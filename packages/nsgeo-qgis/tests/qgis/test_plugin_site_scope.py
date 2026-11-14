@@ -44,6 +44,7 @@ from nsgeo_qgis.slices_plan import (
 )
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
 from osgeo import gdal
 from plugin_testing import (
     ExportGate,
@@ -3484,39 +3485,38 @@ def _nudge_cell(dock) -> None:
 
 def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin):
     dock = whole_site(plugin)
-    assert dock.site_note.text() == ""
+    assert dock.warnings_panel.entries() == ()
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
     engine = dock.site_engine
     assert engine.is_preview and engine.preview_note
-    assert dock.site_note.text() == engine.preview_note
-    assert dock.site_note.isVisibleTo(dock)
-    # Milestone B exports a preview site at full detail, so the tooltip carries no refusal.
-    assert dock.site_note.toolTip() == engine.preview_note
-    assert "export" not in dock.site_note.toolTip().lower()
+    assert dock.warnings_panel.entries() == (Entry(NOTE, engine.preview_note),)
+    assert dock.warnings_panel.isVisibleTo(dock)
+    # Milestone B exports a preview site at full detail, so the note carries no refusal.
+    assert "export" not in engine.preview_note.lower()
 
 
 def test_the_note_clears_when_the_site_fits_again(plugin):
     dock = whole_site(plugin)
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
-    assert dock.site_note.text()
+    assert dock.warnings_panel.entries()
     dock.site_engine.max_pixels = 10**9
     _nudge_cell(dock)
     assert not dock.site_engine.is_preview
-    assert dock.site_note.text() == ""
-    assert dock.site_note.toolTip() == ""
+    assert dock.warnings_panel.entries() == ()
 
 
 def test_the_note_clears_on_switching_to_this_grid(plugin):
     dock = whole_site(plugin)
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
-    assert dock.site_note.isVisibleTo(dock)
+    assert dock.warnings_panel.isVisibleTo(dock)
     dock.grid_scope_button.click()
     _events()
     assert dock.scope() == "grid"
-    assert not dock.site_note.isVisibleTo(dock)
+    assert not dock.warnings_panel.isVisibleTo(dock)
+    assert dock.warnings_panel.entries() == ()
 
 
 def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
@@ -3534,9 +3534,11 @@ def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monk
     assert dock.site_engine.lattice is None, "nothing is drawn"
     scope.refresh_slice()
     assert scope.problem == "the lattice could not be built"
-    assert any("the lattice could not be built" in e for e in errors), "the toast stays"
-    assert dock.site_note.text().startswith("Not drawn: ")
-    assert "the lattice could not be built" in dock.site_note.toolTip()
+    assert not any("the lattice could not be built" in e for e in errors), "one place only"
+    entries = dock.warnings_panel.entries()
+    assert [e.kind for e in entries] == [REFUSAL]
+    assert entries[0].text.startswith("Not drawn: ")
+    assert "the lattice could not be built" in entries[0].text
 
 
 def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
@@ -3545,10 +3547,10 @@ def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
     scope.problem = "stale"
     _nudge_cell(dock)
     assert scope.problem is None
-    assert not dock.site_note.text().startswith("Not drawn")
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
 
 
-def test_the_site_note_never_widens_the_dock(plugin):
+def test_a_long_warning_never_widens_the_site_panel(plugin):
     dock = whole_site(plugin)
     dock.setFloating(True)
     dock.show()
@@ -3556,14 +3558,12 @@ def test_the_site_note_never_widens_the_dock(plugin):
     probe.settle()
     content = probe.scroll.widget()
     before = content.minimumSizeHint().width()
-    height = dock.site_note.height()
     longest = "a very long preview note " * 12
     assert len(longest) >= 300
-    dock.site_note.setText(longest)
+    dock.warnings_panel.set_entries([Entry(NOTE, longest)])
     probe.settle()
     assert content.minimumSizeHint().width() == before
-    assert dock.site_note.height() == height, "empty or full, the line keeps its height"
-    assert dock.site_note.text() == longest
+    assert dock.warnings_panel.entries() == (Entry(NOTE, longest),)
 
 
 def test_export_messages_name_the_cell_and_the_pixel(plugin, drive_dialog, tmp_path):
@@ -3625,8 +3625,7 @@ def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
-    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
 
 
 def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
@@ -3634,8 +3633,7 @@ def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, A="radar", B="radar", C="radar")
     dock = whole_site(plugin)
-    assert "Time zero" not in dock.site_note.text()
-    assert "Time zero" not in dock.site_note.toolTip()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
 def test_grid_time_bases_reads_each_grids_preset(plugin):
@@ -3657,7 +3655,7 @@ def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
     session.site.presets["radar"] = [
         {"step": "time_zero", "params": {}, "enabled": True},
         {"step": "dewow", "params": {}, "enabled": True},
@@ -3666,8 +3664,7 @@ def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
     _events()
     engine = dock.site_engine
     assert time_base_of(engine.engine_for("B").provenance().steps) == "radar"
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
-    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
 
 
 def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
@@ -3678,7 +3675,7 @@ def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
     session.presets_changed.emit()
     _events()
     assert time_base_of(dock.site_engine.engine_for("B").provenance().steps) == "time_zero"
-    assert "Time zero" not in dock.site_note.text()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
 def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
@@ -3687,23 +3684,52 @@ def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
     _preset_per_grid(session, B="zz_bad")
     dock = whole_site(plugin)
     assert dock.site_engine.grid_state("B") != "ready"
-    assert "Time zero" not in dock.site_note.text()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
-def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugin, monkeypatch):
+def test_the_clock_warning_is_its_own_entry_beside_a_preview_or_a_reason(plugin, monkeypatch):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
     scope = dock._site
-    warning = mixed_clock_note(["B"])
+    warning = Entry(WARNING, mixed_clock_note(["B"]))
     monkeypatch.setattr(type(scope.engine), "preview_note", property(lambda s: "A preview"))
-    scope.show_note(drawn=True)
-    assert dock.site_note.text() == f"A preview. {warning}"
+    scope.drawn = True
+    dock.show_warnings()
+    assert dock.warnings_panel.entries() == (warning, Entry(NOTE, "A preview"))
+    scope.drawn = False
     scope.problem = "no depth range"
-    scope.show_note(drawn=False)
-    assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
-    assert dock.site_note.toolTip().endswith(warning)
+    dock.show_warnings()
+    assert dock.warnings_panel.entries() == (
+        Entry(REFUSAL, "Not drawn: no depth range"),
+        warning,
+    )
+
+
+def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
+    plugin, monkeypatch
+):
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    real = site_engine_module.SiteEngine._rebuild_geometry
+
+    def boom(self):
+        raise RuntimeError("the lattice could not be built")
+
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", boom)
+    dock.site_engine._rebuild_geometry_reporting()
+    dock._site.refresh_slice()
+    assert dock.site_engine.geometry_problem == "the lattice could not be built"
+    assert [e.text for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == [
+        "Not drawn: the lattice could not be built"
+    ]
+    assert not any("lattice" in e for e in errors)
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", real)
+    _nudge_cell(dock)
+    assert dock.site_engine.geometry_problem is None
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
 
 
 # ---- #180: the slice coloured with the user's own QGIS symbology -------------------------

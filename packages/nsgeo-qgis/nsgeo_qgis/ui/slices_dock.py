@@ -102,6 +102,7 @@ from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
 from nsgeo_qgis.ui.wheel_guard import guard_wheel
 
 
@@ -458,14 +459,6 @@ class SlicesDock(QgsDockWidget):
         readout_row.addWidget(self.refine_label, 1)
         position_layout.addLayout(readout_row)
 
-        # Whole site only: the preview note, or why nothing is drawn. One
-        # elided line of fixed height (as `refine_label`), the full text in
-        # its tooltip, so a long reason never widens the dock or moves the
-        # scrolled panel.
-        self.site_note = ElidedLabel("")
-        self.site_note.setVisible(False)
-        position_layout.addWidget(self.site_note)
-
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
         velocity_font.setPointSizeF(max(1.0, velocity_font.pointSizeF() * 0.85))
@@ -506,6 +499,13 @@ class SlicesDock(QgsDockWidget):
         position_layout.addLayout(thickness_form)
 
         outer.addWidget(self.position_group)
+
+        # What stands in the way, in full: a refusal that outlasts its toast,
+        # the clock warning, the Whole site preview note. Hidden when empty.
+        self.warnings_panel = WarningsPanel()
+        #: This grid's standing refusal (`_apply_resolution`), or None.
+        self._grid_refusal: str | None = None
+        outer.addWidget(self.warnings_panel)
 
         # ---- Resolution: the binning geometry, debounced (44 ms a
         # rebuild, spec 7.2 and trap 4) so a slider dragged through five
@@ -1511,6 +1511,8 @@ class SlicesDock(QgsDockWidget):
             # DIFFERENT preparation.
             self._pending_palette = None
             self._pending_z_shift = False
+            self._grid_refusal = None
+            self.show_warnings()
             self._mark_cube_unsaved()
             self._sync_included()
             self._remember_source()
@@ -2080,6 +2082,7 @@ class SlicesDock(QgsDockWidget):
                 self.preset_combo.setCurrentText(recipe.choice.preset)
                 self.transform_combo.set_value(transform_text)
                 if recipe.resolution is not None:
+                    self._set_cell_floor(recipe.choice.grid_id)
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
                     self.z0_spin.setValue(recipe.resolution.t0_ns)
@@ -2199,8 +2202,7 @@ class SlicesDock(QgsDockWidget):
             # `smallest_safe_cell` is well under the spin's own 0.01 m and
             # this changes nothing; it only bites where the arithmetic really
             # does run away (walkthrough round 2, W7).
-            floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
-            self.cell_spin.setMinimum(floor)
+            floor = self._set_cell_floor(grid_id)
             self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
             # Quiet: a seed is not an edit, and a grid change re-prepares and
             # `refresh_slice` reads the panel live, so no debounce either.
@@ -2212,6 +2214,15 @@ class SlicesDock(QgsDockWidget):
             self._restore_remembered_resolution(grid_id)
         finally:
             self._seeding -= 1
+
+    def _set_cell_floor(self, grid_id: str) -> float:
+        """Raise `cell_spin`'s minimum to the finest cell `grid_id` can afford
+        (walkthrough round 2, W7). The box only: a remembered resolution or a
+        cube record is never changed, so a floor that moves back lets it return."""
+        grid = self.session.grid(grid_id)
+        floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
+        self.cell_spin.setMinimum(floor)
+        return floor
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
         """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
@@ -2540,12 +2551,17 @@ class SlicesDock(QgsDockWidget):
                 cells = frame_cells(grid_now.size_x, grid_now.size_y, resolution.cell)
                 if cells > MAX_FRAME_CELLS:
                     safe = smallest_safe_cell(grid_now.size_x, grid_now.size_y)
-                    self.error.emit(
-                        f"a {resolution.cell:g} m cell over grid "
-                        f"{grid_now.id!r} is {cells:,} cells, too many to "
-                        f"draw; use {safe:g} m or coarser"
+                    frame = self.engine.frame
+                    still = f" Still showing {frame.cell:g} m." if frame is not None else ""
+                    self._grid_refusal = (
+                        f"Cell {resolution.cell:g} m refused: grid {grid_now.id} would be "
+                        f"{cells:,} cells, too many to draw.{still} "
+                        f"Use {safe:g} m or coarser."
                     )
+                    self.show_warnings()
                     return
+            self._grid_refusal = None
+            self.show_warnings()
             self.engine.set_resolution(resolution)
             # Keyed on `(n_levels, choice, mode, finish settings)` -- see
             # `_stretch_key` -- and a geometry change can only have moved
@@ -3101,6 +3117,20 @@ class SlicesDock(QgsDockWidget):
         """`"grid"` (This grid, M11's dock) or `"site"` (Whole site)."""
         return self._scope
 
+    def show_warnings(self) -> None:
+        """Fill the Warnings section: the site's in Whole site, This grid's
+        standing refusal otherwise. A slot's body, so it guards itself."""
+        try:
+            if self._scope == "site":
+                entries = self._site.warnings()
+            elif self._grid_refusal:
+                entries = [Entry(REFUSAL, self._grid_refusal)]
+            else:
+                entries = []
+            self.warnings_panel.set_entries(entries)
+        except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
+            _log(f"could not show the warnings: {exc}")
+
     def set_scope(self, scope: str) -> None:
         """Switch scope, keeping the window's time (spec 4.1).
 
@@ -3116,6 +3146,7 @@ class SlicesDock(QgsDockWidget):
         if scope == "site" and not self.session.is_open:
             site_scope.show_scope_widgets(self)
             raise RuntimeError("open a survey before showing the whole site")
+        self._grid_refusal = None
         if self._debounce.isActive():
             # The scope being left applies its own pending change first.
             self._debounce.stop()
@@ -3155,6 +3186,7 @@ class SlicesDock(QgsDockWidget):
             site_scope.show_scope_widgets(self)
             self._sync_colours()
             self._resume_grid(top)
+        self.show_warnings()
         self.show_refine()
 
     def _on_scope_clicked(self, scope: str) -> None:

@@ -31,9 +31,11 @@ from nsgeo_qgis.slices_plan import (
     SliceFinish,
     limit_windows,
     old_cube_note,
+    smallest_safe_cell,
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
@@ -2290,12 +2292,19 @@ def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app
         dock.cell_spin.setValue(0.001)
         dock.flush_debounce()
 
-        assert errors, "an undrawable geometry must say so"
-        assert "too many to draw" in errors[-1], errors
-        assert "0.15" in errors[-1], f"the refusal must name a cell that works: {errors[-1]}"
+        entries = dock.warnings_panel.entries()
+        assert [e.kind for e in entries] == [REFUSAL], entries
+        assert "too many to draw" in entries[0].text
+        assert "0.15" in entries[0].text, f"it must name a cell that works: {entries[0].text}"
+        assert "Still showing" in entries[0].text
+        assert errors == [], "one place only: the Warnings section, not a toast"
         assert dock.engine.frame is before, (
             "the engine must still hold the geometry it had, not a frame it cannot draw"
         )
+
+        dock.cell_spin.setValue(0.25)
+        dock.flush_debounce()
+        assert dock.warnings_panel.entries() == ()
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -4271,3 +4280,69 @@ def test_the_thickness_box_keeps_todays_wheel(docked):
     before = dock.thickness_spin.value()
     QApplication.sendEvent(dock.thickness_spin, wheel_event(120))
     assert dock.thickness_spin.value() != before
+
+
+def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(GRID)
+    session.add_grid(big)
+    session.add_lines([_line(tmp_path, "A", "FILE__001", 1.0)])
+    session.add_lines([_line(tmp_path, "Big", "FILE__010", 1.0)])
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        dock.grid_combo.setCurrentText("Big")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        record = _save_cube(dock, session, "cube1", dock.view_settings())
+        record["cell"] = 0.05
+        dock.grid_combo.setCurrentText("A")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+
+        dock.restore_cube("cube1")
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+
+        assert dock.cell_spin.value() == pytest.approx(smallest_safe_cell(300.0, 300.0), abs=1e-3)
+        assert dock.warnings_panel.entries() == ()
+        assert errors == []
+        assert session.site.cubes["cube1"]["cell"] == 0.05
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_warning_coming_and_going_keeps_the_box_you_type_in(docked):
+    dock, _ = docked
+    scroll = _short_and_active(dock)
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    dock.dz_spin.setFocus()
+    dock.dz_spin.setValue(0.75)
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x " * 200)])
+    QApplication.processEvents()
+    dock.warnings_panel.set_entries([])
+    QApplication.processEvents()
+    assert dock.dz_spin.hasFocus()
+    assert dock.dz_spin.value() == 0.75
+
+
+def test_a_long_warning_never_widens_the_panel(docked):
+    dock, _ = docked
+    dock.setFloating(True)
+    dock.show()
+    content = dock.findChild(QScrollArea).widget()
+    QApplication.processEvents()
+    before = content.minimumSizeHint().width()
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "word " * 80)])
+    QApplication.processEvents()
+    assert content.minimumSizeHint().width() == before

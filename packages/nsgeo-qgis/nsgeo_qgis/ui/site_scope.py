@@ -65,6 +65,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import SiteRow
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
 
 
 @dataclass(frozen=True)
@@ -179,13 +180,6 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
             )
         )
     return SiteSource(transform=transform, grids=tuple(grids))
-
-
-def _then(text: str, sentence: str) -> str:
-    """`sentence` after `text` as its own sentence (a full stop is added if `text` has none)."""
-    if text and not text.endswith((".", "!", "?")):
-        text += "."
-    return f"{text} {sentence}".strip()
 
 
 def grid_time_bases(
@@ -430,7 +424,6 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
-    dock.site_note.setVisible(site)
     dock.grid_finish.setVisible(not site)
     dock.site_finish.setVisible(site)
     # Residency stays per grid and automatic in the site (spec 4.8).
@@ -519,6 +512,8 @@ class SiteScope:
         self.res_applied: Resolution | None = None
         #: Why the last resolution was refused (None when it was applied).
         self.problem: str | None = None
+        #: Whether the last tick drew the site (the Warnings section reads it).
+        self.drawn = False
         #: The ready grids the last tick was set up for.
         self.ready_handled: tuple[str, ...] | None = None
         #: `(top_ns, thickness_ns)` of the last tick, as `slice_at` took them:
@@ -906,9 +901,8 @@ class SiteScope:
             self.problem = None
         except Exception as exc:  # noqa: BLE001 -- e.g. a resolution or transform the engine
             # refuses; a size never is one (a big site is drawn as a preview). The
-            # reason is kept for the panel, where it outlasts the toast.
+            # reason stands in the Warnings section, so it is not also a toast.
             self.problem = str(exc)
-            dock.error.emit(str(exc))
         try:
             self.sync_slider()
             if refresh:
@@ -987,8 +981,16 @@ class SiteScope:
         dock = self.dock
         try:
             z = self.engine.site_z
-            self.show_note(drawn=self.showing and z is not None and self.engine.lattice is not None)
-            if not self.showing or z is None or self.engine.lattice is None:
+            # A rebuild that failed leaves no geometry to draw, whatever the
+            # engine still holds.
+            self.drawn = (
+                self.showing
+                and z is not None
+                and self.engine.lattice is not None
+                and self.engine.geometry_problem is None
+            )
+            dock.show_warnings()
+            if not self.drawn:
                 self.refine.stop()  # nothing drawn: no refine is owed
                 self.slice = None
                 self.window = None
@@ -1060,33 +1062,29 @@ class SiteScope:
             dock.window_cleared.emit()
             dock.error.emit(str(exc))
 
-    def show_note(self, *, drawn: bool) -> None:
-        """The site note: the preview note while drawn, the reason when nothing
-        is drawn and one is known, else empty. The tooltip carries the full
-        text. A preview site still exports at full detail, so it says nothing
-        about the export.
-
-        When the drawn grids are not all on one clock (some have no Time zero
-        step) the note ends with `mixed_clock_note`, as its own sentence, in
-        the text and the tooltip alike; a site wholly on the radar clock says
-        nothing, since its grids still line up."""
-        note = self.dock.site_note
+    def warnings(self) -> list[Entry]:
+        """What stands in the way of the site, for the Warnings section: the
+        preview note while drawn, the reason when nothing is drawn, and the
+        clock warning when the drawn grids are not all on one clock (some have
+        no Time zero step; a site wholly on the radar clock says nothing, since
+        its grids still line up). A preview site still exports at full detail,
+        so it says nothing about the export."""
         engine = self.engine
-        text = hint = ""
-        if drawn and engine.preview_note:
-            text = hint = engine.preview_note
-        elif not drawn and self.problem:
-            text = hint = f"Not drawn: {self.problem}"
+        entries: list[Entry] = []
+        if self.drawn:
+            if engine.preview_note:
+                entries.append(Entry(NOTE, engine.preview_note))
+        else:
+            reason = self.problem or engine.geometry_problem
+            if reason:
+                entries.append(Entry(REFUSAL, f"Not drawn: {reason}"))
         source = self.source_sent or self.source()
         if source is not None:
             bases = grid_time_bases(self.session, source, engine)
             radar = [g for g, base in bases.items() if base == TIME_BASE_RADAR]
             if bases and combined_time_base(bases.values()) == TIME_BASE_MIXED:
-                mixed = mixed_clock_note(radar)
-                text = _then(text, mixed)
-                hint = _then(hint, mixed)
-        note.set_hint(hint, whole=True)
-        note.setText(text)
+                entries.append(Entry(WARNING, mixed_clock_note(radar)))
+        return entries
 
     # ---- minimum curvature's refine ---------------------------------------------------
     def status_text(self) -> str:

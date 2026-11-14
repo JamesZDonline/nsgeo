@@ -594,13 +594,14 @@ def test_name_list_reads_as_a_sentence():
 
 def test_preview_note_is_exact_copy():
     base = (
-        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
-        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "Preview at 0.4 m pixels: the site (1234 \u00d7 568 m) is too big to draw at 0.05 m. "
         "It draws in full at a 0.12 m cell or coarser."
     )
     assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
-    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
-        base + " Leaving out C and D would also let it draw in full."
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C"]) == base[:-1] + ", or without grid C."
+    assert (
+        preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"])
+        == base[:-1] + ", or without grids C and D."
     )
 
 

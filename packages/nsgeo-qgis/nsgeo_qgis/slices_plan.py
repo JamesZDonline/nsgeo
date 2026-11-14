@@ -473,12 +473,13 @@ def preview_note(
 ) -> str:
     """Why the site is drawn coarser than its grids, and what would draw it in full."""
     note = (
-        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail. "
+        f"Preview at {pitch:g} m pixels: the site ({width_m:.0f} \u00d7 {height_m:.0f} m) "
+        f"is too big to draw at {cell:g} m. "
         f"It draws in full at a {finest:g} m cell or coarser."
     )
     if stretching:
-        note += f" Leaving out {name_list(stretching)} would also let it draw in full."
+        grids = "grid" if len(stretching) == 1 else "grids"
+        note = f"{note[:-1]}, or without {grids} {name_list(stretching)}."
     return note
 
 
