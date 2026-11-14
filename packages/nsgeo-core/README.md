@@ -70,6 +70,8 @@ Coordinate frames and trace placement.
 | `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
 | `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
 | `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
+| `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
+| `END_LIMIT_M` | A start or end run longer than this many metres (2.0) is flagged. |
 
 ### `nsgeo.processing`
 

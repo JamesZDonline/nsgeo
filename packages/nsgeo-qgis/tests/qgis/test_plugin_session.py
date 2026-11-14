@@ -2169,3 +2169,21 @@ def test_adding_tape_lines_does_not_pin_the_crs(session, tmp_path):
     session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
     session.add_lines(_lines(tmp_path, 1))
     assert session.site.crs is None
+
+
+def test_a_gps_line_in_another_crs_than_the_site_is_refused_and_nothing_is_added(session, tmp_path):
+    session.add_grid(_grid_in("EPSG:32632"))
+    seen: list[int] = []
+    session.lines_changed.connect(lambda: seen.append(1))
+    good = _gps_line(tmp_path, "G5.DZT", "EPSG:32632")
+    bad = _gps_line(tmp_path, "G6.DZT", "EPSG:32616")
+    with pytest.raises(ValueError, match=r"G6\.DZT.*EPSG:32616.*EPSG:32632"):
+        session.add_lines([good, bad])
+    assert session.site.lines == [] and session.site.crs is None and seen == []
+
+    # once pinned, the same rule holds
+    session.add_lines([good])
+    assert seen == [1]
+    with pytest.raises(ValueError, match="EPSG:32616"):
+        session.add_lines([_gps_line(tmp_path, "G7.DZT", "EPSG:32616")])
+    assert len(session.site.lines) == 1 and seen == [1]

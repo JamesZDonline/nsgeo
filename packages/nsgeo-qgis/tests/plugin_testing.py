@@ -594,3 +594,19 @@ def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> 
     assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
     assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
     assert items[-1].value == pytest.approx(limit)
+
+
+def synthetic_gps_dzt(
+    folder: Path,
+    name: str,
+    track: Any,
+    n_traces: int = 200,
+    **kw: Any,
+) -> Path:
+    """A synthetic DZT with a DZG beside it. `track` is `(trace, lat, lon, quality)`
+    fixes, written near the made-up place the core's `dzg_data` uses."""
+    from tests.dzg_data import write_dzg
+
+    path = synthetic_dzt(folder, name, n_traces=n_traces, **kw)
+    write_dzg(path.with_suffix(".DZG"), list(track))
+    return path

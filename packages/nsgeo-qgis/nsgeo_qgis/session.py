@@ -687,13 +687,23 @@ class SiteSession(QObject):
                 raise ValueError(f"line {key!r} is already in the site")
             existing.add(key)
             keyed.append((key, line))
-        if site.crs is None and any(isinstance(ln.placement, TrackPlacement) for ln in lines):
+        gps = [ln for ln in lines if isinstance(ln.placement, TrackPlacement)]
+        if gps:
             # The first GPS line pins the CRS the site is in right now, so a
             # later edit of the first grid cannot move it (R9).
-            pinned = self.site_crs()
-            if pinned is None:
+            in_force = self.site_crs()
+            if in_force is None:
                 raise ValueError("GPS lines need the site's CRS, but the site has none")
-            site.crs = pinned
+            # A line placed in any other CRS fails now, not later at
+            # validate or save (R10).
+            for ln in gps:
+                placed = ln.placement.crs  # type: ignore[union-attr]
+                if placed != in_force:
+                    raise ValueError(
+                        f"line {ln.path.name} is placed in {placed}, but the site is in {in_force}"
+                    )
+            if site.crs is None:
+                site.crs = in_force
         site.lines.extend(lines)
         self._lines_by_key.update(keyed)
         self._set_dirty(True)

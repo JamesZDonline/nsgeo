@@ -71,7 +71,8 @@ jobs:
             packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py \
             packages/nsgeo-qgis/nsgeo_qgis/line_edit.py \
             packages/nsgeo-qgis/nsgeo_qgis/export_pipeline.py \
-            packages/nsgeo-qgis/nsgeo_qgis/destagger_job.py
+            packages/nsgeo-qgis/nsgeo_qgis/destagger_job.py \
+            packages/nsgeo-qgis/nsgeo_qgis/gps_import.py
 
   build-zip:
     runs-on: ubuntu-24.04

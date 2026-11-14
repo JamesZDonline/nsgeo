@@ -126,6 +126,7 @@ from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_res
 from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
+from nsgeo_qgis.ui.gps_import_dialog import GpsImportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
@@ -136,6 +137,7 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
+IMPORT_GPS_TIP = "Imports DZT files with a DZG beside them, each placed along its RTK GPS track."
 VELOCITY_TIP = (
     "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
     "Right-click a point to remove it."
@@ -239,6 +241,7 @@ class NsgeoPlugin:
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
+        self.act_import_gps: QAction | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
@@ -253,6 +256,7 @@ class NsgeoPlugin:
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
+        self._gps_import_dialog: GpsImportDialog | None = None
         self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -314,6 +318,8 @@ class NsgeoPlugin:
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
         self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
+        self.act_import_gps = self._toolbar_action("Import GPS lines…", self.open_gps_import_dialog)
+        self.act_import_gps.setToolTip(IMPORT_GPS_TIP)
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -656,6 +662,9 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # And the GPS import, for the same reason.
+        if self._gps_import_dialog is not None:
+            self._gps_import_dialog.reject()
         # Same reasoning again: Edit lines tables are modeless too, one per
         # grid, and reject() (not close()) runs each one's finished-signal
         # cleanup instead of leaving it dangling with a reference to a
@@ -732,6 +741,7 @@ class NsgeoPlugin:
         self.act_save = None
         self.act_add_grid = None
         self.act_import = None
+        self.act_import_gps = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
@@ -785,7 +795,7 @@ class NsgeoPlugin:
     def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
-            for act in (self.act_save, self.act_add_grid, self.act_import):
+            for act in (self.act_save, self.act_add_grid, self.act_import, self.act_import_gps):
                 if act is not None:
                     act.setEnabled(is_open)
             # A crosshair over an empty profile invites a click that can
@@ -2529,6 +2539,48 @@ class NsgeoPlugin:
         # falls back to the first grid.
         dock = self.survey_dock
         self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
+
+    def open_gps_import_dialog(self, *_: Any) -> None:
+        """Import GPS lines…: modeless and single-instance, open_import_dialog()'s
+        shape. It needs an open site and no grid."""
+        try:
+            assert self.session is not None
+            if not self.session.is_open:
+                return
+            if self._gps_import_dialog is not None:
+                self._gps_import_dialog.show()
+                self._gps_import_dialog.raise_()
+                self._gps_import_dialog.activateWindow()
+                return
+            dialog = GpsImportDialog(self.session, parent=self.iface.mainWindow())
+
+            def finished(result: int) -> None:
+                # A slot on dialog.finished: see the module docstring.
+                # GpsImportDialog.accept() already wrote the site, and left
+                # the words to say in dialog.messages.
+                try:
+                    if result == QDialog.DialogCode.Accepted:
+                        for text in dialog.messages:
+                            self.message(text)
+                except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                    self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
+                finally:
+                    dialog.deleteLater()
+                    self._gps_import_dialog = None
+
+            def clear_if_current() -> None:
+                # See open_grid_dialog()'s clear_if_current.
+                if self._gps_import_dialog is dialog:
+                    self._gps_import_dialog = None
+
+            dialog.finished.connect(finished)
+            dialog.destroyed.connect(clear_if_current)
+            self._gps_import_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as exc:  # noqa: BLE001 -- a slot (triggered): see the module docstring
+            self.message(f"could not open the GPS import: {exc}", Qgis.MessageLevel.Warning)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,
