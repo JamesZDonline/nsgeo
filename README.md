@@ -127,8 +127,8 @@ release's notes list everything in it.
   longer changes dz, z0, z1, the cell size or a line's grid in Edit lines until
   you click into the box; dz can't go below the radar's own sample interval; a
   Whole site refresh leaves a box you are typing in alone; warnings and
-  refusals get their own section in the panel, and its settings sections fold.
-  Being designed.
+  refusals get their own section in the panel, and its settings sections fold;
+  the panel fits the Processing panel's width. Being built.
 
 ### Next, in order
 
