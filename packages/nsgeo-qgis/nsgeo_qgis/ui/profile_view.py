@@ -887,8 +887,22 @@ class ProfileView(QWidget):
             # would follow the next gesture and emit from the wrong one.
             self._abandon_stale_cutoff_grab()
             self._cancel_velocity_box()
-            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            if self._pick_mode or shift:
+            mods = event.modifiers()
+            shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+            # Ctrl (Cmd on a Mac: Qt maps it to ControlModifier unless
+            # AA_MacDontSwapCtrlAndMeta is set) without Shift is the velocity
+            # shortcut: it beats Pick mode and a held Shift is what turns it
+            # into the ordinary click, so Ctrl+Shift falls through below.
+            ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            ctrl_velocity = ctrl and not shift
+            ctrl_shift = ctrl and shift
+            if ctrl_velocity and not self._velocity_mode:
+                # The plugin answers synchronously (a direct connection on this
+                # thread) by switching velocity mode on, or by declining.
+                self.velocity_mode_requested.emit()
+                if not self._velocity_mode:
+                    return
+            if (self._pick_mode or shift) and not ctrl_velocity and not ctrl_shift:
                 # Only inside the radargram itself. This handler runs for
                 # the whole widget, axis margins included, and
                 # `time_of_y` does not clamp -- a shift click on the
@@ -905,7 +919,7 @@ class ProfileView(QWidget):
                 if trace is not None:  # blank space on the ruler is inert
                     self.pick_requested.emit(trace, self.transform.time_of_y(y))
                 return
-            if self._velocity_mode:
+            if self._velocity_mode and not ctrl_shift:
                 # Same bounds guard as the pick branch above, for the same
                 # reason: `time_of_y` does not clamp, so a click on the
                 # axis margin would author a point before the record starts.

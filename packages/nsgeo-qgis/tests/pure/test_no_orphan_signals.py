@@ -93,10 +93,9 @@ SHADOWED = {
     # connects to 3.
     "edited": {"declared": 2, "connects": 3},
     # Hyperbola tracer: ProfileView.velocity_mode_requested (the Ctrl/Cmd press,
-    # emitted from the next task) is relayed by ProfileDock's own. Today only the
-    # view's is connected, to the dock's; the plugin connects the dock's in the
-    # next task, raising connects to 2.
-    "velocity_mode_requested": {"declared": 2, "connects": 1},
+    # emitted from the view's press) is relayed by ProfileDock's own. The dock
+    # connects the view's; the plugin connects the dock's.
+    "velocity_mode_requested": {"declared": 2, "connects": 2},
 }
 
 

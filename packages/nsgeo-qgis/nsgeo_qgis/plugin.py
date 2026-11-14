@@ -137,8 +137,9 @@ from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
 VELOCITY_TIP = (
-    "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
-    "Right-click a point to remove it."
+    "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
+    "or drag a box around it to trace it. Right-click a point to remove it. "
+    "Ctrl+click (Cmd+click on a Mac) works with this off."
 )
 VELOCITY_ON_CUT_TIP = (
     "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
@@ -346,6 +347,7 @@ class NsgeoPlugin:
         self.profile_dock = ProfileDock(self.session, main)
         self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
         self.profile_dock.pick_requested.connect(self._on_pick_requested)
+        self.profile_dock.velocity_mode_requested.connect(self._on_velocity_mode_requested)
         self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.docks.append(self.profile_dock)
 
@@ -1818,6 +1820,20 @@ class NsgeoPlugin:
             self.profile_dock.set_pick_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_velocity_mode_requested(self) -> None:
+        """Ctrl/Cmd+click on the profile with velocity mode off: switch it on
+        when it can be, so the same click goes on to place the dot or box."""
+        try:
+            if self.profile_dock is None or self.act_velocity is None:
+                return
+            if self.act_velocity.isEnabled():
+                self.act_velocity.setChecked(True)
+                self._toggle_velocity_fit_mode(True)
+            elif self.session is not None and is_cut_key(self.session.current_key or ""):
+                self.message(VELOCITY_ON_CUT_TIP, Qgis.MessageLevel.Info)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
     def _toggle_velocity_fit_mode(self, checked: bool) -> None:
         """The Velocity toolbar toggle. Drives the dock, never the view."""
