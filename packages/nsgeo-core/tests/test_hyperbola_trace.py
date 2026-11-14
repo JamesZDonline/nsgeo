@@ -16,7 +16,9 @@ from tests.planted import (
     REAL_NOISE_RATIO,
     REAL_PERIOD_NS,
     Planted,
+    leg_fade_width,
     plant,
+    real_layers,
     ricker,
     wavelet_onset_ns,
 )
@@ -182,6 +184,65 @@ def test_uneven_trace_spacing_is_respected():
     data, t, x = _scene([Planted(100, 15.0, 0.07)], distance_m=x)
     dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
     assert _within_2_sigma(_fit(dots, x), 0.07)
+
+
+def test_a_line_recorded_backwards_is_traced():
+    # A line laid out against its grid's direction has distance falling with
+    # trace (#140: every saved fit on such a line was refused).
+    x = (N_TRACES - 1 - np.arange(N_TRACES)) * REAL_DX_M
+    data, t, x = _scene([Planted(100, 15.0, 0.07)], distance_m=x)
+    dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
+    assert _within_2_sigma(_fit(dots, x), 0.07)
+
+
+def _layered_scene(t0_ns, v_m_ns, half_traces, layer_phase, seed):
+    # As on the real lines (#140): layers a period apart at REAL_LAYER_RATIO
+    # of the apex, legs fading to REAL_LEG_FADE at the last dot a person would
+    # click, half_traces either side of the apex.
+    fade = leg_fade_width(half_traces * REAL_DX_M)
+    return plant(
+        N_TRACES,
+        N_SAMPLES,
+        [Planted(100, t0_ns, v_m_ns, leg_fade_m=fade)],
+        noise_ratio=REAL_NOISE_RATIO,
+        seed=seed,
+        layers=real_layers(N_SAMPLES, layer_phase * REAL_PERIOD_NS),
+    )
+
+
+@pytest.mark.parametrize(
+    ("t0_ns", "v_m_ns", "half_traces", "layer_phase", "box"),
+    [
+        (15.0, 0.07, 25, 0.75, TraceBox(65, 135, 13.0, 21.2)),
+        (25.0, 0.078, 27, 0.375, TraceBox(62, 137, 23.0, 29.5)),
+    ],
+    ids=["15ns", "25ns"],
+)
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_hyperbola_among_layers_is_traced_to_its_velocity(
+    t0_ns, v_m_ns, half_traces, layer_phase, box, seed
+):
+    # The box is drawn close around the dots a person would click (their
+    # extent + 20%, at least 5 traces and 2 ns), as the hand-fit tests do.
+    # A scan score blind to phase took a steep curve through the bright apex,
+    # and the edge windows around it read the layers (#140).
+    data, t, x = _layered_scene(t0_ns, v_m_ns, half_traces, layer_phase, seed)
+    dots = trace_hyperbola(data, t, x, box)
+    assert _within_2_sigma(_fit(dots, x), v_m_ns)
+    assert max(d[0] for d in dots) - min(d[0] for d in dots) >= half_traces
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a flat layer through the apex's own edge shifts the edges there; a known limit",
+)
+def test_a_layer_through_the_apex_edge_still_gives_the_velocity():
+    # The layer's onset falls 0.35 ns after the apex's: across the flat top
+    # the two wavelets add, the edges there come out late, and the cleaning
+    # keeps them over the true legs.
+    data, t, x = _layered_scene(20.0, 0.08, 30, 0.5, seed=1)
+    dots = trace_hyperbola(data, t, x, TraceBox(58, 142, 18.0, 25.6))
+    assert _within_2_sigma(_fit(dots, x), 0.08)
 
 
 def test_a_backwards_box_is_normalised():

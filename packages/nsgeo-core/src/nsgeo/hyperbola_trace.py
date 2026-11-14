@@ -10,6 +10,14 @@ points.
 The edge rule is the one the Time zero step uses for the first arrival: the
 first time the signal reaches a set fraction of its peak, so the two offsets
 cancel when the fraction is the same.
+
+The scan scores a curve by stacking the signed amplitudes along it, after
+taking each row's mean across the box away. A curve that follows one lobe of
+the band adds up; one that cuts across the band's lobes, or runs along a flat
+layer, cancels. Scoring |amplitude| instead (blind to phase) let a steep curve
+sit in the bright apex and win on real lines (#140). The edge window on each
+trace then starts just ahead of the band's own edge, found on the stack of the
+traces along the curve, so the layers and clutter ahead of it are not read.
 """
 
 from __future__ import annotations
@@ -36,27 +44,38 @@ MIN_DOTS = 4
 V_MIN_M_NS = 0.03
 V_MAX_M_NS = 0.30
 #: Traces times samples a box may hold. Read at call time (tests change it).
-#: Measured on a real 1780-trace line: a box of 208 000 cells (1000 traces by
-#: 208 samples) traces in 0.8 to 1.0 s, 250 000 cells in 1.2 s. The largest box
-#: drawn around a saved hand fit holds about 11 000 cells and traces in 0.23 s.
+#: Measured on a real 1780-trace line with the coherent scan: a box of 196 000
+#: cells (960 traces by 204 samples) traces in 0.5 s, 82 000 cells in 0.55 s.
+#: The largest box drawn around a saved hand fit traces in 0.24 s.
 MAX_BOX_CELLS = 200_000
 
 _MIN_BOX = 8  # traces and samples
-#: The best curve's mean smoothed |amplitude| must beat the box's median by this
-#: factor, or the box holds nothing but noise and clutter.
-_DETECT_RATIO = 2.0
-#: A trace's window peak must beat the box's median |amplitude| by this factor...
-_FAINT_RATIO = 3.0
-#: ...and be at least this fraction of the traces nearest the apex. The faded
-#: ends of a leg are the noisiest dots and the longest levers on v, so they are
-#: left out rather than thinned to.
-_FAINT_FRACTION = 0.5
+#: The best curve's stack must stand this many noise deviations above zero, or
+#: the box holds nothing but noise and clutter. Noise alone tops out near 4.8
+#: (120 planted boxes); the author's real hyperbolas score 9 to 60.
+_DETECT_Z = 6.0
+#: The scan's grid: apex times at most this many periods apart, this many
+#: velocities, and at most this many traces read in the coarse round.
+_T_STEP_PERIODS = 1.0 / 8.0
+_N_VELOCITIES = 28
+_COARSE_TRACES = 96
+#: A trace's window peak must be at least this fraction of the traces nearest
+#: the apex. Where a leg fades below it, the leg ends. On the author's hand fits
+#: the band at the last clicked dot is 0.45 of the apex (median; quartiles 0.32
+#: and 0.63), so 0.5 dropped legs they had clicked. A trace whose band does not
+#: stand clear of what comes before it gives no edge anyway: its window then
+#: starts at or above the level (see ``_window_edge``).
+_FAINT_FRACTION = 0.25
 #: Residuals beyond this many median absolute residuals are dropped.
 _OUTLIER_MADS = 3.0
 #: ...but never closer than this many samples, so a near-perfect fit keeps all.
 _OUTLIER_FLOOR_SAMPLES = 0.5
-_PERIODS_BEFORE = 1.0  # edge window: from this many periods before the curve
-_PERIODS_AFTER = 0.5  # ...to this many after it
+#: The edge window on each trace: from this many periods before the band's
+#: edge on the stack...
+_EDGE_LEAD_PERIODS = 0.15
+#: ...to this many after the band's peak. The stacked edge is looked for up to
+#: one period before that peak.
+_EDGE_TAIL_PERIODS = 0.25
 
 
 @dataclass(frozen=True)
@@ -117,17 +136,6 @@ def edge_time(
     return edge
 
 
-def _smooth_abs(box: np.ndarray, width: int) -> np.ndarray:
-    """|box| averaged over ``width`` samples down each trace."""
-    amp = np.abs(box)
-    if width <= 1:
-        return amp
-    pad_lo, pad_hi = width // 2, width - 1 - width // 2
-    padded = np.pad(amp, ((pad_lo, pad_hi), (0, 0)), mode="edge")
-    csum = np.cumsum(np.vstack([np.zeros((1, amp.shape[1])), padded]), axis=0)
-    return (csum[width:] - csum[:-width]) / width
-
-
 def _dominant_period_ns(box: np.ndarray, dt_ns: float) -> float:
     """Period at the peak of the box's mean amplitude spectrum (DC excluded)."""
     seg = box - box.mean(axis=0, keepdims=True)
@@ -143,7 +151,7 @@ def _dominant_period_ns(box: np.ndarray, dt_ns: float) -> float:
 
 
 def _score(
-    smooth: np.ndarray,
+    img: np.ndarray,
     x_m: np.ndarray,
     t_top: float,
     dt_ns: float,
@@ -152,9 +160,14 @@ def _score(
     v: np.ndarray,
     min_valid: int,
 ) -> np.ndarray:
-    """Mean smoothed |amplitude| along each candidate curve, over the box's
-    traces where the curve lies inside the box. -1 where too few traces do."""
-    n_rows, n_tr = smooth.shape
+    """|Sum of the signed amplitudes| along each candidate curve over the
+    square root of their count, over the box's traces where the curve lies
+    inside the box; -1 where too few traces do.
+
+    Divided by sqrt(count), noise scores the same whatever the curve's length,
+    so a long curve and a short one compare fairly.
+    """
+    n_rows, n_tr = img.shape
     out = np.empty(apex_x.size)
     cols = np.arange(n_tr)[None, :]
     chunk = max(1, 2_000_000 // n_tr)
@@ -166,42 +179,90 @@ def _score(
         valid = (row >= 0.0) & (row <= n_rows - 1)
         r0 = np.clip(np.floor(row).astype(int), 0, n_rows - 2)
         w = np.clip(row - r0, 0.0, 1.0)
-        val = smooth[r0, cols] * (1.0 - w) + smooth[r0 + 1, cols] * w
+        val = img[r0, cols] * (1.0 - w) + img[r0 + 1, cols] * w
         count = valid.sum(axis=1)
-        mean = (val * valid).sum(axis=1) / np.maximum(count, 1)
-        out[sl] = np.where(count >= min_valid, mean, -1.0)
+        stack = np.abs((val * valid).sum(axis=1)) / np.sqrt(np.maximum(count, 1))
+        out[sl] = np.where(count >= min_valid, stack, -1.0)
     return out
 
 
 def _scan(
-    smooth: np.ndarray,
+    img: np.ndarray,
     x_m: np.ndarray,
     t_top: float,
     t_bottom: float,
     dt_ns: float,
+    period_ns: float,
 ) -> tuple[float, float, float, float]:
-    """Best (apex x, t0, v, mean score), coarse to fine."""
-    n_tr = smooth.shape[1]
+    """Best (apex x, t0, v, score), coarse to fine.
+
+    The apex times are a fraction of a period apart, so a curve on a lobe is
+    not stepped over. The coarse round reads an even spread of at most
+    ``_COARSE_TRACES`` traces, which keeps a large box quick.
+    """
+    n_tr = img.shape[1]
     min_valid = max(_MIN_BOX, n_tr // 4)
-    xa = np.linspace(x_m[0], x_m[-1], min(n_tr, 24))
-    ta = np.linspace(t_top, t_bottom, min(smooth.shape[0], 30))
-    va = np.geomspace(V_MIN_M_NS, V_MAX_M_NS, 14)
+    # A line laid out against its grid runs to smaller distances: bound by
+    # the box's least and greatest distance, never its first and last.
+    x_lo, x_hi = float(x_m.min()), float(x_m.max())
+    xa = np.linspace(x_lo, x_hi, min(n_tr, 24))
+    n_t = int(np.ceil((t_bottom - t_top) / (_T_STEP_PERIODS * period_ns))) + 1
+    ta = np.linspace(t_top, t_bottom, max(2, min(n_t, 160)))
+    va = np.geomspace(V_MIN_M_NS, V_MAX_M_NS, _N_VELOCITIES)
+    sub = np.unique(np.linspace(0, n_tr - 1, min(n_tr, _COARSE_TRACES)).round().astype(int))
     for round_no in range(4):
         mesh = np.meshgrid(xa, ta, va, indexing="ij")
         gx, gt, gv = (m.ravel() for m in mesh)
-        score = _score(smooth, x_m, t_top, dt_ns, gx, gt, gv, min_valid)
+        if round_no == 0 and sub.size < n_tr:
+            need = max(1, int(np.ceil(min_valid * sub.size / n_tr)))
+            score = _score(img[:, sub], x_m[sub], t_top, dt_ns, gx, gt, gv, need)
+        else:
+            score = _score(img, x_m, t_top, dt_ns, gx, gt, gv, min_valid)
         k = int(np.argmax(score))
         best = (float(gx[k]), float(gt[k]), float(gv[k]), float(score[k]))
         if round_no == 3:
             break
-        # Refine: five points either side of the best, one old step wide.
-        step_x = (xa[1] - xa[0]) if xa.size > 1 else x_m[-1] - x_m[0]
+        # Refine: seven points across the best, one old step either side.
+        step_x = abs(xa[1] - xa[0]) if xa.size > 1 else x_hi - x_lo
         step_t = (ta[1] - ta[0]) if ta.size > 1 else t_bottom - t_top
         ratio = (va[1] / va[0]) if va.size > 1 else 1.0
-        xa = np.clip(best[0] + np.linspace(-step_x, step_x, 7), x_m[0], x_m[-1])
+        xa = np.clip(best[0] + np.linspace(-step_x, step_x, 7), x_lo, x_hi)
         ta = np.clip(best[1] + np.linspace(-step_t, step_t, 7), t_top, t_bottom)
         va = np.clip(best[2] * np.geomspace(1.0 / ratio, ratio, 7), V_MIN_M_NS, V_MAX_M_NS)
     return best
+
+
+def _edge_window(
+    box_data: np.ndarray,
+    box_times: np.ndarray,
+    curve: np.ndarray,
+    period_ns: float,
+    fraction: float,
+) -> tuple[float, float]:
+    """(lead, tail): each trace's edge window, as offsets from the curve.
+
+    The box is read along the curve on every trace and averaged. That keeps
+    the hyperbola's wavelet and averages away what does not follow the curve.
+    The band's peak on that stack, and its edge by the same rule as each
+    trace's, place every trace's window: from just before that edge to just
+    after that peak, so the layers and clutter ahead of the band are not read.
+    """
+    dt = float(box_times[1] - box_times[0])
+    tau = np.arange(-1.5 * period_ns, 1.5 * period_ns + dt / 2.0, dt)
+    total = np.zeros(tau.size)
+    count = np.zeros(tau.size)
+    for col in range(box_data.shape[1]):
+        t = curve[col] + tau
+        inside = (t >= box_times[0]) & (t <= box_times[-1])
+        total[inside] += np.interp(t[inside], box_times, box_data[:, col])
+        count[inside] += 1.0
+    stack = np.where(count > 0.0, total / np.maximum(count, 1.0), 0.0)
+    near = np.flatnonzero(np.abs(tau) <= 0.5 * period_ns)
+    peak = float(tau[near[int(np.argmax(np.abs(stack[near])))]])
+    ahead = (tau >= peak - period_ns) & (tau <= peak)
+    edge, _ = _window_edge(stack[ahead], tau[ahead], fraction)
+    onset = peak - period_ns if edge is None else edge
+    return onset - _EDGE_LEAD_PERIODS * period_ns, peak + _EDGE_TAIL_PERIODS * period_ns
 
 
 def trace_hyperbola(
@@ -247,20 +308,23 @@ def trace_hyperbola(
     dt = float(np.median(np.diff(box_times)))
 
     period = _dominant_period_ns(box_data, dt)
-    smooth = _smooth_abs(box_data, max(1, int(round(period / (2.0 * dt)))))
-    apex_x, t0, v, best = _scan(smooth, x_box, float(box_times[0]), float(box_times[-1]), dt)
-    if best < _DETECT_RATIO * float(np.median(smooth)):
+    # Each row's mean across the box taken away: a layer flat across the box
+    # goes, a hyperbola's curve stays.
+    img = box_data - box_data.mean(axis=1, keepdims=True)
+    apex_x, t0, v, best = _scan(img, x_box, float(box_times[0]), float(box_times[-1]), dt, period)
+    noise = 1.4826 * float(np.median(np.abs(img - np.median(img))))
+    if best < _DETECT_Z * noise:
         raise ValueError("No hyperbola was found in the box.")
 
-    # The edge on each trace, in a window around the best curve.
+    # The edge on each trace, in a window placed by the band on the stack.
     curve = np.sqrt(t0**2 + 4.0 * (x_box - apex_x) ** 2 / v**2)
-    median_amp = float(np.median(np.abs(box_data)))
+    lead, tail = _edge_window(box_data, box_times, curve, period, fraction)
     found: list[tuple[int, float, float]] = []  # (box column, edge, window peak)
     for col in range(n_box_tr):
         if not box_times[0] <= curve[col] <= box_times[-1]:
             continue
-        lo = int(np.searchsorted(box_times, curve[col] - _PERIODS_BEFORE * period, "left"))
-        hi = int(np.searchsorted(box_times, curve[col] + _PERIODS_AFTER * period, "right"))
+        lo = int(np.searchsorted(box_times, curve[col] + lead, "left"))
+        hi = int(np.searchsorted(box_times, curve[col] + tail, "right"))
         edge, peak = _window_edge(box_data[lo:hi, col], box_times[lo:hi], fraction)
         if edge is not None:
             found.append((col, edge, peak))
@@ -269,7 +333,7 @@ def trace_hyperbola(
     cols = np.array([f[0] for f in found])
     peaks = np.array([f[2] for f in found])
     near_apex = np.argsort(np.abs(x_box[cols] - apex_x))[:5]
-    floor = max(_FAINT_RATIO * median_amp, _FAINT_FRACTION * float(np.median(peaks[near_apex])))
+    floor = _FAINT_FRACTION * float(np.median(peaks[near_apex]))
     strong = peaks >= floor
     if not strong[np.argsort(np.abs(x_box[cols] - apex_x))[:3]].any():
         raise ValueError("The hyperbola in the box is too faint to trace.")
