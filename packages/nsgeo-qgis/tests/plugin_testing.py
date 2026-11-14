@@ -611,3 +611,25 @@ def wheel_event(dy: int = -120) -> Any:
         Qt.ScrollPhase.NoScrollPhase,
         False,
     )
+
+
+def propagate_wheel(widget: Any, dy: int = -120) -> Any:
+    """Send a wheel notch to `widget` and replay Qt's climb to its parents.
+
+    Qt delivers a synthesized (non-spontaneous) wheel event only to its
+    receiver; only spontaneous ones propagate. This stands in for the real
+    path (the walkthrough checks that one in QGIS). Returns the widget that
+    accepted the notch, or None.
+    """
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtWidgets import QApplication
+
+    while widget is not None:
+        event = wheel_event(dy)
+        QApplication.sendEvent(widget, event)
+        if event.isAccepted():
+            return widget
+        if widget.isWindow() or widget.testAttribute(Qt.WidgetAttribute.WA_NoMousePropagation):
+            return None
+        widget = widget.parentWidget()
+    return None

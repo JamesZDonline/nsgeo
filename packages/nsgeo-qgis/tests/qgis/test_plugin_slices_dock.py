@@ -41,6 +41,7 @@ from plugin_testing import (
     connect_message_log,
     layout_width,
     needs_real_data,
+    propagate_wheel,
     slow_jobs,
     synthetic_dzt,
     wheel_event,
@@ -4207,15 +4208,13 @@ def test_the_wheel_over_an_unfocused_resolution_box_scrolls_the_panel_and_change
     z, frame = dock.engine.z, dock.engine.frame
     event = wheel_event(-120)
     QApplication.sendEvent(getattr(dock, name), event)
+    assert not event.isAccepted()  # not swallowed: left for the parents
+    taker = propagate_wheel(getattr(dock, name))
     QTest.qWait(200)  # past the 120 ms debounce
-    # Ignored, so Qt hands it to the parents; a posted event does not climb
-    # in the offscreen tests, so the panel's own scrolling is checked by the
-    # test below that sends the notch to the scroll area.
-    assert not event.isAccepted()
+    assert taker in (scroll, scroll.viewport())
+    assert scroll.verticalScrollBar().value() > 0  # the panel scrolled
     assert {n: getattr(dock, n).value() for n in GUARDED} == values
     assert dock.engine.z is z and dock.engine.frame is frame  # nothing re-prepared
-    QApplication.sendEvent(scroll.viewport(), wheel_event(-120))
-    assert scroll.verticalScrollBar().value() > 0  # the panel scrolls to the notch
 
 
 def test_a_focused_resolution_box_still_takes_the_wheel(docked):

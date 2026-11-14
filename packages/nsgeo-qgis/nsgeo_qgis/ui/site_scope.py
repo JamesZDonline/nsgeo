@@ -874,7 +874,8 @@ class SiteScope:
         if dt is not None:
             # One sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                if spin.singleStep() != dt:  # a set re-renders the box's text
+                # A set re-renders the box's text, losing a half-typed value (#105).
+                if spin.singleStep() != dt:
                     spin.setSingleStep(dt)
         if "dz_ns" in remembered:
             values["dz"] = remembered["dz_ns"]
