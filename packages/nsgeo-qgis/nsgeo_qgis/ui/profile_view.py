@@ -897,11 +897,21 @@ class ProfileView(QWidget):
             ctrl_velocity = ctrl and not shift
             ctrl_shift = ctrl and shift
             if ctrl_velocity and not self._velocity_mode:
+                # A press in an axis margin changes no mode.
+                if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
+                    return
                 # The plugin answers synchronously (a direct connection on this
                 # thread) by switching velocity mode on, or by declining.
+                # Switching it on shows the velocity strip, which shrinks this
+                # view and so re-fits the transform: carry the press through
+                # data coordinates so it lands where it was clicked.
+                trace_f = self.transform.trace_of_x(x)
+                time_ns = self.transform.time_of_y(y)
                 self.velocity_mode_requested.emit()
-                if not self._velocity_mode:
+                if not self._velocity_mode or self.transform is None:
                     return
+                x = self.transform.x_of_trace(trace_f)
+                y = self.transform.y_of_time(time_ns)
             if (self._pick_mode or shift) and not ctrl_velocity and not ctrl_shift:
                 # Only inside the radargram itself. This handler runs for
                 # the whole widget, axis margins included, and
