@@ -6,14 +6,11 @@ written only through `fold_settings()`, which tests replace.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 
 from qgis.core import QgsSettings
 from qgis.gui import QgsCollapsibleGroupBox
-from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QObject, QSettings, Qt
-from qgis.PyQt.QtWidgets import QAbstractScrollArea, QApplication, QToolButton
 
 from nsgeo_qgis.log import log as _log
 
@@ -31,43 +28,14 @@ class _ShowSync(QObject):
     QGIS stores the flag of a hidden box but draws nothing, and re-applies it
     only on the box's first show. So a box synced while hidden is marked, and
     on its next Show its own flag is applied again.
-
-    It also gives a header click's focus back. Qt hands a click on an
-    unfocusable widget to the nearest ancestor that takes click focus, here
-    the panel's scroll area, so a click on a header would take focus from the
-    box the user is typing in. Folding is the panel moving on its own (spec
-    §2), so the box that had focus keeps it.
     """
 
     def __init__(self, parent: QObject) -> None:
         super().__init__(parent)
         self.stale: set[int] = set()
-        self._lost: tuple[QObject, float] | None = None
-        app = QApplication.instance()
-        if app is not None:
-            app.focusChanged.connect(self._on_focus_changed)
-
-    def _on_focus_changed(self, old, new) -> None:
-        try:
-            self._lost = (old, time.monotonic()) if old is not None else None
-        except Exception as exc:  # noqa: BLE001 -- a slot on focusChanged
-            _log(f"could not note a focus change: {exc}")
-
-    def _give_back_focus(self) -> None:
-        lost, self._lost = self._lost, None
-        if lost is None or time.monotonic() - lost[1] > 0.1:
-            return
-        widget = lost[0]
-        if sip.isdeleted(widget) or not widget.isVisible():
-            return
-        now = QApplication.focusWidget()
-        if now is None or isinstance(now, (QAbstractScrollArea, QgsCollapsibleGroupBox)):
-            widget.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def eventFilter(self, obj, event):  # noqa: N802 -- Qt override
         try:
-            if event.type() == QEvent.Type.MouseButtonPress:
-                self._give_back_focus()
             if event.type() == QEvent.Type.Show and id(obj) in self.stale:
                 self.stale.discard(id(obj))
                 scroll = obj.scrollOnExpand()
@@ -93,12 +61,10 @@ def remember_folds(name: str, boxes: Sequence[QgsCollapsibleGroupBox]) -> None:
     for box in boxes:
         box.setSaveCollapsedState(False)
         box.setSaveCheckedState(False)
-        # A click on a header is the panel moving on its own: it must not
-        # take focus from the box the user is typing in.
+        # A header is not a Tab stop of its own; the collapse button keeps its
+        # own Tab focus.
         box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         box.installEventFilter(sync)
-        for button in box.findChildren(QToolButton):
-            button.installEventFilter(sync)
     try:
         collapsed = bool(fold_settings().value(key, False, type=bool))
     except Exception as exc:  # noqa: BLE001 -- a bad settings store must not stop the dock

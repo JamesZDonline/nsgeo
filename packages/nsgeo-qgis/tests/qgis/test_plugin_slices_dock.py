@@ -4664,23 +4664,49 @@ def test_folds_are_remembered_across_a_restart(docked):
         again.deleteLater()
 
 
-def test_a_header_click_folds_without_taking_focus_from_dz(docked):
-    from qgis.PyQt.QtWidgets import QToolButton
-
-    dock, _ = docked
-    _short_and_active(dock)
-    dock.dz_spin.setFocus()
-    assert dock.dz_spin.hasFocus()
-    # Display, not Resolution: folding Resolution hides dz itself, and a hidden
-    # box cannot keep focus whatever the click does.
-    scroll = dock.findChild(QScrollArea)
-    scroll.ensureWidgetVisible(dock.display_group)
-    dock.dz_spin.setFocus()
-    button = dock.display_group.findChild(QToolButton)
-    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+def _fold_unfold_display_keeps_dz(dock, mutate=None):
+    """dz focused; Display folds, the panel is scrolled up, Display unfolds and
+    scrolls itself into view. Returns (dz still focused, the unfold's scroll)."""
+    scroll = _short_and_active(dock)
+    bar = scroll.verticalScrollBar()
+    if mutate is not None:
+        mutate(bar, scroll)
+    bar.setValue(bar.maximum())
+    dock.display_group.setCollapsed(True)
     _events_n()
-    assert dock.display_group.isCollapsed()
+    bar.setValue(0)
+    dock.dz_spin.setFocus()
     assert dock.dz_spin.hasFocus()
+    before = bar.value()
+    dock.display_group.setCollapsed(False)
+    _events_n()
+    return dock.dz_spin.hasFocus(), bar.value() - before
+
+
+def test_a_section_folding_does_not_take_focus_from_dz(docked):
+    dock, _ = docked
+    kept, moved = _fold_unfold_display_keeps_dz(dock)
+    assert moved > 0, "the unfold must scroll the panel, or this tests nothing"
+    assert kept
+
+
+def test_the_guard_would_let_go_on_a_value_change(docked):
+    """The previous test has teeth: a guard that let go on valueChanged fails it."""
+    dock, _ = docked
+
+    def mutate(bar, scroll):
+        bar.valueChanged.connect(lambda _v: dock.dz_spin.hasFocus() and scroll.setFocus())
+
+    kept, moved = _fold_unfold_display_keeps_dz(dock, mutate)
+    assert moved > 0
+    assert not kept
+
+
+def test_the_folding_boxes_are_not_tab_stops(docked):
+    dock, _ = docked
+    boxes = [dock.resolution_group, dock.grid_finish, dock.site_finish, dock.display_group]
+    assert all(b.focusPolicy() == Qt.FocusPolicy.NoFocus for b in boxes)
+    assert dock.normalisation_panel.group.focusPolicy() == Qt.FocusPolicy.NoFocus
 
 
 def test_fold_state_never_touches_a_real_settings_file(tmp_path):
