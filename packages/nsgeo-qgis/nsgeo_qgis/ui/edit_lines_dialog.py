@@ -73,6 +73,7 @@ from nsgeo_qgis.line_edit import (
 )
 from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.wheel_guard import guard_wheel
 
 (
     COL_LABEL,
@@ -219,6 +220,8 @@ class EditLinesDialog(QDialog):
             combo = QComboBox()
             combo.addItems(self._grid_ids)
             combo.currentTextChanged.connect(lambda text, r=r: self._on_grid_picked(r, text))
+            guard_wheel(combo, self.table)
+            combo.activated.connect(lambda _i: self.table.setFocus())
             self.table.setCellWidget(r, COL_GRID, combo)
             self._combos.append(combo)
         self.table.itemChanged.connect(self._on_item_changed)

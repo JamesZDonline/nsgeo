@@ -102,6 +102,7 @@ from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
+from nsgeo_qgis.ui.wheel_guard import guard_wheel
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -722,6 +723,8 @@ class SlicesDock(QgsDockWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)
         self.setWidget(scroll)
+        for spin in (self.cell_spin, self.dz_spin, self.z0_spin, self.z1_spin):
+            guard_wheel(spin, scroll)  # spec 2: the wheel scrolls, boxes keep still
 
         # A palette is always offered, even before any source is chosen
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`

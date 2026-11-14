@@ -594,3 +594,20 @@ def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> 
     assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
     assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
     assert items[-1].value == pytest.approx(limit)
+
+
+def wheel_event(dy: int = -120) -> Any:
+    """A plain vertical wheel notch, built as it works on Qt 5 and Qt 6."""
+    from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(2, 2),
+        QPointF(2, 2),
+        QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )

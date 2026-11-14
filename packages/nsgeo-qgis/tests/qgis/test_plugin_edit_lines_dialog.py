@@ -21,8 +21,10 @@ from nsgeo_qgis.ui.edit_lines_dialog import (
     COL_TRACES,
     EditLinesDialog,
 )
-from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtWidgets import QMessageBox
+from plugin_testing import synthetic_dzt, wheel_event
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QAbstractSlider, QApplication, QMessageBox
 
 GRID5 = Grid("Grid5", (500.0, 700.0), 0.0, 15.0, 15.0, "EPSG:32616", 0.5)
 GRID_B = Grid("B", (600.0, 700.0), 0.0, 10.0, 9.0, "EPSG:32616", 0.5)
@@ -669,3 +671,42 @@ def test_the_dialog_opens_no_taller_than_the_screen_allows(table):
     screen = dialog.screen() or QGuiApplication.primaryScreen()
     assert screen is not None
     assert dialog.height() <= 0.9 * screen.availableGeometry().height()
+
+
+def _shown(dialog):
+    dialog.show()
+    dialog.activateWindow()
+    assert QTest.qWaitForWindowActive(dialog)
+    dialog.table.setFocus()
+
+
+def test_the_wheel_over_an_unfocused_grid_combo_moves_no_line(table):
+    session, dialog = table
+    _shown(dialog)
+    combo = dialog.table.cellWidget(2, COL_GRID)
+    for dy in (-120, 120):
+        QApplication.sendEvent(combo, wheel_event(dy))
+    assert [dialog.table.cellWidget(r, COL_GRID).currentText() for r in range(6)] == ["Grid5"] * 6
+    dialog.accept()
+    keys = dialog.keys()
+    assert {session.line_for_key(k).placement.grid_id for k in keys} == {"Grid5"}
+
+
+def test_after_picking_a_grid_focus_goes_back_to_the_table(table):
+    _, dialog = table
+    _shown(dialog)
+    combo = dialog.table.cellWidget(2, COL_GRID)
+    combo.setFocus()
+    QTest.keyClick(combo, Qt.Key.Key_Down)
+    assert combo.currentText() == "B"
+    assert dialog.table.hasFocus()
+
+
+def test_scrolling_the_table_lets_go_of_a_focused_grid_combo(table):
+    _, dialog = table
+    _shown(dialog)
+    combo = dialog.table.cellWidget(2, COL_GRID)
+    combo.setFocus()
+    assert combo.hasFocus()
+    dialog.table.verticalScrollBar().triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
+    assert not combo.hasFocus()

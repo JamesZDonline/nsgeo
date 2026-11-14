@@ -43,9 +43,11 @@ from plugin_testing import (
     needs_real_data,
     slow_jobs,
     synthetic_dzt,
+    wheel_event,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QAbstractSlider, QApplication, QMessageBox, QScrollArea
 from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -4174,3 +4176,90 @@ def test_the_symbology_button_is_off_while_coverage_shows(docked):
     assert "Show coverage" in dock.symbology_button.toolTip()
     dock.coverage_check.setChecked(False)
     assert dock.symbology_button.isEnabled()
+
+
+# ---- the wheel rule (#177) ----
+
+GUARDED = ("cell_spin", "dz_spin", "z0_spin", "z1_spin")
+
+
+def _short_and_active(dock):
+    """Floated short enough to scroll, shown and active, so focus is real."""
+    dock.setFloating(True)
+    dock.resize(420, 300)
+    dock.show()
+    dock.activateWindow()
+    assert QTest.qWaitForWindowActive(dock)
+    scroll = dock.findChild(QScrollArea)
+    scroll.verticalScrollBar().setValue(0)
+    return scroll
+
+
+@pytest.mark.parametrize("name", GUARDED)
+def test_the_wheel_over_an_unfocused_resolution_box_scrolls_the_panel_and_changes_nothing(
+    docked, name
+):
+    dock, _ = docked
+    _ready(dock)
+    scroll = _short_and_active(dock)
+    dock.slice_slider.setFocus()
+    values = {n: getattr(dock, n).value() for n in GUARDED}
+    z, frame = dock.engine.z, dock.engine.frame
+    event = wheel_event(-120)
+    QApplication.sendEvent(getattr(dock, name), event)
+    QTest.qWait(200)  # past the 120 ms debounce
+    # Ignored, so Qt hands it to the parents; a posted event does not climb
+    # in the offscreen tests, so the panel's own scrolling is checked by the
+    # test below that sends the notch to the scroll area.
+    assert not event.isAccepted()
+    assert {n: getattr(dock, n).value() for n in GUARDED} == values
+    assert dock.engine.z is z and dock.engine.frame is frame  # nothing re-prepared
+    QApplication.sendEvent(scroll.viewport(), wheel_event(-120))
+    assert scroll.verticalScrollBar().value() > 0  # the panel scrolls to the notch
+
+
+def test_a_focused_resolution_box_still_takes_the_wheel(docked):
+    dock, _ = docked
+    _ready(dock)
+    _short_and_active(dock)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    before = dock.dz_spin.value()
+    QApplication.sendEvent(dock.dz_spin, wheel_event(120))
+    assert dock.dz_spin.value() == pytest.approx(before + dock.dz_spin.singleStep(), abs=1e-4)
+
+
+def test_scrolling_the_panel_lets_go_of_the_box_you_typed_in(docked):
+    dock, _ = docked
+    _ready(dock)
+    scroll = _short_and_active(dock)
+    dock.dz_spin.setFocus()
+    dock.dz_spin.setValue(0.75)
+    QApplication.sendEvent(scroll.viewport(), wheel_event(-120))
+    assert not dock.dz_spin.hasFocus()
+    assert dock.dz_spin.value() == 0.75
+    assert scroll.verticalScrollBar().value() > 0
+    QApplication.sendEvent(dock.dz_spin, wheel_event(-120))
+    assert dock.dz_spin.value() == 0.75
+
+
+def test_the_panel_moving_on_its_own_keeps_the_focus(docked):
+    dock, _ = docked
+    _ready(dock)
+    scroll = _short_and_active(dock)
+    dock.dz_spin.setFocus()
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    scroll.ensureWidgetVisible(dock.display_group)
+    assert dock.dz_spin.hasFocus()
+    scroll.verticalScrollBar().triggerAction(QAbstractSlider.SliderAction.SliderSingleStepSub)
+    assert not dock.dz_spin.hasFocus()  # a keyboard/arrow scroll is a user scroll
+
+
+def test_the_thickness_box_keeps_todays_wheel(docked):
+    dock, _ = docked
+    _ready(dock)
+    _short_and_active(dock)
+    dock.slice_slider.setFocus()
+    before = dock.thickness_spin.value()
+    QApplication.sendEvent(dock.thickness_spin, wheel_event(120))
+    assert dock.thickness_spin.value() != before

@@ -469,6 +469,10 @@ def set_spins_quietly(dock: Any, **values: float) -> bool:
     for name, value in values.items():
         spin = spins[name]
         before = spin.value()
+        if value == before:
+            continue
+        if spin.hasFocus() and spin.cleanText() != spin.textFromValue(before):
+            continue  # half-typed: the user's text is not ours to overwrite
         spin.blockSignals(True)
         try:
             spin.setValue(value)
@@ -870,7 +874,8 @@ class SiteScope:
         if dt is not None:
             # One sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                spin.setSingleStep(dt)
+                if spin.singleStep() != dt:  # a set re-renders the box's text
+                    spin.setSingleStep(dt)
         if "dz_ns" in remembered:
             values["dz"] = remembered["dz_ns"]
         elif dt is not None:

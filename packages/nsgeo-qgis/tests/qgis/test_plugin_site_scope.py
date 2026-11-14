@@ -56,6 +56,7 @@ from plugin_testing import (
     wait_for_export,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID_X = {"A": (500.0, 506.0), "B": (506.0, 512.0), "C": (512.0, 518.0)}
@@ -3886,3 +3887,29 @@ def test_the_legend_follows_an_edit_without_a_redraw(plugin):
     _own(dock)
     set_range(plugin.slice_layer.layer, -2.0, 5.0)
     assert dock.legend_label.text() == "your own colours · -2 – 5"
+
+
+def test_a_half_typed_value_survives_a_whole_site_ready_tick(plugin):
+    dock = whole_site(plugin)
+    scope = dock._site
+    dock.setFloating(True)
+    dock.show()
+    dock.activateWindow()
+    assert QTest.qWaitForWindowActive(dock)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    dock.dz_spin.selectAll()
+    QTest.keyClicks(dock.dz_spin, "0.")
+    typed = dock.dz_spin.cleanText()
+    plugin.session.remember_site_resolution(dz_ns=0.433)  # the tick now wants another dz
+    scope.ready_handled = None
+    scope._run_tick()
+    assert dock.dz_spin.cleanText() == typed
+
+
+def test_an_unchanged_value_is_not_set_again(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    calls = []
+    monkeypatch.setattr(dock.dz_spin, "setValue", calls.append)
+    assert site_scope_module.set_spins_quietly(dock, dz=dock.dz_spin.value()) is False
+    assert calls == []
