@@ -66,6 +66,8 @@ from nsgeo_qgis.surface_plan import (
     new_feature_id,
     now_iso,
     rebuild_refusal,
+    remembered_end,
+    remembered_step,
     remove_refusal,
     selection_refusal,
     skipped_refusal,
@@ -334,9 +336,9 @@ class Surfaces:
         source = export.source_choice(record.grid_id, choice)
         finish = export.fill_settings(record.grid_id)
         held = self.members(feature_id) if members is None else members.get(feature_id, [])
-        picks = sorted(
-            [r.pick.line_key, r.pick.trace, r.pick.time_ns, r.pick.zero_ns] for r in held
-        )
+        # The radar time, not the stored time and zero: #97 re-measures a line's older picks
+        # from its time zero when the line opens, which moves neither the pick nor the surface.
+        picks = sorted([r.pick.line_key, r.pick.trace, round(r.pick.radar_ns, 6)] for r in held)
         keys = sorted(source.line_keys)
         return {
             "picks": input_hash(picks),
@@ -350,12 +352,14 @@ class Surfaces:
                     "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
                 }
             ),
-            # The record's own depth, never the Slices panel's z1 or its engine's bounds (R10).
+            # What a rebuild would use, field by field: the grid's record, or the Slices panel's
+            # values while the grid has none (nothing remembered since the last Save site, A1).
+            # Once a build or an export remembers a depth end, the panel never reaches it (R10).
             "resolution": input_hash(
                 {
                     "cell": choice.cell,
-                    "dz_ns": choice.dz_ns,
-                    "t1_ns": session.volume_record(record.grid_id).get("t1_ns"),
+                    "dz_ns": remembered_step(choice.dz_ns),
+                    "t1_ns": remembered_end(choice.t1_ns),
                 }
             ),
             "fill": input_hash(
@@ -543,8 +547,7 @@ class Surfaces:
         choice = export.defaults(grid_id)
         # The export dialog shows the depth step to four decimals, so an untouched dialog writes
         # that back: build with it, or the next export would call the surface stale (R11).
-        if round(choice.dz_ns, 4) > 0.0:
-            choice = replace(choice, dz_ns=round(choice.dz_ns, 4))
+        choice = replace(choice, dz_ns=remembered_step(choice.dz_ns))
 
         def report(done: float) -> None:
             if not progress(int(done), 100):
@@ -558,11 +561,7 @@ class Surfaces:
         # Remember the choice with the depth the fill actually reached, as an explicit number
         # (rounded up, so the next fill is clipped at nothing it was not clipped at now): the
         # Slices panel's z1 never reaches a surface (R10).
-        end = math.ceil(got.t1_ns * 1e4 - 1e-6) / 1e4
-        end = round(end, 4)
-        if end < got.t1_ns:
-            end = round(end + 1e-4, 4)
-        choice = replace(choice, t1_ns=end)
+        choice = replace(choice, t1_ns=remembered_end(got.t1_ns))
         window = max(1, int(round(choice.settings.period_ns / got.z.dz_ns)))
         vol = surface_volume(
             got.filled,

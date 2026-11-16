@@ -20,6 +20,8 @@ from nsgeo_qgis.surface_plan import (
     name_refusal,
     outlier_line,
     rebuild_refusal,
+    remembered_end,
+    remembered_step,
     remove_refusal,
     selection_refusal,
     stale_text,
@@ -324,3 +326,23 @@ def test_the_panel_build_and_dialog_wording_round_two():
         "Could not build “A” and “B”: No space left"
     )
     assert build_failure_text(["A"], ValueError("too few")) == "too few"
+
+
+def test_remembered_end_rounds_up_to_four_decimals_and_is_stable():
+    """The depth end a build remembers, and the one staleness compares (walkthrough A1)."""
+    assert remembered_end(None) is None
+    assert remembered_end(40.0) == 40.0
+    assert remembered_end(35.55) == 35.55
+    assert remembered_end(35.55001) == 35.5501
+    assert remembered_end(12.34561234) == 12.3457
+    for t in (40.0, 35.5501, 12.3457, 0.0001, 49.9999, 1234.5678):
+        assert remembered_end(t) == t  # a remembered end comes back unchanged
+        assert remembered_end(remembered_end(t + 3e-5)) == remembered_end(t + 3e-5)
+        assert remembered_end(t + 3e-5) >= t + 3e-5
+
+
+def test_remembered_step_is_the_export_dialogs_four_decimals():
+    assert remembered_step(0.1) == 0.1
+    assert remembered_step(0.21653124690055847) == 0.2165
+    assert remembered_step(0.00004) == 0.00004  # rounding to nothing keeps the step
+    assert remembered_step(remembered_step(0.07812)) == 0.0781

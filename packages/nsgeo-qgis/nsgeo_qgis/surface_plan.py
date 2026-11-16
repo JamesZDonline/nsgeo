@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -285,6 +286,25 @@ def input_hash(value: Any) -> str:
     """16 hex characters of the sha1 of `value` as sorted JSON."""
     text = json.dumps(value, sort_keys=True, default=str)
     return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+def remembered_step(dz_ns: float) -> float:
+    """The depth step a build uses and remembers: as the export dialog shows it, to four
+    decimals (R11), unless that rounds it to nothing."""
+    rounded = round(dz_ns, 4)
+    return rounded if rounded > 0.0 else dz_ns
+
+
+def remembered_end(t1_ns: float | None) -> float | None:
+    """The depth end a build remembers for `t1_ns`: rounded UP to four decimals (the export
+    dialog's precision), so the next fill is clipped at nothing this one was not. A
+    remembered end comes back unchanged; None (to the end of the record) stays None."""
+    if t1_ns is None:
+        return None
+    end = round(math.ceil(t1_ns * 1e4 - 1e-6) / 1e4, 4)
+    if end < t1_ns:
+        end = round(end + 1e-4, 4)
+    return end
 
 
 def stale_text(stale: Iterable[str]) -> str:

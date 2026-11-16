@@ -594,3 +594,61 @@ def test_a_built_surface_stays_fresh_when_another_takes_its_picks(built_site):
     assert surfaces.state(a.feature_id).stale == ()
     assert surfaces.inputs(a.feature_id) == before
     assert surfaces.state(b.feature_id).stale == ("picks",)
+
+
+def test_picks_re_measured_from_their_lines_time_zero_keep_the_surface_fresh(built_site):
+    """#97: opening a line on the profile re-measures its older picks from the line's time
+    zero; their time and zero both change, their radar time does not, and neither does the
+    surface. It must not read stale (walkthrough A1); a pick that really moves still does."""
+    from qgis.core import QgsFeatureRequest
+
+    session, _, _, layers, surfaces = built_site
+    record, fids = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    assert layers.follow_zero(session.keys()[0], -0.693) == 2
+    assert surfaces.state(record.feature_id).stale == ()
+    provider = layers.layers["picks"].dataProvider()
+    moved = next(provider.getFeatures(QgsFeatureRequest(fids[0])))
+    index = provider.fieldNameIndex("time_ns")
+    assert provider.changeAttributeValues({fids[0]: {index: moved["time_ns"] + 0.5}})
+    assert surfaces.state(record.feature_id).stale == ("picks",)
+
+
+def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
+    """Walkthrough A1. A build remembers the grid's 3-D choice in the site, which only Save
+    site writes, while the surface is on disk at once. After quitting without Save site the
+    grid falls back to the Slices panel's cell, depth step and depth end, the ones the surface
+    was built at, so it must not read stale. (The synthetic header's depth step has more than
+    four decimals, which the build rounds as the export dialog does.)"""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import Dock
+    from qgis.core import QgsProject
+
+    session, _, export, layers, surfaces = built_site
+    record, _ = _surface(built_site)
+    assert round(export.defaults(GRID).dz_ns, 4) != export.defaults(GRID).dz_ns
+    _t0, end = export._record_range(export.source_choice(GRID, export.defaults(GRID)))
+    # The Slices panel has shown the grid (so it remembers a depth end), and the site is saved.
+    session.remember_slice_resolution(GRID, t1_ns=round(end - 1.0, 1))
+    session.save(allow_absolute=True)  # the fixture's DZT files sit beside the site folder
+    surfaces.build([record.feature_id], progress=_noop)
+    assert session.volume_record(GRID).get("t1_ns") == round(end - 1.0, 1)
+    assert surfaces.state(record.feature_id).stale == ()
+    layers.detach()
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=QgsProject.instance())
+    dock2 = None
+    try:
+        again.open_site(session.json_path)
+        assert again.volume_record(GRID) == {}  # the build's record was never saved
+        dock2 = Dock(again)
+        export2 = ParaViewExport(again, dock2)
+        reopened = Surfaces(again, layers2, export_for=lambda: export2)
+        state = reopened.state(record.feature_id)
+        assert state.built and state.stale == ()
+    finally:
+        layers2.detach()
+        if dock2 is not None:
+            dock2.dispose()
