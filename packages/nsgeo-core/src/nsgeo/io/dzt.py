@@ -1,8 +1,9 @@
 """GSSI DZT reader.
 
-Written from the format description and verified against ten real SIR-4000
-files. See spec section 6a: several widely cited facts about this format do
-not hold in real data, and each is called out at the point it matters.
+Written from the format description and verified against real SIR-4000 files
+(32-bit) and pulseEKKO lines exported to DZT by EKKO_Project (16-bit). See
+spec section 6a: several widely cited facts about this format do not hold in
+real data, and each is called out at the point it matters.
 """
 
 from __future__ import annotations
@@ -16,9 +17,25 @@ import numpy as np
 
 MINHEADSIZE = 1024
 
-#: Sample dtype by rh_bits. Only 32-bit has been validated against real files;
-#: the 8- and 16-bit paths come from the format description and are untested.
-_DTYPES = {8: "<u1", 16: "<i2", 32: "<i4"}
+#: On-disk sample dtype by rh_bits. 8- and 16-bit samples are unsigned offset
+#: binary, centred on `_CENTRES`; 32-bit samples are signed and centred near
+#: zero. Verified for 16-bit (pulseEKKO export: values 17351..42461, midpoint
+#: 32768) and 32-bit (SIR-4000). Reading 16-bit as signed wraps every sample
+#: just below the centre to about +32767 and just above to about -32767, which
+#: loads without error but draws a banded, scrambled profile. 8-bit follows
+#: the same convention by the format description and has no real file yet.
+_DTYPES = {8: "<u1", 16: "<u2", 32: "<i4"}
+
+#: The value an unsigned sample takes at zero amplitude, by rh_bits.
+_CENTRES = {8: 1 << 7, 16: 1 << 15, 32: 0}
+
+#: The leading samples of every trace that are a per-trace header, not radar
+#: data. Verified in both real variants, with different contents: SIR-4000
+#: writes a trace counter (0, 1, 2, ...) then a mark word (0, or 0x9201 on a
+#: marked trace); the pulseEKKO export writes 0xFFFF then 0xE800 on every
+#: trace. They are set to zero amplitude on read rather than trimmed, so the
+#: sample count and the time of every sample stay exactly as the header says.
+TRACE_HEADER_SAMPLES = 2
 
 
 class DztError(Exception):
@@ -51,6 +68,7 @@ class DztHeader:
 
     @property
     def dtype(self) -> str:
+        """The on-disk sample dtype (not the dtype `read_samples` returns)."""
         return _DTYPES[self.bits]
 
 
@@ -149,11 +167,19 @@ def trace_count(path: str | Path, header: DztHeader) -> int:
 
 
 def read_samples(path: str | Path, header: DztHeader | None = None) -> np.ndarray:
-    """Read all samples as (n_channels, n_samples, n_traces).
+    """Read all samples as signed int32, shape (n_channels, n_samples, n_traces).
 
-    Channels are interleaved per trace on disk. Raw values are returned
-    unmodified: no zero-offset is applied, because rh_zero is not trustworthy
-    (it is 105 in real files, neither documented sentinel).
+    Channels are interleaved per trace on disk. Amplitudes are otherwise raw,
+    with two exceptions, both decoding rather than processing:
+
+    - 8- and 16-bit samples have their offset-binary centre subtracted, so
+      every bit depth comes back signed and centred on zero. The centre comes
+      from the bit depth, never from rh_zero: rh_zero is 105 in real SIR-4000
+      files (neither documented sentinel), though the 16-bit pulseEKKO export
+      does write 0x8000 there.
+    - The first `TRACE_HEADER_SAMPLES` samples of each trace (in each channel)
+      are set to 0, because they are a per-trace header, not radar data.
+      Multi-channel files are unverified against real data on this point.
     """
     path = Path(path)
     if header is None:
@@ -163,4 +189,10 @@ def read_samples(path: str | Path, header: DztHeader | None = None) -> np.ndarra
     expected = n_traces * header.n_channels * header.n_samples
     if flat.size != expected:
         raise DztError(f"expected {expected} samples, read {flat.size}")
-    return flat.reshape(n_traces, header.n_channels, header.n_samples).transpose(1, 2, 0)
+    samples = flat.astype(np.int32, copy=False)
+    centre = _CENTRES[header.bits]
+    if centre:
+        samples -= centre
+    traces = samples.reshape(n_traces, header.n_channels, header.n_samples)
+    traces[:, :, :TRACE_HEADER_SAMPLES] = 0
+    return traces.transpose(1, 2, 0)
