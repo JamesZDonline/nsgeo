@@ -124,11 +124,13 @@ release's notes list everything in it.
   switching velocity mode on first. Being designed.
 - **Slices panel: scroll wheel, typing, width and notes** ([#177], [#176],
   [#105], [#121], and parts of [#157], [#163] and [#50]). The scroll wheel no
-  longer changes dz, z0, z1, the cell size or a line's grid in Edit lines until
-  you click into the box; dz can't go below the radar's own sample interval; a
-  Whole site refresh leaves a box you are typing in alone; warnings and
-  refusals get their own section in the panel, and its settings sections fold;
-  the panel fits the Processing panel's width. Being built.
+  longer moves a line to another grid in Edit lines until you click its Grid
+  box; dz can't go below the radar's own sample interval, and says so; grids
+  start at a 0.1 m cell; a Whole site refresh leaves a box you are typing in
+  alone; warnings and refusals get their own section in the panel, and its
+  settings sections fold, so a section you have set is out of the wheel's way;
+  the panel fits the Processing panel's width. Built, in its second
+  walkthrough round.
 - **Processing steps: edge cases and trace stacking** ([#43], [#40], [#44],
   [#42], [#46], [#125], [#114]). Dewow, background removal, AGC, time zero and
   bandpass stop returning a blank, NaN or uncropped line from a setting that
@@ -186,7 +188,8 @@ Grouped by area. The order within a group is not a priority.
   averaged previews and a memory estimate for This grid ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
   ([#167]); move the colour ramp's stops and watch the slice recolour as you
-  drag ([#183]).
+  drag ([#183]); a fine cell no longer freezes QGIS while its fill is worked
+  out, about 105 s for Whole site at 0.02 m on ten grids ([#193]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -244,6 +247,7 @@ Grouped by area. The order within a group is not a priority.
 [#185]: https://github.com/JamesZDonline/nsgeo/issues/185
 [#187]: https://github.com/JamesZDonline/nsgeo/issues/187
 [#188]: https://github.com/JamesZDonline/nsgeo/issues/188
+[#193]: https://github.com/JamesZDonline/nsgeo/issues/193
 
 ## Why
 
