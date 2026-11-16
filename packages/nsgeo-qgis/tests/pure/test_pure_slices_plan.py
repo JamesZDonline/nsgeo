@@ -360,17 +360,18 @@ def test_a_site_source_shares_one_transform_and_names_each_grid_once():
         SiteSource(transform="amp_envelope", grids=(a, b, again_a))
 
 
-def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
-    """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
-    line the detail is set by the trace spacing, so a widely spaced grid
+def test_the_default_cell_is_0_1_m_no_larger_than_half_the_spacing():
+    """#81: a fixed 0.1 m (0.2 m until the session A walkthrough), not a
+    fraction of the line spacing -- along a line the detail is set by the
+    trace spacing, so a widely spaced grid
     keeps fine cells. Spec 4's "no larger than half the line spacing"
     still caps it, and the frame's affordable floor (`smallest_safe_cell`,
     walkthrough W7) still wins over both."""
     from nsgeo_qgis.slices_plan import default_cell
 
-    assert default_cell(0.5, 0.01) == pytest.approx(0.2)
-    assert default_cell(1.0, 0.01) == pytest.approx(0.2)  # not 0.4: fixed, not relative
-    assert default_cell(0.25, 0.01) == pytest.approx(0.125)  # half the spacing
+    assert default_cell(0.5, 0.01) == pytest.approx(0.1)
+    assert default_cell(1.0, 0.01) == pytest.approx(0.1)  # not 0.5: fixed, not relative
+    assert default_cell(0.15, 0.01) == pytest.approx(0.075)  # half the spacing
     assert default_cell(0.5, 0.3) == pytest.approx(0.3)  # the floor wins
 
 

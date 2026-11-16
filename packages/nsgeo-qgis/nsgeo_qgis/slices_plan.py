@@ -239,8 +239,8 @@ def level_limit_problem(resolution: Resolution, samples: Sequence[int]) -> str |
 #: first default and striped nominal gaps: binning moves each line up to half
 #: a cell, so a gap's middle cell can be ceil(spacing / cell) * cell / 2 from
 #: data, at most (spacing + cell) / 2, which 0.75 covers for any cell up to
-#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.2 m
-#: cell its middle rows are 0.4 m from data.
+#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.1 m
+#: cell its middle rows are about 0.5 m from data, past the 0.375 m reach.
 DEFAULT_METHOD = "kriging"
 DEFAULT_MAX_DISTANCE_SPACINGS = 0.75
 #: The neighbour search reaches at least this many line spacings (plan call 1).
@@ -723,8 +723,9 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 
 #: Issue #81: the cell a grid starts from, in metres -- fixed, not a
 #: fraction of the line spacing, because along a line the detail is set by
-#: the trace spacing. `default_cell` caps it at half the line spacing.
-DEFAULT_CELL_M = 0.2
+#: the trace spacing. `default_cell` caps it at half the line spacing. 0.1 m
+#: since the session A walkthrough (the author's call; it was 0.2 m).
+DEFAULT_CELL_M = 0.1
 
 
 def default_cell(spacing_m: float, floor: float) -> float:

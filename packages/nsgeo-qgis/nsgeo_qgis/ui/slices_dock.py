@@ -105,7 +105,6 @@ from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
-from nsgeo_qgis.ui.wheel_guard import guard_wheel
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -207,6 +206,49 @@ class ElidedLabel(QLabel):
             self.setToolTip(self.full_text)
         else:
             self.setToolTip(self._hint if self.full_text else "")
+
+
+#: dz's minimum before any line gives a sample interval (spec 3.2).
+GENERIC_DZ_MIN = 0.001
+
+#: The note beside dz while it sits on its floor (walkthrough D1).
+DZ_FLOOR_NOTE = "(sample interval)"
+DZ_FLOOR_TIP = (
+    "dz can't go below the radar's sample interval (in Whole site, the finest "
+    "grid's). A finer dz only adds levels between the same two readings: no new "
+    "information, only a deeper cube."
+)
+
+
+class _DzSpinBox(QDoubleSpinBox):
+    """dz's box: shows `note` while dz sits on a sample-interval floor.
+
+    Seeds and restores set dz and its minimum with signals blocked, so the
+    Python setters update the note as well as `valueChanged`."""
+
+    def __init__(self, note: QLabel) -> None:
+        super().__init__()
+        self._note = note
+        self.valueChanged.connect(self._sync_note)
+
+    def setValue(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setValue(value)
+        self._sync_note()
+
+    def setMinimum(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setMinimum(value)
+        self._sync_note()
+
+    def setRange(self, low: float, high: float) -> None:  # noqa: N802 -- Qt override
+        super().setRange(low, high)
+        self._sync_note()
+
+    def _sync_note(self, *_args: object) -> None:
+        try:
+            floor = self.minimum()
+            self._note.setVisible(floor > GENERIC_DZ_MIN and self.value() <= floor)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot
+            _log(f"could not show dz's floor: {exc}")
 
 
 class _OpensWideScrollArea(QScrollArea):
@@ -570,8 +612,13 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("Cell size", self.cell_spin)
 
-        self.dz_spin = QDoubleSpinBox()
-        self.dz_spin.setRange(0.001, 100.0)
+        self.dz_floor_note = QLabel(DZ_FLOOR_NOTE)
+        self.dz_floor_note.setToolTip(DZ_FLOOR_TIP)
+        _keep = self.dz_floor_note.sizePolicy()
+        _keep.setRetainSizeWhenHidden(True)  # dz keeps its width at and off the floor
+        self.dz_floor_note.setSizePolicy(_keep)
+        self.dz_spin = _DzSpinBox(self.dz_floor_note)
+        self.dz_spin.setRange(GENERIC_DZ_MIN, 100.0)
         self.dz_spin.setDecimals(4)
         self.dz_spin.setSuffix(" ns")
         self.dz_spin.setValue(1.0)
@@ -582,10 +629,15 @@ class SlicesDock(QgsDockWidget):
         self.dz_spin.setSingleStep(0.05)
         self.dz_spin.setToolTip(
             "Vertical spacing of the cube's levels, in two-way time.\n"
-            "Defaults to the file's own sample interval; §7.2 measured that "
-            "decimating buys nothing, so there is rarely a reason to coarsen it."
+            "Defaults to the file's own sample interval, and can't go below it; "
+            "§7.2 measured that decimating buys nothing, so there is rarely a "
+            "reason to coarsen it."
         )
-        resolution_form.addRow("dz", self.dz_spin)
+        dz_row = QHBoxLayout()
+        dz_row.setContentsMargins(0, 0, 0, 0)
+        dz_row.addWidget(self.dz_spin, 1)
+        dz_row.addWidget(self.dz_floor_note)
+        resolution_form.addRow("dz", dz_row)
 
         self.z0_spin = QDoubleSpinBox()
         self.z0_spin.setRange(-1_000.0, 100_000.0)
@@ -754,8 +806,8 @@ class SlicesDock(QgsDockWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)
         self.setWidget(scroll)
-        for spin in (self.cell_spin, self.dz_spin, self.z0_spin, self.z1_spin):
-            guard_wheel(spin, scroll)  # spec 2: the wheel scrolls, boxes keep still
+        # The Resolution boxes keep Qt's wheel (walkthrough W1: the author
+        # tried the click-first rule and chose folding the section instead).
 
         # A palette is always offered, even before any source is chosen
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
@@ -2229,7 +2281,7 @@ class SlicesDock(QgsDockWidget):
         `_resume_grid`, #71), so an unrelated session signal never
         overwrites a value the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and #81's 0.2 m cell and the interpolation defaults -- both
+        spacing", and #81's default cell and the interpolation defaults -- both
         need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.

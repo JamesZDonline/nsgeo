@@ -501,14 +501,14 @@ def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
     assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
 
 
-def test_the_site_starts_from_square_and_a_0_2_m_cell(plugin):
+def test_the_site_starts_from_square_and_a_0_1_m_cell(plugin):
     """#81, in Whole site: with nothing stored the transform falls back to
     This grid's, which starts on Square, and the cell follows This grid's
-    rule (site3's 1.5 m spacing does not clamp 0.2 m)."""
+    rule (site3's 1.5 m spacing does not clamp 0.1 m)."""
     dock = whole_site(plugin)
     assert dock.site_panel.transform() == "amp_square"
     assert dock.site_engine.engine_for("A").choice.transform == "amp_square"
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
 
 
 def test_a_remembered_none_transform_is_kept_over_the_default(plugin):
@@ -1117,15 +1117,15 @@ def test_a_burst_of_slider_moves_draws_once_with_the_last_value(plugin, monkeypa
 
 def test_the_site_cell_seeds_from_the_finest_spaced_grid(site3_factory, open_plugin):
     """#75: spec 4.4 seeds the cell by M11's rule for the finest-spaced
-    included grid, here B at 0.3 m against A's and C's 1.5 m."""
+    included grid, here B at 0.1 m against A's and C's 1.5 m."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.save()
     plugin = open_plugin(site)
     dock = whole_site(plugin)
     floor = dock.cell_spin.minimum()
-    assert default_cell(0.3, floor) != pytest.approx(default_cell(1.5, floor))
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, floor))
+    assert default_cell(0.1, floor) != pytest.approx(default_cell(1.5, floor))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, floor))
 
 
 def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_plugin):
@@ -1140,17 +1140,17 @@ def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_
 
 
 def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_factory, open_plugin):
-    """#75: a change to the included grids seeds the cell again -- B's 0.3 m
-    spacing seeds 0.15 m, and unticking B seeds A's and C's 0.2 m -- and a
+    """#75: a change to the included grids seeds the cell again -- B's 0.1 m
+    spacing seeds 0.05 m, and unticking B seeds A's and C's 0.1 m -- and a
     hand-set cell survives leaving the site and coming back. A hand-set cell
     is remembered (#71), so it is laid over every later seed as well, the
     seed an untick makes included."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.save()
     plugin = open_plugin(site)
     dock = whole_site(plugin)
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, dock.cell_spin.minimum()))
     dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)  # B
     settle(dock)
     assert dock.cell_spin.value() == pytest.approx(default_cell(1.5, dock.cell_spin.minimum()))
@@ -1491,29 +1491,29 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site3_factory, open_plugin
 ):
     """The same fall-back with nothing remembered for B: This grid comes back
-    with B's own seed (its 0.3 m spacing's cell, the default interpolation), not with
+    with B's own seed (its 0.1 m spacing's cell, the default interpolation), not with
     the values A had before the site."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.set_site_view(grids=("B", "C"))
     site.session.save()
     plugin = open_plugin(site)
     dock = plugin.slices_dock
     dock.grid_finish.max_distance_spin.setValue(1.5)  # A's own, unlike B's seed
     dock.flush_debounce()
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
     whole_site(plugin)
     plugin.session.remove_grid("A", with_lines=True)
     settle(dock)
     dock.site_panel.select_grid(None)
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, dock.cell_spin.minimum()))
     assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.15)
+    assert dock.engine.frame.cell == pytest.approx(0.05)
     assert dock.current_values() is not None
     assert plugin.session.slice_resolution("B") == {}
 

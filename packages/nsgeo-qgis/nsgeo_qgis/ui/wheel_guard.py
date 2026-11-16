@@ -1,10 +1,11 @@
-"""The wheel rule for boxes inside a scrolling panel (spec §2, #177, #176).
+"""The wheel rule for boxes inside a scrolling panel or table (spec §2, #176).
 
 A box in a scroll area takes the wheel only once the user has clicked it.
-Over an unfocused box a notch scrolls the panel; scrolling the panel by hand
+Over an unfocused box a notch scrolls the area; scrolling the area by hand
 lets go of a focused box. This is the `TimeSpinBox.wheelEvent` rule of
 `param_form.py`, applied from outside so any spin box or combo can take it
-with one call.
+with one call. Edit lines' Grid combos use it; the Slices boxes tried it and
+went back to Qt's wheel at the walkthrough (W1).
 """
 
 from __future__ import annotations

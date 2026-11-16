@@ -491,16 +491,16 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Shift and use the mouse wheel over the map to step through the slices.
 3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), and the
    top and bottom of the volume (**z0**, **z1**). Hover over each control for an
-   explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
+   explanation. A grid starts at a 0.1 m cell, or half the line spacing if that
    is smaller. Each grid remembers the resolution you set for it, and saving the
    site saves it.
-   The mouse wheel changes **Cell size**, **dz**, **z0** and **z1** only once
-   you have clicked into the box, so scrolling past them changes nothing.
-   **dz** can't go below the radar's own sample interval. In **Whole site** it
+   **dz** can't go below the radar's own sample interval, and reads
+   *(sample interval)* beside the number when it is there. In **Whole site** it
    can't go below the finest grid's interval, and it starts at the coarsest
-   one's. The **Resolution**, **Interpolation**, **Normalisation** and
-   **Display** headers fold their sections away, and nsgeo remembers which are
-   folded.
+   one's. The mouse wheel changes any box under the pointer. Once a section is
+   set, fold it away from its header, so scrolling the panel can't change it:
+   the **Resolution**, **Interpolation**, **Normalisation** and **Display**
+   headers fold, and nsgeo remembers which are folded.
 4. **Interpolation** decides what is drawn in the cells no line crossed, and
    whether the slice is smoothed. The same box appears for **Whole site**, with
    its own settings.

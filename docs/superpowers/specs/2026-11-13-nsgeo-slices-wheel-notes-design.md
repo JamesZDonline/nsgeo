@@ -41,6 +41,15 @@ every warning in full at the width they work at.
 
 ## 2. The wheel rule (#177, #176)
 
+> **Changed at the walkthrough (2026-11-16, the author's call, check W1).** Having used it, the
+> author chose Qt's own wheel back for the Slices boxes: dz, z0, z1 and Cell size change under
+> the pointer again, as Thickness and Step do. The protection is folding: once a section is set,
+> fold it, and scrolling the panel can't reach its boxes (§6.2). The rule below now holds for
+> Edit lines' Grid combo only (§4), which the author kept ("here the behavior feels right"). The
+> dz floor and the level limit (§3) stand, so a wheel notch can no longer drop dz below one sample.
+> In the same round the default cell went from 0.2 m to 0.1 m (`DEFAULT_CELL_M`), still capped at
+> half the line spacing.
+
 **The rule:** a box ignores the wheel until you click into it (it has keyboard focus). An ignored
 wheel event goes to the panel, which scrolls. This is the rule the Processing panel's
 `TimeSpinBox.wheelEvent` already uses (`ui/param_form.py`, from #109).
@@ -94,6 +103,8 @@ reading, which is the freeze.
 
 - **dz can't go below the sample interval**, and its arrows step in whole samples. The box's
   minimum is the interval; its step already is (`_seed_dz_z_defaults`, `SiteScope.seed_z`).
+- **At the floor, dz says why** (walkthrough D1, the author's call): *(sample interval)* beside
+  the number, with the reason in its tooltip. Hidden before any line gives a floor.
 - **This grid:** the interval of the grid's first included line, as `_seed_dz_z_defaults` reads it
   today.
 - **Whole site:** the finest interval among the included grids. All of the author's grids share

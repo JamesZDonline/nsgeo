@@ -45,14 +45,13 @@ from plugin_testing import (
     connect_message_log,
     layout_width,
     needs_real_data,
-    propagate_wheel,
     slow_jobs,
     synthetic_dzt,
     wheel_event,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QAbstractSlider, QApplication, QMessageBox, QScrollArea
+from qgis.PyQt.QtWidgets import QApplication, QMessageBox, QScrollArea
 from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -1182,24 +1181,24 @@ def test_a_cube_saved_before_a_spacing_edit_follows_the_new_spacing(docked):
     assert dock.grid_finish.max_distance_metres.text() == "= 1 m"
 
 
-def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(docked):
+def test_a_grid_starts_from_square_a_0_1_m_cell_and_the_default_interpolation(docked):
     """#81: what a grid's slices start from before anything is remembered
-    for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
+    for it. `GRID`'s spacing is 0.5 m, where 0.1 m is under half the
     spacing, so nothing is clamped here."""
     dock, _ = docked
     assert dock.transform_combo.value() == "amp_square"
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.slice_finish() == SliceFinish()  # kriging out to 0.75 x spacing, no smoothing
 
 
-@pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
+@pytest.mark.parametrize(("spacing", "cell"), [(0.15, 0.075), (1.0, 0.1)])
 def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
     qgis_app, tmp_path, spacing, cell
 ):
-    """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
-    0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
+    """#81: a fixed 0.1 m, capped at spec 4's half the line spacing -- so
+    0.075 m on a 0.15 m-spaced grid, and still 0.1 m (not 0.5) at 1 m. The
     max distance is always half the grid's own spacing."""
     session = SiteSession()
     session.new_site(tmp_path)
@@ -2191,11 +2190,15 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
             ), f"cell {dock.cell_spin.value()} on a 300 m grid cannot be drawn"
 
         # ... and one click is a usable increment, not a leap to the end
-        # of the range. The old behaviour went 0.5 -> minimum in one.
-        dock.cell_spin.setValue(seeded)
+        # of the range. The old behaviour went 0.5 -> minimum in one. (The
+        # 0.1 m seed is clamped to this grid's 0.15 m floor, so it starts
+        # from 0.5 m, above the floor.)
+        start = 0.5
+        assert start > dock.cell_spin.minimum()
+        dock.cell_spin.setValue(start)
         dock.cell_spin.stepBy(-1)
-        assert dock.cell_spin.value() < seeded
-        assert seeded - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
+        assert dock.cell_spin.value() < start
+        assert start - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2710,7 +2713,7 @@ def test_seeding_never_remembers_a_resolution(docked_two_grids):
     dock, session = docked_two_grids
     # B's own spacing seeds a different cell, so every switch below really
     # moves the box (and emits) rather than passing for want of a change.
-    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.3))
+    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.1))
     _settle_sources(dock, session)
     seen: list[float] = []
     dock.cell_spin.valueChanged.connect(seen.append)
@@ -4197,9 +4200,7 @@ def test_the_symbology_button_is_off_while_coverage_shows(docked):
     assert dock.symbology_button.isEnabled()
 
 
-# ---- the wheel rule (#177) ----
-
-GUARDED = ("cell_spin", "dz_spin", "z0_spin", "z1_spin")
+# ---- the wheel (#177; walkthrough W1) ----
 
 
 def _short_and_active(dock):
@@ -4214,81 +4215,19 @@ def _short_and_active(dock):
     return scroll
 
 
-@pytest.mark.parametrize("name", GUARDED)
-def test_the_wheel_over_an_unfocused_resolution_box_scrolls_the_panel_and_changes_nothing(
-    docked, name
-):
-    dock, _ = docked
-    _ready(dock)
-    scroll = _short_and_active(dock)
-    dock.slice_slider.setFocus()
-    values = {n: getattr(dock, n).value() for n in GUARDED}
-    z, frame = dock.engine.z, dock.engine.frame
-    event = wheel_event(-120)
-    QApplication.sendEvent(getattr(dock, name), event)
-    assert not event.isAccepted()  # not swallowed: left for the parents
-    taker = propagate_wheel(getattr(dock, name))
-    QTest.qWait(200)  # past the 120 ms debounce
-    assert taker in (scroll, scroll.viewport())
-    assert scroll.verticalScrollBar().value() > 0  # the panel scrolled
-    assert {n: getattr(dock, n).value() for n in GUARDED} == values
-    assert dock.engine.z is z and dock.engine.frame is frame  # nothing re-prepared
-
-
-def test_a_focused_resolution_box_still_takes_the_wheel(docked):
-    dock, _ = docked
-    _ready(dock)
-    _short_and_active(dock)
-    dock.dz_spin.setFocus()
-    assert dock.dz_spin.hasFocus()
-    before = dock.dz_spin.value()
-    QApplication.sendEvent(dock.dz_spin, wheel_event(120))
-    assert dock.dz_spin.value() == pytest.approx(before + dock.dz_spin.singleStep(), abs=1e-4)
-
-
-def test_scrolling_the_panel_lets_go_of_the_box_you_typed_in(docked):
-    dock, _ = docked
-    _ready(dock)
-    scroll = _short_and_active(dock)
-    dock.dz_spin.setFocus()
-    dock.dz_spin.selectAll()
-    QTest.keyClicks(dock.dz_spin, "0.75")
-    QApplication.sendEvent(scroll.viewport(), wheel_event(-120))
-    assert not dock.dz_spin.hasFocus()
-    assert dock.dz_spin.value() == 0.75
-    assert scroll.verticalScrollBar().value() > 0
-    QApplication.sendEvent(dock.dz_spin, wheel_event(-120))
-    assert dock.dz_spin.value() == 0.75
-
-
-def test_the_resolution_boxes_take_focus_only_by_click_or_tab(docked):
-    dock, _ = docked
-    for name in GUARDED:
-        assert getattr(dock, name).focusPolicy() == Qt.FocusPolicy.StrongFocus
-    # the rule reaches only the four: the thickness box keeps Qt's default
-    assert dock.thickness_spin.focusPolicy() == Qt.FocusPolicy.WheelFocus
-
-
-def test_the_panel_moving_on_its_own_keeps_the_focus(docked):
-    dock, _ = docked
-    _ready(dock)
-    scroll = _short_and_active(dock)
-    dock.dz_spin.setFocus()
-    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
-    scroll.ensureWidgetVisible(dock.display_group)
-    assert dock.dz_spin.hasFocus()
-    scroll.verticalScrollBar().triggerAction(QAbstractSlider.SliderAction.SliderSingleStepSub)
-    assert not dock.dz_spin.hasFocus()  # a keyboard/arrow scroll is a user scroll
-
-
-def test_the_thickness_box_keeps_todays_wheel(docked):
+@pytest.mark.parametrize("name", ("cell_spin", "dz_spin", "z0_spin", "z1_spin", "thickness_spin"))
+def test_the_slices_boxes_take_the_wheel_unfocused(docked, name):
+    """Walkthrough W1: the author tried the click-first rule on the Resolution
+    boxes and chose Qt's own wheel back, with folding to keep it away."""
     dock, _ = docked
     _ready(dock)
     _short_and_active(dock)
     dock.slice_slider.setFocus()
-    before = dock.thickness_spin.value()
-    QApplication.sendEvent(dock.thickness_spin, wheel_event(120))
-    assert dock.thickness_spin.value() != before
+    box = getattr(dock, name)
+    assert box.focusPolicy() == Qt.FocusPolicy.WheelFocus
+    before = box.value()
+    QApplication.sendEvent(box, wheel_event(120))
+    assert box.value() == pytest.approx(before + box.singleStep(), abs=1e-4)
 
 
 def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app, tmp_path):
@@ -4383,6 +4322,44 @@ def test_dz_cannot_go_below_the_sample_interval_in_this_grid(docked):
     dock.dz_spin.stepBy(1)
     assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + dt, abs=1e-4)
 
+
+
+def test_dz_says_why_it_stops_at_the_sample_interval(docked):
+    """Walkthrough D1: at its floor, dz says "(sample interval)" beside the
+    number, and its tooltip says why it can't go lower."""
+    from nsgeo_qgis.ui.site_scope import set_spins_quietly
+    from nsgeo_qgis.ui.slices_dock import DZ_FLOOR_NOTE
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    note = dock.dz_floor_note
+    assert note.text() == DZ_FLOOR_NOTE == "(sample interval)"
+    assert "sample interval" in note.toolTip()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert not note.isHidden()
+    dock.dz_spin.stepBy(1)  # the arrows and the wheel
+    assert note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum())  # a seed or restore, signals blocked
+    assert not note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum() * 3)
+    assert note.isHidden()
+    dock.dz_spin.setValue(0.001)  # typed below the floor: clamped to it
+    assert not note.isHidden()
+
+
+def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    dock = SlicesDock(session)
+    try:
+        assert dock.dz_spin.minimum() == pytest.approx(0.001)
+        dock.dz_spin.setValue(0.001)
+        assert dock.dz_floor_note.isHidden()
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
 
 def _assert_at_the_floor_and_built(dock):
     """The box shows the floor and the cube built within the level limit."""
