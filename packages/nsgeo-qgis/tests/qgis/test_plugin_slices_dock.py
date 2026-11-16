@@ -2182,7 +2182,9 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         seeded = dock.cell_spin.value()
         assert frame_cells(big.size_x, big.size_y, seeded) <= MAX_FRAME_CELLS
 
-        # Hold the down-arrow. Far more presses than the range can absorb.
+        # Hold the down-arrow from well above the floor (the 0.1 m seed is
+        # clamped to it). Far more presses than the range can absorb.
+        dock.cell_spin.setValue(0.5)
         for _ in range(500):
             dock.cell_spin.stepBy(-1)
             assert frame_cells(big.size_x, big.size_y, dock.cell_spin.value()) <= (
@@ -4254,6 +4256,7 @@ def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app,
         dock.grid_combo.setCurrentText("A")
         dock.prepare()
         assert dock.engine.wait_for_preparation(20_000)
+        dock.cell_spin.setValue(0.3)  # neither the floor nor a seed, so the restore shows
         dock.flush_debounce()
 
         dock.restore_cube("cube1")
@@ -4323,7 +4326,6 @@ def test_dz_cannot_go_below_the_sample_interval_in_this_grid(docked):
     assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + dt, abs=1e-4)
 
 
-
 def test_dz_says_why_it_stops_at_the_sample_interval(docked):
     """Walkthrough D1: at its floor, dz says "(sample interval)" beside the
     number, and its tooltip says why it can't go lower."""
@@ -4343,8 +4345,36 @@ def test_dz_says_why_it_stops_at_the_sample_interval(docked):
     assert not note.isHidden()
     set_spins_quietly(dock, dz=dock.dz_spin.minimum() * 3)
     assert note.isHidden()
-    dock.dz_spin.setValue(0.001)  # typed below the floor: clamped to it
+    dock.dz_spin.setValue(0.001)  # below the floor: clamped to it
     assert not note.isHidden()
+
+
+def test_dz_says_it_while_a_floor_moves_under_it(docked):
+    """The floor moves with signals blocked (the scope switch, a seed): the
+    note follows it, not only dz's own changes."""
+    from nsgeo_qgis.ui.site_scope import set_dz_floor
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    floor = dock.dz_spin.minimum()
+    assert dock.dz_spin.value() == floor and not dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor / 2)  # a finer floor: dz now sits above it
+    assert dock.dz_spin.value() == floor
+    assert dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor)  # back onto dz
+    assert not dock.dz_floor_note.isHidden()
+
+
+def test_a_grid_left_with_no_lines_drops_dz_back_to_no_floor(docked):
+    """Spec 3.2: with no line there is no interval, so neither the old floor
+    nor its note stays."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() > 0.01 and not dock.dz_floor_note.isHidden()
+    session.remove_lines(tuple(session.keys()))
+    QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(0.001)
+    assert dock.dz_floor_note.isHidden()
 
 
 def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
@@ -4360,6 +4390,7 @@ def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
+
 
 def _assert_at_the_floor_and_built(dock):
     """The box shows the floor and the cube built within the level limit."""

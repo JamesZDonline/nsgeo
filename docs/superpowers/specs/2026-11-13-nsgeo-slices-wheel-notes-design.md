@@ -316,6 +316,10 @@ tab stack gets below 449 px. That would be its own issue if the author wants it.
 
 ## 9. Tests to pin
 
+*After the walkthrough (§2's banner): the Slices bullets on unfocused boxes, the ignored event and
+letting go are superseded; the Resolution boxes now take the wheel like Thickness. They hold for
+Edit lines' Grid combo.*
+
 - A wheel event over an **unfocused** dz, z0, z1 or Cell size box changes nothing, and nothing
   re-prepares. A **focused** box still takes the wheel.
 - A wheel event over an unfocused Edit lines **Grid** combo changes no line's grid. After a pick,
@@ -363,6 +367,8 @@ tab stack gets below 449 px. That would be its own issue if the author wants it.
 ## 11. The walkthrough
 
 Built and deployed to its own QGIS profile, as usual. It covers:
+*Round 2 (§2's banner) replaced the two Slices wheel checks below with "the wheel is back", and
+added dz's note and the 0.1 m start.*
 - **a narrow panel:** Slices tabbed with Processing at its minimum, and docked alone. Nothing
   scrolls sideways, and every warning reads in full;
 - **scrolling past every box:** dz, z0, z1 and Cell size don't change. A click then the wheel does

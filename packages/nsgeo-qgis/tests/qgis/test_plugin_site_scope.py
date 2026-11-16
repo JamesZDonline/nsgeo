@@ -1459,7 +1459,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     A is out of the site, so its removal changes no ready grid, and no tick
     re-seeds the site's z range over what landed."""
     session = plugin.session
-    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
+    b_res = {"cell": 0.3, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
     session.remember_slice_resolution("B", **b_res)
     session.set_site_view(grids=("B", "C"))
     session.save()
@@ -1476,12 +1476,12 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     dock.site_panel.select_grid(None)  # This grid comes back on its own grid
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
-    assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
+    assert _resolution_spins(dock) == pytest.approx((0.3, 0.5, 2.0, 30.0))
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
     assert dock.current_values() is not None
     assert session.slice_resolution("B") == b_res
@@ -2008,7 +2008,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     switch is no choice, so nothing is written and the survey stays clean."""
     dock = plugin.slices_dock
     session = plugin.session
-    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, max_distance_spacings=1.5)
+    session.remember_slice_resolution("B", cell=0.3, dz_ns=0.5, max_distance_spacings=1.5)
     session.save()
     stored = session.slice_source("B")
     whole_site(plugin)
@@ -2017,11 +2017,11 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     assert dock.grid_combo.currentText() == "B"
     assert dock.engine.wait_for_preparation(20_000)
     spin_until(lambda: False, 400)  # any debounce runs on its own
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.3)
     assert dock.dz_spin.value() == pytest.approx(0.5)
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
     assert dock.current_values() is not None
     assert session.slice_source("B") == stored

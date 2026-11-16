@@ -2352,10 +2352,16 @@ class SlicesDock(QgsDockWidget):
         In Whole site the spins are the site's (#71), so the seed stays owed,
         `_dz_z_seeded_for` unmarked, and `_resume_grid` retries it.
         """
-        if self._dz_z_seeded_for == grid_id or self._scope == "site":
+        if self._scope == "site":
             return
         included = self._default_included(grid_id)
         if not included:
+            # No line, no interval (spec 3.2): back to the generic minimum, so
+            # an earlier grid's or site's floor neither binds dz nor puts
+            # "(sample interval)" beside it.
+            site_scope.set_dz_floor(self, GENERIC_DZ_MIN)
+            return
+        if self._dz_z_seeded_for == grid_id:
             return
         header = self.session.line_for_key(included[0]).header
         # #71: a seed, not an edit (see `_seed_resolution_defaults`).
