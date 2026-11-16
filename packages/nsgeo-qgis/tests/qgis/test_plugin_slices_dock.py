@@ -2674,10 +2674,10 @@ def test_a_resolution_edit_is_remembered_for_that_grid_only(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     assert not session.dirty
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
-    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert session.slice_resolution("A") == {"cell": 0.15}
     assert session.slice_resolution("B") == {}
     assert session.dirty
 
@@ -2687,7 +2687,7 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.engine.wait_for_preparation(20_000)
     seed_cell = dock.cell_spin.value()
     seed_dz = dock.dz_spin.value()
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(seed_dz * 2)
     dock.grid_finish.max_distance_spin.setValue(1.5)
     dock.flush_debounce()
@@ -2699,11 +2699,11 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
 
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
     assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     # On the engine too, not only in the boxes, and drawn.
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.15)
     assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
     assert dock.current_values() is not None
@@ -2730,7 +2730,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
 ):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(0.5)
     dock.z0_spin.setValue(2.0)
     dock.z1_spin.setValue(30.0)
@@ -2740,7 +2740,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     session.save()
     stored = session.slice_source("A")
     assert stored["resolution"] == {
-        "cell": 0.1,
+        "cell": 0.15,
         "dz_ns": 0.5,
         "t0_ns": 2.0,
         "t1_ns": 30.0,
@@ -2752,7 +2752,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     dock2 = SlicesDock(reopened)
     try:
         assert dock2.grid_combo.currentText() == "A"
-        assert dock2.cell_spin.value() == pytest.approx(0.1)
+        assert dock2.cell_spin.value() == pytest.approx(0.15)
         assert dock2.dz_spin.value() == pytest.approx(0.5)
         assert dock2.z0_spin.value() == pytest.approx(2.0)
         assert dock2.z1_spin.value() == pytest.approx(30.0)
@@ -2760,7 +2760,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         dock2.flush_debounce()
         assert dock2.engine.wait_for_preparation(20_000)
         # The restored values reached the engine and drew a slice.
-        assert dock2.engine.frame.cell == pytest.approx(0.1)
+        assert dock2.engine.frame.cell == pytest.approx(0.15)
         assert dock2.engine.z.t0_ns == pytest.approx(2.0)
         assert dock2.engine.z.dz_ns == pytest.approx(0.5)
         assert dock2.engine.z.t_end_ns == pytest.approx(30.0)
@@ -2922,7 +2922,7 @@ def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_gri
 def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
     _save_cube(dock, session, "A__res", dock.view_settings())
@@ -2944,10 +2944,10 @@ def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
         "smooth_x_m",
         "smooth_y_m",
     }
-    assert remembered["cell"] == pytest.approx(0.1)
+    assert remembered["cell"] == pytest.approx(0.15)
     _switch(dock, "B")
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
 
 
 # ---- minimum curvature: preview while the depth moves, refine once it rests --
