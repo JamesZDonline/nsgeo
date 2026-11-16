@@ -652,3 +652,14 @@ def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
         layers2.detach()
         if dock2 is not None:
             dock2.dispose()
+
+
+def test_a_changed_depth_step_marks_the_surface_stale(built_site):
+    session, _, _, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    step = session.volume_record(GRID)["dz_ns"]
+    session.remember_volume(GRID, dz_ns=round(step + 0.05, 4))
+    assert surfaces.state(record.feature_id).stale == ("resolution",)
+    session.remember_volume(GRID, dz_ns=step)
+    assert surfaces.state(record.feature_id).stale == ()
