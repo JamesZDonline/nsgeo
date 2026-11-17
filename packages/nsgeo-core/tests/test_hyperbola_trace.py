@@ -144,6 +144,29 @@ def test_a_fading_leg_among_layers_drops_the_faded_traces():
     assert all(abs(d[0] - 100) <= 35 for d in dots)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "a known limit (spec §14): on ground with flat layers, the dots of a fading leg "
+        "can run onto the layers; in a tight box they can follow the layers alone"
+    ),
+)
+def test_a_tight_box_among_layers_never_traces_the_layers():
+    # The box's bottom is 0.8 ns below a deep apex whose legs fade into flat
+    # layers. The dots land on layer crossings in two clusters a period apart,
+    # nowhere near the hyperbola, and fit 0.17 m/ns for 0.07 with its apex
+    # inside them and a moveout of about a period, so neither trust check
+    # refuses it. The layers' lobes pass the faint floor on the raw box, as
+    # for a fading leg (above).
+    data, t, x = _deep_scene(seed=3, layered=True)
+    try:
+        dots = trace_hyperbola(data, t, x, TraceBox(30, 170, 27.0, 30.8))
+    except ValueError:
+        return
+    assert _within_2_sigma(_fit(dots, x), 0.07)
+
+
 @pytest.mark.parametrize(
     "box",
     [TraceBox(98, 160, 10.0, 35.0), TraceBox(100, 160, 10.0, 35.0), TraceBox(40, 160, 10.0, 25.0)],
@@ -180,11 +203,14 @@ def test_too_few_surviving_edges_gives_the_cleaning_message_not_the_fits(monkeyp
 
 
 def test_thinning_never_repeats_a_trace():
-    # Legs fading from 15 traces out. Fading from the apex itself left only
-    # the flat top, which is now too flat to trace (spec §4.3 step 4).
-    data, t, x = _scene([Planted(100, 15.0, 0.07, fade_from_trace=15)])
-    dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0), max_dots=4)
-    assert len({d[0] for d in dots}) == len(dots) >= 4
+    # Among layers the cleaning leaves gaps between the surviving edges, so
+    # two evenly spaced targets can share a nearest survivor. Each target
+    # takes the nearest one not already taken: max_dots different traces come
+    # back from the 58 survivors. Taking the nearest for each and dropping the
+    # repeats returned 34.
+    data, t, x = _layered_scene(15.0, 0.07, 25, 0.625, seed=1)
+    dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 13.0, 24.0), max_dots=40)
+    assert len({d[0] for d in dots}) == len(dots) == 40
 
 
 def test_a_box_top_cutting_into_the_band_does_not_shift_the_fit():
