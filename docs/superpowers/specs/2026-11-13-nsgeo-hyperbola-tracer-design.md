@@ -146,6 +146,11 @@ curve floated above the hyperbola. That fails the author's own test (§1).
 samples by linear interpolation.
 - The first strong lobe is chosen once per box, from the stack of the traces along the chosen
   curve. That way every trace follows the same lobe.
+  - *(Revised 2026-11-16 after the final review.)* Only the traces near the curve's apex go into
+    that stack: those where the curve lies within a quarter period of its apex time. Stacked over
+    the whole box, the lobe ahead of the band grew with how much of the legs the box held, and on
+    the author's lines a box 1.4–2.5× the hyperbola's extent took that lobe and moved v by 8–13%.
+    Near the apex the choice is the same however big the box.
 - "Strong" means a lobe that stands clear of the faint precursor lobes ahead of it. The builder
   sets the threshold from evidence.
 - A zero crossing does not depend on how bright the trace is. So the edge does not drift deeper
@@ -364,8 +369,10 @@ Nothing from these sites is committed: not the manifest, the dots or the numbers
 3. Trace.
 4. Fit the traced dots and the hand dots at the same zero (`fit_at_zero`).
 - **Agreement:** |v_traced − v_hand| ≤ 2·√(σ_traced² + σ_hand²).
-- **Repeatability:** three boxes about 20% different in margin and offset agree pairwise by the
-  same rule.
+- **Repeatability:** five boxes, from a margin of 10% to 75% of the dots' extent (one of them
+  shifted), agree pairwise by the same rule. A box the tracer refuses is left out; the 20% box must
+  trace, and at least one other. *(Revised 2026-11-16: three boxes 10–35% never reached the box
+  sizes that changed the lobe.)*
 - **Speed:** the largest of these boxes is timed (§4.5).
 
 **When a traced fit disagrees with the hand fit,** the builder lists it in the ledger and the

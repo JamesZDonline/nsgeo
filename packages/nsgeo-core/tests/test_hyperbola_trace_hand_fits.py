@@ -230,7 +230,8 @@ def test_the_largest_box_traces_within_a_second():
     cases = [c for c in _cases() if not c.missing]
     if not cases:
         pytest.skip("no hand-fit DZT is present")
-    boxes = [(c, _box(c, 0.35)) for c in cases]
+    loosest = max(BOXES)  # the biggest box the box test draws
+    boxes = [(c, _box(c, *loosest)) for c in cases]
     case, box = max(
         boxes,
         key=lambda cb: (cb[1].last_trace - cb[1].first_trace) * (cb[1].bottom_ns - cb[1].top_ns),

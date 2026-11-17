@@ -67,8 +67,8 @@ V_MIN_M_NS = 0.03
 V_MAX_M_NS = 0.30
 #: Traces times samples a box may hold. Read at call time (tests change it).
 #: Measured on a real line: a box of 196 000 cells (960 traces by 204 samples)
-#: traces in about 0.5 s (0.46-0.56 s over ten runs); the largest box drawn
-#: around a saved hand fit, in 0.17 s.
+#: traces in about 0.5 s (0.46-0.51 s over ten runs); the largest box drawn
+#: around a saved hand fit (a 75% margin), in 0.24 s.
 MAX_BOX_CELLS = 200_000
 
 _MIN_BOX = 8  # traces and samples
