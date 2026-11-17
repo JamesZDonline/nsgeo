@@ -125,7 +125,7 @@ release's notes list everything in it.
   if you edit while its lines prepare or its preset has since gained or lost
   Time zero; a quick switch to another survey no longer carries the last one's
   palette or slice time over; and a grid the panel falls back to opens on the
-  preset Whole site draws it with. Designing.
+  preset Whole site draws it with. Building.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
@@ -169,7 +169,8 @@ Grouped by area. The order within a group is not a priority.
   its own profile ([#185]); a layered velocity from fits at several depths
   ([#187]); exports record where the grid's velocity came from ([#188]); show
   migration's velocity beside a traced one, as a second, independent number
-  ([#195]).
+  ([#195]); warn when a grid's velocity from fits is on another clock than its
+  slices ([#201]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); a frequency profile
@@ -251,6 +252,7 @@ Grouped by area. The order within a group is not a priority.
 [#195]: https://github.com/JamesZDonline/nsgeo/issues/195
 [#197]: https://github.com/JamesZDonline/nsgeo/issues/197
 [#199]: https://github.com/JamesZDonline/nsgeo/issues/199
+[#201]: https://github.com/JamesZDonline/nsgeo/issues/201
 
 ## Why
 
