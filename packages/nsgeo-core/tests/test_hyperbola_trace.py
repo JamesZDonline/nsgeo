@@ -144,22 +144,18 @@ def test_a_fading_leg_among_layers_drops_the_faded_traces():
     assert all(abs(d[0] - 100) <= 35 for d in dots)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "a known limit (spec §14): on ground with flat layers, the dots of a fading leg "
-        "can run onto the layers; in a tight box they can follow the layers alone"
-    ),
-)
-def test_a_tight_box_among_layers_never_traces_the_layers():
+@pytest.mark.parametrize("seed", range(1, 7))
+def test_a_tight_box_among_layers_never_traces_the_layers(seed):
     # The box's bottom is 0.8 ns below a deep apex whose legs fade into flat
-    # layers. The dots land on layer crossings in two clusters a period apart,
-    # nowhere near the hyperbola, and fit 0.17 m/ns for 0.07 with its apex
+    # layers. With 24 coarse apexes 5.9 traces apart, the scan took a curve
+    # through the layers on seeds 3 and 6: the dots landed on layer crossings
+    # in two clusters a period apart and fit 0.17 m/ns for 0.07, with the apex
     # inside them and a moveout of about a period, so neither trust check
-    # refuses it. The layers' lobes pass the faint floor on the raw box, as
-    # for a fading leg (above).
-    data, t, x = _deep_scene(seed=3, layered=True)
+    # refused it (#140). With the apexes 4 traces apart the scan settles on
+    # the hyperbola, whose top in this box is too flat to give a velocity: of
+    # 375 boxes around this one over five seeds, 15 traced the layers before
+    # and none now.
+    data, t, x = _deep_scene(seed=seed, layered=True)
     try:
         dots = trace_hyperbola(data, t, x, TraceBox(30, 170, 27.0, 30.8))
     except ValueError:
@@ -177,6 +173,27 @@ def test_a_leg_cut_off_by_the_box_is_traced_from_the_part_inside(box):
     dots = trace_hyperbola(data, t, x, box)
     assert _within_2_sigma(_fit(dots, x), 0.07)
     assert all(box.top_ns <= d[1] <= box.bottom_ns for d in dots)
+
+
+@pytest.mark.parametrize("half_traces", [100, 150])
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_wide_box_around_a_plain_hyperbola_is_traced_to_its_velocity(half_traces, seed):
+    # A box far wider than the hyperbola's flat top, its legs running out of
+    # the bottom. The scan's coarse round put its 24 apexes 8.7 and 13 traces
+    # apart here, took a curve off the hyperbola, and could not walk back to
+    # it: the +-100 box refused ("No hyperbola", only one leg's dots kept) and
+    # the +-150 box gave 7.5% slow at 16 sigma (#140).
+    data, t, x = plant(
+        400, 300, [Planted(200, 15.0, 0.07)], noise_ratio=REAL_NOISE_RATIO, seed=seed
+    )
+    dots = trace_hyperbola(data, t, x, TraceBox(200 - half_traces, 200 + half_traces, 5.0, 45.0))
+    fit = _fit(dots, x)
+    # Both legs, out to where they leave the box's bottom (88 traces).
+    assert min(d[0] for d in dots) <= 200 - 80 and max(d[0] for d in dots) >= 200 + 80
+    # Ten dots along a perfect hyperbola this long give a sigma of about
+    # 0.01%, under the 0.01-0.03% the crossings' sampling leaves (the same
+    # dots off the box's edge show it in a +-40 box, where sigma is 0.04%).
+    assert abs(fit.v_m_ns - 0.07) <= max(2 * fit.v_stderr_m_ns, 0.001 * 0.07)
 
 
 def test_a_planted_hyperbola_at_five_times_the_noise_is_still_traced():

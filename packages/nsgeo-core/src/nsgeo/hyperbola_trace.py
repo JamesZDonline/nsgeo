@@ -80,6 +80,20 @@ _DETECT_Z = 6.0
 _T_STEP_PERIODS = 1.0 / 8.0
 _N_VELOCITIES = 28
 _COARSE_TRACES = 96
+#: The coarse round's apex positions lie at most this many traces apart, with
+#: at least ``_COARSE_APEXES`` and at most ``_COARSE_APEXES_MAX`` of them. A
+#: plain planted hyperbola (15 ns, 0.07 m/ns) whose legs fill a wide box is
+#: found from every apex position against the grid with 8 traces between
+#: apexes, and missed from some at 8.7 (24 apexes over a 201-trace box): the
+#: curve nearest it scores below one off the hyperbola, and refining cannot
+#: walk that far back. 4 leaves twice the margin.
+_COARSE_APEX_TRACES = 4
+_COARSE_APEXES = 24
+_COARSE_APEXES_MAX = 64
+#: With more apexes the coarse round reads fewer traces, down to this many, so
+#: its cost stays near that of ``_COARSE_APEXES`` apexes on
+#: ``_COARSE_TRACES`` traces.
+_COARSE_TRACES_MIN = 48
 #: The first strong lobe is the earliest lobe on the stack, within a period
 #: before its peak, that reaches this fraction of that peak. On the stacks of
 #: the author's hand fits, the lobes ahead of the one whose crossing they
@@ -247,19 +261,28 @@ def _scan(
     """Best (apex x, t0, v, score), coarse to fine.
 
     The apex times are a fraction of a period apart, so a curve on a lobe is
-    not stepped over. The coarse round reads an even spread of at most
-    ``_COARSE_TRACES`` traces, which keeps a large box quick.
+    not stepped over, and the apex positions a few traces apart however wide
+    the box. The coarse round reads an even spread of at most
+    ``_COARSE_TRACES`` traces, fewer as the apex positions grow, which keeps a
+    large box quick. Each round refines across one step of the round before
+    either side, the step taken from that round's grid before it is clipped
+    to the box: a clipped grid at the box's side has no step, and froze there.
     """
     n_tr = img.shape[1]
     min_valid = max(_MIN_BOX, n_tr // 4)
     # A line laid out against its grid runs to smaller distances: bound by
     # the box's least and greatest distance, never its first and last.
     x_lo, x_hi = float(x_m.min()), float(x_m.max())
-    xa = np.linspace(x_lo, x_hi, min(n_tr, 24))
+    n_x = -(-(n_tr - 1) // _COARSE_APEX_TRACES) + 1
+    n_x = min(n_tr, max(_COARSE_APEXES, min(n_x, _COARSE_APEXES_MAX)))
+    xa = np.linspace(x_lo, x_hi, n_x)
     n_t = int(np.ceil((t_bottom - t_top) / (_T_STEP_PERIODS * period_ns))) + 1
     ta = np.linspace(t_top, t_bottom, max(2, min(n_t, 160)))
     va = np.geomspace(V_MIN_M_NS, V_MAX_M_NS, _N_VELOCITIES)
-    sub = np.unique(np.linspace(0, n_tr - 1, min(n_tr, _COARSE_TRACES)).round().astype(int))
+    n_sub = _COARSE_TRACES * _COARSE_APEXES // n_x
+    n_sub = min(n_tr, max(_COARSE_TRACES_MIN, min(n_sub, _COARSE_TRACES)))
+    sub = np.unique(np.linspace(0, n_tr - 1, n_sub).round().astype(int))
+    step_x, step_t, ratio = xa[1] - xa[0], ta[1] - ta[0], va[1] / va[0]
     for round_no in range(4):
         mesh = np.meshgrid(xa, ta, va, indexing="ij")
         gx, gt, gv = (m.ravel() for m in mesh)
@@ -273,12 +296,10 @@ def _scan(
         if round_no == 3:
             break
         # Refine: seven points across the best, one old step either side.
-        step_x = abs(xa[1] - xa[0]) if xa.size > 1 else x_hi - x_lo
-        step_t = (ta[1] - ta[0]) if ta.size > 1 else t_bottom - t_top
-        ratio = (va[1] / va[0]) if va.size > 1 else 1.0
         xa = np.clip(best[0] + np.linspace(-step_x, step_x, 7), x_lo, x_hi)
         ta = np.clip(best[1] + np.linspace(-step_t, step_t, 7), t_top, t_bottom)
         va = np.clip(best[2] * np.geomspace(1.0 / ratio, ratio, 7), V_MIN_M_NS, V_MAX_M_NS)
+        step_x, step_t, ratio = step_x / 3.0, step_t / 3.0, ratio ** (1.0 / 3.0)
     return best
 
 
