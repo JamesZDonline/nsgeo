@@ -194,6 +194,11 @@ class Site:
     #: Every key is optional; a missing key is the default (plugin colours).
     slice_colours: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    #: What `load_site` changed so the project could open: one plain-language
+    #: note per processing step it turned off, reset or removed. A fact about
+    #: this load only, so it is never saved.
+    load_notes: list[str] = field(default_factory=list)
+
     #: Cuts drawn on the grids, in drawing order. Each is keyed `cut:<id>`
     #: and lives apart from `lines`, so line-only code never sees one.
     cuts: list[Cut] = field(default_factory=list)

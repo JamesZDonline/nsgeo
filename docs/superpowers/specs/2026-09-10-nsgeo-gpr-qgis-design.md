@@ -306,6 +306,36 @@ and each one is a place a naive reader goes wrong:
   with the recorded survey.
 - `.DZX` sidecars accompany the files and are not yet parsed. They are XML
   metadata and may carry marks and line information worth reading in v1.1.
+- **The first two samples of every trace are a per-trace header, not radar
+  data** (found 2026-11, in both variants below). In SIR-4000 files sample 0
+  is a trace counter (0, 1, 2, ...) and sample 1 a mark word (0, or 0x9201 on
+  a marked trace). Against data of +/-1.6e7 they were invisible, so the
+  reader returned them as data until a 16-bit variant made them full-scale.
+  The reader now sets both to 0 at every bit depth: zeroed, not trimmed, so
+  the sample count and the time of every sample are unchanged.
+
+### pulseEKKO lines exported to DZT (16-bit)
+
+Verified against four Sensors & Software pulseEKKO 500 MHz lines exported by
+EKKO_Project v1.5.340 from DT1 (the header's text block says so). They
+loaded without error but drew a banded, scrambled profile:
+
+- **16-bit samples are unsigned offset binary, centred on 32768** (values
+  17,351 to 42,461). Read as signed `int16`, every sample just below the
+  centre wraps to about +32767 and just above to about -32767. The reader
+  subtracts the centre by bit depth (32768 for 16-bit, 128 for 8-bit, by the
+  same convention but with no real 8-bit file yet) and returns signed int32
+  at every depth. The centre is taken from the bit depth, not `rh_zero`,
+  though this variant does write 0x8000 there.
+- `rh_tag` is 0x00FF, `rh_data` is 1024 (so the header is 1024 bytes, by the
+  `else` branch of the header-size rule), and trace counts divide exactly
+  (2552 traces for a 51.02 m line at 50 traces/m).
+- The per-trace header samples are constant: 0xFFFF then 0xE800.
+- `rhf_position` is -5.02 ns, so the first ~25 samples precede time zero; the
+  direct wave arrives at about 0 ns, consistent with reading it as the time of
+  the first sample.
+- `rhf_epsr` is 0 and the antenna name is "not specified"; the import dialog
+  already notes a dielectric outside the soil range.
 
 ### Other formats seen
 

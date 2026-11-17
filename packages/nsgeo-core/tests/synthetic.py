@@ -25,6 +25,10 @@ def write_dzt(
 ) -> None:
     """Write `data` (n_samples, n_traces) as a DZT file.
 
+    `data` is signed amplitude at every bit depth. Its first two samples per
+    trace land where real files keep a per-trace header, so the reader
+    returns them as 0 whatever is written there.
+
     For n_channels > 1, `data` is (n_channels, n_samples, n_traces) and
     channels are interleaved per trace, which is how GSSI writes them.
     """
@@ -63,7 +67,11 @@ def write_dzt(
     blob = bytearray(headsize)
     blob[:MINHEADSIZE] = head
 
-    dtype = {8: "<u1", 16: "<i2", 32: "<i4"}[bits]
+    # 8- and 16-bit are unsigned offset binary on disk, as real GSSI files
+    # are: `data` is signed amplitude, so the centre is added before writing.
+    dtype, centre = {8: ("<u1", 1 << 7), 16: ("<u2", 1 << 15), 32: ("<i4", 0)}[bits]
     # interleave channels per trace: trace0ch0, trace0ch1, trace1ch0, ...
-    interleaved = np.transpose(stack, (2, 0, 1)).astype(dtype).reshape(-1)
+    interleaved = (
+        (np.transpose(stack, (2, 0, 1)).astype(np.int64) + centre).astype(dtype).reshape(-1)
+    )
     path.write_bytes(bytes(blob) + interleaved.tobytes())
