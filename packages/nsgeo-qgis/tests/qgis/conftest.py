@@ -138,10 +138,14 @@ class FakeIface:
         self.canvases3d: dict = {}
         self.dialogs3d: dict = {}
         self.created3d = 0
+        #: Host new views in a `QDockWidget`, not a `QDialog`; answer None to every create.
+        self.dock3d = False
+        self.refuse3d = False
 
-    def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
-        """A fake canvas and a top-level dialog titled `name`, as the real call makes."""
-        from qgis.PyQt.QtWidgets import QDialog
+    def _make_holder(self, name, title=None):
+        """The top-level window (a `QDialog`, or a `QDockWidget` when `dock3d` is set) that holds
+        a 3-D view; `title` carries a title across a swap, as QGIS's dock toggle does."""
+        from qgis.PyQt.QtWidgets import QDialog, QDockWidget
 
         class _Dialog(QDialog):
             raised = 0
@@ -150,11 +154,35 @@ class FakeIface:
                 self.raised += 1
                 super().raise_()
 
+        class _Dock(QDockWidget):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        holder = _Dock() if self.dock3d else _Dialog()
+        holder.setWindowTitle(title if title is not None else name)
+        return holder
+
+    def swap_holder3d(self, name):
+        """Dock (or undock) the view as the user does: a new holder with the same title."""
+        from qgis.PyQt import sip
+
+        old = self.dialogs3d[name]
+        title = old.windowTitle()
+        self.dock3d = not self.dock3d
+        self.dialogs3d[name] = self._make_holder(name, title)
+        sip.delete(old)
+
+    def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """A fake canvas and its window titled `name`, as the real call makes; None, as QGIS
+        answers, when a view of that name is open (names are unique) or `refuse3d` is set."""
+        if self.refuse3d or name in self.canvases3d:
+            return None
         canvas = _make_fake_canvas3d()
-        dialog = _Dialog()
-        dialog.setWindowTitle(name)
         self.canvases3d[name] = canvas
-        self.dialogs3d[name] = dialog
+        self.dialogs3d[name] = self._make_holder(name)
         self.created3d += 1
         return canvas
 

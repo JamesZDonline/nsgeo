@@ -20,6 +20,10 @@ BUTTON_TIP: str = (
     "Open QGIS's 3-D view of the grid the Slices panel shows: its picks at depth and its surfaces"
 )
 PICKS_LAYER_NAME: str = "Picks at depth (3D view)"
+VIEW_REFUSED: str = (
+    "QGIS would not open the 3-D view: a view named 'nsgeo 3D' is already open and could not "
+    "be closed. Close it and try again."
+)
 
 
 def scene_stretch(record: Mapping[str, object]) -> float:
@@ -51,6 +55,24 @@ def stretched_z(depth_m: float, stretch: float) -> float:
     return -depth_m * stretch
 
 
+def local_corners(size_x: float, size_y: float) -> list[tuple[float, float]]:
+    """A grid's four corners in its own frame, as (x, y) pairs from the origin."""
+    return [(0.0, 0.0), (size_x, 0.0), (size_x, size_y), (0.0, size_y)]
+
+
+def scene_extent(corners: Sequence[tuple[float, float]]) -> tuple[float, float, float, float]:
+    """The corners' bounding box: (xmin, ymin, xmax, ymax)."""
+    xs = [c[0] for c in corners]
+    ys = [c[1] for c in corners]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def scene_centre(corners: Sequence[tuple[float, float]]) -> tuple[float, float]:
+    """The middle of the corners' bounding box: the view's origin and where the camera looks."""
+    xmin, ymin, xmax, ymax = scene_extent(corners)
+    return (xmin + xmax) / 2.0, (ymin + ymax) / 2.0
+
+
 @dataclass(frozen=True)
 class CameraPose:
     x: float
@@ -65,10 +87,8 @@ def camera_pose(
     corners: Sequence[tuple[float, float]], depths: Sequence[float], stretch: float
 ) -> CameraPose:
     """Where the camera looks: the grid's centre, at the middle of its depths."""
-    xs = [c[0] for c in corners]
-    ys = [c[1] for c in corners]
-    cx = (min(xs) + max(xs)) / 2.0
-    cy = (min(ys) + max(ys)) / 2.0
+    xmin, ymin, xmax, ymax = scene_extent(corners)
+    cx, cy = scene_centre(corners)
     mid = (min(depths) + max(depths)) / 2.0 if depths else 0.0
-    extent = max(max(xs) - min(xs), max(ys) - min(ys))
+    extent = max(xmax - xmin, ymax - ymin)
     return CameraPose(cx, cy, stretched_z(mid, stretch), 1.2 * extent, 45.0, 0.0)

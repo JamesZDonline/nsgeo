@@ -109,7 +109,9 @@ def test_open_shows_the_scene_grids_picks_and_surfaces(scene):
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
     assert len(iface.canvases3d[VIEW_NAME].cameraController().poses) == 1
     assert session.dirty is False
-    # the layer tree's checked layers reach the view on the next turn, picks layer among them
+    # QGIS resets the view to the map's layers in the tick it opens; the 0 ms re-set from the
+    # layer tree puts the picks layer back (the fake alone copies at creation and would pass)
+    settings.setLayers([])
     assert spin_until(lambda: s3d.picks_layer.id() in [lyr.id() for lyr in settings.layers()])
 
 
@@ -218,11 +220,21 @@ def test_a_picks_layer_removed_by_hand_comes_back(scene):
     s3d, session, surfaces, surface_layers, iface, _ = scene
     s3d.open()
     first = s3d.picks_layer.id()
+    # let open()'s own 0 ms layer re-set fire first, or it would also serve the refresh below
+    settings = iface.canvases3d[VIEW_NAME].mapSettings()
+    assert spin_until(lambda: not s3d._layers_timer.isActive())
+    # a handler connected after the fake's own copy empties the view's layers as the picks
+    # layer is added, standing in for QGIS's same-tick miss
+    miss = lambda *_: settings.setLayers([])  # noqa: E731
+    QgsProject.instance().layersAdded.connect(miss)
     QgsProject.instance().removeMapLayer(first)
-    s3d.refresh()
+    s3d.refresh()  # the picks layer is recreated here, and the view's layers re-set on a turn
+    QgsProject.instance().layersAdded.disconnect(miss)
     assert s3d.picks_layer is not None and s3d.picks_layer.id() != first
     assert QgsProject.instance().mapLayer(s3d.picks_layer.id()) is not None
     assert len(list(s3d.picks_layer.getFeatures())) == 4
+    assert s3d.picks_layer.id() not in [lyr.id() for lyr in settings.layers()]
+    assert spin_until(lambda: s3d.picks_layer.id() in [lyr.id() for lyr in settings.layers()])
 
 
 def test_a_cleared_project_forgets_the_scene_layers(scene):
@@ -233,3 +245,54 @@ def test_a_cleared_project_forgets_the_scene_layers(scene):
     s3d.close()
     s3d.open()
     assert s3d.is_open() and s3d.picks_layer is not None
+
+
+def _no_scene_layers_left(s3d, surface_layers):
+    assert s3d.picks_layer is None
+    assert not any(
+        lyr.name() == "Picks at depth (3D view)"
+        for lyr in QgsProject.instance().mapLayers().values()
+    )
+    assert all(lyr.renderer3D() is None for lyr in surface_layers.layers_by_feature().values())
+
+
+def test_a_leftover_view_of_the_same_name_is_closed_and_a_fresh_one_opens(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    old = iface.createNewMapCanvas3D(VIEW_NAME)  # as a view restored with a saved project
+    assert old is not None
+    s3d.open()
+    assert s3d.is_open() and iface.created3d == 2
+    assert iface.canvases3d[VIEW_NAME] is not old
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
+
+
+def test_a_refused_view_raises_and_leaves_nothing_behind(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.refuse3d = True
+    with pytest.raises(RuntimeError, match="3-D view"):
+        s3d.open()
+    assert not s3d.is_open() and s3d.grid_id is None
+    _no_scene_layers_left(s3d, surface_layers)
+    iface.refuse3d = False
+    s3d.open()  # a later open works
+    assert s3d.is_open()
+
+
+def test_a_docked_view_is_retitled_and_a_swapped_holder_still_is(scene):
+    from qgis.PyQt.QtWidgets import QDockWidget
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.dock3d = True
+    s3d.open()
+    holder = iface.dialogs3d[VIEW_NAME]
+    assert isinstance(holder, QDockWidget)
+    assert holder.windowTitle() == view_title(A, 3.0, 0)
+    before = holder.raised
+    s3d.open()
+    assert holder.raised == before + 1
+    # undock: QGIS builds a new holder carrying the current title
+    iface.swap_holder3d(VIEW_NAME)
+    assert not isinstance(iface.dialogs3d[VIEW_NAME], QDockWidget)
+    session.remember_volume(A, stretch=2.0)
+    s3d.refresh()
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)

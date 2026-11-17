@@ -34,7 +34,7 @@ from qgis.core import (
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtGui import QColor
-from qgis.PyQt.QtWidgets import QApplication, QDialog
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget
 from qgis.PyQt.QtXml import QDomDocument
 
 from nsgeo_qgis.log import log as _log
@@ -43,7 +43,11 @@ from nsgeo_qgis.scene3d_plan import (
     PICK_RADIUS_M,
     PICKS_LAYER_NAME,
     VIEW_NAME,
+    VIEW_REFUSED,
     camera_pose,
+    local_corners,
+    scene_centre,
+    scene_extent,
     scene_grid,
     scene_stretch,
     stretched_z,
@@ -124,7 +128,7 @@ class Scene3D:
         self.picks_layer: QgsVectorLayer | None = None
         self._export: Any = None
         self._canvas: Any = None
-        self._dialog: Any = None
+        self._last_title = VIEW_NAME
         #: Bumped at each teardown, so a late `destroyed` from an old view does nothing.
         self._generation = 0
         #: layer id -> the stretch of the renderer this view put on it.
@@ -159,24 +163,35 @@ class Scene3D:
     def open(self) -> None:
         """Open the view on the scene grid, or raise and refresh the one that is open."""
         if self.is_open():
-            if _alive(self._dialog):
-                self._dialog.show()
-                self._dialog.raise_()
-                self._dialog.activateWindow()
+            holder = self._holder()
+            if holder is not None:
+                holder.show()
+                holder.raise_()
+                holder.activateWindow()
             self.refresh()
             return
         grid = scene_grid(self.dock.scope(), self.dock.grid_combo.currentText() or None, None)
         if grid is None:
             raise ValueError(NO_GRID)
+        try:
+            self._open_on(grid)
+        except BaseException:
+            self._teardown()
+            raise
+
+    def _open_on(self, grid: str) -> None:
         self._export = self.export_for()
         self.grid_id = grid
         self._ensure_picks_layer()
         stretch = self._stretch(grid)
         self._fill_picks(grid, stretch)
         self._apply_renderers(grid, stretch)
+        # QGIS refuses a second view of one name (one restored with a saved project, say).
+        self.iface.closeMapCanvas3D(VIEW_NAME)
         canvas = self.iface.createNewMapCanvas3D(VIEW_NAME)
+        if canvas is None:
+            raise RuntimeError(VIEW_REFUSED)
         self._canvas = canvas
-        self._dialog = self._find_dialog()
         generation = self._generation
         canvas.destroyed.connect(lambda *_: self._on_destroyed(generation))
         settings = canvas.mapSettings()
@@ -325,18 +340,18 @@ class Scene3D:
         import numpy as np
 
         g = self.session.grid(grid)
-        local = np.array([[0.0, 0.0], [g.size_x, 0.0], [g.size_x, g.size_y], [0.0, g.size_y]])
+        local = np.array(local_corners(g.size_x, g.size_y))
         return [(float(x), float(y)) for x, y in g.to_world(local)]
 
     def _frame(self, grid: str, stretch: float) -> None:
         """Point the view at the grid: its CRS, origin and extent, and the camera."""
         corners = self._corners(grid)
-        xs = [c[0] for c in corners]
-        ys = [c[1] for c in corners]
+        xmin, ymin, xmax, ymax = scene_extent(corners)
+        cx, cy = scene_centre(corners)
         settings = self._canvas.mapSettings()
         settings.setCrs(QgsCoordinateReferenceSystem(self.session.grid(grid).crs))
-        settings.setOrigin(QgsVector3D((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, 0.0))
-        settings.setExtent(QgsRectangle(min(xs), min(ys), max(xs), max(ys)))
+        settings.setOrigin(QgsVector3D(cx, cy, 0.0))
+        settings.setExtent(QgsRectangle(xmin, ymin, xmax, ymax))
         depths = self._depths_of(grid)
         pose = camera_pose(corners, depths, stretch)
         self._canvas.cameraController().setLookingAtMapPoint(
@@ -358,16 +373,18 @@ class Scene3D:
                     stale += 1
         except Exception as exc:  # noqa: BLE001 -- the title is not worth a refresh
             _log(f"3-D view: could not count the stale surfaces: {exc}")
-        if _alive(self._dialog):
-            self._dialog.setWindowTitle(view_title(grid, stretch, stale))
+        holder = self._holder()
+        if holder is not None:
+            title = view_title(grid, stretch, stale)
+            holder.setWindowTitle(title)
+            self._last_title = title
 
-    def _find_dialog(self) -> Any:
+    def _holder(self) -> Any:
+        """The window or dock holding the view, found afresh each time: docking and undocking
+        rebuilds it. It is titled `VIEW_NAME` until we retitle it, then with that title."""
+        titles = {VIEW_NAME, self._last_title}
         for widget in QApplication.allWidgets():
-            if (
-                isinstance(widget, QDialog)
-                and widget.isWindow()
-                and (widget.windowTitle() == VIEW_NAME)
-            ):
+            if isinstance(widget, (QDialog, QDockWidget)) and widget.windowTitle() in titles:
                 return widget
         return None
 
@@ -410,6 +427,6 @@ class Scene3D:
                 surface.setRenderer3D(None)
         self._forget_layers()
         self._canvas = None
-        self._dialog = None
+        self._last_title = VIEW_NAME
         self._export = None
         self.grid_id = None

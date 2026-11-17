@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from nsgeo_qgis.scene3d_plan import camera_pose, scene_grid, scene_stretch, view_title
+from nsgeo_qgis.scene3d_plan import (
+    camera_pose,
+    local_corners,
+    scene_centre,
+    scene_extent,
+    scene_grid,
+    scene_stretch,
+    view_title,
+)
 from nsgeo_qgis.slices_plan import DEFAULT_STRETCH
 
 
@@ -35,3 +43,12 @@ def test_camera_frames_the_grid_at_mid_depth():
     assert pose.distance == pytest.approx(1.2 * 20.0)
     assert (pose.pitch, pose.yaw) == (45.0, 0.0)
     assert camera_pose([(0, 0), (2, 0), (2, 2), (0, 2)], [], 3.0).z == 0.0
+
+
+def test_local_corners_scene_extent_and_centre():
+    assert local_corners(3.0, 12.0) == [(0.0, 0.0), (3.0, 0.0), (3.0, 12.0), (0.0, 12.0)]
+    tilted = [(5.0, 1.0), (9.0, 3.0), (7.0, 7.0), (3.0, 5.0)]
+    assert scene_extent(tilted) == (3.0, 1.0, 9.0, 7.0)
+    assert scene_centre(tilted) == (6.0, 4.0)
+    pose = camera_pose(tilted, [], 3.0)
+    assert (pose.x, pose.y) == scene_centre(tilted)
