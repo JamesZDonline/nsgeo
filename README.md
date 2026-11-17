@@ -110,9 +110,9 @@ release's notes list everything in it.
   **Plan B, surfaces from picks** ([#202]) are merged (above). **Plan C, the
   QGIS 3-D view:** a 3D view button opens QGIS's own 3-D view of the grid the
   Slices panel shows, with its picks at depth and its surfaces, stretched and
-  saying so. **Plan D, cuts in 3-D:** picks on cuts join surfaces, and the
-  ParaView export gains a wall for every line and cut. Both planned, awaiting
-  review; C builds first.
+  saying so. Built and reviewed, awaiting its walkthrough. **Plan D, cuts in
+  3-D:** picks on cuts join surfaces, and the ParaView export gains a wall for
+  every line and cut. Planned; builds after C merges.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
