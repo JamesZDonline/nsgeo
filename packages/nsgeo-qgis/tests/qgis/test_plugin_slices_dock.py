@@ -5169,9 +5169,10 @@ def docked_mixed_radar(qgis_app, tmp_path):
     _dispose(dock)
 
 
-def _deep_cube_saved_with_a_shown(dock, session):
+def _deep_cube_saved_with_a_shown(dock, session, palette: str | None = "amp_black_high"):
     """Save "B__deep", a cube of B with more levels than A's lines allow, then
-    show A again. Returns the cube's z axis."""
+    show A again. Returns the cube's z axis. A `palette` of None saves it with
+    an offered palette that is not B's default (`_another_palette`)."""
     assert dock.engine.wait_for_preparation(20_000)
     dock.grid_combo.setCurrentText("B")
     assert dock.engine.wait_for_preparation(20_000)
@@ -5183,7 +5184,9 @@ def _deep_cube_saved_with_a_shown(dock, session):
     dock.flush_debounce()
     deep = dock.engine.z
     assert deep is not None and deep.nz > 1024, "more levels than A's lines would allow"
-    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    if palette is None:
+        palette = _another_palette(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
     _save_cube(dock, session, "B__deep", view)
     dock.grid_combo.setCurrentText("A")
     assert dock.engine.wait_for_preparation(20_000)
@@ -5238,6 +5241,49 @@ def test_a_restore_that_waits_for_a_site_task_applies_its_resolution_to_its_own_
     assert z.dz_ns == pytest.approx(deep.dz_ns)
     assert dock.warnings_panel.entries() == ()
     assert errors == []
+
+
+def test_a_restore_that_waits_for_a_site_task_keeps_its_palette(docked_mixed_radar, monkeypatch):
+    """#200: the restore's preparation is owed while a site task is live, so
+    no preparation is running when `restore_cube` returns. That read as a no-op
+    preparation and dropped the cube's palette, and the owed preparation's
+    `_on_prepared` then drew B on its default palette."""
+    dock, session = docked_mixed_radar
+    _deep_cube_saved_with_a_shown(dock, session, palette=None)
+    palette = session.site.cubes["B__deep"]["view"]["palette"]
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("B__deep")
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+
+    assert dock.grid_combo.currentText() == "B"
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert palette in offered, offered
+    assert dock.palette_combo.currentText() == palette
+
+
+def test_a_waiting_restore_whose_source_is_prepared_leaves_no_palette_pending(docked, monkeypatch):
+    """The restore waits behind a site task for a source the engine already
+    holds, so the owed preparation is a no-op and no `_on_prepared` follows.
+    The palette the restore set stands, and none stays pending for a later,
+    unrelated preparation to apply (fix round 1's rule)."""
+    dock, session = docked
+    _ready(dock)
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("A__test")
+    assert dock._pending_palette == other, "held for the owed preparation"
+    live[0] = False
+    dock._run_pending_grid_prepare()
+
+    assert not dock.engine.is_running
+    assert dock._pending_palette is None
+    assert dock.palette_combo.currentText() == other
 
 
 @pytest.fixture

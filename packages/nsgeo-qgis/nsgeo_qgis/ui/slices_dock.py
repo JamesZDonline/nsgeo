@@ -441,7 +441,10 @@ class SlicesDock(QgsDockWidget):
         #: reselecting the SAME cube). Without this, a value stashed here
         #: would sit unconsumed until some LATER, unrelated preparation's
         #: `_on_prepared` fires and applies a palette that restore no
-        #: longer has anything to do with.
+        #: longer has anything to do with. A restore whose preparation is
+        #: owed (R-P5, #200) keeps it for that preparation instead, and
+        #: `_run_pending_grid_prepare` clears it when that one turns out a
+        #: no-op too.
         self._pending_palette: str | None = None
         #: A restored record from before the time-zero clock, whose preset now
         #: sets one: `_on_prepared` moves its z range by the median zero and
@@ -2363,15 +2366,15 @@ class SlicesDock(QgsDockWidget):
             # fires and applies a palette that restore no longer has
             # anything to do with -- exactly the staleness this field's
             # own docstring otherwise claims cannot happen.
-            if not self.engine.is_running:
-                self._pending_palette = None
+            if not self.engine.is_running and not deferred:
                 # No preparation is coming. If the engine already holds this
                 # source (the usual case: the restored source was the
                 # remembered one), the range is settled and pushed here. A
-                # preparation still owed (R-P5) leaves the settling and the
-                # push to `_run_pending_grid_prepare`.
-                if not deferred:
-                    self._settle_and_push()
+                # preparation still owed (R-P5, #200) is coming: its
+                # `_on_prepared` applies the palette, and
+                # `_run_pending_grid_prepare` settles and pushes the range.
+                self._pending_palette = None
+                self._settle_and_push()
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
@@ -3617,6 +3620,11 @@ class SlicesDock(QgsDockWidget):
             # would make This grid ignore every later resolution edit.
             owed, self._resolution_owed = self._resolution_owed, False
             self.prepare()
+            if not self.engine.is_running:
+                # No `_on_prepared` is coming: a palette a waiting restore held
+                # for it stands as `apply_view` set it, and must not wait for a
+                # later, unrelated preparation (as in `restore_cube`).
+                self._pending_palette = None
             # A moved grid's engine was cleared, resolution and all; and a grid
             # opened from the site list (#70), or a restore made while this was
             # owed (#200), still holds the left grid's, whatever the spins' own
