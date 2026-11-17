@@ -26,9 +26,14 @@ from tests.planted import (
 
 N_TRACES = 200
 N_SAMPLES = 200
+NO_HYPERBOLA = r"^No hyperbola was found in the box\.$"
+TOO_FLAT = (
+    r"^The traced points are too flat to give a velocity: draw the box further down the "
+    r"hyperbola's legs\.$"
+)
 
 
-def _scene(hyperbolas, *, distance_m=None, seed=1):
+def _scene(hyperbolas, *, distance_m=None, seed=1, **kw):
     return plant(
         N_TRACES,
         N_SAMPLES,
@@ -36,6 +41,7 @@ def _scene(hyperbolas, *, distance_m=None, seed=1):
         noise_ratio=REAL_NOISE_RATIO,
         seed=seed,
         distance_m=distance_m,
+        **kw,
     )
 
 
@@ -119,8 +125,8 @@ def test_a_fading_leg_drops_the_faded_traces():
 
 @pytest.mark.parametrize(
     "box",
-    [TraceBox(98, 160, 10.0, 35.0), TraceBox(40, 160, 10.0, 25.0)],
-    ids=["apex-and-one-leg", "bottom-cuts-both-legs"],
+    [TraceBox(98, 160, 10.0, 35.0), TraceBox(100, 160, 10.0, 35.0), TraceBox(40, 160, 10.0, 25.0)],
+    ids=["apex-and-one-leg", "apex-on-the-box-side", "bottom-cuts-both-legs"],
 )
 def test_a_leg_cut_off_by_the_box_is_traced_from_the_part_inside(box):
     data, t, x = _scene([Planted(100, 15.0, 0.07)])
@@ -153,7 +159,9 @@ def test_too_few_surviving_edges_gives_the_cleaning_message_not_the_fits(monkeyp
 
 
 def test_thinning_never_repeats_a_trace():
-    data, t, x = _scene([Planted(100, 15.0, 0.07, fade_from_trace=0)])
+    # Legs fading from 15 traces out. Fading from the apex itself left only
+    # the flat top, which is now too flat to trace (spec §4.3 step 4).
+    data, t, x = _scene([Planted(100, 15.0, 0.07, fade_from_trace=15)])
     dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0), max_dots=4)
     assert len({d[0] for d in dots}) == len(dots) >= 4
 
@@ -175,6 +183,59 @@ def test_noise_alone_is_no_hyperbola():
         match="No hyperbola was found in the box.|The hyperbola in the box is too faint to trace.",
     ):
         trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
+
+
+@pytest.mark.parametrize("dip_ns_m", [3.0, 5.0, 8.0, 12.0])
+def test_a_dipping_reflector_alone_is_no_hyperbola(dip_ns_m):
+    # A straight reflector has no apex. Its dots fit a hyperbola whose apex
+    # lies outside them, on the fit's apex search bound, and traced at
+    # 0.06-0.25 m/ns with a sigma of 1-3% before the fit was checked (#140).
+    data, t, x = _scene([], dipping=[(14.0, dip_ns_m, 1.0)])
+    with pytest.raises(ValueError, match=NO_HYPERBOLA):
+        trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
+
+
+@pytest.mark.parametrize(
+    ("edge_ns", "dip_ns_m"), [(14.0, 3.0), (14.0, 5.0), (24.0, -5.0), (14.0, 8.0), (14.0, 12.0)]
+)
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_dipping_reflector_across_a_hyperbola_never_gives_its_slope(edge_ns, dip_ns_m, seed):
+    # A reflector as strong as the hyperbola crosses it. Where the scan takes
+    # the reflector, its slope traced as a velocity (0.17-0.25 m/ns at 3-5
+    # ns/m); now the box refuses. Where it takes the hyperbola, the velocity
+    # is the hyperbola's.
+    data, t, x = _scene([Planted(100, 15.0, 0.07)], dipping=[(edge_ns, dip_ns_m, 1.0)], seed=seed)
+    try:
+        dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
+    except ValueError:
+        return
+    assert _within_2_sigma(_fit(dots, x), 0.07)
+
+
+def _deep_scene(seed, layered):
+    layers = real_layers(N_SAMPLES, 0.5 * REAL_PERIOD_NS) if layered else None
+    fade = leg_fade_width(30 * REAL_DX_M) if layered else None
+    return _scene([Planted(100, 30.0, 0.07, leg_fade_m=fade)], seed=seed, layers=layers)
+
+
+@pytest.mark.parametrize("layered", [False, True], ids=["plain", "layered"])
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_only_the_top_of_a_deep_hyperbola_is_too_flat(layered, seed):
+    # The box's bottom is 0.6 ns below the apex, so the dots' moveout is a
+    # fifth to a quarter of a period: inside the window that holds each dot to
+    # the lobe, so their curvature is not resolved. Among layers such dots gave
+    # 0.049-0.050 m/ns for 0.07, with a sigma of 5% (#140).
+    data, t, x = _deep_scene(seed, layered)
+    with pytest.raises(ValueError, match=TOO_FLAT):
+        trace_hyperbola(data, t, x, TraceBox(30, 170, 27.0, 30.6))
+
+
+@pytest.mark.parametrize("layered", [False, True], ids=["plain", "layered"])
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_the_same_deep_hyperbola_boxed_down_its_legs_is_traced(layered, seed):
+    data, t, x = _deep_scene(seed, layered)
+    dots = trace_hyperbola(data, t, x, TraceBox(30, 170, 27.0, 38.0))
+    assert _within_2_sigma(_fit(dots, x), 0.07)
 
 
 def test_a_tiny_box_is_refused():

@@ -30,6 +30,13 @@ took the next lobe down wherever a leg's crossing came early, and dots on a
 leg jumped down a level; a window a quarter period wide either way followed
 the layers a faded leg runs into, and the dots floated off the band (#140).
 
+Before the dots are returned they are fitted exactly as the panel will fit
+them, and refused when that fit cannot be trusted (spec §4.3 step 4): when its
+apex lies outside the dots, they follow a dipping reflector or some other
+feature, not a hyperbola with its apex in the box; when they are too flat,
+their curvature lies inside the window that holds them to the lobe and the
+fit's sigma is far too small.
+
 This is not the Time zero step's rule (0.2 of the direct wave's peak); the
 small fixed offset between the two is a follow-up. ``trace_hyperbola`` takes
 no Time zero fraction.
@@ -102,6 +109,29 @@ _FAINT_FRACTION = 0.2
 _OUTLIER_MADS = 3.0
 #: ...but never closer than this many samples, so a near-perfect fit keeps all.
 _OUTLIER_FLOOR_SAMPLES = 0.5
+#: The returned dots' fit is refused as no hyperbola when its apex lies more
+#: than this many trace spacings (the box's median) beyond the dots. A
+#: straight dipping reflector's dots put it on the fit's apex search bound, 15
+#: spacings out on planted lines; a hyperbola's own dots put it inside them,
+#: or 1-2 spacings out when the box's side cuts just past the apex. On the
+#: author's hand fits it lies inside the dots on every box that traced the
+#: hyperbola they clicked, and 14 and 24 spacings out on the two that traced
+#: another feature.
+_APEX_OUTSIDE_SPACINGS = 3.0
+#: The returned dots' fit is refused as too flat when its moveout, from the
+#: apex to the farthest dot, is under this many periods: about twice the lobe
+#: window's full width. On 2176 tight boxes over planted hyperbolas among
+#: layers, 88-95% of the fits below it are off by over 3 sigma and 5%, 64%
+#: from 0.45 to 0.48 and 37-46% from 0.48 to 0.55; a higher bar refuses about
+#: as many right fits as wrong ones. On the author's hand fits, every box that
+#: traced the hyperbola they clicked has 0.54 or more; the two below it that
+#: traced that hyperbola (0.07 and 0.20) gave 0.7 and 1.3 times what the
+#: other boxes around it gave.
+_MIN_MOVEOUT_PERIODS = 0.45
+_TOO_FLAT = (
+    "The traced points are too flat to give a velocity: draw the box further down "
+    "the hyperbola's legs."
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +148,19 @@ def _too_few(n: int) -> str:
 
 def _too_faint() -> ValueError:
     return ValueError("The hyperbola in the box is too faint to trace.")
+
+
+def _check_trust(x_m: np.ndarray, t_ns: np.ndarray, spacing_m: float, period_ns: float) -> None:
+    """Fit the dots about to be returned exactly as the panel will, the first
+    as the apex guess, and refuse when that fit cannot be trusted (spec §4.3
+    step 4). Any ``fit_hyperbola`` refusal passes through unchanged."""
+    fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
+    beyond = max(float(x_m.min()) - fit.apex_x_m, fit.apex_x_m - float(x_m.max()), 0.0)
+    if beyond > _APEX_OUTSIDE_SPACINGS * spacing_m:
+        raise ValueError("No hyperbola was found in the box.")
+    far = x_m[int(np.argmax(np.abs(x_m - fit.apex_x_m)))]
+    if float(hyperbola_time(fit, far)) - fit.t0_ns < _MIN_MOVEOUT_PERIODS * period_ns:
+        raise ValueError(_TOO_FLAT)
 
 
 def _zero_at(seg: np.ndarray, times: np.ndarray, j: int) -> float:
@@ -407,4 +450,6 @@ def trace_hyperbola(
         chosen = set(picks) | {apex_i}
     rest = sorted(chosen - {apex_i})
     order = [apex_i, *rest]
+    spacing = float(np.median(np.abs(np.diff(x_box))))
+    _check_trust(x_e[order], edges[order], spacing, period)
     return [(int(tr0 + cols[k]), float(edges[k])) for k in order]

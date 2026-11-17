@@ -184,6 +184,7 @@ def plant(
     distance_m: np.ndarray | None = None,
     wavelet: np.ndarray = REAL_WAVELET,
     layers: list[tuple[float, float]] | None = None,
+    dipping: list[tuple[float, float, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(data, times_ns, distance_m): data is (n_samples, n_traces).
 
@@ -191,7 +192,9 @@ def plant(
     placed so its edge (``wavelet_edge_ns``: the zero crossing into its first
     strong lobe) lies exactly on t(x) = sqrt(t0^2 + 4 (x - x0)^2 / v^2).
     ``layers`` are flat reflectors, (edge time, amplitude), with the same
-    wavelet across every trace. Noise is Gaussian with a standard deviation of
+    wavelet across every trace. ``dipping`` are straight reflectors, (edge
+    time at distance 0, slope in ns per metre, amplitude), whose edge lies on
+    t(x) = edge + slope x. Noise is Gaussian with a standard deviation of
     ``noise_ratio`` times 1.0.
     """
     if distance_m is None:
@@ -213,6 +216,9 @@ def plant(
         data += amp[None, :] * wavelet_at(times[:, None] - start[None, :], wavelet)
     for edge_ns, amplitude in layers or []:
         data += amplitude * wavelet_at(times - (edge_ns - edge), wavelet)[:, None]
+    for edge_ns, slope_ns_m, amplitude in dipping or []:
+        start = edge_ns + slope_ns_m * distance_m - edge
+        data += amplitude * wavelet_at(times[:, None] - start[None, :], wavelet)
     rng = np.random.default_rng(seed)
     data += rng.normal(0.0, noise_ratio, data.shape)
     return data, times, distance_m
