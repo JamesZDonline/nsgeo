@@ -129,8 +129,10 @@ same way, and the Slices panel says by how much.
 When `_sync_included`'s grid-changed branch runs for a grid the combo moved to on its own, not
 one you picked, This grid selects `site_scope.default_preset(session, grid_id)` inside the
 `_updating` guard, as #106 does for the switch from the site list. "On its own" means the
-selected grid was removed, or a site opened (my call: opening carries a same-named preset over
-from the last survey, which is the same disagreement). Nothing is written to the grid's record.
+selected grid was removed, or a site opened (my call). *Corrected in the build (Task 1):* opening
+does not carry a same-named preset over today, because `open_site` closes the open survey first
+and that empties the preset combo. The rule covers a site open anyway, and a guard test pins it.
+Nothing is written to the grid's record.
 That move also drops a restore's pending values (§2), because it is a source change.
 
 A grid **picked by hand** still carries the preset over. `_remember_source` then records it, as
@@ -233,7 +235,9 @@ the author's real project. It covers:
 - **editing while lines prepare:** change a line, a grid or a preset in the second after a restore;
 - **switching sites and grids quickly**, including closing and reopening within a second of a
   restore;
-- **closing from Whole site and opening another survey;**
+- **closing from Whole site and opening another survey,** and the same from This grid. A new
+  survey now opens at its own first slice either way (Task 1 found that the slider kept the closed
+  survey's position);
 - **removing a grid in This grid** (#152).
 
 #200 needs a site task still finishing when you restore, which is hard to hit by hand. The tests
