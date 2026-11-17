@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing._util import running_mean
+from nsgeo.processing._util import running_mean, window_samples
 from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
@@ -32,15 +32,13 @@ class Dewow:
                 default=4.0,
                 unit="ns",
                 min=0.0,
-                help="Running-mean window; must exceed one sample interval.",
+                help=(
+                    "Running-mean window; must span at least two samples "
+                    "(1.5 sample intervals or more)."
+                ),
             ),
         )
 
     def apply(self, rg: Radargram) -> Radargram:
-        window = int(round(self.window_ns / rg.dt_ns))
-        if window < 1:
-            raise ValueError(
-                f"window_ns={self.window_ns} is shorter than one sample "
-                f"({rg.dt_ns} ns); nothing to remove"
-            )
+        window = window_samples(self.window_ns, rg.dt_ns, "Dewow")
         return rg.replace(data=rg.data - running_mean(rg.data, window, axis=0))

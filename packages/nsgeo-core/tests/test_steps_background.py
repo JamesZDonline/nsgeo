@@ -3,7 +3,18 @@ from __future__ import annotations
 import nsgeo.processing  # noqa: F401
 import numpy as np
 import pytest
+from nsgeo.processing.background import BackgroundSliding
 from nsgeo.processing.base import Radargram, available_steps, build_step
+
+from tests.real_data import DATA, real_radargram
+
+
+def file7_with(bad, row=100, trace=300):
+    """Campus FILE__007 with one bad sample."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[row, trace] = bad
+    return rg.replace(data=data)
 
 
 def banded(n_samples=128, n_traces=300, seed=0):
@@ -46,10 +57,12 @@ def test_sliding_removes_a_band_that_drifts_along_the_line():
     assert np.abs(sliding.data).mean() < np.abs(full.data).mean()
 
 
-def test_sliding_with_window_of_one_is_a_no_op_in_effect():
+def test_sliding_refuses_a_window_of_one_trace_which_would_subtract_each_trace_from_itself():
     rg, _, _ = banded()
-    out = build_step("background_sliding", window_traces=1).apply(rg)
-    np.testing.assert_allclose(out.data, 0.0, atol=1e-12)
+    with pytest.raises(ValueError, match="window_traces"):
+        build_step("background_sliding", window_traces=1)
+    with pytest.raises(ValueError, match="window_traces must be >= 2, got 1"):
+        BackgroundSliding(window_traces=1).apply(rg)
 
 
 def test_sliding_rejects_zero_window():
@@ -84,6 +97,36 @@ def test_svd_rejects_negative_components():
         build_step("background_svd", n_components=-1).apply(rg)
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+@pytest.mark.parametrize("name", ["background_mean", "background_sliding"])
+def test_on_a_real_line_a_bad_sample_damages_only_itself(name, bad):
+    """#43 and its background-mean twin: one NaN used to turn the rest of its
+    row into NaN (mean: the whole row; sliding: every window that held it)."""
+    out = build_step(name).apply(file7_with(bad)).data
+    assert np.argwhere(~np.isfinite(out)).tolist() == [[100, 300]]
+    assert np.isnan(out[100, 300]) == np.isnan(bad)
+
+
+def test_mean_of_a_row_with_no_finite_sample_touches_only_bad_samples():
+    data = np.ones((4, 3))
+    data[2, :] = [np.nan, np.inf, np.nan]
+    out = build_step("background_mean").apply(Radargram(data=data, dt_ns=0.2, t0_ns=0.0)).data
+    np.testing.assert_array_equal(out[[0, 1, 3]], 0.0)
+    assert np.isnan(out[2]).all()
+
+
+def test_svd_refuses_a_real_line_holding_a_nan():
+    """It used to fail inside numpy with "SVD did not converge"."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            "1 of 635 traces hold samples that are not finite; the decomposition cannot run on them"
+        ),
+    ) as caught:
+        build_step("background_svd", n_components=1).apply(file7_with(np.nan))
+    assert not isinstance(caught.value, np.linalg.LinAlgError)
+
+
 _STEP_PARAMS = {
     "time_zero": {"mode": "sample", "sample": 4},
     "time_cutoff": {"end_ns": 10.0},
@@ -99,6 +142,7 @@ _STEP_PARAMS = {
     "amp_abs": {},
     "amp_square": {},
     "amp_envelope": {},
+    "trace_stack": {"window_traces": 3},
 }
 
 
