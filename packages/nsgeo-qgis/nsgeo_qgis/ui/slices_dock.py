@@ -598,9 +598,9 @@ class SlicesDock(QgsDockWidget):
         self._grid_refusal: str | None = None
         #: Spec §8: what the restore of the cube on show said, as ⓘ notes (its
         #: clock shift, the lines it left out). They go when the Cube box
-        #: leaves that cube (`_mark_cube_unsaved`, the next restore), or the
-        #: source, grid, scope or site changes (`_drop_restore_pending`,
-        #: `set_scope`).
+        #: leaves that cube (an edit, `_mark_cube_unsaved`; any later restore,
+        #: refused or not), or the source, grid, scope or site changes
+        #: (`_drop_restore_pending`, `set_scope`).
         self._grid_notes: list[str] = []
         outer.addWidget(self.warnings_panel)
 
@@ -1832,7 +1832,13 @@ class SlicesDock(QgsDockWidget):
         """Settle the z range (`_settle_z`), then push it at the engine. For
         the paths no `_on_prepared` follows: a restore whose source the engine
         already holds, and `_run_pending_grid_prepare` when its `prepare()`
-        dispatched nothing."""
+        dispatched nothing.
+
+        Steps aside entirely while a preparation runs with a shift owed: the
+        range is still on the radar's clock, and that preparation's
+        `_on_prepared` shifts, clamps and pushes it (spec §3)."""
+        if self._pending_z_shift and self.engine.is_running:
+            return
         self._settle_z()
         self._apply_resolution()
 
@@ -1994,7 +2000,8 @@ class SlicesDock(QgsDockWidget):
         claim still true; the Source combos and the four `Resolution`
         geometry spins do, and are wired to call this (see their own
         connections and `_on_source_changed`/`set_included`). The restore's
-        notes go with the cube's name (spec §8).
+        notes go with it (spec §8), even when the box already read
+        "(unsaved)": a note that landed after an earlier edit goes at the next.
 
         Gated on `self._updating` for the same reason `_on_source_changed`
         is: `restore_cube` sets these same widgets itself while restoring,
@@ -2006,7 +2013,12 @@ class SlicesDock(QgsDockWidget):
                 return
             if self.cube_combo.currentText() != "(unsaved)":
                 self.cube_combo.setCurrentText("(unsaved)")
+            if self._grid_notes:
                 # Spec §8: the restore's notes were about the cube just left.
+                # Whatever the box reads: a shift owed to a preparation still
+                # running lands after an edit has marked the cube unsaved, and
+                # its note says why the edited range moved; the next edit takes
+                # it down (review I2-1).
                 self._grid_notes = []
                 self.show_warnings()
         except Exception as exc:  # noqa: BLE001 -- reached directly from valueChanged
@@ -2387,7 +2399,10 @@ class SlicesDock(QgsDockWidget):
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)
             self.error.emit(message)
-            # A restore that failed past its checks dropped the last cube's notes.
+            # The combo leaves the cube it named just below, so that cube's
+            # notes go too, whether the restore was refused at its checks or
+            # failed past them (review I2-1).
+            self._grid_notes = []
             self.show_warnings()
             # Fix round 1, Minor: a refused restore must not leave
             # `cube_combo` naming a cube the dock did not actually

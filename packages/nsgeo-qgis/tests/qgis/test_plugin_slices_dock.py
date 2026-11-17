@@ -4068,21 +4068,27 @@ def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_l
     _assert_shifted_once(dock, errors)
 
 
-def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed):
+def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed, monkeypatch):
+    """With a shift owed and a preparation running, `_settle_and_push` leaves
+    both the shift and the push to that preparation's `_on_prepared`: no
+    range reaches the engine before its owed shift (spec §3)."""
     dock, session = docked_zeroed
     _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
     errors: list[str] = []
     dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
     dock.restore_cube("A__old")
     assert dock.engine.is_running
     assert dock._pending_z_shift
 
-    dock._settle_and_push()  # must not consume the flag or say anything
+    dock._settle_and_push()  # must not consume the flag, push or say anything
 
     assert dock._pending_z_shift
+    assert pushed == [], "pushed while the shift was still owed"
     assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
     assert dock.engine.wait_for_preparation(20_000)
     _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
 
 
 def _assert_shifted_once(dock, errors):
@@ -4143,9 +4149,9 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     dock._on_prepared()
     assert dock.z0_spin.value() == pytest.approx(20.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(30.0, abs=1e-3)
-    note = old_cube_note(-dock.engine.median_zero())
-    assert _notes(dock).count(note) == 1, _notes(dock)
-    assert note not in errors, errors
+    # The edit took the note down, and no second shift said it again.
+    assert _notes(dock) == []
+    assert old_cube_note(-dock.engine.median_zero()) not in errors, errors
 
 
 # ---- spec §3: one settle sequence (#162 item 3, #200), notes in Warnings (§8) ----
@@ -4238,6 +4244,44 @@ def test_a_restore_note_goes_when_the_cube_is_left(docked_zeroed, leave):
         assert dock.site_engine.wait_until_idle(60_000)
         dock.set_scope("grid")
 
+    assert _notes(dock) == []
+
+
+def test_an_edit_while_a_restore_prepares_leaves_no_note_past_the_next_edit(docked_zeroed):
+    """Review I2-1, route (b): an edit inside the preparation window marks the
+    cube unsaved before its shift lands. The shift then moves the edited spins
+    and its note says why; the next edit, with the Cube box already reading
+    "(unsaved)", must take that note down."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.is_running
+
+    dock.z1_spin.stepDown()
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert _notes(dock), "the late note: the shift moved the edited range"
+
+    dock.z1_spin.stepDown()
+
+    assert _notes(dock) == []
+
+
+def test_a_restore_refused_at_its_checks_takes_the_last_notes_down(docked_zeroed):
+    """Review I2-1, route (a): a refused restore leaves the dock as it was, but
+    the Cube box leaves the cube it named, so that cube's notes go with it."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    record = _save_cube(
+        dock, session, "A__gone", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    record["preset"] = "does-not-exist"
+    dock.cube_combo.setCurrentText("A__old")
+    assert _notes(dock)
+
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert dock.cube_combo.currentText() == "(unsaved)"
     assert _notes(dock) == []
 
 
