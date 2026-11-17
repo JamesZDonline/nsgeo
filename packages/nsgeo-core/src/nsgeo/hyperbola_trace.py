@@ -17,9 +17,10 @@ the author's ruling after the real-data check). A faint precursor lobe runs
 ahead of the band the author sees; the first version marked where the signal
 first reached a fifth of its peak, which often fell on that precursor, so the
 traced curve floated above the hyperbola. The lobe is chosen once per box,
-from the stack of the traces along the scan's curve, so every trace follows
-the same one. A zero crossing does not depend on how bright the trace is, so
-the edge does not drift deeper as a leg fades.
+from the stack along the scan's curve of the traces near its apex, so every
+trace follows the same one, and the same one however much of the legs the box
+holds. A zero crossing does not depend on how bright the trace is, so the edge
+does not drift deeper as a leg fades.
 
 Every dot stays on that lobe: the crossing is locked to it (spec §4.2). On
 each trace it is looked for only in a narrow window around where the lobe is
@@ -95,13 +96,24 @@ _COARSE_APEXES_MAX = 64
 #: ``_COARSE_TRACES`` traces.
 _COARSE_TRACES_MIN = 48
 #: The first strong lobe is the earliest lobe on the stack, within a period
-#: before its peak, that reaches this fraction of that peak. On the stacks of
-#: the author's hand fits, the lobes ahead of the one whose crossing they
-#: clicked reach 0.14-0.47 of the peak and the clicked lobe 0.50-1.00, on all
-#: but two (one clicked the lobe after a 0.56 one, one a 0.39 lobe). The
-#: measured wavelet's precursor is 0.21 and its first strong lobe 0.69
+#: before its peak, that reaches this fraction of that peak. On the stacks
+#: near the apex (below) of the boxes around the author's hand fits, the lobe
+#: whose crossing lies nearest their hand curve reaches 0.43-1.00 of the peak
+#: (0.63 or more on all but one) and the lobes ahead of it 0.11-0.61: no
+#: ratio parts them, and 0.5 takes that lobe on 15 of the 20 the scan finds.
+#: The measured wavelet's precursor is 0.21 and its first strong lobe 0.69
 #: (tests/planted.py, REAL_WAVELET).
 _STRONG_LOBE = 0.5
+#: "Strong" is judged on the stack of only the traces where the scan's curve
+#: lies within this many periods of its apex time (at least ``_MIN_BOX`` of
+#: them). Stacked over the whole box, the bigger the box the more of the legs
+#: it held, where the lobe ahead grows against the band (0.25 of the peak at
+#: the apex, 0.51 at the last clicked dot): on the author's lines a box 1.4-2.5
+#: times the hyperbola's extent took the lobe ahead and moved v by 8-13% (#140).
+#: Over boxes of margins 10-75% around their hand fits, 0.25 chooses the same
+#: lobe on every box of every fit whose scan takes the hyperbola; the whole
+#: box put 12 boxes a lobe off their 20% box, 0.5 four (0.46-0.53 at the apex).
+_APEX_STACK_PERIODS = 0.25
 #: Each trace's crossing is looked for only this many periods either side of
 #: where the lobe is expected. Near the apex of the author's hand fits, where
 #: the band is clearest, the crossing lies within 0.097 periods of that on 80%
@@ -401,9 +413,14 @@ def trace_hyperbola(
         raise ValueError("No hyperbola was found in the box.")
 
     # The lobe to follow, chosen once on the stack of the box (as drawn) along
-    # the scan's curve: the only place "strong" is judged.
+    # the scan's curve, over the traces near its apex: the only place "strong"
+    # is judged, and the same however much of the legs the box holds.
     curve = np.sqrt(t0**2 + 4.0 * (x_box - apex_x) ** 2 / v**2)
-    lobe = _first_strong_lobe(*_stack_along(box_data, box_times, curve, period), period)
+    moveout = curve - t0
+    near = moveout <= max(_APEX_STACK_PERIODS * period, np.sort(moveout)[_MIN_BOX - 1])
+    lobe = _first_strong_lobe(
+        *_stack_along(box_data[:, near], box_times, curve[near], period), period
+    )
     if lobe is None:
         raise _too_faint()
     lag, sign = lobe

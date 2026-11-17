@@ -31,6 +31,7 @@ TOO_FLAT = (
     r"^The traced points are too flat to give a velocity: draw the box further down the "
     r"hyperbola's legs\.$"
 )
+TOO_FEW = r"^Too few points were left after cleaning \(\d+\); a fit needs at least 4\.$"
 
 
 def _scene(hyperbolas, *, distance_m=None, seed=1, **kw):
@@ -254,8 +255,12 @@ def test_a_dipping_reflector_alone_is_no_hyperbola(dip_ns_m):
     # A straight reflector has no apex. Its dots fit a hyperbola whose apex
     # lies outside them, on the fit's apex search bound, and traced at
     # 0.06-0.25 m/ns with a sigma of 1-3% before the fit was checked (#140).
+    # At 12 ns/m the reflector crosses only the box's first 20 traces: the
+    # scan's apex sits at the box's side, and the lobe chosen on the traces
+    # near it leaves three dots, too few to fit, which is also a refusal.
+    reason = NO_HYPERBOLA if dip_ns_m < 12.0 else f"{NO_HYPERBOLA}|{TOO_FEW}"
     data, t, x = _scene([], dipping=[(14.0, dip_ns_m, 1.0)])
-    with pytest.raises(ValueError, match=NO_HYPERBOLA):
+    with pytest.raises(ValueError, match=reason):
         trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
 
 
@@ -406,15 +411,59 @@ def test_a_precursor_growing_down_the_legs_does_not_lift_the_dots(seed):
     assert _within_2_sigma(_fit(dots, x), 0.07)
 
 
+def _growing_precursor_scene(seed):
+    # On the real lines the lobe ahead of the band grows against the band's
+    # peak down the legs: about 0.25 at the apex, 0.5 at the last clicked dot
+    # and 0.75 beyond (#140). Here the legs fade as the real ones do, over flat
+    # layers half a period out of step, and a half-sine over the precursor's
+    # span (it ends at the edge, so the planted crossing stays on t(x)) takes
+    # the lobe ahead from 0.3 of the peak at the apex to 0.7 at the last dot a
+    # person would click (25 traces out) and towards 0.9 beyond.
+    data, t, x = _layered_scene(15.0, 0.07, 25, 0.5, seed)
+    out = (x - x[100]) / (25 * REAL_DX_M)
+    ratio = 0.3 + 0.6 * (1.0 - np.exp(-np.log(3.0) * out**2))
+    fade = np.exp(-0.5 * ((x - x[100]) / leg_fade_width(25 * REAL_DX_M)) ** 2)
+    span = wavelet_edge_ns() - wavelet_precursor_ns()
+    edge = np.sqrt(15.0**2 + 4.0 * (x - x[100]) ** 2 / 0.07**2)
+    tau = np.clip(t[:, None] - (edge[None, :] - span), 0.0, None)
+    lobe = np.where(tau <= span, np.sin(np.pi * np.minimum(tau, span) / span), 0.0)
+    return data + (fade * (ratio - 0.21))[None, :] * lobe, t, x
+
+
+@pytest.mark.parametrize("seed", range(1, 6))
+def test_a_box_twice_as_big_takes_the_same_lobe(seed):
+    # The lobe was chosen on the stack of every trace in the box, so how much
+    # of the legs a box held decided it: on the real lines a box 1.4-2.5 times
+    # the hyperbola's extent took the lobe ahead (its stack ratio crossing 0.5)
+    # and moved v by 8-13% at a sigma of 1-2% (#140). Here the box drawn close
+    # around the dots a person would click took the lobe ahead, 1.4 ns up, and
+    # the box twice its size the planted one. The lobe is now chosen on the
+    # stack of the traces near the apex, which both boxes hold.
+    data, t, x = _growing_precursor_scene(seed)
+    fits = []
+    for box in (TraceBox(70, 130, 13.0, 21.5), TraceBox(40, 160, 12.0, 30.0)):
+        dots = trace_hyperbola(data, t, x, box)
+        traces = np.array([d[0] for d in dots])
+        times = np.array([d[1] for d in dots])
+        truth = np.sqrt(15.0**2 + 4.0 * (x[traces] - x[100]) ** 2 / 0.07**2)
+        assert np.abs(times - truth).max() <= REAL_PERIOD_NS / 4  # the planted lobe
+        fits.append(_fit(dots, x))
+    tight, big = fits
+    assert abs(tight.v_m_ns - big.v_m_ns) <= 2 * np.hypot(tight.v_stderr_m_ns, big.v_stderr_m_ns)
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="a flat layer through the apex's own edge shifts the edges there; a known limit",
 )
 def test_a_layer_through_the_apex_edge_still_gives_the_velocity():
-    # The layer's onset falls 0.35 ns after the apex's: across the flat top
+    # The layer's onset falls 0.15 ns after the apex's: across the flat top
     # the two wavelets add, the edges there come out late, and the cleaning
-    # keeps them over the true legs.
-    data, t, x = _layered_scene(20.0, 0.08, 30, 0.5, seed=1)
+    # keeps them over the true legs (2.2% fast). With the lobe chosen near the
+    # apex, a layer 0.35 ns after it no longer does (0.9%, inside 2 sigma), but
+    # over layers 0.15-0.55 ns after it, 10 of 30 planted boxes still read
+    # 1.5-2.3% fast outside 2 sigma.
+    data, t, x = _layered_scene(20.0, 0.08, 30, 0.4375, seed=1)
     dots = trace_hyperbola(data, t, x, TraceBox(58, 142, 18.0, 25.6))
     assert _within_2_sigma(_fit(dots, x), 0.08)
 
