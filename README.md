@@ -175,7 +175,8 @@ Grouped by area. The order within a group is not a priority.
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); a frequency profile
-  ([#34]); configurable axes ([#11]).
+  ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
+  until it is fixed, instead of a six-second toast ([#197]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
@@ -248,6 +249,7 @@ Grouped by area. The order within a group is not a priority.
 [#188]: https://github.com/JamesZDonline/nsgeo/issues/188
 [#193]: https://github.com/JamesZDonline/nsgeo/issues/193
 [#195]: https://github.com/JamesZDonline/nsgeo/issues/195
+[#197]: https://github.com/JamesZDonline/nsgeo/issues/197
 
 ## Why
 
