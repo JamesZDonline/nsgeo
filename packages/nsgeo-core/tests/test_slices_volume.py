@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from nsgeo.io.dzt import read_header, read_samples
-from nsgeo.processing import build_step
-from nsgeo.processing.base import Radargram
 from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
-    PreparedLine,
     Provenance,
     SliceCube,
     VolumeSettings,
@@ -25,8 +21,7 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 
-from tests.real_data import CAMPUS_LINES
-from tests.real_lines import AXIS, CELL, SPACING, needs_real_files, prepared_lines
+from tests.real_lines import AXIS, CELL, needs_real_files, prepared_lines, squared_volume
 
 
 def _prov(transform: str) -> Provenance:
@@ -264,45 +259,6 @@ def test_an_empty_cube_is_refused():
 
 # --- real lines, squared amplitude from the bipolar data (no envelope step) -------------------
 
-_SQUARED: list = []
-
-
-def _squared_volume():
-    """Ten real lines, left bipolar and squared (`amp_square`), binned on a frame with spare rows
-    and columns so some cells stay uncovered. Built once."""
-    if not _SQUARED:
-        lines = []
-        for i, path in enumerate(CAMPUS_LINES[:10]):
-            header = read_header(path)
-            rg = Radargram(
-                data=np.asarray(read_samples(path, header)[0], dtype=float),
-                dt_ns=header.dt_ns,
-                t0_ns=header.position_ns,
-            )
-            for name in ("time_zero", "dewow", "background_mean", "gain_agc"):
-                rg = build_step(name).apply(rg)
-            n = rg.data.shape[1]
-            local = np.column_stack([np.linspace(0.0, 19.99, n), np.full(n, 0.25 + i * SPACING)])
-            lines.append(
-                PreparedLine(
-                    key=path.name,
-                    data=(rg.data**2).astype(np.float32),
-                    dt_ns=rg.dt_ns,
-                    t0_ns=rg.t0_ns,
-                    coords=local,
-                )
-            )
-        frame = CubeFrame((0.0, 0.0), 0.0, CELL, 110, 30, "EPSG:32633")
-        plans = [plan_line(p, frame, AXIS) for p in lines]
-        cube = build_cube(lines, plans, frame, AXIS, _prov("amp_square"))
-        finish = FinishSettings("idw", 0.25, 1.0)
-        weights = plan_fill(cube.coverage() > 0, CELL, "idw", 0.25, 1.0)
-        out = np.empty((AXIS.nz, frame.ny, frame.nx), dtype=np.float32)
-        fill_levels(cube, weights, finish, out)
-        vol = prepare_volume(out, AXIS, VelocityModel.constant(0.071), CELL, VolumeSettings())
-        _SQUARED.append((out, vol))
-    return _SQUARED[0]
-
 
 def _humps(c: np.ndarray) -> int:
     """Humps above half the maximum. Two maxima are one hump unless the dip between them falls
@@ -317,7 +273,7 @@ def _humps(c: np.ndarray) -> int:
 
 @needs_real_files
 def test_real_volume_is_unipolar_and_uncovered_cells_stay_nan():
-    _, vol = _squared_volume()
+    _, vol = squared_volume()
     amp, strength = vol.slab(0, vol.depths_m.size)
     for arr in (amp, strength):
         assert np.nanmin(arr) >= 0.0
@@ -328,7 +284,7 @@ def test_real_volume_is_unipolar_and_uncovered_cells_stay_nan():
 
 @needs_real_files
 def test_real_column_through_a_strong_reflection_has_one_hump():
-    out, vol = _squared_volume()
+    out, vol = squared_volume()
     # constant velocity from level 0: depth level j is source level j
     assert vol.source_level[0] == 0
     peaks = np.nan_to_num(out, nan=-1.0).max(axis=0)
@@ -350,7 +306,7 @@ def test_real_column_through_a_strong_reflection_has_one_hump():
 
 @needs_real_files
 def test_real_slabs_equal_the_whole():
-    _, vol = _squared_volume()
+    _, vol = squared_volume()
     nd = vol.depths_m.size
     a0, s0 = vol.slab(0, nd)
     parts = [vol.slab(j, min(j + 23, nd)) for j in range(0, nd, 23)]

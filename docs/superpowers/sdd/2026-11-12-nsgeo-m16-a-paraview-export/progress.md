@@ -161,3 +161,5 @@ CI-style run (packages/nsgeo-qgis/tests, one process) on 4a04ee4: 2635 passed, 3
 - Walk fix: minor (deferred): a stored number no longer follows a lengthened record (decision 8 behaviour; the field shows it) — mention in the guide if the user wants.
 - Walk fix: complete (commits 4a04ee4..b8ec2ed, review clean). Walkthrough page updated (D1, D2, R3, intro; head b8ec2ed).
 - Walk fix: whole QGIS suite on b8ec2ed (one process, CI-style): 2654 passed, 3 skipped, 1 warning in 1457.80s (0:24:17)
+- Plan A: PR #190 opened (nsgeo-m16 at 5d1338b: main merged b7a678f, export on grid_depth_velocity; core 1285/4, pure 329/3, QGIS 2470 one process).
+- 2026-11-16: merged origin/main up to #198 (0e00aa0, clean); two tests moved off main's new 0.1 m default cell (37ba35a); core+pure 1736 passed 7 skipped; PR #190 CI 32 pass. Merged at the author's go → main c610111 ("Merge #190"). Plan B is PR #202 (retargeted to main). Ledger retired into the decision record via the Plan B branch; worktree, branch and profile ns_geo_m16 cleaned up.

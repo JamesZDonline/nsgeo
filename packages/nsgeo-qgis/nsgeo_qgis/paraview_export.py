@@ -29,6 +29,7 @@ import re
 import shutil
 import traceback
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,8 +54,15 @@ from nsgeo.slices import (
     plan_fill,
     plan_line,
     prepare_volume,
+    surface_mesh,
 )
 from nsgeo.vtkxml import write_image_data, write_poly_data
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+)
 from qgis.PyQt.QtCore import QEventLoop
 
 from nsgeo_qgis.paraview_scene import (
@@ -80,6 +88,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
+from nsgeo_qgis.surface_plan import feature_ids
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -181,18 +190,82 @@ def _spans(n: int, step: int) -> list[tuple[int, int]]:
     return [(j, min(j + step, n)) for j in range(0, n, step)]
 
 
-class ParaViewExport:
-    """Writes a grid's ParaView folder. `dock` is the Slices dock (read only)."""
+@dataclass(frozen=True)
+class FilledGrid:
+    """A grid's prepared lines and its kept, filled cube (M16 B): what `ParaViewExport.fill` hands
+    to the export and to surface builds. `filled` is a read-only memory map, `(nz, ny, nx)`."""
 
-    def __init__(self, session: Any, dock: Any) -> None:
+    lines: list[PreparedLine]
+    prov: Any
+    frame: CubeFrame
+    z: ZAxis
+    velocity: Any
+    filled: np.ndarray
+    skipped_lines: list[str]
+    #: Where the fill's depth axis ends, in ns on the cube's clock (the lines' end, or earlier).
+    t1_ns: float
+
+
+@dataclass(frozen=True)
+class PlacedPick:
+    """A pick on the cube: its line, its (clamped) trace, frame-local metres and true depth."""
+
+    line_key: str
+    trace: int
+    x_m: float
+    y_m: float
+    depth_m: float
+
+
+def place_picks(
+    rows: Sequence[tuple[str, Any]],
+    lines: Sequence[PreparedLine],
+    prov: Any,
+    frame: CubeFrame,
+    velocity: Any,
+) -> list[PlacedPick | None]:
+    """Each `(line_key, pick)` of `rows` on the cube's clock, in order. A pick whose line is not
+    among `lines`, or whose depth is not finite, is None."""
+    on_zero = time_base_of(prov.steps) == TIME_BASE_TIME_ZERO
+    by_key = {line.key: line for line in lines}
+    found: list[tuple[int, PreparedLine, int, float]] = []
+    for i, (key, p) in enumerate(rows):
+        line = by_key.get(key)
+        if line is None:
+            continue
+        target = line.zero_ns if on_zero else 0.0
+        trace = min(max(int(p.trace), 0), line.coords.shape[0] - 1)
+        found.append((i, line, trace, float(retime_ns(p.time_ns, p.zero_ns or 0.0, target))))
+    out: list[PlacedPick | None] = [None] * len(rows)
+    if not found:
+        return out
+    depth = np.asarray(
+        velocity.depth_at(np.asarray([f[3] for f in found], dtype=float)), dtype=float
+    )
+    for (i, line, trace, _), d in zip(found, depth):
+        if not math.isfinite(float(d)):
+            continue
+        x, y = frame.to_local(line.coords[trace : trace + 1])[0]
+        out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
+    return out
+
+
+class ParaViewExport:
+    """Writes a grid's ParaView folder. `dock` is the Slices dock (read only). `surfaces` (a
+    `Surfaces`) puts the grid's built surfaces in features.vtp; without it that file is empty."""
+
+    def __init__(self, session: Any, dock: Any, surfaces: Any = None) -> None:
         self.session = session
         self.dock = dock
+        self.surfaces = surfaces
         self._zero_probes: dict[tuple[str, str], float] = {}
         # picks_for scans every pick of the site, so a grid's count is read once for as long
         # as this object lives (the dialog's lifetime).
         self._pick_counts: dict[str, int] = {}
         #: Lines of the last `run` that could not be prepared and so are not in its export.
         self.skipped_lines: list[str] = []
+        #: Surfaces of the last `run` left out of features.vtp (their CRS cannot be reached).
+        self.skipped_surfaces: list[str] = []
 
     # ---- settings ----------------------------------------------------------
     def defaults(self, grid_id: str) -> VolumeChoice:
@@ -229,6 +302,14 @@ class ParaViewExport:
             raise ValueError(f"grid {grid_id!r} has no lines to export")
         return SourceChoice(grid_id, preset, choice.transform, keys)
 
+    def source_choice(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
+        """What the grid's cube is made from (preset, transform, lines); prepares nothing."""
+        return self._source(grid_id, choice)
+
+    def fill_settings(self, grid_id: str) -> Any:
+        """The grid's fill: method, max distance, search radius and smoothing."""
+        return self._finish(grid_id)
+
     def _frame(self, grid_id: str, choice: VolumeChoice) -> CubeFrame:
         grid = self.session.grid(grid_id)
         cells = frame_cells(grid.size_x, grid.size_y, choice.cell)
@@ -259,6 +340,9 @@ class ParaViewExport:
         dt = float(self.session.line_for_key(keys[0]).header.dt_ns)
         try:
             end: float | None = self._record_range(self._source(grid_id, self.defaults(grid_id)))[1]
+            # The dialog's spin box keeps four decimals: round up, so that "Down to" can hold
+            # a depth a build remembered (also rounded up) and the record's own end (R11).
+            end = math.ceil(end * 1e4 - 1e-6) / 1e4
         except ValueError:
             end = None  # no preset or no shared range: the summary says so
         return (float(cell) if isinstance(cell, float) and cell > 0.0 else None), dt, end
@@ -280,6 +364,7 @@ class ParaViewExport:
                 len(self.session.picks_for(k)) for k in source.line_keys
             )
         n_picks = self._pick_counts[grid_id]
+        states = self._surface_states(grid_id)
         return ExportSummary(
             folder=folder,
             replaces=folder.is_dir(),
@@ -290,10 +375,28 @@ class ParaViewExport:
             fill_method=str(self._finish(grid_id).method),
             n_picks=n_picks,
             n_lines=len(source.line_keys),
+            n_surfaces=len(states),
+            n_stale_surfaces=sum(1 for st in states if st.stale),
             export_bytes=self.estimate(grid_id, choice),
             cache_bytes=self.cache_bytes(grid_id, choice),
             free_bytes=int(shutil.disk_usage(Path(self.session.root)).free),
         )
+
+    def _surface_states(self, grid_id: str) -> list[Any]:
+        """The state of each built surface of the grid, in the surfaces' order."""
+        if self.surfaces is None:
+            return []
+        out = []
+        members = self.surfaces.layers.members_by_feature()  # one scan, not one per surface
+        folder = self.surfaces.folder(grid_id)
+        for record in self.surfaces.records():
+            if record.grid_id == grid_id:
+                state = self.surfaces.state(record.feature_id, members)
+                # The json names the files; a dialog refresh must not load every npz.
+                npz = (state.report or {}).get("files", {}).get("npz")
+                if state.built and npz and (folder / str(npz)).is_file():
+                    out.append(state)
+        return out
 
     def cache_bytes(self, grid_id: str, choice: VolumeChoice) -> int:
         """The bytes the fill cache will add: 0 when this grid's cache for these settings is
@@ -409,19 +512,40 @@ class ParaViewExport:
             finally:
                 own.dispose()
 
-    # ---- the run -------------------------------------------------------------
-    def run(
+    # ---- the fill ------------------------------------------------------------
+    def fill(
+        self, grid_id: str, choice: VolumeChoice, *, progress: Callable[[int, int], bool]
+    ) -> FilledGrid:
+        """The grid's prepared lines and its filled cube at `choice`, kept as a memory-mapped
+        file in `<site>/paraview/.cache/` (the export's own cache: an export and a surface
+        build of one grid and choice share it). `progress(done, total)` counts the fill's
+        levels; False cancels (ParaViewExportCancelled) and keeps nothing of this fill."""
+        state = {"done": 0, "total": 0}
+
+        def announce(frame: CubeFrame, z: ZAxis) -> None:
+            state["total"] = z.nz
+
+        def step(n: int = 1) -> None:
+            state["done"] += n
+            if not progress(state["done"], state["total"]):
+                raise ParaViewExportCancelled("cancelled")
+
+        try:
+            return self._fill_grid(grid_id, choice, step, announce)
+        except BaseException as exc:
+            traceback.clear_frames(exc.__traceback__)  # see `run`: a mapped file cannot be deleted
+            raise
+
+    def _fill_grid(
         self,
         grid_id: str,
         choice: VolumeChoice,
-        *,
-        progress: Callable[[int, int], bool],
-        paraview_path: str = "",
-    ) -> Path:
-        """Write the grid's folder and return it. `progress(done, total)` counts the fill
-        levels, the volume's trend slabs and the written slabs; False cancels
-        (ParaViewExportCancelled) and leaves any earlier export as it was."""
-        grid = self.session.grid(grid_id)
+        step: Callable[[int], None],
+        announce: Callable[[CubeFrame, ZAxis], None],
+    ) -> FilledGrid:
+        """Everything `run` does before the volume: the frame and source checks, the sweep of
+        unfinished cache files, the lines, the fill (or the kept one) and its opened map.
+        `announce(frame, z)` is called once the depth axis is known, before any `step`."""
         frame = self._frame(grid_id, choice)  # before anything is prepared or written
         source = self._source(grid_id, choice)
         folder = paraview_folder(self.session, grid_id)
@@ -434,26 +558,11 @@ class ParaViewExport:
         self.skipped_lines = sorted(k for k in source.line_keys if k not in got)
         t0, record_end = _lines_range(lines)
         t0, t1 = _clip(t0, record_end, choice)
-        z, nd = _levels(t0, t1, choice)
+        z, _nd = _levels(t0, t1, choice)
         finish = self._finish(grid_id)
         velocity = self.session.grid_depth_velocity(grid_id)
-        window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
-        slab = _slab_levels(frame.n_cells, window)
-        spans = _spans(nd, slab)
-        total = z.nz + 3 * len(spans)
-        state = {"done": 0}
-
-        def step(n: int = 1) -> None:
-            state["done"] += n
-            if not progress(state["done"], total):
-                raise ParaViewExportCancelled("export cancelled")
-
-        def tick_trend() -> bool:
-            step()
-            return True
-
+        announce(frame, z)
         cache_dir = folder.parent / ".cache"
-        partial = folder.with_name(folder.name + ".partial")
         cache_part: Path | None = None
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -477,6 +586,56 @@ class ParaViewExport:
                     if old != cache:
                         old.unlink(missing_ok=True)
             filled = np.lib.format.open_memmap(cache, mode="r")
+        except BaseException as exc:
+            # As `run` does: let go of the frames (and the map they hold) before deleting.
+            traceback.clear_frames(exc.__traceback__)
+            if cache_part is not None:
+                with contextlib.suppress(OSError):
+                    cache_part.unlink(missing_ok=True)
+            raise
+        return FilledGrid(lines, prov, frame, z, velocity, filled, list(self.skipped_lines), t1)
+
+    # ---- the run -------------------------------------------------------------
+    def run(
+        self,
+        grid_id: str,
+        choice: VolumeChoice,
+        *,
+        progress: Callable[[int, int], bool],
+        paraview_path: str = "",
+    ) -> Path:
+        """Write the grid's folder and return it. `progress(done, total)` counts the fill
+        levels, the volume's trend slabs and the written slabs; False cancels
+        (ParaViewExportCancelled) and leaves any earlier export as it was."""
+        grid = self.session.grid(grid_id)
+        folder = paraview_folder(self.session, grid_id)
+        cache_dir = folder.parent / ".cache"
+        partial = folder.with_name(folder.name + ".partial")
+        state = {"done": 0, "total": 0}
+        spans: list[tuple[int, int]] = []
+
+        def step(n: int = 1) -> None:
+            state["done"] += n
+            if not progress(state["done"], state["total"]):
+                raise ParaViewExportCancelled("export cancelled")
+
+        def tick_trend() -> bool:
+            step()
+            return True
+
+        def announce(frame: CubeFrame, z: ZAxis) -> None:
+            window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
+            spans.extend(_spans(_depth_levels(z), _slab_levels(frame.n_cells, window)))
+            state["total"] = z.nz + 3 * len(spans)
+
+        try:
+            got = self._fill_grid(grid_id, choice, step, announce)
+            frame, z = got.frame, got.z
+            lines, prov, velocity, filled = got.lines, got.prov, got.velocity, got.filled
+            nd = _depth_levels(z)
+            finish = self._finish(grid_id)
+            window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
+            slab = _slab_levels(frame.n_cells, window)
             vol = prepare_volume(
                 filled,
                 z,
@@ -495,10 +654,20 @@ class ParaViewExport:
                 shutil.rmtree(partial)
             partial.mkdir(parents=True)
             amp_p99 = self._write_cube(partial, vol, frame, choice, spans, step)
-            n_picks = self._write_picks(partial, lines, prov, frame, choice, velocity)
+            features = self._write_features(partial, grid_id, frame, choice)
+            n_picks = self._write_picks(
+                partial,
+                lines,
+                prov,
+                frame,
+                choice,
+                velocity,
+                {f["feature_id"]: f["index"] for f in features},
+            )
+            features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
             record = self._record(
-                grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks
+                grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks, features
             )
             record["skipped_lines"] = list(self.skipped_lines)
             write_scene_files(partial, record, paraview_path)
@@ -510,9 +679,6 @@ class ParaViewExport:
             # (the next run deletes what is left).
             traceback.clear_frames(exc.__traceback__)
             shutil.rmtree(partial, ignore_errors=True)
-            if cache_part is not None:
-                with contextlib.suppress(OSError):
-                    cache_part.unlink(missing_ok=True)
             if isinstance(exc, VolumeStopped):
                 raise ParaViewExportCancelled(str(exc)) from exc
             raise
@@ -695,40 +861,130 @@ class ParaViewExport:
         frame: CubeFrame,
         choice: VolumeChoice,
         velocity: Any,
+        feature_index: dict[str, int] | None = None,
     ) -> int:
-        """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity."""
-        on_zero = time_base_of(prov.steps) == TIME_BASE_TIME_ZERO
+        """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity.
+        `feature` is the index (in export.json's `features`) of the first built surface the
+        pick is in, or -1; `n_surfaces` counts the built ones."""
+        feature_index = feature_index or {}
         order = {line.key: i for i, line in enumerate(sorted(lines, key=lambda ln: ln.key))}
-        xy: list[np.ndarray] = []
-        times: list[float] = []
-        index: list[int] = []
-        for line in lines:
-            target = line.zero_ns if on_zero else 0.0
-            n = line.coords.shape[0]
-            for p in self.session.picks_for(line.key):
-                trace = min(max(int(p.trace), 0), n - 1)
-                xy.append(frame.to_local(line.coords[trace : trace + 1])[0])
-                times.append(float(retime_ns(p.time_ns, p.zero_ns or 0.0, target)))
-                index.append(order[line.key])
-        if times:
-            depth = np.asarray(velocity.depth_at(np.asarray(times, dtype=float)), dtype=float)
-            local = np.asarray(xy, dtype=float).reshape(-1, 2)
-            keep = np.isfinite(depth)
-            depth, local = depth[keep], local[keep]
-            line_index = np.asarray(index, dtype=np.int32)[keep]
-        else:
-            depth, local = np.empty(0), np.empty((0, 2))
-            line_index = np.empty(0, dtype=np.int32)
+        rows = [(line.key, p) for line in lines for p in self.session.picks_for(line.key)]
+        spots = place_picks(rows, lines, prov, frame, velocity)
+        placed = [p for p in spots if p is not None]
+        # A pick can be in several surfaces (`feature_id` lists them): `feature` is its first
+        # built one, `n_surfaces` how many built ones it is in.
+        built = [
+            [feature_index[i] for i in feature_ids(pick.feature_id) if i in feature_index]
+            for (_key, pick), spot in zip(rows, spots)
+            if spot is not None
+        ]
+        feature = np.asarray([b[0] if b else -1 for b in built], dtype=np.int32)
+        n_surfaces = np.asarray([len(b) for b in built], dtype=np.int32)
+        depth = np.asarray([p.depth_m for p in placed], dtype=float)
+        local = np.asarray([[p.x_m, p.y_m] for p in placed], dtype=float).reshape(-1, 2)
+        line_index = np.asarray([order[p.line_key] for p in placed], dtype=np.int32)
         points = (
             np.column_stack([local, -depth * choice.stretch]) if depth.size else np.empty((0, 3))
         )
         write_poly_data(
             folder / "picks.vtp",
             points,
-            {"true_depth_m": depth.astype(np.float32), "line": line_index},
+            {
+                "true_depth_m": depth.astype(np.float32),
+                "line": line_index,
+                "feature": feature,
+                "n_surfaces": n_surfaces,
+            },
             verts=[[i] for i in range(len(depth))],
         )
         return int(depth.size)
+
+    def _write_features(
+        self, folder: Path, grid_id: str, frame: CubeFrame, choice: VolumeChoice
+    ) -> list[dict[str, Any]]:
+        """features.vtp: every built surface of the grid, stale ones included (they show their
+        last build), as triangles at `(x, y, -depth * stretch)` in the cube's frame. Returns
+        each surface's scene entry (with its `feature_id`, which the caller removes)."""
+        points: list[np.ndarray] = []
+        depth: list[np.ndarray] = []
+        feature: list[np.ndarray] = []
+        stale: list[np.ndarray] = []
+        polys: list[list[int]] = []
+        entries: list[dict[str, Any]] = []
+        self.skipped_surfaces = []
+        count = 0
+        records = [] if self.surfaces is None else self.surfaces.records()
+        members = {} if self.surfaces is None else self.surfaces.layers.members_by_feature()
+        for record in records:
+            if record.grid_id != grid_id:
+                continue
+            built = self.surfaces.built(record.feature_id)
+            if built is None:
+                continue
+            index = len(entries)
+            is_stale = bool(self.surfaces.state(record.feature_id, members).stale)
+            local, triangles, _cells = surface_mesh(built.depth_m, built.cell)
+            if len(local):
+                # The build's own frame to world, then to this export's frame: the same unless
+                # the grid has moved since the build.
+                x_hat, y_hat = CubeFrame(
+                    built.origin, built.azimuth, built.cell, 1, 1, built.crs
+                ).axes()
+                world = (
+                    np.asarray(built.origin, dtype=float)
+                    + local[:, :1] * x_hat
+                    + local[:, 1:2] * y_hat
+                )
+                if str(built.crs) != str(frame.crs):
+                    world = self._reproject(world, str(built.crs), str(frame.crs))
+                    if world is None:
+                        self.skipped_surfaces.append(record.name)
+                        continue
+                xy = frame.to_local(world)
+                points.append(np.column_stack([xy, -local[:, 2] * choice.stretch]))
+                depth.append(local[:, 2].astype(np.float32))
+                feature.append(np.full(len(local), index, dtype=np.int32))
+                stale.append(np.full(len(local), 1 if is_stale else 0, dtype=np.uint8))
+                polys.extend((triangles + count).tolist())
+                count += len(local)
+            fit = built.report.get("fit", {})
+            entries.append(
+                {
+                    "feature_id": record.feature_id,
+                    "index": index,
+                    "name": record.name,
+                    "stale": is_stale,
+                    "picks": int(fit.get("picks", 0)),
+                    "within_2cm": int(fit.get("within_2cm", 0)),
+                    "on_holes": int(fit.get("on_holes", 0)),
+                }
+            )
+        write_poly_data(
+            folder / "features.vtp",
+            np.vstack(points) if points else np.empty((0, 3)),
+            {
+                "true_depth_m": np.concatenate(depth) if depth else np.empty(0, np.float32),
+                "feature": np.concatenate(feature) if feature else np.empty(0, np.int32),
+                "stale": np.concatenate(stale) if stale else np.empty(0, np.uint8),
+            },
+            polys=polys,
+        )
+        return entries
+
+    @staticmethod
+    def _reproject(world: np.ndarray, source: str, target: str) -> np.ndarray | None:
+        """`world` (n, 2) from the CRS `source` to `target`; None when either is unknown or a
+        point cannot be moved."""
+        src, dst = QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target)
+        if not (src.isValid() and dst.isValid()):
+            return None
+        transform = QgsCoordinateTransform(src, dst, QgsProject.instance().transformContext())
+        try:
+            moved = [transform.transform(QgsPointXY(float(x), float(y))) for x, y in world]
+        except Exception:  # noqa: BLE001 -- QgsCsException: a point outside the CRS's domain
+            return None
+        out = np.array([[p.x(), p.y()] for p in moved], dtype=float)
+        return out if np.isfinite(out).all() else None
 
     @staticmethod
     def _write_lines(
@@ -765,6 +1021,7 @@ class ParaViewExport:
         vol: Any,
         amp_p99: float,
         n_picks: int,
+        features: list[dict[str, Any]],
     ) -> dict[str, Any]:
         depths = vol.depths_m
         local = [frame.to_local(line.coords) for line in lines]
@@ -811,6 +1068,7 @@ class ParaViewExport:
                 "lines_along": along,
             },
             n_picks=int(n_picks),
+            features=features,
             nsgeo_version=str(nsgeo.__version__),
             written_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
