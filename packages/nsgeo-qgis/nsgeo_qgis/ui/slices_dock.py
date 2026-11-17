@@ -421,9 +421,13 @@ class SlicesDock(QgsDockWidget):
         #: applied by `apply_view` before `prepare()` would otherwise be
         #: silently overwritten the moment the async preparation completes.
         #: Consumed and cleared by `_on_prepared` every time it runs
-        #: (restore-triggered or not), and cleared early by
-        #: `_on_source_changed`/`set_included` too, so a manual change made
-        #: while a restore is still preparing cannot inherit its palette.
+        #: (restore-triggered or not), and dropped early (spec §2,
+        #: `_drop_restore_pending`) by a new site and by a source change -- by
+        #: hand (`_on_source_changed`, `set_included`), from the site list
+        #: (`_switch_resumed_grid`), or a grid the combo fell back to on its
+        #: own (`_sync_included`) -- so neither a change made while a restore
+        #: is still preparing nor the next survey can inherit its palette.
+        #: Never by a refresh that keeps the source (#162 item 2).
         #: Fix round 1, Minor: ALSO cleared right after `restore_cube`'s
         #: own `prepare()` call when that call turns out to have been a
         #: no-op (`self.engine.is_running` still `False` afterwards) --
@@ -439,7 +443,10 @@ class SlicesDock(QgsDockWidget):
         #: A restored record from before the time-zero clock, whose preset now
         #: sets one: `_on_prepared` moves its z range by the median zero and
         #: says so. Consumed by every `_on_prepared` (which also covers a preparation
-        #: with failed lines), and cleared by a manual source change.
+        #: with failed lines). Dropped (spec §2, `_drop_restore_pending`) by a
+        #: new site and by a source change -- by hand, from the site list, or a
+        #: grid the combo fell back to on its own -- and never by a refresh
+        #: that keeps the source (#162 item 2).
         self._pending_z_shift = False
 
         body = QWidget(self)
@@ -946,8 +953,13 @@ class SlicesDock(QgsDockWidget):
         for why one was rejected.
         """
         try:
-            # A restore's owed shift belongs to the site it was made in.
-            self._pending_z_shift = False
+            # Spec §2: what a restore owes belongs to the site it was made in.
+            # A new site (opened or closed) is checked once, here, and its
+            # values dropped before anything below can use one. A refresh on
+            # the same site keeps them: the source is as it was (#162 item 2).
+            new_site = self.session.site is not self._site_seen
+            if new_site:
+                self._drop_restore_pending()
             self._updating += 1
             try:
                 site = self.session.site
@@ -1033,9 +1045,23 @@ class SlicesDock(QgsDockWidget):
                     self._site.on_session_changed()
                 else:
                     self.set_scope("grid")  # the survey closed under the site
-            if self.session.site is not self._site_seen:
+            if new_site:
                 self._site_seen = self.session.site
                 self._site.forget()
+                # #102: the switch back to This grid just above, when the survey
+                # closed under the site, carried the site's time over and can
+                # owe a resolution. Both were the closed survey's, and so is
+                # the slider's index: with no axis to carry a time from,
+                # `_apply_resolution` keeps it (its range only clamps it), so
+                # the next survey would open at the old one's slice. Blocked,
+                # as every other placement of the slider is.
+                self._pending_top_ns = None
+                self._resolution_owed = False
+                self.slice_slider.blockSignals(True)
+                try:
+                    self.slice_slider.setValue(0)
+                finally:
+                    self.slice_slider.blockSignals(False)
         except Exception as exc:  # noqa: BLE001 -- a slot on five session signals
             _log(f"could not rebuild the slice source controls: {exc}")
 
@@ -1097,7 +1123,7 @@ class SlicesDock(QgsDockWidget):
             if getattr(self.session.line_for_key(key).placement, "grid_id", None) == grid_id
         )
 
-    def _sync_included(self) -> None:
+    def _sync_included(self, *, by_hand: bool = False) -> None:
         """Reset the inclusion set when the selected grid actually
         changed; otherwise read the grid's line record again
         (`_read_remembered_lines`, the site's reading, #100) while the set
@@ -1136,10 +1162,32 @@ class SlicesDock(QgsDockWidget):
         `_included` itself is already retried for the same reason -- once
         successfully seeded for a grid it does not re-run for that grid
         again, so a value the user later chooses is never clobbered.
+
+        #152 (spec §5): a grid change not made `by_hand` is the combo moving
+        on its own -- the selected grid was removed, or a site opened. That
+        grid opens on the preset Whole site draws it with
+        (`site_scope.default_preset`, as #106 does for a switch from the site
+        list), selected inside the `_updating` guard and written to no
+        record. It is a source change, so a restore's pending values go too
+        (spec §2). A grid picked by hand (`_on_source_changed`) keeps the
+        preset showing, and `_remember_source` then records it.
         """
         grid_id = self.grid_combo.currentText() or None
         if grid_id != self._last_grid_id:
             self._last_grid_id = grid_id
+            if not by_hand:
+                self._drop_restore_pending()
+                preset = (
+                    site_scope.default_preset(self.session, grid_id)
+                    if grid_id is not None and self.session.is_open
+                    else None
+                )
+                if preset is not None and self.preset_combo.findText(preset) >= 0:
+                    self._updating += 1
+                    try:
+                        self.preset_combo.setCurrentText(preset)
+                    finally:
+                        self._updating -= 1
             self._included = self._default_included(grid_id)
             self._included_is_default = True
             self._dz_z_seeded_for = None
@@ -1414,8 +1462,7 @@ class SlicesDock(QgsDockWidget):
         # own docstring for why a manual change clears it here and in
         # `_on_source_changed` rather than leaving `_on_prepared` to apply
         # a palette this choice has nothing to do with.
-        self._pending_palette = None
-        self._pending_z_shift = False
+        self._drop_restore_pending()
         self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
@@ -1592,12 +1639,11 @@ class SlicesDock(QgsDockWidget):
             # `_pending_palette`'s own docstring for why this must not
             # inherit a palette a still-preparing `restore_cube` owes a
             # DIFFERENT preparation.
-            self._pending_palette = None
-            self._pending_z_shift = False
+            self._drop_restore_pending()
             self._grid_refusal = None
             self.show_warnings()
             self._mark_cube_unsaved()
-            self._sync_included()
+            self._sync_included(by_hand=True)
             self._remember_source()
             self._update_included_label()
             self.prepare()
@@ -1722,6 +1768,17 @@ class SlicesDock(QgsDockWidget):
             )
         self.error.emit(old_cube_note(-median))
         return True
+
+    def _drop_restore_pending(self) -> None:
+        """Forget what a restore still owes: its depth shift and its palette.
+
+        Spec §2: they belong to the site and source the restore was made for.
+        Called when a site opens or closes (`rebuild_source`) and on a source
+        change: by hand (`_on_source_changed`, `set_included`), from the site
+        list (`_switch_resumed_grid`), or a grid the combo fell back to on its
+        own (`_sync_included`). Never on a refresh that keeps the source."""
+        self._pending_z_shift = False
+        self._pending_palette = None
 
     def _apply_owed_z_shift(self) -> None:
         """After a `prepare()` that dispatched nothing: apply a shift a restore owes.
@@ -3403,8 +3460,7 @@ class SlicesDock(QgsDockWidget):
         It opens on the preset the site drew the grid with (#106): its
         remembered one, else the first (`site_scope.default_preset`), not
         whatever This grid's preset combo showed for the grid it left."""
-        self._pending_palette = None  # a source change, not a restore
-        self._pending_z_shift = False
+        self._drop_restore_pending()  # a source change, not a restore
         self._updating += 1
         try:
             self.grid_combo.setCurrentText(grid_id)

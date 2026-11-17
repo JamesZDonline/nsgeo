@@ -2145,6 +2145,29 @@ def test_a_carried_time_never_overrides_a_later_resolution_change(plugin):
     assert dock._pending_top_ns is None
 
 
+def test_a_survey_opened_after_closing_one_in_whole_site_starts_at_its_first_slice(
+    plugin, site3_factory
+):
+    """#102: closing a survey under Whole site switches back to This grid, which
+    carries the site's time over. That time was the closed survey's, so the
+    next survey opened at it instead of at its own first slice."""
+    dock = whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    _events()
+    plugin.session.save()
+    plugin.session.close_site()
+    _events()
+    assert dock.scope() == "grid"
+    assert dock._pending_top_ns is None
+    assert not dock._resolution_owed
+
+    plugin.session.open_site(site3_factory().json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+
+    assert dock.slice_slider.value() == 0
+
+
 def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugin, monkeypatch):
     monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
     dock = plugin.slices_dock

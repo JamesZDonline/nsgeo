@@ -35,7 +35,7 @@ from nsgeo_qgis.slices_plan import (
     smallest_safe_cell,
     transform_names,
 )
-from nsgeo_qgis.ui import folds
+from nsgeo_qgis.ui import folds, site_scope
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
@@ -2644,6 +2644,131 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     assert session.slice_source("A")["lines"] is None
 
 
+# ---- #152: the grid the panel falls back to ---------------------------------
+def _another_palette(dock):
+    """An offered palette other than the one showing (the default after a preparation)."""
+    shown = dock.palette_combo.currentText()
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    return next(name for name in offered if name != shown)
+
+
+def _second_survey(tmp_path, presets=("p",)):
+    """Another survey on disk, under `tmp_path / "second"`: grid A, three
+    synthetic lines, and `presets` (each the dewow `PRESET`). Its grid has no
+    remembered slice source."""
+    folder = tmp_path / "second"
+    folder.mkdir()
+    other = SiteSession()
+    other.new_site(folder)
+    other.add_grid(GRID)
+    other.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+    )
+    for name in presets:
+        other.site.presets[name] = list(PRESET)
+    other.save()
+    return other.json_path
+
+
+def test_a_grid_the_combo_falls_back_to_opens_on_the_preset_whole_site_draws_it_with(
+    docked_two_grids,
+):
+    """#152: removing the selected grid moves the combo on its own. The grid it
+    falls back to used to keep the removed grid's preset; it opens on the one
+    Whole site draws it with, and nothing is written to its record."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")  # by hand: A remembers q
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("A")["preset"] == "q"
+    assert session.slice_source("B") in (None, {})
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == site_scope.default_preset(session, "B") == "p"
+    assert dock.engine.choice.preset == "p"
+    assert not session.slice_source("B")
+
+
+def test_a_grid_picked_by_hand_still_carries_the_preset_over(docked_two_grids):
+    """Guard (holds today): #152's rule is for a grid the combo moves to on its
+    own. A grid picked by hand keeps the preset showing, and the pick records
+    it as that grid's source."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.preset_combo.currentText() == "q"
+    assert session.slice_source("B")["preset"] == "q"
+
+
+def test_opening_a_survey_does_not_carry_a_same_named_preset_over(docked_two_grids, tmp_path):
+    """Guard (holds today): #152 (spec §5) counts the first grid of a survey just
+    opened as one the combo moved to on its own. A preset the last survey showed
+    is no choice made for it, even when the new survey has one of the same name.
+    It already opens on `p`: `open_site` closes the open survey first, and that
+    `site_closed` empties the preset combo, so the refill selects the first
+    preset. This pins it now that a site open goes through the fallback rule."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.preset_combo.currentText() == "q"
+    session.save()
+
+    session.open_site(_second_survey(tmp_path, presets=("p", "q")))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert session.slice_source("A") is None
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.engine.choice.preset == "p"
+
+
+def test_removing_the_grid_while_its_restore_prepares_drops_the_restore(docked_two_grids):
+    """Review Focus 1: the restored grid is removed before its preparation
+    lands, so the combo falls back to another grid. That is a source change:
+    the restored palette and shift are dropped, not applied to that grid."""
+    dock, session = docked_two_grids
+    session.site.presets["z"] = list(TIME_ZERO_PRESET)
+    session.presets_changed.emit()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("z")  # A's cube on a preset that sets time zero
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()  # B's too: the same transform
+    other = _another_palette(dock)
+    _owed_record(dock, session, palette=other)  # no clock marked: it owes a shift
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock._pending_palette is None
+    assert not dock._pending_z_shift
+    assert dock.palette_combo.currentText() == default
+    assert not [m for m in errors if "first break" in m], errors  # no shift landed on B
+
+
 # ---- #71: each grid remembers its own resolution ----------------------------
 def _switch(dock, grid_id):
     """Pick `grid_id` in This grid's combo, then let the change land."""
@@ -3762,10 +3887,10 @@ def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docke
 # ---- #97: cubes on the time-zero clock ------------------------------------
 
 
-def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None):
+def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None, palette="amp_black_high"):
     """A record as an earlier build wrote it: no `time_base`, z on the radar clock."""
     record = _save_cube(
-        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
     )
     record.pop("time_base", None)
     if time_base is not None:
@@ -3999,11 +4124,85 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     assert errors.count(old_cube_note(-dock.engine.median_zero())) == 1
 
 
-def test_rebuilding_the_source_drops_an_owed_shift(docked_zeroed):
-    dock, _session = docked_zeroed
-    dock._pending_z_shift = True
+@pytest.mark.parametrize("signal", ["lines_changed", "grids_changed", "presets_changed"])
+def test_an_edit_while_a_restore_prepares_keeps_its_shift_and_note(docked_zeroed, signal):
+    """#162 item 2: an edit that leaves the source as it was does not forget
+    what a restore still owes. `rebuild_source` answers all three signals, and
+    it used to drop the owed shift on every one: the cube came back on the
+    radar clock, a line zero away, under its own name and with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
+    getattr(session, signal).emit()
+
+    assert dock.engine.wait_for_preparation(20_000)
+    _assert_shifted_once(dock, errors)
+
+
+def test_rebuilding_the_source_keeps_what_a_restore_owes_on_the_same_site(docked_zeroed):
+    """#162 item 2 (spec §2): only a new site or a source change drops a
+    restore's pending values. A rebuild on the same site, with the source as it
+    was, keeps both for the preparation still running."""
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    other = _another_palette(dock)
+    _prepared_with_owed_record(dock, session, palette=other)  # engine cleared
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
     dock.rebuild_source()
-    assert dock._pending_z_shift is False
+
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+
+def test_a_restored_palette_does_not_carry_into_the_next_survey(docked, tmp_path):
+    """#163 item 4: a palette a restore still owes belongs to the survey it was
+    made in. Closing that survey mid-preparation used to leave it pending, and
+    the next survey's first preparation applied it."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    dock.engine.clear()
+    dock.restore_cube("A__test")
+    assert dock.engine.is_running
+
+    session.save()
+    session.close_site()
+    assert dock._pending_palette is None
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.palette_combo.currentText() == default
+
+
+def test_a_survey_opened_after_closing_one_in_this_grid_starts_at_its_first_slice(docked, tmp_path):
+    """#102, without Whole site: the slider's own index was the closed survey's.
+    With no axis left to carry a time from, nothing placed it again, so the next
+    survey opened at the old one's slice."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    assert dock.slice_slider.value() > 0
+    session.save()
+    session.close_site()
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+
+    assert dock.slice_slider.value() == 0
 
 
 def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):
