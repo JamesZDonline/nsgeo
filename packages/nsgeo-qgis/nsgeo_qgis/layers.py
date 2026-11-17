@@ -617,8 +617,11 @@ class SiteLayers(QObject):
             return
         if (not site.grids and not site.lines) or self.crs() is None:
             self._clear_derived_tables()
+            self._drop_rtk_gaps()
             return
         try:
+            if not self._has_gps_lines():
+                self._drop_rtk_gaps()
             self.ensure_tables()
         except Exception as exc:  # noqa: BLE001 -- see rule 4 above
             # ensure_tables() already contains each table's own setup (see
@@ -897,6 +900,27 @@ class SiteLayers(QObject):
             self.session.picks_changed.emit()
         return len(changes)
 
+    def _has_gps_lines(self) -> bool:
+        site = self.session.site
+        return site is not None and any(
+            isinstance(line.placement, TrackPlacement) for line in site.lines
+        )
+
+    def _drop_rtk_gaps(self) -> None:
+        """`rtk_gaps` belongs to a site with GPS lines (walkthrough G9): when the
+        last one is gone, empty the table so a later reader of the file sees no
+        stale gaps, then take the layer out of the group and the project. The
+        table itself stays in the GeoPackage."""
+        layer = self.layers.get("rtk_gaps")
+        if layer is None:
+            return
+        if not sip.isdeleted(layer):
+            try:
+                self._refill("rtk_gaps", [])
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                _log(f"could not clear 'rtk_gaps': {exc}", Qgis.MessageLevel.Critical)
+        self._drop_loaded_layer("rtk_gaps")
+
     def _clear_derived_tables(self) -> None:
         """The site has no grid and no line (or no CRS), so there is nothing
         to derive geometry from. The tables were already created while a grid
@@ -915,7 +939,10 @@ class SiteLayers(QObject):
         path = str(self.session.gpkg_path)
         crs = self.crs()
         assert crs is not None
+        gps = self._has_gps_lines()
         for name, (wkb, spec) in TABLES.items():
+            if name == "rtk_gaps" and not gps:
+                continue  # only a site with GPS lines carries it
             try:
                 self._ensure_table(path, name, wkb, spec, crs)
             except Exception as exc:  # noqa: BLE001 -- see rule 4 above
@@ -936,7 +963,7 @@ class SiteLayers(QObject):
             self._group = group
         opened = []
         for name in LEGEND_ORDER:
-            if name in self.layers:
+            if name in self.layers or (name == "rtk_gaps" and not gps):
                 continue
             try:
                 layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
@@ -1984,6 +2011,8 @@ class SiteLayers(QObject):
         over `END_LIMIT_M`, along the line's own trace positions."""
         site = self.session.site
         assert site is not None
+        if "rtk_gaps" not in self.layers:
+            return  # a site with no GPS line has no gap layer
         layer_fields = self.layers["rtk_gaps"].fields()
         feats = []
 
@@ -2040,7 +2069,9 @@ class SiteLayers(QObject):
         # Dotted and heavier than the survey lines, above them, in a colour no
         # grid or cut uses. Not identifiable and in no selection slot of
         # `MapLink`, so a click on a gap never navigates.
-        layer = self.layers["rtk_gaps"]
+        layer = self.layers.get("rtk_gaps")
+        if layer is None:
+            return
         symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
         symbol.setColor(QColor(RTK_GAP_COLOUR))
         symbol.setWidth(0.8)

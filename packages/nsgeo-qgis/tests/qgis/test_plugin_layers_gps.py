@@ -247,7 +247,7 @@ def test_tape_lines_are_drawn_as_before_with_placed_by_tape(tape_site):
     assert f["without_rtk_m"] == NULL
     assert f["grid_id"] == "A"
     assert f["axis"] == "y"
-    assert layers.feature_count("rtk_gaps") == 0
+    assert "rtk_gaps" not in layers.layers
 
 
 def test_gps_and_tape_lines_share_a_site_and_the_no_grid_category_is_styled(site):
@@ -402,3 +402,73 @@ def test_a_tape_only_site_has_no_no_grid_row(tape_site):
     cats = list(layers.layers["lines"].renderer().categories())
     assert [str(c.value()) for c in cats] == ["A"]
     assert [c.label() for c in cats] == ["A"]
+
+
+def _group_names(layers):
+    return [c.layer().name() for c in layers.group.findLayers()]
+
+
+def _gpkg_has_gaps_table(session):
+    return QgsVectorLayer(f"{session.gpkg_path}|layername=rtk_gaps", "x", "ogr").isValid()
+
+
+def test_a_tape_only_site_has_no_rtk_gaps(tape_site):
+    session, layers, tmp = tape_site
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.5, 0.0, 1, p.stem))])
+    assert "rtk_gaps" not in _group_names(layers)
+    assert "rtk_gaps" not in layers.layers
+    assert not _gpkg_has_gaps_table(session)
+
+
+def test_the_first_gps_line_brings_rtk_gaps_and_the_last_takes_it_away(site):
+    session, layers, tmp = site
+    session.add_lines([gps_line(tmp / "raw", "FILE__001.DZT", {15: 4, 75: 5, 125: 4, 185: 4})])
+    names = _group_names(layers)
+    assert names.index("cuts") < names.index("rtk_gaps") < names.index("lines")
+    assert layers.feature_count("rtk_gaps") == 1
+    layer = layers.layers["rtk_gaps"]
+    layer_id = layer.id()
+    session.remove_line("raw/FILE__001.DZT")
+    assert "rtk_gaps" not in layers.layers
+    assert "rtk_gaps" not in _group_names(layers)
+    assert layers.project.mapLayer(layer_id) is None
+    session.add_lines([gps_line(tmp / "raw", "FILE__001.DZT", {15: 4, 75: 5, 125: 4, 185: 4})])
+    names = _group_names(layers)
+    assert names.index("cuts") < names.index("rtk_gaps") < names.index("lines")
+    assert layers.feature_count("rtk_gaps") == 1
+
+
+def test_reopening_a_tape_only_site_does_not_open_an_existing_rtk_gaps_table(site):
+    session, layers, tmp = site
+    session.add_lines([gps_line(tmp / "raw", "FILE__001.DZT", {15: 4, 75: 5, 125: 4, 185: 4})])
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, CRS, 0.5))
+    session.remove_line("raw/FILE__001.DZT")
+    session.save()
+    assert _gpkg_has_gaps_table(session)  # the table stays; the layer does not
+    layers.detach()
+    project = QgsProject.instance()
+    project.clear()
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp / "survey.nsgeo.json")
+    try:
+        assert "rtk_gaps" not in layers2.layers
+        assert "rtk_gaps" not in _group_names(layers2)
+        assert _gpkg_has_gaps_table(again)
+    finally:
+        layers2.detach()
+
+
+def test_a_tape_only_refresh_logs_nothing_critical(tape_site, monkeypatch):
+    import nsgeo_qgis.layers as mod
+
+    logged = []
+    monkeypatch.setattr(mod, "_log", lambda msg, level=None: logged.append((msg, level)))
+    session, layers, tmp = tape_site
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.5, 0.0, 1, p.stem))])
+    layers.refresh()
+    assert [m for m, _ in logged if "rtk_gaps" in m] == []
