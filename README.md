@@ -119,9 +119,11 @@ release's notes list everything in it.
   fix marked), the Survey panel, and a destagger you can type. Building.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
-  dots on the outer edge of its top band, ready to edit and save like
+  dots on the leading edge of its band, ready to edit and save like
   clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
-  switching velocity mode on first. Being designed.
+  switching velocity mode on first. Built and checked against the author's
+  own hand fits and an independent migration check; in review before its
+  walkthrough.
 - **Slices panel: scroll wheel, typing, width and notes** ([#177], [#176],
   [#105], [#121], and parts of [#157], [#163] and [#50]). The scroll wheel no
   longer moves a line to another grid in Edit lines until you click its Grid
@@ -172,7 +174,9 @@ Grouped by area. The order within a group is not a priority.
   placement together is done).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
-  ([#187]); exports record where the grid's velocity came from ([#188]).
+  ([#187]); exports record where the grid's velocity came from ([#188]); show
+  migration's velocity beside a traced one, as a second, independent number
+  ([#195]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); a frequency profile
@@ -248,6 +252,7 @@ Grouped by area. The order within a group is not a priority.
 [#187]: https://github.com/JamesZDonline/nsgeo/issues/187
 [#188]: https://github.com/JamesZDonline/nsgeo/issues/188
 [#193]: https://github.com/JamesZDonline/nsgeo/issues/193
+[#195]: https://github.com/JamesZDonline/nsgeo/issues/195
 
 ## Why
 
