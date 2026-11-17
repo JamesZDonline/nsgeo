@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -248,6 +249,9 @@ def place_picks(
         x, y = frame.to_local(line.coords[trace : trace + 1])[0]
         out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
     return out
+
+
+_log = logging.getLogger(__name__)
 
 
 class ParaViewExport:
@@ -479,6 +483,51 @@ class ParaViewExport:
             stack.source = Radargram.from_profile(profiles[self.session.channel(key)])
             self._zero_probes[memo] = float(stack.zero_ns())
         return self._zero_probes[memo]
+
+    def pick_depths(self, grid_id: str, rows: Sequence[tuple[str, Any]]) -> list[float | None]:
+        """Each `(line_key, pick)`'s true depth in metres, as `place_picks` gives it, or None
+        (a cut, a line outside the grid's source, a non-finite time or depth). Prepares no
+        line: at most one file per line is read, once, and only when the preset sets time zero."""
+        out: list[float | None] = [None] * len(rows)
+        try:
+            source = self.source_choice(grid_id, self.defaults(grid_id))
+        except ValueError:
+            return out
+        steps = list(self.session.site.presets.get(source.preset, []))
+        on_zero = time_base_of(steps) == TIME_BASE_TIME_ZERO
+        keys = set(source.line_keys)
+        zeros: dict[str, float | None] = {}
+        found: list[tuple[int, float]] = []
+        for i, (key, p) in enumerate(rows):
+            if key not in keys:
+                continue
+            target = 0.0
+            if on_zero:
+                if key not in zeros:
+                    try:
+                        zeros[key] = self._zero_of(key, steps)
+                    except Exception:
+                        _log.warning("pick depths: no time zero for line %s", key, exc_info=True)
+                        zeros[key] = None
+                zero = zeros[key]
+                if zero is None:
+                    continue
+                target = zero
+            t = float(retime_ns(p.time_ns, p.zero_ns or 0.0, target))
+            if math.isfinite(t):
+                found.append((i, t))
+        if not found:
+            return out
+        depth = np.asarray(
+            self.session.grid_depth_velocity(grid_id).depth_at(
+                np.asarray([f[1] for f in found], dtype=float)
+            ),
+            dtype=float,
+        )
+        for (i, _), d in zip(found, depth):
+            if math.isfinite(float(d)):
+                out[i] = float(d)
+        return out
 
     # ---- the lines ----------------------------------------------------------
     def _prepared(self, source: SourceChoice) -> tuple[list[PreparedLine], Any]:
