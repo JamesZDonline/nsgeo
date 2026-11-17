@@ -134,9 +134,10 @@ def test_a_fading_leg_drops_the_faded_traces():
 )
 def test_a_fading_leg_among_layers_drops_the_faded_traces():
     # The layers' lobes on the raw box reach 0.2-0.3 of the band's, above the
-    # faint floor, so the dots run on along them past the leg's end and the
-    # velocity comes out 0.5-2% fast. A candidate fix judges the floor on the
-    # box with its row means removed.
+    # faint floor, so the dots run on along them past the leg's end (to 54
+    # traces) and the velocity comes out 1.7-1.9% slow at about 3.5 sigma.
+    # Judging the floor on the box with its row means removed ends the dots at
+    # 27-33 traces, but moves real hand-fit results past their rules (#140).
     data, t, x = _scene(
         [Planted(100, 15.0, 0.07, fade_from_trace=25)],
         layers=real_layers(N_SAMPLES, 0.25 * REAL_PERIOD_NS),
