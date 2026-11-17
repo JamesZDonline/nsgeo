@@ -115,7 +115,7 @@ from nsgeo_qgis.paraview_scene import (
     launch_failed_message,
 )
 from nsgeo_qgis.scene3d import Scene3D
-from nsgeo_qgis.scene3d_plan import BUTTON_TIP
+from nsgeo_qgis.scene3d_plan import BUTTON_TIP, VIEW_FAILED
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
@@ -793,6 +793,13 @@ class NsgeoPlugin:
                 "could not save changes before unloading; unsaved changes will be lost",
                 Qgis.MessageLevel.Critical,
             )
+        if self.scene3d is not None:
+            # Before the docks and the surface layers it reads: it closes the view and
+            # removes the picks layer it added.
+            with contextlib.suppress(Exception):
+                self.session.site_closed.disconnect(self._close_view3d)
+            self.scene3d.dispose()
+            self.scene3d = None
         if self.surfaces_dock is not None:
             self.surfaces_dock.dispose()
         if self.slices_dock is not None:
@@ -874,13 +881,6 @@ class NsgeoPlugin:
             # is orphaned by this plugin unloading around it.
             self.slice_layer.dispose()
             self.slice_layer = None
-        if self.scene3d is not None:
-            # Before the surface layers and the docks it reads: it closes the view and
-            # removes the picks layer it added.
-            with contextlib.suppress(Exception):
-                self.session.site_closed.disconnect(self._close_view3d)
-            self.scene3d.dispose()
-            self.scene3d = None
         if self.surface_layers is not None:
             # Before layers.detach(): its group lives inside the site's, which detach removes.
             self.surface_layers.dispose()
@@ -916,6 +916,8 @@ class NsgeoPlugin:
             self.scene3d.open()
         except (ValueError, RuntimeError) as exc:
             self.message(str(exc), Qgis.MessageLevel.Warning)
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(VIEW_FAILED.format(error=exc), Qgis.MessageLevel.Critical)
 
     def _close_view3d(self, *_: Any) -> None:
         try:

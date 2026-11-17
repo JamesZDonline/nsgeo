@@ -19,6 +19,7 @@ NO_GRID: str = "Add a grid first: the 3-D view shows one grid."
 BUTTON_TIP: str = (
     "Open QGIS's 3-D view of the grid the Slices panel shows: its picks at depth and its surfaces"
 )
+VIEW_FAILED: str = "Could not open the 3-D view: {error}"
 PICKS_LAYER_NAME: str = "Picks at depth (3D view)"
 VIEW_REFUSED: str = (
     "QGIS would not open the 3-D view: a view named 'nsgeo 3D' is already open and could not "

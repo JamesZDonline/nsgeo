@@ -14,7 +14,14 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.slices import SurfaceSettings
 from nsgeo_qgis.scene3d import Scene3D
-from nsgeo_qgis.scene3d_plan import BUTTON_TIP, NO_GRID, VIEW_NAME, VIEW_REFUSED, view_title
+from nsgeo_qgis.scene3d_plan import (
+    BUTTON_TIP,
+    NO_GRID,
+    VIEW_FAILED,
+    VIEW_NAME,
+    VIEW_REFUSED,
+    view_title,
+)
 from nsgeo_qgis.surface_layers import SurfaceLayers
 from plugin_testing import GRID, spin_until, synthetic_dzt
 from qgis.core import QgsProject, QgsReadWriteContext
@@ -329,6 +336,54 @@ def test_a_scope_change_reaches_the_scene(surface_plugin):
     assert seen == ["site", "grid"]
 
 
+def test_a_scope_change_schedules_a_refresh_of_an_open_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.open_view3d()
+    refreshed = []
+    real = plugin.scene3d.refresh
+    plugin.scene3d.refresh = lambda: (refreshed.append(1), real())
+    plugin.slices_dock.set_scope("site")
+    assert plugin.scene3d._timer.isActive()
+    assert spin_until(lambda: refreshed)
+    assert plugin.scene3d.grid_id == GRID.id
+
+
+def test_the_scene_follows_the_combo_through_repeat_switches_and_keeps_its_grid_in_site(
+    surface_plugin, tmp_path
+):
+    plugin = surface_plugin
+    session = plugin.session
+    session.add_grid(Grid(B, (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    paths = [synthetic_dzt(tmp_path / "rawb", f"B__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    session.add_lines(
+        [Line.open(p, GridPlacement(B, "y", 0.5 + i, 0.0, 1, p.stem)) for i, p in enumerate(paths)]
+    )
+    combo = plugin.slices_dock.grid_combo
+    assert combo.findText(B) >= 0
+    plugin.open_view3d()
+    assert plugin.scene3d.grid_id == GRID.id
+    for want in (B, A, B, A):
+        combo.setCurrentText(want)
+        assert spin_until(lambda want=want: plugin.scene3d.grid_id == want), want
+    plugin.slices_dock.set_scope("site")
+    combo.setCurrentText(B)
+    spin_until(lambda: False, timeout_ms=500)
+    assert plugin.scene3d.grid_id == A
+
+
+def test_an_unexpected_failure_opening_the_view_is_reported_not_raised(surface_plugin):
+    plugin = surface_plugin
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+
+    def boom():
+        raise OSError("disk gone")
+
+    plugin.scene3d.open = boom
+    plugin.open_view3d()
+    assert messages == [VIEW_FAILED.format(error=OSError("disk gone"))]
+
+
 def test_open_with_no_grid_warns_in_the_message_bar_and_does_not_raise(surface_plugin):
     plugin = surface_plugin
     plugin.slices_dock.grid_combo.clear()
@@ -349,16 +404,25 @@ def test_a_refused_view_warns_in_the_message_bar(surface_plugin):
 
 def test_closing_the_site_closes_the_view(surface_plugin):
     plugin = surface_plugin
+    plugin.surfaces.create("Bowl", plugin.pick_fids, SurfaceSettings(strength=0.0))
+    (record,) = plugin.surfaces.records()
+    plugin.surfaces.build([record.feature_id], progress=_noop)
+    plugin.surface_layers.sync()
     plugin.open_view3d()
     assert plugin.scene3d.is_open() and _scene_layers_in_project()
+    shown = list(plugin.surface_layers.layers_by_feature().values())
+    assert shown and all(lyr.renderer3D() is not None for lyr in shown)
     plugin.session.close_site()
     assert not plugin.scene3d.is_open()
     assert not _scene_layers_in_project()
-    assert all(
-        lyr.renderer3D() is None
-        for lyr in QgsProject.instance().mapLayers().values()
-        if hasattr(lyr, "renderer3D")
-    )
+    assert all(lyr.renderer3D() is None for lyr in shown if _alive(lyr))
+    assert not plugin.surface_layers.layers_by_feature()
+
+
+def _alive(layer):
+    from qgis.PyQt import sip
+
+    return not sip.isdeleted(layer)
 
 
 def test_a_failing_close_does_not_escape_the_site_closed_slot(surface_plugin):
