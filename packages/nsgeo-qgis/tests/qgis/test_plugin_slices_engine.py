@@ -1899,31 +1899,31 @@ def test_a_stored_resolution_past_the_limit_builds_nothing_once_lines_arrive(sou
 # ---- #162 item 1: the radar-clock first break of the prepared lines ----------
 
 
-def _banded_engine(tmp_path, band_rows):
-    """An engine on three banded lines (`_banded_dzt`; None for a silent line,
-    every sample zero) under "radar", a preset with no Time zero step."""
-    from test_plugin_slices_dock import _banded_dzt
+def _banded_engine(tmp_path, band_rows, rise=0.0):
+    """An engine on one line per entry of `band_rows`, under "radar", a preset
+    with no Time zero step. Each line is quiet noise with a flat band at its row,
+    as `_banded_dzt` in the dock tests writes it, rising to `rise` of the band
+    over the two rows before; None is a silent line, every sample zero."""
     from tests.synthetic import write_dzt
 
-    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
-    paths = []
+    lines = []
     for i, row in enumerate(band_rows):
-        name = f"FILE__00{i + 1}.DZT"
+        path = tmp_path / "raw" / f"FILE__00{i + 1}.DZT"
+        rng = np.random.default_rng(i)
+        data = (rng.normal(size=(512, 60)) * 1e4).astype(np.int32)  # quiet: the band breaks
         if row is None:
-            (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
-            write_dzt(tmp_path / "raw" / name, np.zeros((512, 60), dtype=np.int32))
-            paths.append(tmp_path / "raw" / name)
+            data[:] = 0
         else:
-            paths.append(_banded_dzt(tmp_path / "raw", name, row))
-    session.add_lines(
-        [
-            Line.open(p, GridPlacement("A", "y", 1.0 + i, 0.0, 1, p.stem))
-            for i, p in enumerate(paths)
-        ]
-    )
+            data[row : row + 4, :] = 5_000_000
+            if rise:
+                data[row - 2 : row, :] = int(rise * 5_000_000)
+        write_dzt(path, data)
+        lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
     session.site.presets["radar"] = []
     errors: list[str] = []
     engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
@@ -1963,6 +1963,25 @@ def test_median_first_break_leaves_out_a_line_with_no_signal(qgis_app, tmp_path)
         _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
         assert errors == [] and engine.line_count == 3
         assert engine.median_first_break() is None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("transform", [NO_TRANSFORM, "amp_abs", "amp_square"])
+def test_median_first_break_is_where_the_amplitude_breaks_under_the_transform(
+    qgis_app, tmp_path, transform
+):
+    """Time zero picks the first row whose trace-mean |amplitude| reaches 0.2 of
+    its peak. These lines rise to 0.3 of the band two rows before it, so that
+    rise is the break under every transform that keeps |x|. Squared, the rise is
+    0.09 of the peak: read as prepared, `amp_square` (the default) picked the
+    band itself, two rows late, as it was two samples late on both real surveys."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=transform, preset="radar")
+        assert errors == []
+        line = engine.prepared_lines()[0]
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 38 * line.dt_ns)
     finally:
         engine.dispose()
 

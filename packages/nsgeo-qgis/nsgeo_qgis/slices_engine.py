@@ -462,14 +462,24 @@ class SliceEngine(QObject):
         zero step, which is when it is asked for (#162 item 1).
 
         Picked by the Time zero step itself: on a line whose zero is 0.0, the
-        zero it sets is `first_break_ns`. A line with no signal has no first
-        break (the step refuses it), and is left out rather than read as row 0,
-        as `first_break_ns` would. None with nothing prepared or no break on any
-        line."""
+        zero it sets is `first_break_ns`. The rule averages each row's
+        |amplitude|, so a squared line (the `amp_square` transform, the default)
+        is read through its square root, which gives that back exactly. Read as
+        prepared, the square reaches 0.2 of its peak only where the amplitude
+        reaches 0.45 of its own, and the pick ran two samples (0.43 ns) late on
+        both real surveys: on the campus lines, nearly the whole shift. Any other
+        transform is read as prepared: |x| is what the rule averages anyway, and
+        an envelope picks within a sample.
+
+        A line with no signal has no first break (the step refuses it), and is
+        left out rather than read as row 0, as `first_break_ns` would. None with
+        nothing prepared or no break on any line."""
         pick = build_step("time_zero", threshold=threshold)
+        squared = self._choice is not None and self._choice.transform == "amp_square"
         breaks = []
         for line in self._lines:
-            rg = Radargram(data=line.data, dt_ns=line.dt_ns, t0_ns=line.t0_ns)
+            data = np.sqrt(line.data) if squared else line.data
+            rg = Radargram(data=data, dt_ns=line.dt_ns, t0_ns=line.t0_ns)
             try:
                 breaks.append(float(pick.apply(rg).zero_ns))
             except ValueError:  # "Time zero found no first arrival"

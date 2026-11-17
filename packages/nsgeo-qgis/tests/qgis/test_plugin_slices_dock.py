@@ -4662,6 +4662,31 @@ def test_a_real_data_old_record_restores_moved_by_the_median_zero(
         _assert_shifted_once(dock, errors)
 
 
+@pytest.mark.parametrize(("paths", "length_m", "band"), _REAL_SURVEYS)
+def test_the_first_break_estimate_matches_time_zero_on_real_lines(
+    qgis_app, tmp_path, paths, length_m, band
+):
+    """Spec §9, the check that the estimate is fair: the median first break a
+    restore shifts by when its preset has lost Time zero agrees with the median
+    line zero Time zero itself finds, within one sample. Both are read as This
+    grid prepares the lines, under its own transform (amp_square, the default),
+    as a restore reads them. Read straight off the squared lines, the estimate
+    was two samples late on both surveys."""
+    presets = {"radar": [_DEWOW], "zeroed": [_TIME_ZERO, _DEWOW]}
+    with _real_docked(tmp_path, paths, length_m, presets) as (dock, _session):
+        assert dock.engine.wait_for_preparation(60_000)
+        read = {}
+        for preset in ("radar", "zeroed"):
+            dock.preset_combo.setCurrentText(preset)
+            assert dock.engine.wait_for_preparation(60_000)
+            assert dock.engine.choice.preset == preset and dock.engine.is_prepared
+            read[preset] = (dock.engine.median_first_break(), dock.engine.median_zero())
+        dt = dock.engine.prepared_lines()[0].dt_ns
+        transform = dock.engine.choice.transform
+    first_break, zero = read["radar"][0], read["zeroed"][1]
+    assert first_break == pytest.approx(zero, abs=dt), (transform, first_break, zero, dt)
+
+
 def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):
     dock, session = docked_zeroed
     _prepared_with_owed_record(dock, session)
