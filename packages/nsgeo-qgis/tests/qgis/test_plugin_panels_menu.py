@@ -308,3 +308,18 @@ def test_unloading_removes_the_panels_button_and_its_menu(fake_iface, qgis_app):
     assert sip.isdeleted(menu)
     assert sip.isdeleted(button)
     assert all(sip.isdeleted(a) for a in entries)
+
+
+def test_the_3d_view_button_greys_until_a_site_opens(fake_iface, tmp_path):
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        assert not plugin.act_view3d.isEnabled()
+        folder = tmp_path / "site"
+        folder.mkdir()
+        plugin.session.new_site(folder)
+        assert plugin.act_view3d.isEnabled()
+        plugin.session.close_site()
+        assert not plugin.act_view3d.isEnabled()
+    finally:
+        plugin.unload()

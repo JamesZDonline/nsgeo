@@ -14,7 +14,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.slices import SurfaceSettings
 from nsgeo_qgis.scene3d import Scene3D
-from nsgeo_qgis.scene3d_plan import VIEW_NAME, view_title
+from nsgeo_qgis.scene3d_plan import BUTTON_TIP, NO_GRID, VIEW_NAME, VIEW_REFUSED, view_title
 from nsgeo_qgis.surface_layers import SurfaceLayers
 from plugin_testing import GRID, spin_until, synthetic_dzt
 from qgis.core import QgsProject, QgsReadWriteContext
@@ -296,3 +296,90 @@ def test_a_docked_view_is_retitled_and_a_swapped_holder_still_is(scene):
     session.remember_volume(A, stretch=2.0)
     s3d.refresh()
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
+
+
+# ---- Task 3: the plugin's 3D view button ----------------------------------------------------
+
+
+def _scene_layers_in_project():
+    return [
+        lyr for lyr in QgsProject.instance().mapLayers().values() if "Picks at depth" in lyr.name()
+    ]
+
+
+def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin):
+    plugin = surface_plugin
+    assert plugin.act_view3d.text() == "3D view"
+    assert plugin.act_view3d.toolTip() == BUTTON_TIP
+    plugin.act_view3d.trigger()
+    assert plugin.scene3d.is_open()
+    assert plugin.scene3d.grid_id == plugin.slices_dock.grid_combo.currentText() == GRID.id
+    assert VIEW_NAME in plugin.iface.canvases3d
+
+
+def test_a_scope_change_reaches_the_scene(surface_plugin):
+    plugin = surface_plugin
+    seen = []
+    plugin.slices_dock.scope_changed.connect(seen.append)
+    plugin.slices_dock.set_scope("site")
+    assert seen == ["site"]
+    plugin.slices_dock.set_scope("site")
+    assert seen == ["site"]
+    plugin.slices_dock.set_scope("grid")
+    assert seen == ["site", "grid"]
+
+
+def test_open_with_no_grid_warns_in_the_message_bar_and_does_not_raise(surface_plugin):
+    plugin = surface_plugin
+    plugin.slices_dock.grid_combo.clear()
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+    plugin.open_view3d()
+    assert messages == [NO_GRID] and not plugin.scene3d.is_open()
+
+
+def test_a_refused_view_warns_in_the_message_bar(surface_plugin):
+    plugin = surface_plugin
+    plugin.iface.refuse3d = True
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+    plugin.open_view3d()
+    assert messages == [VIEW_REFUSED] and not plugin.scene3d.is_open()
+
+
+def test_closing_the_site_closes_the_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.open_view3d()
+    assert plugin.scene3d.is_open() and _scene_layers_in_project()
+    plugin.session.close_site()
+    assert not plugin.scene3d.is_open()
+    assert not _scene_layers_in_project()
+    assert all(
+        lyr.renderer3D() is None
+        for lyr in QgsProject.instance().mapLayers().values()
+        if hasattr(lyr, "renderer3D")
+    )
+
+
+def test_a_failing_close_does_not_escape_the_site_closed_slot(surface_plugin):
+    plugin = surface_plugin
+
+    def boom():
+        raise RuntimeError("boom")
+
+    real = plugin.scene3d.close
+    plugin.scene3d.close = boom
+    try:
+        plugin._close_view3d()  # logs, never raises
+    finally:
+        plugin.scene3d.close = real
+
+
+def test_unload_closes_the_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.open_view3d()
+    iface = plugin.iface
+    plugin.unload()
+    assert VIEW_NAME not in iface.canvases3d
+    assert not _scene_layers_in_project()
+    assert plugin.scene3d is None

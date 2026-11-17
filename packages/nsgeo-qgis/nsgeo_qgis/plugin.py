@@ -102,6 +102,7 @@ from nsgeo_qgis.export_task import (
 )
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import CORNER_ROLES
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
@@ -113,6 +114,8 @@ from nsgeo_qgis.paraview_scene import (
     how_to_open_message,
     launch_failed_message,
 )
+from nsgeo_qgis.scene3d import Scene3D
+from nsgeo_qgis.scene3d_plan import BUTTON_TIP
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
@@ -301,6 +304,9 @@ class NsgeoPlugin:
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
         self.act_surface: QAction | None = None
+        self.act_view3d: QAction | None = None
+        #: QGIS's 3-D view of the Slices panel's grid (M16 C).
+        self.scene3d: Scene3D | None = None
         #: The Cut map tool while the toggle is on (cut spec §4.1).
         self._cut_tool: CutTool | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
@@ -393,6 +399,8 @@ class NsgeoPlugin:
         self.act_surface.setToolTip(
             "Make a surface from the picks selected on the map (the picks layer current)."
         )
+        self.act_view3d = self._toolbar_action("3D view", self.open_view3d)
+        self.act_view3d.setToolTip(BUTTON_TIP)
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -426,6 +434,18 @@ class NsgeoPlugin:
         self.slices_dock.save_cube_requested.connect(self.save_cube)
         self.slices_dock.export_requested.connect(self.export_geotiff)
         self.slices_dock.paraview_requested.connect(self.export_paraview)
+        self.scene3d = Scene3D(
+            self.session,
+            self.layers,
+            self.surfaces,
+            self.surface_layers,
+            self._surface_export,
+            self.slices_dock,
+            self.iface,
+        )
+        self.session.site_closed.connect(self._close_view3d)
+        self.slices_dock.scope_changed.connect(self.scene3d.request_refresh)
+        self.slices_dock.grid_combo.currentTextChanged.connect(self.scene3d.request_refresh)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
         # Spec 9.2: tabified with Processing rather than a fourth dock
         # competing for screen space. Processing stays the raised tab --
@@ -828,6 +848,7 @@ class NsgeoPlugin:
         self.act_velocity = None
         self.act_cut = None
         self.act_surface = None
+        self.act_view3d = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -853,6 +874,13 @@ class NsgeoPlugin:
             # is orphaned by this plugin unloading around it.
             self.slice_layer.dispose()
             self.slice_layer = None
+        if self.scene3d is not None:
+            # Before the surface layers and the docks it reads: it closes the view and
+            # removes the picks layer it added.
+            with contextlib.suppress(Exception):
+                self.session.site_closed.disconnect(self._close_view3d)
+            self.scene3d.dispose()
+            self.scene3d = None
         if self.surface_layers is not None:
             # Before layers.detach(): its group lives inside the site's, which detach removes.
             self.surface_layers.dispose()
@@ -880,10 +908,32 @@ class NsgeoPlugin:
         self.toolbar_actions.append(action)
         return action
 
+    def open_view3d(self) -> None:
+        """Open QGIS's 3-D view of the Slices panel's grid; say why when it cannot."""
+        try:
+            if self.scene3d is None:
+                return
+            self.scene3d.open()
+        except (ValueError, RuntimeError) as exc:
+            self.message(str(exc), Qgis.MessageLevel.Warning)
+
+    def _close_view3d(self, *_: Any) -> None:
+        try:
+            if self.scene3d is not None:
+                self.scene3d.close()
+        except Exception as exc:  # noqa: BLE001 -- a slot on session.site_closed
+            _log(f"could not close the 3-D view: {exc}")
+
     def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
-            for act in (self.act_save, self.act_add_grid, self.act_import, self.act_surface):
+            for act in (
+                self.act_save,
+                self.act_add_grid,
+                self.act_import,
+                self.act_surface,
+                self.act_view3d,
+            ):
                 if act is not None:
                     act.setEnabled(is_open)
             # A crosshair over an empty profile invites a click that can
