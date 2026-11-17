@@ -789,6 +789,30 @@ site folder**, never `site.nsgeo.gpkg` on its own. A cloud-synced folder copies
 files one at a time while you work, so either keep active sites outside one, or
 let it sync only while QGIS is closed.
 
+### A one-sample window blanks the profile (#40)
+
+[Issue #40](https://github.com/JamesZDonline/nsgeo/issues/40). **Dewow** and
+**Background removal (sliding)** subtract a running mean. If the window is one sample (or
+one trace) wide, they subtract each value from itself, and the profile goes
+blank. With **Difference** on, the whole profile then shows as removed. **Automatic gain control**
+has the same edge case with a different symptom. At a one-sample window, every
+value becomes plus or minus the **Target RMS**, so all the amplitude information
+is lost. Nothing warns you in either case.
+
+**Workaround:** keep each window at least two samples wide.
+
+- **Dewow**: **Window (ns)** at least twice the sample interval.
+- **Background removal (sliding)**: **Window (traces)** at least 2.
+- **Automatic gain control**: **Window (ns)** at least twice the sample interval.
+
+The sample interval is the time range divided by the samples per trace. For
+example, 512 samples over 50 ns is about 0.1 ns, so the shortest safe window is
+about 0.2 ns. The default windows (4 ns for Dewow, 200 traces for
+Background removal (sliding) and 20 ns for Automatic gain control) are safe unless your sample
+interval is longer than 2 ns. If a profile goes blank, select the step and widen
+its window. Your DZT files are untouched. Versions after 0.4.0 refuse such a
+window and name the shortest one that works.
+
 ---
 
 ## 6. Reporting a problem
