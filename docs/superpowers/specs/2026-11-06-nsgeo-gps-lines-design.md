@@ -138,7 +138,11 @@ These are the user's, in the order they were made.
       separately from what the line recorded (#47's design), one model for both kinds of line.
     - M17 lets the user type that shift for GPS lines: set for a whole import, editable per line.
       If destagger lands first, M17's GPS lines plug into its shift; if M17 lands first, destagger
-      extends M17's.
+      extends M17's. *Destagger landed first* (#47's stagger half in PR #160, automatic Measure in
+      #159 / PR #168; §15), so M17a's `TrackPlacement.travel_shift` is `GridPlacement`'s field
+      under the same name, and the Survey panel calls it "destagger" for both kinds of line. #47
+      stays open for its other half, direction balancing. Measure works on grid lines only; M17c
+      extends it to GPS lines in an area (§9).
     - A delay term (seconds, scaled by walking speed) is measurable only on GPS lines. It is worth
       4–11 cm here; whether nsgeo carries it is for destagger to decide.
 11. **True-distance profiles are in M17, as their own middle chunk** (after the builder check
@@ -195,8 +199,10 @@ Made without the user; each is open to veto.
   `TrackPlacement` with the same `grid_id`, the way an edit swaps placements today: the key is
   unchanged, so processing, velocity, fits (stored by trace and time) and picks all stay, and picks
   follow the new positions as they do after any edit. It takes a destagger value as Import GPS
-  lines… does; the tape line's own `travel_shift` measured a different thing and is not carried
-  over. A line with no usable DZG is refused with the import's reasons. M17a's import refuses a
+  lines… does. The tape line's own `travel_shift` (destagger, from #47) is not carried over: it
+  corrected where the tape placement put the traces, and once GPS places the line a different
+  offset applies (the GPS's position relative to the radar, §7: −48 cm between neighbours by GPS
+  against −30 cm by tape on the same lines), so the value is measured again (typed, or by Measure once M17c extends it to GPS lines). A line with no usable DZG is refused with the import's reasons. M17a's import refuses a
   file already in the site with "already in the site"; it does not tell the user to remove it.
 - **C10. The saved project holds the fixes it placed the line from** (trace index, projected
   position, quality, altitude), so reopening a project gives identical positions even if the DZG is
@@ -455,7 +461,8 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   view is where walkthroughs have found the most (#67, the time cutoff, the gain strip).
 - **M17c — GPS areas.** Grid outline with holes and its mask, which the colour stretch ignores
   (decision 13); Fit to these tracks; drawing and reshaping; Move to grid ▸ for GPS lines (C3);
-  Place by GPS for tape lines (C9); shared rulers (decision 8, C8), exact for zigzag lines once
+  Place by GPS for tape lines (C9); destagger's Measure (#159) for GPS lines in an area (§15);
+  shared rulers (decision 8, C8), exact for zigzag lines once
   M17b is in; slices of areas. Needs line editing merged.
 
 ---
