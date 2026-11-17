@@ -467,3 +467,6 @@ Three tasks, then the walkthrough:
 - A fading leg on ground with flat layers keeps a few dots past its end, on the layers, which
   makes v 0.5–2% fast on planted lines. A strict xfail pins it. A candidate fix is to judge the
   faint floor on the box with its row means removed.
+- In the same family: a tight box around a deep apex on layered ground can trace two flat layers
+  one period apart instead of the hyperbola, about 2.5× fast with the apex inside the dots and
+  enough moveout to pass §4.3 step 4. A strict xfail pins it.
