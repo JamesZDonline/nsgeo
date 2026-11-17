@@ -22,6 +22,7 @@ EXPECTED_PUBLIC = {
     "velocity",
     "velocity_fit",
     "velocity_source",
+    "vtkxml",
 }
 
 
