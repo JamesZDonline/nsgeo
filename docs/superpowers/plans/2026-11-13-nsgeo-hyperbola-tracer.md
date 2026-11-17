@@ -257,9 +257,8 @@ pinned by a test in its owning task.
   - Usage: `python tests/make_hand_fit_data.py SITE.nsgeo.json [...]`. It copies each named site
     file into `tests/data/local/hand-fits/` under a neutral name (`site-1.nsgeo.json`, …).
   - It creates empty `rulings.json` and `pending.json` if absent.
-  - Run it with the two site files named in spec §10:
-    - `~/nsgeo-m4-check/Nashville_City_Cemetery (Copy)/survey.nsgeo.json`
-    - `~/nsgeo-m4-check/Sunnyside/survey.nsgeo.json`
+  - Run it with the author's two site files (spec §10; the paths are in the local ledger, not
+    here).
   - Confirm `git status` shows nothing from `tests/data/local/`.
 
 - [ ] **Step 2: Write the tests**, parametrised over every saved fit in `HAND_FIT_SITES`, keyed
@@ -525,7 +524,7 @@ leg jump down a level). They ruled one hand fit "a level too low".
   - Lower the faint floor until the dots follow a leg as far as the author's clicks do. The debug report's evidence says about 0.15–0.2.
 
 - [ ] **Step 4: Real data.**
-  - Add the author's ruling to `rulings.json`: key `"/mnt/DataStorage/VISR/Sunnyside_2023/Grid 1/Raw_Data/FILE__008.DZT#fit-1"`, text `"hand fit off: clicked a level too low (author, 2026-11-13)"`.
+  - Add the author's ruling on the fit they clicked "a level too low" to `rulings.json`, keyed by that fit's DZT path and id, with the text `"hand fit off: clicked a level too low (author, 2026-11-13)"`.
   - Re-run `test_hyperbola_trace_hand_fits.py` and rewrite `pending.json` from the results. A strict xfail that now passes must leave the file.
   - Report the per-fit table.
   - Render, into the session scratchpad and copied to `~/nsgeo-tracer-review/`:

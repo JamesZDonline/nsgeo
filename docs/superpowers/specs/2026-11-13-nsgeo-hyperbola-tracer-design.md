@@ -345,14 +345,9 @@ walkthrough.
 **Core tests on real data, local only.** These use the author's saved hand fits (decision 8).
 CI has no such data and skips them.
 
-**The source.** There are 22 distinct saved fits:
-- 13 at Nashville City Cemetery 2023, Grids 2 and 7, in
-  `~/nsgeo-m4-check/Nashville_City_Cemetery (Copy)/survey.nsgeo.json` (schema 3). The
-  non-copy file holds 9 of the same fits.
-- 9 at Sunnyside 2023, Grids 1, 7 and 9, in `~/nsgeo-m4-check/Sunnyside/survey.nsgeo.json`.
-
-The fits run from 0.044 to 0.106 m/ns, with 4–9 dots each. The DZTs are under
-`/mnt/DataStorage/VISR/`.
+**The source.** There are 22 distinct saved fits, 13 at one site and 9 at another, with 4–9
+dots each. The author names the two site files when building the local data; their names, paths
+and numbers stay out of the repository.
 
 **The test data.** A small script builds a gitignored folder under `tests/data/local/` in the
 pattern of `GRID2_LINES` (`tests/real_data.py`):
@@ -399,10 +394,14 @@ the test asserts the traced-to-hand ratio stays inside it, so a later lobe jump 
 
 ## 11. Walkthrough (the author, on ns_geo or a new profile)
 
-1. Box a hyperbola on a line you know. The curve sits on the outer edge where you see it.
-2. Mark the same hyperbola by hand and save it, then box it and save that. The two velocities in
-   the line's velocity dialog agree within σ.
-3. Box it three slightly different ways. You get the same velocity each time.
+1. Box a hyperbola on a line you know. The curve sits on the leading edge where you see it.
+2. Mark the same hyperbola by hand and save it, then box it and save that. *(Revised 2026-11-16.)*
+   The traced velocity reads about 5–20% faster than the hand one, the difference accepted in
+   §10; much more than that is worth a look.
+3. Box it three ways: tight around the hyperbola, about 1.5× its visible extent and about 2×.
+   You get the same velocity each time, within σ. The final review found boxes this much bigger
+   changing the lobe or running onto layers on some of the author's lines; the walkthrough
+   names those lines.
 4. Try these boxes, each with the result shown:
 
    | Box | Result |
@@ -411,6 +410,7 @@ the test asserts the traced-to-hand ratio stays inside it, so a later lobe jump 
    | Two hyperbolas | the stronger one, shown by its curve |
    | Half a hyperbola at a line's end | traced |
    | Empty ground | a reason |
+   | Only the top of a hyperbola | "too flat" |
    | Migration on | a refusal naming Migration |
 
 5. After a trace, remove a dot, add a dot, Save fit, and reopen the dialog.
@@ -418,17 +418,10 @@ the test asserts the traced-to-hand ratio stays inside it, so a later lobe jump 
 7. **On a Mac, if one is available:** Cmd+click and Cmd+drag. If none is available, the
    walkthrough and the PR record that it was not checked.
 8. A big box: how long it takes.
-9. **Rule on each disagreement** the local tests listed (§10): was the hand fit off, or the
-   tracer?
-10. Optional, for #125: look at its four candidates and say which are real diffractions. They
-    are on the campus lines in `tests/data/local`, after Time zero, Dewow and Background mean:
+9. **Rule on each disagreement** the local tests listed (§10): was the hand fit off, the tracer
+   wrong, or the difference expected?
 
-    | Line | Trace | Time |
-    |---|---|---|
-    | FILE__003 | 283 | 15.6 ns |
-    | FILE__006 | 544 | 14.9 ns |
-    | FILE__008 | 370 | 15.1 ns |
-    | FILE__004 | 577 | 23.3 ns (30 traces from the line's end) |
+*(#125's candidate check, once item 10 here, was settled when #125 closed.)*
 
 ## 12. Left to the builder
 
