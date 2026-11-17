@@ -58,7 +58,7 @@ class Dock:
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
 
-def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
+def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, n_samples: int = 512, **kw) -> Path:
     """A small synthetic DZT with a visible pattern, written into `folder`."""
     from tests.synthetic import write_dzt
 
@@ -66,7 +66,7 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     # crc32, not hash(): str hashing is salted per-process (PYTHONHASHSEED),
     # so the same `name` would otherwise seed different data every run.
     rng = np.random.default_rng(zlib.crc32(name.encode()))
-    data = (rng.normal(size=(512, n_traces)) * 1e6).astype(np.int32)
+    data = (rng.normal(size=(n_samples, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000  # a flat band, so background removal has something to remove
     path = folder / name
     write_dzt(path, data, **kw)
@@ -631,3 +631,20 @@ def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> 
     assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
     assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
     assert items[-1].value == pytest.approx(limit)
+
+
+def wheel_event(dy: int = -120) -> Any:
+    """A plain vertical wheel notch, built as it works on Qt 5 and Qt 6."""
+    from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(2, 2),
+        QPointF(2, 2),
+        QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )

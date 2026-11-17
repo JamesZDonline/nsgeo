@@ -24,6 +24,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
+from nsgeo.processing.base import build_step, get_step, param_problem, step_title
 from nsgeo.processing.stack import StepStack
 from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
@@ -437,6 +438,115 @@ def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _held(specs: dict[str, Any], params: dict[str, Any], skip: set[str], lead: str) -> str:
+    """One sentence listing the saved settings not already named, by label."""
+    items = [f"{specs[k].label} {v!r}" for k, v in params.items() if k not in skip]
+    if not items:
+        return ""
+    listed = items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+    return f"{lead} {listed}."
+
+
+#: Steps that stay on when a setting is reset: turning Time zero off would
+#: move every time after it.
+_STAYS_ON = ("time_zero",)
+
+
+def _repair_steps(
+    entries: list[dict[str, Any]], where: str, notes: list[str]
+) -> list[dict[str, Any]]:
+    """Saved steps whose settings the rules now refuse, made loadable.
+
+    A refused setting with a default is reset to it and the step turned off
+    (Time zero stays on). A refused setting with no default, a missing
+    required one, or a step that cannot be built removes the step. Each
+    change adds one plain-language note. Structural faults (an entry that is
+    not an object, no step name, unknown step or setting) still raise.
+    Returns new dicts; `entries` is untouched.
+    """
+    if not isinstance(entries, list):
+        raise TypeError(f"a stack must be a list of steps, got {type(entries).__name__}")
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise TypeError(f"a step must be an object, got {type(entry).__name__}")
+        name = entry["step"]
+        cls = get_step(name)
+        params = entry.get("params", {})
+        if not isinstance(params, dict):
+            raise TypeError(f"step {name!r}: params must be an object")
+        specs = {s.name: s for s in cls.schema()}
+        unknown = sorted(set(params) - set(specs))
+        if unknown:
+            raise ValueError(
+                f"step {name!r} has no parameter(s) {unknown}; it takes {sorted(specs)}"
+            )
+        title = step_title(name)
+        removed = f"{where}: {title} is removed. "
+        again = "Add it again with the settings you want."
+        fixed = dict(params)
+        # Everything wrong with the step is collected first, so one note
+        # names it all; whether the step goes is decided after.
+        missing = [s for s in specs.values() if s.required and s.name not in params]
+        refused: list[tuple[Any, Any, str]] = []
+        for spec in specs.values():
+            if spec.name in params:
+                reason = param_problem(spec, params[spec.name])
+                if reason is not None:
+                    refused.append((spec, params[spec.name], reason))
+                    if not spec.required:
+                        fixed[spec.name] = spec.default
+        if missing or any(spec.required for spec, _, _ in refused):
+            parts = []
+            for spec, value, reason in refused:
+                tail = f", and {spec.label} has no default" if spec.required else ""
+                parts.append(f"Its {spec.label} was {value!r}, which {reason}{tail}.")
+            for spec in missing:
+                parts.append(f"It has no {spec.label}, which it needs.")
+            named = {spec.name for spec, _, _ in refused}
+            held = _held(specs, params, named, "It also held")
+            notes.append(f"{removed}{' '.join(parts)} {held + ' ' if held else ''}{again}")
+            continue
+        repaired = {**entry, "params": fixed}
+        note = None
+        sentences: list[str] = []
+        if refused:
+            sentences = [
+                f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
+                for spec, value, reason in refused
+            ]
+            was_on = bool(entry.get("enabled", True))
+            if not was_on:
+                note = (
+                    f"{where}: {title} (already off) had "
+                    f"{'a setting' if len(refused) == 1 else 'settings'} reset. "
+                    f"{' '.join(sentences)} The step stays off, as it was saved."
+                )
+            elif name in _STAYS_ON:
+                sentences = [t.replace("Its ", f"{title}'s ", 1) for t in sentences]
+                note = (
+                    f"{where}: {' '.join(sentences)} The step stays on, because "
+                    f"turning {title} off would move every time after it."
+                )
+            else:
+                repaired["enabled"] = False
+                note = (
+                    f"{where}: {title} is turned off. {' '.join(sentences)} "
+                    "Check the step and turn it back on."
+                )
+        try:
+            build_step(name, **fixed)
+        except (TypeError, ValueError) as exc:
+            held = _held(specs, params, set(), "It held")
+            built = " ".join([*sentences, f"It could not be built: {exc}.", held])
+            notes.append(f"{removed}{built.strip()} {again}")
+            continue
+        if note is not None:
+            notes.append(note)
+        out.append(repaired)
+    return out
+
+
 def load_site(path: str | Path) -> Site:
     path = Path(path)
     try:
@@ -455,6 +565,7 @@ def load_site(path: str | Path) -> Site:
     grids = [_grid_from_dict(g) for g in doc.get("grids", [])]
     lines = []
     stacks: dict[str, StepStack] = {}
+    load_notes: list[str] = []
     for entry in doc.get("lines", []):
         stored = Path(entry["path"])
         dzt = stored if stored.is_absolute() else root / stored
@@ -516,8 +627,11 @@ def load_site(path: str | Path) -> Site:
             dataclasses.replace(line, velocity_fits=fits, velocity_source=source, fit_serial=serial)
         )
         if "stack" in entry:
+            where = f"Line {Path(entry['path']).name}"
+            if placement.grid_id:
+                where += f" (grid {placement.grid_id})"
             try:
-                stacks[key] = StepStack.from_dicts(entry["stack"])
+                stacks[key] = StepStack.from_dicts(_repair_steps(entry["stack"], where, load_notes))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(
                     f"invalid processing stack for line {entry['path']!r}: {exc}"
@@ -525,6 +639,7 @@ def load_site(path: str | Path) -> Site:
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
+    site.load_notes = load_notes
 
     cuts = doc.get("cuts", [])
     if not isinstance(cuts, list):
@@ -540,12 +655,14 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(
             f"{path}: 'presets' must be an object keyed by name, got {type(presets).__name__}"
         )
+    repaired_presets: dict[str, list[dict[str, Any]]] = {}
     for name, dicts in presets.items():
         try:
-            StepStack.from_dicts(dicts)
+            repaired_presets[name] = _repair_steps(dicts, f"Preset {name!r}", load_notes)
+            StepStack.from_dicts(repaired_presets[name])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
-    site.presets = dict(presets)
+    site.presets = repaired_presets
 
     cubes = doc.get("cubes", {})
     if not isinstance(cubes, dict):

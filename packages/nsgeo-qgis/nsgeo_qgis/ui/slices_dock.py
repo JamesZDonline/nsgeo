@@ -51,7 +51,7 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from qgis.gui import QgsDockWidget
+from qgis.gui import QgsCollapsibleGroupBox, QgsDockWidget
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -89,6 +89,7 @@ from nsgeo_qgis.slices_plan import (
     SiteSource,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     default_cell,
     depth_scroll_steps,
     estimate_memory,
@@ -99,10 +100,12 @@ from nsgeo_qgis.slices_plan import (
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
+from nsgeo_qgis.ui.folds import remember_folds
 from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -123,6 +126,15 @@ def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
     elif not upper and snapped < value:
         snapped += step
     return round(snapped, decimals)
+
+
+COVERAGE_TIP = (
+    "Shows how many traces fell in each cell, instead of the amplitude.\n"
+    "Use it to see where your lines ran and where there is no data: blank cells had no line "
+    "through them.\n"
+    "In a Whole site preview each pixel shows the largest count among the cells under it, so "
+    "lines look wider than they are."
+)
 
 
 class ElidedLabel(QLabel):
@@ -195,6 +207,65 @@ class ElidedLabel(QLabel):
             self.setToolTip(self.full_text)
         else:
             self.setToolTip(self._hint if self.full_text else "")
+
+
+#: dz's minimum before any line gives a sample interval (spec 3.2).
+GENERIC_DZ_MIN = 0.001
+
+#: The note beside dz while it sits on its floor (walkthrough D1).
+DZ_FLOOR_NOTE = "(sample interval)"
+DZ_FLOOR_TIP = (
+    "dz can't go below the radar's sample interval (in Whole site, the finest "
+    "grid's). A finer dz only adds levels between the same two readings: no new "
+    "information, only a deeper cube."
+)
+
+
+class _DzSpinBox(QDoubleSpinBox):
+    """dz's box: shows `note` while dz sits on a sample-interval floor.
+
+    Seeds and restores set dz and its minimum with signals blocked, so the
+    Python setters update the note as well as `valueChanged`."""
+
+    def __init__(self, note: QLabel) -> None:
+        super().__init__()
+        self._note = note
+        self.valueChanged.connect(self._sync_note)
+
+    def setValue(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setValue(value)
+        self._sync_note()
+
+    def setMinimum(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setMinimum(value)
+        self._sync_note()
+
+    def setRange(self, low: float, high: float) -> None:  # noqa: N802 -- Qt override
+        super().setRange(low, high)
+        self._sync_note()
+
+    def _sync_note(self, *_args: object) -> None:
+        try:
+            floor = self.minimum()
+            self._note.setVisible(floor > GENERIC_DZ_MIN and self.value() <= floor)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot
+            _log(f"could not show dz's floor: {exc}")
+
+
+class _OpensWideScrollArea(QScrollArea):
+    """A scroll area whose `sizeHint` adds the vertical bar's width (#50).
+
+    The stock hint does not include the bar, so a dock opening at it shows the
+    bar and then scrolls sideways by the bar's width."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        try:
+            hint = super().sizeHint()
+            bar = self.verticalScrollBar().sizeHint().width()
+            return QSize(hint.width() + bar, hint.height())
+        except Exception as exc:  # noqa: BLE001 -- a Qt virtual
+            _log(f"could not size the Slices panel: {exc}")
+            return QSize(0, 0)
 
 
 class SlicesDock(QgsDockWidget):
@@ -412,6 +483,13 @@ class SlicesDock(QgsDockWidget):
         self.cube_combo = QComboBox()
         self.grid_combo = QComboBox()
         self.preset_combo = QComboBox()
+        # Names come from the data: a long one is cut off, never a floor on the
+        # panel's width (#121). The popup still lists the whole name.
+        for combo in (self.cube_combo, self.grid_combo, self.preset_combo):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(12)
         self.transform_combo = TransformCombo()
         form.addRow("Cube", self.cube_combo)
         form.addRow("Grid", self.grid_combo)
@@ -421,6 +499,7 @@ class SlicesDock(QgsDockWidget):
 
         included_row = QHBoxLayout()
         self.included_label = QLabel("")
+        self.included_label.setWordWrap(True)  # the over-budget suffix is long (#121)
         self.choose_button = QPushButton("Choose…")
         included_row.addWidget(self.included_label, 1)
         included_row.addWidget(self.choose_button)
@@ -469,19 +548,12 @@ class SlicesDock(QgsDockWidget):
         readout_row.addWidget(self.refine_label, 1)
         position_layout.addLayout(readout_row)
 
-        # Whole site only: the preview note, or why nothing is drawn. One
-        # elided line of fixed height (as `refine_label`), the full text in
-        # its tooltip, so a long reason never widens the dock or moves the
-        # scrolled panel.
-        self.site_note = ElidedLabel("")
-        self.site_note.setVisible(False)
-        position_layout.addWidget(self.site_note)
-
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
         velocity_font.setPointSizeF(max(1.0, velocity_font.pointSizeF() * 0.85))
         self.velocity_label.setFont(velocity_font)
         self.velocity_label.setStyleSheet("color: palette(mid);")
+        self.velocity_label.setWordWrap(True)  # the source label comes from the data (#121)
         position_layout.addWidget(self.velocity_label)
 
         # M12 spec 4.3: each grid's depth through its own velocity, in the
@@ -518,10 +590,17 @@ class SlicesDock(QgsDockWidget):
 
         outer.addWidget(self.position_group)
 
+        # What stands in the way, in full: a refusal that outlasts its toast,
+        # the clock warning, the Whole site preview note. Hidden when empty.
+        self.warnings_panel = WarningsPanel()
+        #: This grid's standing refusal (`_apply_resolution`), or None.
+        self._grid_refusal: str | None = None
+        outer.addWidget(self.warnings_panel)
+
         # ---- Resolution: the binning geometry, debounced (44 ms a
         # rebuild, spec 7.2 and trap 4) so a slider dragged through five
         # cell sizes in a second rebuilds once, not five times.
-        self.resolution_group = QGroupBox("Resolution")
+        self.resolution_group = QgsCollapsibleGroupBox("Resolution")
         resolution_form = QFormLayout(self.resolution_group)
 
         self.cell_spin = QDoubleSpinBox()
@@ -545,8 +624,13 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("Cell size", self.cell_spin)
 
-        self.dz_spin = QDoubleSpinBox()
-        self.dz_spin.setRange(0.001, 100.0)
+        self.dz_floor_note = QLabel(DZ_FLOOR_NOTE)
+        self.dz_floor_note.setToolTip(DZ_FLOOR_TIP)
+        _keep = self.dz_floor_note.sizePolicy()
+        _keep.setRetainSizeWhenHidden(True)  # dz keeps its width at and off the floor
+        self.dz_floor_note.setSizePolicy(_keep)
+        self.dz_spin = _DzSpinBox(self.dz_floor_note)
+        self.dz_spin.setRange(GENERIC_DZ_MIN, 100.0)
         self.dz_spin.setDecimals(4)
         self.dz_spin.setSuffix(" ns")
         self.dz_spin.setValue(1.0)
@@ -557,10 +641,15 @@ class SlicesDock(QgsDockWidget):
         self.dz_spin.setSingleStep(0.05)
         self.dz_spin.setToolTip(
             "Vertical spacing of the cube's levels, in two-way time.\n"
-            "Defaults to the file's own sample interval; §7.2 measured that "
-            "decimating buys nothing, so there is rarely a reason to coarsen it."
+            "Defaults to the file's own sample interval, and can't go below it; "
+            "§7.2 measured that decimating buys nothing, so there is rarely a "
+            "reason to coarsen it."
         )
-        resolution_form.addRow("dz", self.dz_spin)
+        dz_row = QHBoxLayout()
+        dz_row.setContentsMargins(0, 0, 0, 0)
+        dz_row.addWidget(self.dz_spin, 1)
+        dz_row.addWidget(self.dz_floor_note)
+        resolution_form.addRow("dz", dz_row)
 
         self.z0_spin = QDoubleSpinBox()
         self.z0_spin.setRange(-1_000.0, 100_000.0)
@@ -640,7 +729,7 @@ class SlicesDock(QgsDockWidget):
         # ---- Display: how the slice is coloured and stretched, never
         # what it contains -- spec 8's comparability-by-default,
         # legibility-on-demand split.
-        self.display_group = QGroupBox("Display")
+        self.display_group = QgsCollapsibleGroupBox("Display")
         display_form = QFormLayout(self.display_group)
 
         # #180: the plugin's palette and stretch, or the user's own QGIS
@@ -668,16 +757,7 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow("Palette", self.palette_combo)
 
         self.coverage_check = QCheckBox("Show coverage")
-        # Round 2, W6: "Don't know what this is doing." The view is the
-        # whole reason the cube stores a count alongside the mean (spec
-        # 6.2), and it is unreadable without being told what the numbers
-        # are.
-        self.coverage_check.setToolTip(
-            "Shows how many traces fell in each cell instead of the amplitude.\n"
-            "Cells no line crossed are left blank, so an empty bin is "
-            "distinguishable from a real zero reflection -- which is the "
-            "whole point of recording a count."
-        )
+        self.coverage_check.setToolTip(COVERAGE_TIP)
         display_form.addRow(self.coverage_check)
 
         # Ruling AN (M11 final review): the settings override spec 9.2
@@ -692,15 +772,19 @@ class SlicesDock(QgsDockWidget):
         self.resident_check = QCheckBox("Keep the volume in memory")
         display_form.addRow(self.resident_check)
 
-        self.legend_label = QLabel("")
-        # Wraps, because a QLabel's minimum width is its text width and a
-        # dock's minimum width is a hard floor on the QGIS main window's
-        # -- the same mechanism that made this dock force a 556 px window
-        # in round 1. The coverage legend is the longest string here.
-        self.legend_label.setWordWrap(True)
+        # One line, elided with the full text in the tooltip: a QLabel's minimum
+        # width is its text width (round 1's 556 px window), and a wrapped one
+        # changes height with its text as the stretch moves, which shifts the
+        # panel under the wheel (#121). The coverage legend is the longest string.
+        self.legend_label = ElidedLabel("")
         display_form.addRow("Legend", self.legend_label)
 
         outer.addWidget(self.display_group)
+        # Folding, wired once all four panels exist (#157 item 6).
+        remember_folds("resolution", [self.resolution_group])
+        remember_folds("interpolation", [self.grid_finish, self.site_finish])
+        remember_folds("normalisation", [self.normalisation_panel.group])
+        remember_folds("display", [self.display_group])
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -734,11 +818,13 @@ class SlicesDock(QgsDockWidget):
         # from the M11 walkthrough as "it messes up the width/height of
         # the window". A scroll area's own minimum is small, so the dock
         # can be any size the user wants and scrolls to the rest.
-        scroll = QScrollArea(self)
+        scroll = _OpensWideScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)
         self.setWidget(scroll)
+        # The Resolution boxes keep Qt's wheel (walkthrough W1: the author
+        # tried the click-first rule and chose folding the section instead).
 
         # A palette is always offered, even before any source is chosen
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
@@ -1527,6 +1613,8 @@ class SlicesDock(QgsDockWidget):
             # DIFFERENT preparation.
             self._pending_palette = None
             self._pending_z_shift = False
+            self._grid_refusal = None
+            self.show_warnings()
             self._mark_cube_unsaved()
             self._sync_included()
             self._remember_source()
@@ -2095,6 +2183,15 @@ class SlicesDock(QgsDockWidget):
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)
                 self.preset_combo.setCurrentText(recipe.choice.preset)
                 self.transform_combo.set_value(transform_text)
+                # The cube's grid's floor, as a grid change sets it, whether
+                # or not the record has a resolution (spec 6.1).
+                self._set_cell_floor(recipe.choice.grid_id)
+                # As `_seed_dz_z_defaults` reads it: the first included line still
+                # in the site. A key no longer there is `set_source`'s to name.
+                live = set(self.session.keys())
+                first = next((k for k in self._included if k in live), None)
+                if first is not None:
+                    site_scope.set_dz_floor(self, self.session.line_for_key(first).header.dt_ns)
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
@@ -2135,13 +2232,23 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
+            # A refusal belonged to the grid that was showing.
+            self._grid_refusal = None
+            self.show_warnings()
+            # Prepared first, so the apply below is checked against the cube's
+            # own grid (`set_source` has already moved the engine's choice),
+            # not the one the restore left: its level limit and frame cap are
+            # that grid's. The spin restores above armed the debounce: stop
+            # it so set_source's nested cancel loop cannot fire an apply
+            # against the old grid.
+            self._debounce.stop()
+            self.prepare()
             if self._pending_z_shift:
                 # An old record's range is still on the radar clock: nothing
                 # is pushed at the engine until the shift has been applied.
                 self._debounce.stop()
             else:
                 self.flush_debounce()
-            self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
             # the preset's live steps still match -- reachable by
@@ -2193,7 +2300,7 @@ class SlicesDock(QgsDockWidget):
         `_resume_grid`, #71), so an unrelated session signal never
         overwrites a value the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and #81's 0.2 m cell and the interpolation defaults -- both
+        spacing", and #81's default cell and the interpolation defaults -- both
         need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.
@@ -2215,8 +2322,7 @@ class SlicesDock(QgsDockWidget):
             # `smallest_safe_cell` is well under the spin's own 0.01 m and
             # this changes nothing; it only bites where the arithmetic really
             # does run away (walkthrough round 2, W7).
-            floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
-            self.cell_spin.setMinimum(floor)
+            floor = self._set_cell_floor(grid_id)
             self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
             # Quiet: a seed is not an edit, and a grid change re-prepares and
             # `refresh_slice` reads the panel live, so no debounce either.
@@ -2228,6 +2334,15 @@ class SlicesDock(QgsDockWidget):
             self._restore_remembered_resolution(grid_id)
         finally:
             self._seeding -= 1
+
+    def _set_cell_floor(self, grid_id: str) -> float:
+        """Raise `cell_spin`'s minimum to the finest cell `grid_id` can afford
+        (walkthrough round 2, W7). The box only: a remembered resolution or a
+        cube record is never changed, so a floor that moves back lets it return."""
+        grid = self.session.grid(grid_id)
+        floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
+        self.cell_spin.setMinimum(floor)
+        return floor
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
         """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
@@ -2256,10 +2371,16 @@ class SlicesDock(QgsDockWidget):
         In Whole site the spins are the site's (#71), so the seed stays owed,
         `_dz_z_seeded_for` unmarked, and `_resume_grid` retries it.
         """
-        if self._dz_z_seeded_for == grid_id or self._scope == "site":
+        if self._scope == "site":
             return
         included = self._default_included(grid_id)
         if not included:
+            # No line, no interval (spec 3.2): back to the generic minimum, so
+            # an earlier grid's or site's floor neither binds dz nor puts
+            # "(sample interval)" beside it.
+            site_scope.set_dz_floor(self, GENERIC_DZ_MIN)
+            return
+        if self._dz_z_seeded_for == grid_id:
             return
         header = self.session.line_for_key(included[0]).header
         # #71: a seed, not an edit (see `_seed_resolution_defaults`).
@@ -2271,6 +2392,8 @@ class SlicesDock(QgsDockWidget):
             # (walkthrough round 2, W7).
             for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
                 _spin.setSingleStep(header.dt_ns)
+            # #177: dz cannot go below the sample interval, before it is set.
+            site_scope.set_dz_floor(self, header.dt_ns)
             self.dz_spin.setValue(header.dt_ns)
             self.z0_spin.setValue(header.position_ns)
             self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
@@ -2520,6 +2643,8 @@ class SlicesDock(QgsDockWidget):
                 # applying them to it now would only draw B's settings onto
                 # A's lines (a spurious "does not cover" error).
                 return
+            # What is refused is decided afresh by this apply.
+            self._grid_refusal = None
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
@@ -2539,6 +2664,7 @@ class SlicesDock(QgsDockWidget):
             except ValueError as exc:
                 # __post_init__'s own validation (e.g. z1 <= z0) -- a
                 # refusal the user can read, not a crash from a QTimer slot.
+                self.show_warnings()
                 self.error.emit(str(exc))
                 return
             # Defence in depth behind `cell_spin`'s own floor: a
@@ -2556,13 +2682,25 @@ class SlicesDock(QgsDockWidget):
                 cells = frame_cells(grid_now.size_x, grid_now.size_y, resolution.cell)
                 if cells > MAX_FRAME_CELLS:
                     safe = smallest_safe_cell(grid_now.size_x, grid_now.size_y)
-                    self.error.emit(
-                        f"a {resolution.cell:g} m cell over grid "
-                        f"{grid_now.id!r} is {cells:,} cells, too many to "
-                        f"draw; use {safe:g} m or coarser"
+                    frame = self.engine.frame
+                    still = f" Still showing {frame.cell:g} m." if frame is not None else ""
+                    self._grid_refusal = (
+                        f"Cell {resolution.cell:g} m refused: grid {grid_now.id} would be "
+                        f"{cells:,} cells, too many to draw.{still} "
+                        f"Use {safe:g} m or coarser."
                     )
+                    self.show_warnings()
                     return
-            self.engine.set_resolution(resolution)
+            self._grid_refusal = None
+            try:
+                self.engine.set_resolution(resolution)
+            except TooManyLevels as exc:
+                # #177: refused before the engine stored anything, so the map
+                # stays as it was. The reason stands in Warnings, not a toast.
+                self._grid_refusal = str(exc)
+                self.show_warnings()
+                return
+            self.show_warnings()
             # Keyed on `(n_levels, choice, mode, finish settings)` -- see
             # `_stretch_key` -- and a geometry change can only have moved
             # `n_levels` (the axis it is measured against changed), so there
@@ -2592,6 +2730,8 @@ class SlicesDock(QgsDockWidget):
                 self.slice_slider.blockSignals(False)
             self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            # A refusal shown for the last apply is not this apply's: one place.
+            self.show_warnings()
             self.error.emit(str(exc))
 
     def refresh_slice(self) -> None:
@@ -3117,6 +3257,20 @@ class SlicesDock(QgsDockWidget):
         """`"grid"` (This grid, M11's dock) or `"site"` (Whole site)."""
         return self._scope
 
+    def show_warnings(self) -> None:
+        """Fill the Warnings section: the site's in Whole site, This grid's
+        standing refusal otherwise. A slot's body, so it guards itself."""
+        try:
+            if self._scope == "site":
+                entries = self._site.warnings()
+            elif self._grid_refusal:
+                entries = [Entry(REFUSAL, self._grid_refusal)]
+            else:
+                entries = []
+            self.warnings_panel.set_entries(entries)
+        except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
+            _log(f"could not show the warnings: {exc}")
+
     def set_scope(self, scope: str) -> None:
         """Switch scope, keeping the window's time (spec 4.1).
 
@@ -3132,6 +3286,7 @@ class SlicesDock(QgsDockWidget):
         if scope == "site" and not self.session.is_open:
             site_scope.show_scope_widgets(self)
             raise RuntimeError("open a survey before showing the whole site")
+        self._grid_refusal = None
         if self._debounce.isActive():
             # The scope being left applies its own pending change first.
             self._debounce.stop()
@@ -3171,6 +3326,7 @@ class SlicesDock(QgsDockWidget):
             site_scope.show_scope_widgets(self)
             self._sync_colours()
             self._resume_grid(top)
+        self.show_warnings()
         self.show_refine()
 
     def _on_scope_clicked(self, scope: str) -> None:

@@ -671,3 +671,13 @@ def surface_plugin(fake_iface, tmp_path, answer_modal):
         QgsProject.instance().clear()
         QgsSettings().setValue("nsgeo/slicesDockTabified", False)
         QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+
+
+@pytest.fixture(autouse=True)
+def _fold_settings(tmp_path, monkeypatch):
+    """Fold state never reaches a real QGIS settings file (#157 item 6)."""
+    from nsgeo_qgis.ui import folds
+    from qgis.PyQt.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(folds, "fold_settings", lambda: store)

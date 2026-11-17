@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -258,9 +259,9 @@ class NormalisationPanel(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        group = QGroupBox("Normalisation")
-        outer.addWidget(group)
-        form = QFormLayout(group)
+        self.group = QgsCollapsibleGroupBox("Normalisation")
+        outer.addWidget(self.group)
+        form = QFormLayout(self.group)
 
         self.method_combo = QComboBox()
         for label, method in METHODS:
