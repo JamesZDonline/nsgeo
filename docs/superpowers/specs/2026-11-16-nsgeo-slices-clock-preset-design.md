@@ -100,14 +100,17 @@ behaves the same.
   median)`), as an unmarked record already does.
 - **Time zero → radar** (the preset has since lost Time zero): the prepared lines are on the
   radar's clock and each reports a zero of 0.0, so there is no line zero to read. The shift is
-  the median **first break** of the prepared lines, picked by Time zero's own rule at its default
-  threshold (`first_break_ns`, 0.2). The range moves by `retime_ns(t, median, 0.0)`, the reverse
-  of the gained case, so its sign follows the break's. A new engine read beside `median_zero` gives
-  it.
+  the median **first break** of the prepared lines. Each line's break is picked during
+  preparation on its raw record, before any step runs, by Time zero's own rule at its default
+  threshold (`first_break_ns`, 0.2): where Time zero runs in an ordinary preset, which puts it
+  first. The range moves by `retime_ns(t, median, 0.0)`, the reverse of the gained case, so its
+  sign follows the break's. A new engine read beside `median_zero` gives it.
   - **The accepted catch:** the cube's record does not keep its Time zero settings. Only its npz
-    does, and a restore never reads the npz. A cube made with Sample mode or another threshold
-    can be a few samples off, and the steps the preset runs before the pick can move it by about
-    one sample. The note gives the number.
+    does, and a restore never reads the npz. A cube whose saved preset ran other steps before
+    Time zero, or used Sample mode or another threshold, can be a few samples off. The note
+    gives the number.
+  - **Corrected in the build (PF-1):** the break was first picked on the prepared lines, and ran
+    two samples late on the author's real preset, because its gain steps moved the pick.
 - **With nothing prepared** (every line failed) there is nothing to measure: no shift, no note,
   as today.
 
@@ -257,8 +260,8 @@ cover it, and the walkthrough says so rather than ask for it.
 ## 12. Left to the builder
 
 - The settle helper's name and signature, and how the owed shift's direction is carried.
-- The engine read for the median first break, and building a `Radargram` from a prepared line
-  for `first_break_ns`.
+- The engine read for the median first break, and where each line's raw-record pick is kept
+  until it is read (PF-1: on its `PreparedLine`).
 - The exact note wording, within §4's facts.
 - How "the grid moved on its own" reaches `_sync_included` (a parameter, say), so a hand pick and
   a fallback are told apart.
