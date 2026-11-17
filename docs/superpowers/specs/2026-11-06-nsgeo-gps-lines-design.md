@@ -1,14 +1,15 @@
 # nsgeo GPS lines (M17) — design
 
 Place GPR lines by the RTK GPS track that the GSSI controller records in a `.DZG` beside each
-`.DZT`, so that a survey can be walked without tapes. GPS lines are imported **unattached**. An
-area for slices is drawn or fitted around them **afterwards**, and lines join it with **Move to
-grid ▸**. The area can be any shape.
+`.DZT`, so that a survey can be walked without tapes. From M17b, GPS lines come in through **Add
+data ▾ ▸ GPR…** into a grid: an existing one, or a new one fitted around their tracks (decision
+14). An outline, with holes, clips a grid's slices to any shape. M17a, built first, imports GPS
+lines unattached.
 
 Answers #134's "to decide" list: use 1 (free GPS lines) and use 3 (lines placed by GPS inside a
-slice area) are in; use 2 (a GPS track drawn beside a tape placement as a check) is dropped. Two
-milestones, M17a, M17b and M17c (§9). Builds on the line-editing bundle (#35, #64, #29; branch
-`nsgeo-line-editing`), which was not yet merged when this was written.
+slice area) are in; use 2 (a GPS track drawn beside a tape placement as a check) is dropped. Four
+milestones, M17a to M17d (§9; relettered on 2026-11-17, decision 14). Builds on the line-editing
+bundle (#35, #64, #29; branch `nsgeo-line-editing`), which was not yet merged when this was written.
 
 ---
 
@@ -30,9 +31,10 @@ square, a wheel reading 1.5–3% short, and the cart carried 1.5–2 m past obst
 the error is small (median 0.11 m), which is ordinary walking wander.
 
 **Success.** On the 60-line survey in `packages/nsgeo-core/tests/data/local/with-dzg/`, the user
-imports the files without making a grid first and sees every line on the map along the path it was
-walked. They make an area with **Fit to these tracks**, reshape it if they want, move the lines into
-it, and get slices of it in the Slices panel like any grid's. Lines with no RTK fix for a stretch
+imports the files into a new grid fitted around their tracks, with no tapes laid out, and sees every
+line on the map along the path it was walked. They outline the grid if they want, and get slices of
+it in the Slices panel like any grid's. (Decision 14 replaced the first version: import unattached,
+then fit an area and move the lines into it.) Lines with no RTK fix for a stretch
 still place, and the user can see where that happened.
 
 ---
@@ -93,13 +95,17 @@ These are the user's, in the order they were made.
 1. **GPS is trusted over tapes.** Use 2 of #134 (draw the GPS track beside a tape placement to
    check it) is not wanted.
 2. **GPS lines are imported unattached,** each placed from its own DZG, with no grid chosen first.
+   *Superseded from M17b by decision 14: GPS lines go into a grid at import. M17a, built before it,
+   imports them unattached.*
 3. **The slice area is made afterwards.** It need not be rectangular. The cube behind it stays
    rectangular, just big enough to hold the outline, with cells outside the outline left empty.
+   *From M17b the grid is made at import (decision 14); the outline is still drawn afterwards.*
 4. **Lines join an area by being moved there** with Move to grid ▸ (line editing), not by falling
-   inside it.
+   inside it. *From M17b lines join a grid at import (decision 14); Move to grid ▸ still moves them
+   later.*
 5. **Fit to these tracks** stays in: select lines, press it, get a rectangle lined up with them,
    then reshape it. Its edges sit half a spacing outside the outer lines, matching the user's
-   practice (§2).
+   practice (§2). *From M17b the same fitting makes the new grid at import (decision 14).*
 6. **No antenna-offset setting:** the mount is centred. *Reopened by the delay measurement (§7):
    the data shows a ~24 cm along-track shift regardless, so some along-track correction is needed;
    settled in decision 10.*
@@ -141,14 +147,15 @@ These are the user's, in the order they were made.
       extends M17's. *Destagger landed first* (#47's stagger half in PR #160, automatic Measure in
       #159 / PR #168; §15), so M17a's `TrackPlacement.travel_shift` is `GridPlacement`'s field
       under the same name, and the Survey panel calls it "destagger" for both kinds of line. #47
-      stays open for its other half, direction balancing. Measure works on grid lines only; M17c
-      extends it to GPS lines in an area (§9).
+      stays open for its other half, direction balancing. Measure works on grid lines only; M17d
+      extends it to GPS lines in a grid (§9).
     - A delay term (seconds, scaled by walking speed) is measurable only on GPS lines. It is worth
       4–11 cm here; whether nsgeo carries it is for destagger to decide.
 11. **True-distance profiles are in M17, as their own middle chunk** (after the builder check
     raised it; the user, 2026-11-06). A GPS line's profile, migration and velocity fit use each
-    trace's true distance, and a lift shows as a gap. Estimated medium (2–3 tasks), so it is M17b
-    and the areas become M17c (§9).
+    trace's true distance, and a lift shows as a gap. Estimated medium (2–3 tasks), so it was M17b
+    and the areas M17c. Relettered on 2026-11-17: true-distance profiles are M17c, GPS lines in
+    grids M17b, the rest of the areas M17d (decision 14, §9).
 
 12. **GPS slices show their gaps** (the user, 2026-11-06). An area keeps the slices' usual default
     max distance (0.75× its spacing), so the slivers where walked lines drifted apart stay blank:
@@ -161,6 +168,23 @@ These are the user's, in the order they were made.
     cannot cut a strip out of the middle and keep both sides. Blanked cells (outside the outline
     or in a hole) must also drop out of the slices' colour stretch, so a masked road no longer
     sets the colours (§5.4).
+14. **One Add data menu, and GPS lines always go into a grid** (the user, 2026-11-17, during the
+    M17a walkthrough). Replaces decisions 2–4 from M17b on; M17a was built and walked through
+    before it, and the milestones were relettered (§9).
+    - A toolbar **Add data ▾** menu replaces the separate import buttons. Its entries name the
+      instrument: **GPR…** now, the magnetometer when M19 lands.
+    - The GPR dialog has a switch between **Grid** (placed by the tapes, today's Import DZT…) and
+      **GPS** (placed by each file's DZG).
+    - With GPS, the lines go into a grid: an existing one picked from a list, or a new one the user
+      names, fitted around the files' tracks. The user asked for a minimum oriented bounding
+      rectangle. Claude suggested lining it up with the lines instead, because a pure minimum-area
+      rectangle can come out turned a degree or two from the lines where their starts are ragged
+      (this survey's start line was 1.8° off square) and puts the outer lines on its edge; the user
+      agreed. So a new grid is §6.3's fitting: turned to the lines' main direction, edges half a
+      spacing outside the outer lines, along edges at the extreme trace positions. Only when the
+      lines share no main direction does it fall back to the minimum-area rectangle.
+    - Lines imported unattached by M17a keep loading. Move to grid ▸ puts them into a grid, and Fit
+      to these tracks makes one around them.
 ---
 
 ## 4. Claude's calls
@@ -171,20 +195,24 @@ Made without the user; each is open to veto.
   metres; none means the rectangle). Everything that works on grids (Slices panel, Whole site, the
   Survey panel, velocities, exports, M15's cuts) then works on areas unchanged. There is no second
   kind of grid object.
-- **C2. Membership is a `grid_id` on the GPS line's placement** (`None` when unattached). The
+- **C2. Membership is a `grid_id` on the GPS line's placement** (`None` when unattached: from M17b
+  only lines imported by M17a, which the loader keeps reading; decision 14). The
   plugin already decides membership by `getattr(line.placement, "grid_id", None)` everywhere it
   asks (session, Survey panel, line choice, site scope), so this slots in.
 - **C3. Moving a GPS line changes only which grid it belongs to.** It never moves the line. Move to
-  grid ▸ gains a **No grid** entry for GPS lines, so a line can be taken out of an area again.
+  grid ▸ lists grids only: from M17b a GPS line always has one (decision 14), so the first
+  version's **No grid** entry is dropped.
   Tape lines keep line editing's behaviour (re-placed in the new grid's frame).
 - **C4. A grid can hold both kinds of line,** e.g. GPS lines walked across an old tape grid. Each
   line keeps its own placement. Nothing warns about the mix; tape lines on that survey were
   typically 0.3 m off the GPS positions, so the result may not line up well.
-- **C5. Unattached lines have no slices.** Slices come from areas. (`CubeFrame.for_points` exists
+- **C5. Unattached lines have no slices.** Slices come from grids; from M17b only M17a's lines can
+  be unattached (decision 14). (`CubeFrame.for_points` exists
   for a frame around scattered tracks, but nothing needs it once areas are grids.)
 - **C6. Bridged traces go into slices** like any other: they are placed, just less precisely.
 - **C7. The area's line spacing** (`default_spacing`, used by the slices' default max distance of
-  0.75× spacing) is measured from the selected tracks by Fit to these tracks, and can be typed over.
+  0.75× spacing) is measured from the tracks whenever a grid is fitted to them (at import from M17b,
+  or by Fit to these tracks), and can be typed over.
   An area drawn by hand with no tracks selected asks for it.
 - **C8. Shared ruler or walked distance:** a GPS line shares the area's ruler when its overall
   direction is within about 20° of one of the area's axes; otherwise it uses distance walked. The
@@ -200,17 +228,19 @@ Made without the user; each is open to veto.
   unchanged, so processing, velocity, fits (stored by trace and time) and picks all stay, and picks
   follow the new positions as they do after any edit. It takes a destagger value as Import GPS
   lines… does. The tape line's own `travel_shift` (destagger, from #47) is not carried over: it
-  corrected where the tape placement put the traces, and once GPS places the line a different
-  offset applies (the GPS's position relative to the radar, §7: −48 cm between neighbours by GPS
-  against −30 cm by tape on the same lines), so the value is measured again (typed, or by Measure once M17c extends it to GPS lines). A line with no usable DZG is refused with the import's reasons. M17a's import refuses a
-  file already in the site with "already in the site"; it does not tell the user to remove it.
+  corrected where the tape placement put the traces, and once GPS places the line a different offset
+  applies (the GPS's position relative to the radar, §7: −48 cm between neighbours by GPS against
+  −30 cm by tape on the same lines), so the value is measured again (typed, or by Measure once M17d
+  extends it to GPS lines). A line with no usable DZG is refused with the import's reasons. M17a's
+  import refuses a file already in the site with "already in the site"; it does not tell the user to
+  remove it.
 - **C10. The saved project holds the fixes it placed the line from** (trace index, projected
   position, quality, altitude), so reopening a project gives identical positions even if the DZG is
   moved, edited or lost. A DZG is small (~50–100 fixes per line).
 - **C11. Time-triggered lines with a DZG place by GPS too.** Tape placement refuses them (no
   traces per metre); GPS placement needs only trace numbers, and bridging by trace count is bridging
   by time. Placing them comes free. Anything that needs a trace spacing (migration) still refuses
-  them today; once M17b gives migration true spacing (decision 11), a GPS line needs no wheel
+  them today; once M17c gives migration true spacing (decision 11), a GPS line needs no wheel
   for it either.
 - **C12. A site has one CRS of its own** (from the builder check). Today a site borrows the first
   grid's (`grids[0].crs`, in `layers.py`, `site_engine._site_crs` and the grid dialog's
@@ -308,6 +338,8 @@ schema change only when an outline exists (the way M15 handles `schema_version`)
 
 ### 6.1 Import GPS lines…
 
+*M17a as built. From M17b, Add data ▾ ▸ GPR… replaces it (§6.5, decision 14).*
+
 A new action, not tied to a grid. The user picks DZT files. For each, the DZG beside it is read, the
 fixes are converted to the site's CRS (decision 9; `utm_epsg` in `ui/grid_dialog.py` has the
 fallback), and the line is added with a `TrackPlacement` and no grid.
@@ -330,7 +362,7 @@ Where the action lives (toolbar, Survey panel, or both) is the builder's call.
 - **Profiles:** decision 8 and C8. The ruler code (`ui/ruler.py`, `ProfileDock._ruler_for`) keys a
   ruler by `(grid_id, axis)` and reads `placement.axis`; GPS lines need an axis derived from their
   direction within the area, and distances projected onto that axis rather than walked.
-  From M17b the view draws each trace at its true distance on whichever ruler the line uses
+  From M17c the view draws each trace at its true distance on whichever ruler the line uses
   (decision 11). A projected distance can step backwards where the operator did; the builder must
   keep it monotonic.
 - **Edit lines…** (line editing's table): GPS lines appear with their grid, and their tape-only
@@ -339,9 +371,12 @@ Where the action lives (toolbar, Survey panel, or both) is the builder's call.
 ### 6.3 Making and reshaping an area
 
 - **Fit to these tracks:** from a selection of GPS lines (Survey panel or map), make a grid lined
-  up with them: azimuth from the lines' mean direction, cross edges half a spacing outside the
+  up with them (from M17b the same fitting makes a new grid at import, §6.5): azimuth from the
+  lines' main direction, cross edges half a spacing outside the
   outer lines' mean positions, along edges at the extreme trace positions, spacing measured (C7).
   It opens in the grid dialog, so the user can name it and set a velocity before OK.
+  When the lines share no main direction (supplemental lines at every angle), the rectangle is the
+  minimum-area one around every trace, with the same half-spacing margin (decision 14).
 - **Draw an outline:** click points on the map to make the outline, for a new area or on any
   existing grid (C13). For a new area the rectangle is the smallest one at the area's azimuth that
   holds it.
@@ -359,6 +394,23 @@ overlay are the obvious things to build on.
 An area is a grid (C1), so This grid and Whole site work as they do; the only changes are the
 outline mask (§5.4) and that GPS lines bin at their own positions, which `trace_coords` already
 gives. Whole site's per-grid engines take areas like any grid.
+
+### 6.5 Add data (from M17b, decision 14)
+
+- **Add data ▾ ▸ GPR…** opens one dialog for GPR files with a **Grid / GPS** switch. **Grid**
+  behaves as today's Import DZT…. **GPS** is M17a's table (its rows, amber and red cells, destagger
+  and coordinates) plus a grid choice: an existing GPR grid, or **New grid** with a name.
+- **A new grid** is fitted when the user imports: decision 14's rectangle, in the site's CRS, with
+  its spacing measured (C7) and shown so it can be typed over. Whether it opens in the grid dialog
+  before the lines are added, as Fit to these tracks does, is for the mock-up.
+- **An existing grid** takes the lines as they are. Traces outside its rectangle are not in its
+  slices, so the summary says how many metres of each line fall outside.
+- **Has to handle:** a single line (a new grid one spacing wide, spacing typed); lines walked in
+  every direction (the minimum-area fallback); a mag grid is never offered.
+- **The old entries:** the toolbar's Import DZT… and Import GPS lines… fold into Add data. The
+  Survey panel's per-grid **Import DZT files…** stays as a shortcut that opens the dialog with that
+  grid chosen. The layout is mocked up (lavish) and agreed with the user before building, as M17a's
+  dialog was.
 
 ---
 
@@ -433,7 +485,7 @@ where they differ.*
   the header's dielectric, so an unattached line gets depths without change.
 - **Line editing** (unmerged when written): Move to grid ▸, Edit lines…, picks that follow their
   line through any move and through remove-and-re-import (#35), and the slices engine re-preparing
-  when a line's placement changes. M17c needs it merged.
+  when a line's placement changes. M17b and M17d need it merged.
 - **Profiles assume one equal column per trace** (`ui/view_transform.py`: `x_of_trace` /
   `trace_of_x` are linear in trace index; `ui/profile_view.py` calls them in ~15 places). The
   ruler side already maps trace to metres through each line's own distance array
@@ -453,17 +505,24 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   and editable per line; map paths with bridged stretches; Survey panel; profiles labelled in
   distance walked (still one column per trace); picks, processing and velocity on GPS lines as on
   any line. Useful on its own: free transects and supplemental lines.
-- **M17b — True-distance profiles** (decision 11). The profile view draws every trace at its true
-  distance, with a visible gap where the cart was lifted; picks, the velocity-fit curve, hover,
-  mirroring, the gain strip and the Difference view follow. The velocity fit uses each trace's true
-  distance; migration re-samples a GPS line to even spacing, migrates and maps back. Tape lines,
-  being evenly spaced, look exactly as before. Expect a fix round after the walkthrough: the profile
-  view is where walkthroughs have found the most (#67, the time cutoff, the gain strip).
-- **M17c — GPS areas.** Grid outline with holes and its mask, which the colour stretch ignores
-  (decision 13); Fit to these tracks; drawing and reshaping; Move to grid ▸ for GPS lines (C3);
-  Place by GPS for tape lines (C9); destagger's Measure (#159) for GPS lines in an area (§15);
-  shared rulers (decision 8, C8), exact for zigzag lines once
-  M17b is in; slices of areas. Needs line editing merged.
+- **M17b — Add data and GPS grids** (decision 14). Add data ▾ ▸ GPR… with its Grid / GPS switch
+  (§6.5, mock-up first); GPS lines into an existing grid or a new one fitted around them; GPS lines
+  working in grids: slices and Whole site (they bin at their own positions through `trace_coords`),
+  the Survey panel under their grid, Edit lines (tape-only fields read-only), Move to grid ▸ (C3),
+  grid edits that leave GPS lines where they are (C13), profiles in distance walked until M17d's
+  shared rulers; Fit to these tracks from a selection, for lines M17a imported unattached. GPS lines
+  never join a mag grid.
+- **M17c — True-distance profiles** (decision 11; M17b before 2026-11-17). The profile view draws
+  every trace at its true distance, with a visible gap where the cart was lifted; picks, the
+  velocity-fit curve, hover, mirroring, the gain strip and the Difference view follow. The velocity
+  fit uses each trace's true distance; migration re-samples a GPS line to even spacing, migrates and
+  maps back. Tape lines, being evenly spaced, look exactly as before. Expect a fix round after the
+  walkthrough: the profile view is where walkthroughs have found the most (#67, the time cutoff, the
+  gain strip).
+- **M17d — Outlines and the rest of the areas.** Grid outline with holes and its mask, which the
+  colour stretch ignores (decision 13); drawing and reshaping; Place by GPS for tape lines (C9);
+  destagger's Measure (#159) for GPS lines in a grid (§15); shared rulers (decision 8, C8), exact
+  for zigzag lines once M17c is in. Needs line editing merged.
 
 ---
 
@@ -490,14 +549,19 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   `FILE__011` drawn at its full ~30 m (not the wheel's 26 m); `FILE__016` and `FILE__028` stretched
   across their obstacle lifts; profiles labelled in distance walked; the summary's wording. The dropout
   display can only be walked on a locally degraded copy, since no real dropout exists.
-- **M17b walkthrough:** `FILE__016` and `FILE__028` show their lifts as gaps; a feature lines up on
+- **M17b walkthrough:** Add data ▾ ▸ GPR… with GPS on the 60 lines into a new grid: the rectangle
+  lined up with the lines, half a spacing outside the outer ones; slices of it. The second survey
+  into an existing grid, with a line partly outside it named in the summary. A tape import through
+  the same dialog, unchanged. M17a's unattached lines moved into a grid, and a grid fitted around
+  others. Edit lines with GPS rows; editing the grid leaves its GPS lines in place.
+- **M17c walkthrough:** `FILE__016` and `FILE__028` show their lifts as gaps; a feature lines up on
   neighbouring profiles across a lift; picks, a velocity fit and mirroring on a GPS line; a tape
   line looks unchanged; a velocity fitted on a GPS line vs the same diffraction by wheel spacing.
-- **M17c walkthrough:** Fit to these tracks on the 60 lines; reshape the outline; move the lines in
-  and one back out; zigzag profiles line up on one ruler; slices of the area with nothing outside
-  the outline; Whole site with an area beside an existing tape grid. On the survey with roads along
-  two edges: an outline inside the roads, and the slices' colours no longer set by them; a hole
-  across the middle. Place by GPS on a tape line with processing, a fit and picks: all three stay.
+- **M17d walkthrough:** reshape a grid's outline; zigzag profiles line up on one ruler; slices
+  with nothing outside the outline; Whole site with a GPS grid beside an existing tape grid. On the
+  survey with roads along two edges: an outline inside the roads, and the slices' colours no longer
+  set by them; a hole across the middle. Place by GPS on a tape line with processing, a fit and
+  picks: all three stay. Measure on a GPS grid's zigzag.
 
 ---
 
@@ -517,7 +581,7 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 
 ## 13. Left to the builder
 
-- Where Import GPS lines… lives, and the summary's form.
+- Where Import GPS lines… lives, and the summary's form (M17a; from M17b, Add data ▾, §6.5).
 - The bridged-stretch rule (§5.3) and how ends take their heading.
 - The ruler angle threshold (C8, ~20°).
 - How the map shows bridged stretches and GPS-vs-tape lines, within the existing symbology (#66).
@@ -537,6 +601,10 @@ On 2026-11-16, after M17a was built, the user added holes to the outline (decisi
 how a re-imported line would be known as the same line, which revised C9 to an in-place
 **Place by GPS**.
 
+On 2026-11-17, walking through M17a, the user replaced the separate GPS import with one **Add
+data ▾** menu and made GPS lines always go into a grid (decision 14), which relettered the
+milestones: M17b GPS grids, M17c true-distance profiles, M17d outlines and the rest.
+
 ---
 
 ## 15. What main changed before planning (2026-11-13)
@@ -544,23 +612,24 @@ how a re-imported line would be known as the same line, which revised C9 to an i
 Main moved ~300 commits between this design and the M17a plan. What matters here:
 
 - **Line editing is merged** (PR #137, in 0.3.0): Edit lines…, Move to grid ▸ and picks that follow
-  their line through any move or re-import. M17c's dependency is met.
+  their line through any move or re-import. The later milestones' dependency is met.
 - **Placement corrections and destagger are merged** (#3 and #47 in PR #160, #159 in PR #168).
   `GridPlacement` now has `scale` and `travel_shift`; `travel_shift` is metres, moving every trace
   forward along the line's own direction of travel, stored apart from `start_along`. That is exactly
   decision 10's model, so **`TrackPlacement` takes a `travel_shift` with the same name and meaning**,
   and the Survey panel names it "destagger" for both kinds of line. **Measure** in Edit lines
   (`nsgeo.destagger.measure`) reads `GridPlacement` fields (`axis`, `offset`, `direction`), so it
-  works on grid lines only; extending it to GPS lines in an area is M17c's.
+  works on grid lines only; extending it to GPS lines in a grid is M17d's.
 - **Cuts are merged** (M15, PR #172), with schema 2 for a site with cuts. **Velocity sources** took
   schema 3 (PR #186). A site with GPS lines therefore saves as **schema 4**.
 - **M19a (magnetometer grids) is built on its own branch, not merged.** It adds `Grid.instrument`
   (`"gpr"` / `"mag"`), mag files on `Site`, its own schema bump (numbered 3 on its branch, so it must
   renumber when it meets main), and mag rows in the Survey panel. Whichever of M17a and M19a merges
   second renumbers its schema constant to the next free number and expects conflicts in
-  `project.py`, `session.py` and `ui/survey_dock.py`. GPS lines never join a mag grid (M17c).
+  `project.py`, `session.py` and `ui/survey_dock.py`. GPS lines never join a mag grid (M17b: neither
+  the import's grid list nor Move to grid ▸ offers one).
 - **Slices changed underneath** (#113 packed cube, #111 multigrid, #107/#108 whole site at fine
-  cells). M17c's outline mask must be re-checked against the packed cube's covered-cells model when
+  cells). M17d's outline mask must be re-checked against the packed cube's covered-cells model when
   its plan is written.
 - **Real data:** `tests/real_data.py` now lists each survey separately (#141): `GPS_LINES` (this
   spec's 60 lines) and `GRID2_LINES` (a second 60-line survey from the same site, with DZGs). The
