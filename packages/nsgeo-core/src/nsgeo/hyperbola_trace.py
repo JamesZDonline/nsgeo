@@ -278,10 +278,10 @@ def _scan(
     not stepped over, and the apex positions a few traces apart up to
     ``_COARSE_APEXES_MAX`` of them (about 253 traces). The coarse round reads
     an even spread of at most ``_COARSE_TRACES`` traces, fewer as the apex
-    positions grow, which keeps a
-    large box quick. Each round refines across one step of the round before
-    either side, the step taken from that round's grid before it is clipped
-    to the box: a clipped grid at the box's side has no step, and froze there.
+    positions grow, which keeps a large box quick. Each round refines across
+    one step of the round before either side, the step taken from that
+    round's grid before it is clipped to the box: a clipped grid at the box's
+    side has no step, and froze there.
     """
     n_tr = img.shape[1]
     min_valid = max(_MIN_BOX, n_tr // 4)
