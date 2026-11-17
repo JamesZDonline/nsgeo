@@ -462,11 +462,18 @@ Three tasks, then the walkthrough:
 - #140's option 3: migrate the box at a range of velocities as a check on the trace.
 - Time zero could offer the tracer's own edge, the zero crossing into the first strong lobe of
   the direct wave, so that traced fits and the clock share one rule (§4.2).
-- A flat layer lying across the apex's own edge biases a traced v 1.2–1.3× fast. A strict xfail
-  pins it.
-- A fading leg on ground with flat layers keeps a few dots past its end, on the layers, which
-  makes v 0.5–2% fast on planted lines. A strict xfail pins it. A candidate fix is to judge the
-  faint floor on the box with its row means removed.
-- In the same family: a tight box around a deep apex on layered ground can trace two flat layers
-  one period apart instead of the hyperbola, about 2.5× fast with the apex inside the dots and
-  enough moveout to pass §4.3 step 4. A strict xfail pins it.
+- A flat layer lying just after the apex's own edge still biases a traced v 1.5–2.3% fast on
+  about a third of boxes (it was 1.2–1.3× before the scan and lobe fixes). A strict xfail pins it.
+- A fading leg on ground with flat layers keeps a few dots past its end, on the layers. After the
+  scan and lobe fixes this reads about 2% slow on planted lines (a loose box about 1% slow; a real
+  fit boxed at about 2.2× its extent stays within 2σ of its tight box). A strict xfail pins it. The
+  candidate fix is to judge the faint floor on both the raw box and the box with its row means
+  removed; it fixed the planted lines but left one real fit just outside its bound, so it waits.
+- Rule B (too flat) is a partial guard: around a deep apex on layered ground a few tight boxes
+  still read about 14% fast with enough moveout to pass it.
+- **Which lobe is the band's edge.** The lobe is now chosen near the apex, so the box's size no
+  longer changes it. But no fixed strength threshold matches the lobe the author clicks on all
+  their fits: it matches on 15 of 20. A way for the author to pick the lobe (for example, move the
+  traced dots up or down one lobe) is a candidate follow-up after the walkthrough.
+- Boxes much bigger than the hyperbola can still read 4–5% off a tight box on the same lobe,
+  because more of the stretched legs is taken in.
