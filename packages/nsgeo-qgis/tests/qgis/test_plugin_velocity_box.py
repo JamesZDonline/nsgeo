@@ -9,12 +9,13 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
+from nsgeo.processing.base import Radargram, retime_ns
 from nsgeo.velocity_fit import refit
 from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication, QMessageBox
-from tests.planted import REAL_DT_NS, REAL_NOISE_RATIO, Planted, plant
+from tests.planted import REAL_DT_NS, REAL_NOISE_RATIO, REAL_PERIOD_NS, Planted, plant
 from tests.synthetic import write_dzt
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 1.0, "EPSG:32616", 0.5)
@@ -28,10 +29,13 @@ V = 0.07
 PAD = 51
 
 
-def _write_planted(folder, name, *, hyperbola: bool):
+def _write_planted(folder, name, *, hyperbola: bool, direct_wave: bool = False):
     folder.mkdir(parents=True, exist_ok=True)
     planted = [Planted(APEX, 15.0, V)] if hyperbola else []
-    data, _, _ = plant(N_TRACES, 512, planted, noise_ratio=REAL_NOISE_RATIO, seed=3)
+    # A direct wave across every trace at 2 ns gives a Time zero step's first
+    # break something to land on, ahead of the hyperbola, as on a real line.
+    layers = [(2.0, 1.0)] if direct_wave else None
+    data, _, _ = plant(N_TRACES, 512, planted, noise_ratio=REAL_NOISE_RATIO, seed=3, layers=layers)
     data = np.vstack([np.zeros((PAD, N_TRACES)), data])
     scaled = (data * 1e8).astype(np.int32)
     path = folder / name
@@ -231,6 +235,40 @@ def test_a_saved_traced_fit_refits_to_the_velocity_shown(plugin):
     again = refit(stored, distance, dock._line_zero())
     assert round(again.v_m_ns, 4) == round(shown.v_m_ns, 4)
     assert round(stored.v_m_ns, 4) == round(shown.v_m_ns, 4)
+
+
+def test_a_traced_fit_on_a_line_with_time_zero_refits_on_the_lines_clock(plugin, tmp_path):
+    # The tracer runs on the line's own clock and the dots are kept on the
+    # radar clock. With Time zero at the direct wave's first break the two
+    # differ, so the dots make a round trip that a line without Time zero
+    # never makes.
+    s, v, dock = plugin.session, _view(plugin), plugin.profile_dock
+    path = _write_planted(tmp_path / "raw", "FILE__003.DZT", hyperbola=True, direct_wave=True)
+    line = Line.open(path, GridPlacement("A", "y", 3.0, 0.0))
+    s.add_lines([line])
+    key = s.keys()[-1]
+    s.set_profiles(key, line.load())
+    s.append_step(key, build_step("time_zero", mode="first_break"))
+    s.open_line(key)
+    zero = dock._line_zero()
+    assert zero > 1.0  # the first break, not the radar's own zero
+    _drag(v, *_box_around(v))
+    shown = dock.velocity_fit_result()
+    assert shown is not None
+    dock.save_fit_button.click()
+    stored = next(iter(s.line_for_key(key).velocity_fits.values()))
+    distance = s.line_for_key(key).distance_along()
+    again = refit(stored, distance, dock._line_zero())
+    assert again.v_m_ns == pytest.approx(shown.v_m_ns, rel=1e-9)
+    # On the line's clock each dot lies on the planted edge, which plant puts
+    # on t(x) on the planted rows: PAD rows down the file's radar clock.
+    radar = Radargram.from_profile(line.load()[0]).times_ns()
+    planted = np.sqrt(15.0**2 + 4.0 * (distance - distance[APEX]) ** 2 / V**2)
+    edge = np.interp(PAD + planted / REAL_DT_NS, np.arange(radar.size), radar)
+    for trace, t_radar in stored.points:
+        assert retime_ns(t_radar, 0.0, zero) == pytest.approx(
+            retime_ns(edge[trace], 0.0, zero), abs=REAL_PERIOD_NS / 8
+        )
 
 
 def test_a_traced_fit_without_time_zero_shows_the_radar_clock_note(plugin):
