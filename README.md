@@ -131,8 +131,8 @@ release's notes list everything in it.
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
   clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
-  switching velocity mode on first. Built and checked against the author's
-  own hand fits and an independent migration check; in review before its
+  switching velocity mode on first. Built, reviewed and checked against the
+  author's own hand fits and an independent migration check; awaiting its
   walkthrough.
 
 ### Next, in order
