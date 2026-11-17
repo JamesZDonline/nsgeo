@@ -4237,6 +4237,32 @@ def test_an_owed_shift_waits_for_the_preparation_it_is_owed_to(docked_zeroed, mo
     _assert_pushed_shifted(dock, pushed)
 
 
+def test_a_restore_that_waits_for_a_site_task_and_owes_a_shift_pushes_it_shifted(
+    docked_zeroed, monkeypatch
+):
+    """Spec §3 with #200: the restore defers behind a live site task, the retry
+    dispatches the preparation (the engine was cleared), and the shift is owed
+    to it. Nothing is pushed before `_on_prepared` shifts the range, and the
+    note shows once. A guard: it pins today's code."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the retry dispatches
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    assert dock._grid_prepare_pending and dock._resolution_owed and dock._pending_z_shift
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.is_running, "the retry dispatched the preparation"
+    assert pushed == [], "pushed before the shift"
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
+
+
 @pytest.mark.parametrize("leave", ["edit", "scope"])
 def test_a_restore_note_goes_when_the_cube_is_left(docked_zeroed, leave):
     """Spec §8: the note describes the cube the Cube box names. An edit marks
@@ -4351,14 +4377,16 @@ def test_closing_the_site_while_a_restore_waits_for_a_site_task_is_quiet(
     dock.error.connect(errors.append)
     dock.restore_cube("A__old")
     assert dock._grid_prepare_pending, "the restore waits for the site task"
+    assert dock._resolution_owed
 
     session.save()
     session.close_site()
+    # Here, not after the retry below: the retry consumes the flag anyway.
+    assert not dock._resolution_owed, "the close dropped the owed resolution"
     live[0] = False
     dock._run_pending_grid_prepare()
 
     assert errors == []
-    assert not dock._resolution_owed
     assert not [m for m in message_log if "could not" in m], message_log
 
 
@@ -4705,6 +4733,9 @@ def test_the_first_break_estimate_matches_time_zero_on_real_lines(
             read[preset] = (dock.engine.median_first_break(), dock.engine.median_zero())
         dt = dock.engine.prepared_lines()[0].dt_ns
         transform = dock.engine.choice.transform
+    # The square-root branch is what this checks on real ground: should the
+    # default change, this says so rather than quietly checking another branch.
+    assert transform == "amp_square", transform
     first_break, zero = read["radar"][0], read["zeroed"][1]
     assert first_break == pytest.approx(zero, abs=dt), (transform, first_break, zero, dt)
 
