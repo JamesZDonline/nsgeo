@@ -117,10 +117,11 @@ release's notes list everything in it.
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
-- **M17a: GPS lines**, the first of three plans. Read the RTK GPS log
+- **M17a: GPS lines**, the first of four plans. Read the RTK GPS log
   (`.DZG`) beside each DZT and place the line along the track it was
   walked, with no grid: import, the map (with stretches that had no RTK
-  fix marked), the Survey panel, and a destagger you can type. Building.
+  fix marked), the Survey panel, and a destagger you can type. Built;
+  walkthrough under way.
 - **Slices: the right clock and preset after a change** ([#162], [#102], [#152],
   part of [#163]). A restored cube comes back on the clock it was saved on, even
   if you edit while its lines prepare or its preset has since gained or lost
@@ -143,8 +144,10 @@ than reworking M16–M17 afterwards.
 
 1. **M16: 3-D.** In progress (above).
 2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
-   lines by their track ([#134]). Designed, in three parts: GPS lines (in
-   progress, above), profiles at true distance, and GPS areas.
+   lines by their track ([#134]). Designed, in four parts: GPS lines (in
+   progress, above); one **Add data** menu, with GPS lines going into an
+   existing grid or a new one fitted around them; profiles at true distance;
+   and outlines with holes, Place by GPS and the rest of the GPS areas.
 3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 4. **M19: magnetometer data.** The first instrument other than GPR:
@@ -163,7 +166,7 @@ back on the wrong clock without a note ([#162], in progress above).
 Grouped by area. The order within a group is not a priority.
 
 - **Line placement and survey geometry:** grids that are not rectangles
-  ([#130]; the outline and its slice mask come with M17's GPS areas); balancing
+  ([#130]; the outline and its slice mask come with M17d); balancing
   lines walked in different directions (the second half of [#47]); a preset or
   velocity override for a selection of lines at once ([#58]; editing their
   placement together is done).
