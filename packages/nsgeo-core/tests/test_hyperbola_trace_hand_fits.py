@@ -10,7 +10,9 @@ a note on a disagreement awaiting a ruling (the test is a strict xfail). A
 key plus "|boxes" does the same for the three-box test alone. `expected.json`
 maps a key to {"ratio": [lo, hi], "reason": ...}: a difference the author has
 accepted as expected, so the traced-to-hand velocity ratio must lie in
-[lo, hi] instead of the two agreeing (the three-box test is unchanged).
+[lo, hi], and the traced sigma stay within ``EXPECTED_MAX_REL_SIGMA`` of its
+velocity, instead of the two agreeing (the three-box test is unchanged). Each
+fit's band is centred on its accepted ratio, so a lobe jump still fails.
 
 A saved stack may have Migration or an amplitude transform switched on. The
 panel refuses to trace with those on and tells the author to switch them off,
@@ -53,6 +55,9 @@ EXPECTED = _read("expected.json")
 #: The steps the panel refuses to trace with: Migration and the amplitude
 #: transforms (spec §3, decision 3).
 REFUSED_STEPS = ("migrate_fk", "amp_abs", "amp_square", "amp_envelope")
+#: An accepted difference must still be a precise trace: a ratio inside its
+#: band means little when the traced sigma could hide a jump.
+EXPECTED_MAX_REL_SIGMA = 0.05
 
 
 @dataclass
@@ -183,6 +188,10 @@ def test_a_traced_fit_agrees_with_the_hand_fit(case):
         ratio = t.v_m_ns / h.v_m_ns
         assert lo <= ratio <= hi, (
             f"traced/hand {ratio:.3f} outside [{lo}, {hi}]: {expected['reason']}"
+        )
+        rel_sigma = t.v_stderr_m_ns / t.v_m_ns
+        assert rel_sigma <= EXPECTED_MAX_REL_SIGMA, (
+            f"traced sigma/v {rel_sigma:.3f} over {EXPECTED_MAX_REL_SIGMA}: {expected['reason']}"
         )
         return
     assert _agree(t.v_m_ns, t.v_stderr_m_ns, h.v_m_ns, h.v_stderr_m_ns), (
