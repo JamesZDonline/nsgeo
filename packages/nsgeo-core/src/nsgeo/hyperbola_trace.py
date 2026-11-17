@@ -87,7 +87,9 @@ _COARSE_TRACES = 96
 #: found from every apex position against the grid with 8 traces between
 #: apexes, and missed from some at 8.7 (24 apexes over a 201-trace box): the
 #: curve nearest it scores below one off the hyperbola, and refining cannot
-#: walk that far back. 4 leaves twice the margin.
+#: walk that far back. 4 leaves twice the margin. The cap keeps a wide box
+#: quick, so past about 253 traces the apexes are again more than 8 apart and
+#: some plain hyperbolas are refused ("too flat"), never given a wrong velocity.
 _COARSE_APEX_TRACES = 4
 _COARSE_APEXES = 24
 _COARSE_APEXES_MAX = 64
@@ -273,9 +275,10 @@ def _scan(
     """Best (apex x, t0, v, score), coarse to fine.
 
     The apex times are a fraction of a period apart, so a curve on a lobe is
-    not stepped over, and the apex positions a few traces apart however wide
-    the box. The coarse round reads an even spread of at most
-    ``_COARSE_TRACES`` traces, fewer as the apex positions grow, which keeps a
+    not stepped over, and the apex positions a few traces apart up to
+    ``_COARSE_APEXES_MAX`` of them (about 253 traces). The coarse round reads
+    an even spread of at most ``_COARSE_TRACES`` traces, fewer as the apex
+    positions grow, which keeps a
     large box quick. Each round refines across one step of the round before
     either side, the step taken from that round's grid before it is clipped
     to the box: a clipped grid at the box's side has no step, and froze there.

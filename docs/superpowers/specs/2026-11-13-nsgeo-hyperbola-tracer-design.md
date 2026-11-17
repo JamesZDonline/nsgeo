@@ -406,9 +406,9 @@ the test asserts the traced-to-hand ratio stays inside it, so a later lobe jump 
    The traced velocity reads about 5–20% faster than the hand one, the difference accepted in
    §10; much more than that is worth a look.
 3. Box it three ways: tight around the hyperbola, about 1.5× its visible extent and about 2×.
-   You get the same velocity each time, within σ. The final review found boxes this much bigger
-   changing the lobe or running onto layers on some of the author's lines; the walkthrough
-   names those lines.
+   The dots stay on the same lobe, and the velocity holds within σ on most lines. On a few of the
+   author's lines a looser box still reads 4–5% off a tight one on the same lobe; the walkthrough
+   names them.
 4. Try these boxes, each with the result shown:
 
    | Box | Result |
@@ -462,18 +462,25 @@ Three tasks, then the walkthrough:
 - #140's option 3: migrate the box at a range of velocities as a check on the trace.
 - Time zero could offer the tracer's own edge, the zero crossing into the first strong lobe of
   the direct wave, so that traced fits and the clock share one rule (§4.2).
-- A flat layer lying just after the apex's own edge still biases a traced v 1.5–2.3% fast on
-  about a third of boxes (it was 1.2–1.3× before the scan and lobe fixes). A strict xfail pins it.
+- A flat layer lying just after the apex's own edge still biases a traced v about 2–3% fast on
+  about a third of boxes. A strict xfail pins it.
 - A fading leg on ground with flat layers keeps a few dots past its end, on the layers. After the
-  scan and lobe fixes this reads about 2% slow on planted lines (a loose box about 1% slow; a real
-  fit boxed at about 2.2× its extent stays within 2σ of its tight box). A strict xfail pins it. The
-  candidate fix is to judge the faint floor on both the raw box and the box with its row means
-  removed; it fixed the planted lines but left one real fit just outside its bound, so it waits.
+  scan and lobe fixes this reads about 2% slow on planted lines, and a loose box about 1% slow.
+  A strict xfail pins it. The candidate fix is to judge the faint floor on both the raw box and
+  the box with its row means removed; it fixed the planted lines but left one real fit just
+  outside its bound, so it waits.
+- A box holding only the apex and one leg on layered ground reads 2–5% fast on planted lines.
 - Rule B (too flat) is a partial guard: around a deep apex on layered ground a few tight boxes
   still read about 14% fast with enough moveout to pass it.
 - **Which lobe is the band's edge.** The lobe is now chosen near the apex, so the box's size no
   longer changes it. But no fixed strength threshold matches the lobe the author clicks on all
   their fits: it matches on 15 of 20. A way for the author to pick the lobe (for example, move the
   traced dots up or down one lobe) is a candidate follow-up after the walkthrough.
-- Boxes much bigger than the hyperbola can still read 4–5% off a tight box on the same lobe,
-  because more of the stretched legs is taken in.
+- On the same lobe, a looser box can still read 4–5% off a tight one: on one of the author's fits
+  from about 1.35× the hyperbola's extent, where the dots run further down a leg than the
+  author's clicks, and on two others at 2–2.5×.
+- A box more than about four times wider than the hyperbola's run inside it can trace a curve
+  that misses it, because the scan asks a curve to stay inside the box for a quarter of its width.
+  Counting a shorter run fixed the planted cases at about three times the cost.
+- Past about 253 traces wide, the scan's coarse apex grid is capped, and some plain hyperbolas
+  are refused as too flat.
