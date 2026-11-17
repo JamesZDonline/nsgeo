@@ -23,6 +23,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsGeometry,
+    QgsMapLayer,
     QgsNullSymbolRenderer,
     QgsPoint,
     QgsProject,
@@ -40,21 +41,20 @@ from qgis.PyQt.QtXml import QDomDocument
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.scene3d_plan import (
     NO_GRID,
+    PICK_COLOUR,
     PICK_RADIUS_M,
     PICKS_LAYER_NAME,
     VIEW_NAME,
     VIEW_REFUSED,
     camera_pose,
     local_corners,
+    padded_extent,
     scene_centre,
-    scene_extent,
     scene_grid,
     scene_stretch,
     stretched_z,
     view_title,
 )
-
-_PICK_COLOUR = "#1f1f1f"
 
 
 def _alive(obj: Any) -> bool:
@@ -78,6 +78,7 @@ def _mesh_renderer(layer: Any, stretch: float) -> Any | None:
         Qgs3D.initialize()
         metadata = QgsApplication.renderer3DRegistry().rendererMetadata("mesh")
     if metadata is None:
+        _log("3-D view: QGIS has no mesh 3-D renderer, so a surface is not drawn")
         return None
     doc = QDomDocument()
     element = doc.createElement("renderer-3d")
@@ -98,7 +99,7 @@ def _picks_renderer() -> Any:
     symbol.setShape(Qgis.Point3DShape.Sphere)
     symbol.setShapeProperties({"radius": PICK_RADIUS_M})
     material = QgsPhongMaterialSettings()
-    material.setDiffuse(QColor(_PICK_COLOUR))
+    material.setDiffuse(QColor(PICK_COLOUR))
     symbol.setMaterialSettings(material)
     symbol.setAltitudeClamping(Qgis.AltitudeClamping.Absolute)
     return QgsVectorLayer3DRenderer(symbol)
@@ -129,6 +130,11 @@ class Scene3D:
         self._export: Any = None
         self._canvas: Any = None
         self._last_title = VIEW_NAME
+        #: What the view was last framed on: the grid and its geometry (Edit grid moves it).
+        self._framed_grid: str | None = None
+        self._framed_geometry: tuple[Any, ...] | None = None
+        #: The next 0 ms layers turn empties the view's layers first (a re-frame).
+        self._rebuild_layers = False
         #: Bumped at each teardown, so a late `destroyed` from an old view does nothing.
         self._generation = 0
         #: layer id -> the stretch of the renderer this view put on it.
@@ -170,12 +176,20 @@ class Scene3D:
                 holder.activateWindow()
             self.refresh()
             return
-        grid = scene_grid(self.dock.scope(), self.dock.grid_combo.currentText() or None, None)
+        grid = scene_grid(
+            self.dock.scope(),
+            self.dock.grid_combo.currentText() or None,
+            None,
+            self._grid_ids(),
+        )
         if grid is None:
             raise ValueError(NO_GRID)
         try:
             self._open_on(grid)
         except BaseException:
+            if self._canvas is not None:  # a view QGIS made: close it, not just forget it
+                with contextlib.suppress(Exception):
+                    self.iface.closeMapCanvas3D(VIEW_NAME)
             self._teardown()
             raise
 
@@ -197,7 +211,6 @@ class Scene3D:
         settings = canvas.mapSettings()
         settings.setTerrainRenderingEnabled(False)
         settings.setBackgroundColor(QColor(255, 255, 255))
-        self._layers_timer.start()
         self._frame(grid, stretch)
         self._retitle(grid, stretch)
 
@@ -206,12 +219,11 @@ class Scene3D:
         if not self.is_open() or self._disposed:
             return
         shown = self.dock.grid_combo.currentText() or None
-        grid = scene_grid(self.dock.scope(), shown, self.grid_id)
+        grid = scene_grid(self.dock.scope(), shown, self.grid_id, self._grid_ids())
         if grid is None:
             grid = self.grid_id
-        if grid is None:
+        if grid is None or grid not in self._grid_ids():
             return
-        changed = grid != self.grid_id
         self.grid_id = grid
         stretch = self._stretch(grid)
         if not self._picks_alive():
@@ -219,7 +231,7 @@ class Scene3D:
             self._layers_timer.start()
         self._fill_picks(grid, stretch)
         self._apply_renderers(grid, stretch)
-        if changed:
+        if grid != self._framed_grid or self._geometry_of(grid) != self._framed_geometry:
             self._frame(grid, stretch)
         self._retitle(grid, stretch)
 
@@ -258,6 +270,14 @@ class Scene3D:
             self.project.cleared.disconnect(self._on_cleared)
 
     # ---- the pieces --------------------------------------------------------------
+    def _grid_ids(self) -> list[str]:
+        site = self.session.site
+        return [g.id for g in site.grids] if site is not None else []
+
+    def _geometry_of(self, grid: str) -> tuple[Any, ...]:
+        g = self.session.grid(grid)
+        return (g.origin, g.azimuth, g.size_x, g.size_y, g.crs)
+
     def _stretch(self, grid: str) -> float:
         return scene_stretch(self.session.volume_record(grid))
 
@@ -269,23 +289,28 @@ class Scene3D:
         if self._picks_alive():
             return
         grid_crs = self.layers.crs()
-        crs = grid_crs.authid() if grid_crs is not None else ""
-        uri = f"PointZ?crs={crs}&field=true_depth_m:double" if crs else "PointZ"
-        layer = QgsVectorLayer(uri, PICKS_LAYER_NAME, "memory")
+        layer = QgsVectorLayer("PointZ?field=true_depth_m:double", PICKS_LAYER_NAME, "memory")
+        if grid_crs is not None and grid_crs.isValid():
+            layer.setCrs(grid_crs)
+        # QGIS asks "scratch layers will be lost" on exit / New / Open while a memory layer holds
+        # features; this one is rebuilt from the picks, so there is nothing to lose
+        layer.setCustomProperty("skipMemoryLayersCheck", 1)
+        layer.setFlags(layer.flags() & ~QgsMapLayer.LayerFlag.Identifiable)
         layer.setRenderer(QgsNullSymbolRenderer())
         layer.setRenderer3D(_picks_renderer())
         self.project.addMapLayer(layer, False)
+        self.picks_layer = layer
         group = self.layers.group
         placed = False
         if group is not None:
             picks = self.layers.layers.get("picks")
             node = group.findLayer(picks.id()) if _alive(picks) else None
-            if node is not None:
-                group.insertLayer(group.children().index(node) + 1, layer)
+            parent = node.parent() if node is not None else None
+            if node is not None and parent is not None:
+                parent.insertLayer(parent.children().index(node) + 1, layer)
                 placed = True
         if not placed:
             self.project.layerTreeRoot().addLayer(layer)
-        self.picks_layer = layer
 
     def _fill_picks(self, grid: str, stretch: float) -> list[float]:
         """Rewrite the picks layer with the grid's picks at their true depth; the depths."""
@@ -299,23 +324,40 @@ class Scene3D:
                 if r.point is not None
             ]
         depths = self._export.pick_depths(grid, [(r.pick.line_key, r.pick) for r in rows])
-        features = []
-        kept: list[float] = []
+        wanted: list[tuple[float, float, float, float]] = []
         for row, depth in zip(rows, depths):
             if depth is None or row.point is None:
                 continue
-            feature = QgsFeature(layer.fields())
-            feature.setGeometry(
-                QgsGeometry(QgsPoint(row.point[0], row.point[1], stretched_z(depth, stretch)))
+            wanted.append(
+                (
+                    float(row.point[0]),
+                    float(row.point[1]),
+                    float(stretched_z(depth, stretch)),
+                    float(depth),
+                )
             )
-            feature.setAttribute("true_depth_m", float(depth))
+        kept = [w[3] for w in wanted]
+        # refresh runs on many signals: rewrite only when a point moved, so the view does not
+        # rebuild (flicker) for nothing
+        now = []
+        for f in layer.getFeatures():
+            pt = f.geometry().constGet()
+            now.append((pt.x(), pt.y(), pt.z(), float(f["true_depth_m"])))
+        if sorted(now) == sorted(wanted):
+            return kept
+        features = []
+        for x, y, z, depth in wanted:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry(QgsPoint(x, y, z)))
+            feature.setAttribute("true_depth_m", depth)
             features.append(feature)
-            kept.append(float(depth))
         provider = layer.dataProvider()
         provider.truncate()
         provider.addFeatures(features)
         layer.updateExtents()
         layer.triggerRepaint()
+        # the open 3-D scene ignores repaints; this is the signal it rebuilds a layer on
+        layer.trigger3DUpdate()
         return kept
 
     def _apply_renderers(self, grid: str, stretch: float) -> None:
@@ -346,7 +388,7 @@ class Scene3D:
     def _frame(self, grid: str, stretch: float) -> None:
         """Point the view at the grid: its CRS, origin and extent, and the camera."""
         corners = self._corners(grid)
-        xmin, ymin, xmax, ymax = scene_extent(corners)
+        xmin, ymin, xmax, ymax = padded_extent(corners)
         cx, cy = scene_centre(corners)
         settings = self._canvas.mapSettings()
         settings.setCrs(QgsCoordinateReferenceSystem(self.session.grid(grid).crs))
@@ -354,9 +396,18 @@ class Scene3D:
         settings.setExtent(QgsRectangle(xmin, ymin, xmax, ymax))
         depths = self._depths_of(grid)
         pose = camera_pose(corners, depths, stretch)
-        self._canvas.cameraController().setLookingAtMapPoint(
-            QgsVector3D(pose.x, pose.y, pose.z), pose.distance, pose.pitch, pose.yaw
-        )
+        controller = self._canvas.cameraController()
+        if hasattr(controller, "setLookingAtMapPoint"):
+            controller.setLookingAtMapPoint(
+                QgsVector3D(pose.x, pose.y, pose.z), pose.distance, pose.pitch, pose.yaw
+            )
+        else:  # QGIS 3.40: no map-point call, so look straight down from the right distance
+            controller.resetView(pose.distance)
+        self._framed_grid = grid
+        self._framed_geometry = self._geometry_of(grid)
+        # the CRS and origin change reaches no entity already built: rebuild them all
+        self._rebuild_layers = True
+        self._layers_timer.start()
 
     def _depths_of(self, grid: str) -> list[float]:
         layer = self.picks_layer
@@ -378,6 +429,11 @@ class Scene3D:
             title = view_title(grid, stretch, stale)
             holder.setWindowTitle(title)
             self._last_title = title
+            if not holder.property("nsgeoHooked"):
+                # QGIS re-applies its own stored title when docking toggles, and replaces the
+                # holder: re-title the new one as soon as the old one goes
+                holder.setProperty("nsgeoHooked", True)
+                holder.destroyed.connect(self.request_refresh)
 
     def _holder(self) -> Any:
         """The window or dock holding the view, found afresh each time: docking and undocking
@@ -393,7 +449,12 @@ class Scene3D:
         checked layers, which include the picks layer and the surfaces."""
         try:
             if self.is_open():
-                self._canvas.mapSettings().setLayers(self.project.layerTreeRoot().checkedLayers())
+                settings = self._canvas.mapSettings()
+                layers = self.project.layerTreeRoot().checkedLayers()
+                if self._rebuild_layers:
+                    self._rebuild_layers = False
+                    settings.setLayers([])
+                settings.setLayers(layers)
         except Exception as exc:  # noqa: BLE001 -- a slot
             _log(f"could not set the 3-D view's layers: {exc}")
 
@@ -419,6 +480,9 @@ class Scene3D:
     def _teardown(self) -> None:
         self._generation += 1
         self._layers_timer.stop()
+        self._rebuild_layers = False
+        self._framed_grid = None
+        self._framed_geometry = None
         layer = self.picks_layer
         if _alive(layer) and self.project.mapLayer(layer.id()) is not None:
             self.project.removeMapLayer(layer.id())

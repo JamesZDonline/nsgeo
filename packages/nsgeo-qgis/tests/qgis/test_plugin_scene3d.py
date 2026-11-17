@@ -297,12 +297,185 @@ def test_a_docked_view_is_retitled_and_a_swapped_holder_still_is(scene):
     before = holder.raised
     s3d.open()
     assert holder.raised == before + 1
-    # undock: QGIS builds a new holder carrying the current title
     iface.swap_holder3d(VIEW_NAME)
     assert not isinstance(iface.dialogs3d[VIEW_NAME], QDockWidget)
     session.remember_volume(A, stretch=2.0)
     s3d.refresh()
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
+
+
+def test_a_dock_toggle_retitles_the_new_holder_without_another_refresh(scene):
+    """QGIS re-applies the view's creation name to the holder a dock toggle builds, so the
+    stretch must come back on its own (the old holder going is the cue)."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    iface.swap_holder3d(VIEW_NAME)
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == VIEW_NAME
+    assert spin_until(lambda: iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0))
+    iface.swap_holder3d(VIEW_NAME)  # and back, the new holder is hooked too
+    assert spin_until(lambda: iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0))
+
+
+def _settle(s3d):
+    assert spin_until(lambda: not s3d._layers_timer.isActive() and not s3d._timer.isActive())
+
+
+def _count_3d_updates(layer):
+    seen = []
+    layer.request3DUpdate.connect(lambda: seen.append(1))
+    return seen
+
+
+def test_picks_update_in_the_open_scene_after_a_new_pick_a_stretch_and_a_grid_switch(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    seen = _count_3d_updates(s3d.picks_layer)
+    s3d.refresh()  # nothing changed: no rebuild of the entities (flicker)
+    assert seen == []
+    surfaces.layers.write_pick(_pick(session.keys_on_grid(A)[0], 30, 10.2))
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(seen) == 1)
+    session.remember_volume(A, stretch=2.0)
+    s3d.refresh()
+    assert len(seen) == 2
+    s3d.dock_state.grid = B
+    s3d.refresh()
+    assert len(seen) == 3
+    s3d.refresh()
+    assert len(seen) == 3
+
+
+def test_a_frame_rebuilds_the_views_layers_in_its_new_crs(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    settings = iface.canvases3d[VIEW_NAME].mapSettings()
+    full = sorted(lyr.id() for lyr in settings.layers())
+    assert s3d.picks_layer.id() in full
+    seen = []
+    settings.layersChanged.connect(
+        lambda: seen.append(sorted(lyr.id() for lyr in settings.layers()))
+    )
+    s3d.dock_state.grid = B  # a grid change frames the view again
+    s3d.refresh()
+    _settle(s3d)
+    assert seen == [[], full]
+
+
+def test_a_moved_grid_is_framed_again(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    poses = iface.canvases3d[VIEW_NAME].cameraController().poses
+    s3d.refresh()
+    assert len(poses) == 1  # nothing moved
+    g = session.grid(A)
+    session.replace_grid(
+        Grid(
+            A,
+            (g.origin[0] + 50.0, g.origin[1]),
+            g.azimuth,
+            g.size_x,
+            g.size_y,
+            g.crs,
+            g.default_spacing,
+        )
+    )
+    s3d.refresh()
+    assert len(poses) == 2 and poses[1][0].x() == pytest.approx(poses[0][0].x() + 50.0)
+    assert len(iface.canvases3d[VIEW_NAME].mapSettings().origin().toString()) > 0
+
+
+def test_the_scene_extent_has_a_margin_round_the_grid(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    ext = iface.canvases3d[VIEW_NAME].mapSettings().extent()
+    g = session.grid(A)
+    assert ext.width() >= g.size_x + 2.0 and ext.height() >= g.size_y + 2.0
+
+
+def test_a_3_40_camera_without_a_map_point_call_is_framed_with_reset_view(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.legacy_camera3d = True
+    s3d.open()
+    assert s3d.is_open()
+    resets = iface.canvases3d[VIEW_NAME].cameraController().resets
+    assert len(resets) == 1 and resets[0] > 0
+
+
+def test_a_failed_frame_closes_the_real_view_and_leaves_nothing(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+
+    def boom(grid):
+        raise RuntimeError("no corners")
+
+    s3d._corners = boom
+    with pytest.raises(RuntimeError, match="no corners"):
+        s3d.open()
+    assert iface.created3d == 1 and iface.canvases3d == {}
+    assert not s3d.is_open()
+    _no_scene_layers_left(s3d, surface_layers)
+
+
+def test_the_picks_layer_is_marked_temporary_hidden_from_identify_and_drawn_as_spheres(scene):
+    from qgis.core import Qgis, QgsMapLayer, QgsNullSymbolRenderer
+
+    s3d, *_ = scene
+    s3d.open()
+    layer = s3d.picks_layer
+    assert layer.customProperty("skipMemoryLayersCheck") == 1
+    assert not (layer.flags() & QgsMapLayer.LayerFlag.Identifiable)
+    assert isinstance(layer.renderer(), QgsNullSymbolRenderer)
+    assert layer.renderer3D().symbol().shape() == Qgis.Point3DShape.Sphere
+
+
+def test_the_picks_layer_declares_its_depth_field_without_a_crs(scene):
+    s3d, *_ = scene
+    s3d.layers.crs = lambda: None
+    s3d.open()
+    assert "true_depth_m" in s3d.picks_layer.fields().names()
+    assert len(list(s3d.picks_layer.getFeatures())) == 4
+
+
+def test_a_picks_layer_in_a_subgroup_still_gets_the_scene_layer_beside_it(scene):
+    s3d, *_ = scene
+    group = s3d.layers.group
+    picks = s3d.layers.layers["picks"]
+    node = group.findLayer(picks.id())
+    sub = group.addGroup("sub")
+    sub.addChildNode(node.clone())
+    group.removeChildNode(node)
+    s3d.open()
+    assert s3d.is_open()
+    assert s3d.project.layerTreeRoot().findLayer(s3d.picks_layer.id()) is not None
+    s3d.close()
+    assert not _scene_layers_in_project()
+
+
+def test_removing_the_scene_grid_in_whole_site_falls_back_to_the_panels_grid(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.dock_state.grid = B
+    s3d.open()
+    s3d.dock_state.scope = "site"
+    s3d.dock_state.grid = A
+    session.remove_grid(B, with_lines=True)
+    s3d.refresh()
+    assert s3d.grid_id == A
+    assert iface.dialogs3d[VIEW_NAME].windowTitle().startswith(view_title(A, 3.0, 0))
+
+
+def test_a_missing_mesh_renderer_is_logged_not_silent(scene, monkeypatch):
+    from nsgeo_qgis import scene3d
+
+    logged = []
+    monkeypatch.setattr(scene3d, "_log", logged.append)
+    registry = scene3d.QgsApplication.renderer3DRegistry()
+    monkeypatch.setattr(type(registry), "rendererMetadata", lambda self, name: None, raising=False)
+    monkeypatch.setattr("qgis._3d.Qgs3D.initialize", staticmethod(lambda: None), raising=False)
+    s3d, *_ = scene
+    s3d.open()
+    assert any("mesh 3-D renderer" in line for line in logged)
 
 
 # ---- Task 3: the plugin's 3D view button ----------------------------------------------------

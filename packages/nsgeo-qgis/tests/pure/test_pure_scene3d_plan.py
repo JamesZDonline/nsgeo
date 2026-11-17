@@ -6,6 +6,7 @@ import pytest
 from nsgeo_qgis.scene3d_plan import (
     camera_pose,
     local_corners,
+    padded_extent,
     scene_centre,
     scene_extent,
     scene_grid,
@@ -52,3 +53,17 @@ def test_local_corners_scene_extent_and_centre():
     assert scene_centre(tilted) == (6.0, 4.0)
     pose = camera_pose(tilted, [], 3.0)
     assert (pose.x, pose.y) == scene_centre(tilted)
+
+
+def test_scene_grid_falls_back_to_the_panels_when_the_last_grid_is_gone():
+    assert scene_grid("site", "Grid 2", "Grid 1", ["Grid 1", "Grid 2"]) == "Grid 1"
+    assert scene_grid("site", "Grid 2", "Grid 1", ["Grid 2"]) == "Grid 2"
+    assert scene_grid("site", None, "Grid 1", []) is None
+    assert scene_grid("grid", "Grid 2", "Grid 1", ["Grid 2"]) == "Grid 2"
+
+
+def test_padded_extent_adds_a_tenth_of_the_longer_side_and_at_least_a_metre():
+    big = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)]
+    assert padded_extent(big) == (-4.0, -4.0, 44.0, 24.0)
+    small = [(5.0, 5.0), (8.0, 5.0), (8.0, 7.0), (5.0, 7.0)]
+    assert padded_extent(small) == (4.0, 4.0, 9.0, 8.0)

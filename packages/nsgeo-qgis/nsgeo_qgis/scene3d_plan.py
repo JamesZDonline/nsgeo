@@ -8,13 +8,14 @@ Pure: no qgis import, so the pure tier and mypy run it. The text lives here, not
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from nsgeo_qgis.slices_plan import DEFAULT_STRETCH
 
 VIEW_NAME: str = "nsgeo 3D"
 PICK_RADIUS_M: float = 0.06
+PICK_COLOUR: str = "#1f1f1f"
 NO_GRID: str = "Add a grid first: the 3-D view shows one grid."
 BUTTON_TIP: str = (
     "Open QGIS's 3-D view of the grid the Slices panel shows: its picks at depth and its surfaces"
@@ -44,10 +45,18 @@ def view_title(grid_name: str, stretch: float, n_stale: int) -> str:
     return title
 
 
-def scene_grid(scope: str, shown: str | None, last: str | None) -> str | None:
-    """The grid the view shows: the one the panel shows, but in Whole site the last one."""
+def scene_grid(
+    scope: str,
+    shown: str | None,
+    last: str | None,
+    existing: Collection[str] | None = None,
+) -> str | None:
+    """The grid the view shows: the one the panel shows, but in Whole site the last one, unless
+    that grid no longer exists (`existing` lists the grids that do), then the panel's."""
     if scope == "site":
-        return last if last is not None else shown
+        if last is not None and (existing is None or last in existing):
+            return last
+        return shown
     return shown
 
 
@@ -66,6 +75,16 @@ def scene_extent(corners: Sequence[tuple[float, float]]) -> tuple[float, float, 
     xs = [c[0] for c in corners]
     ys = [c[1] for c in corners]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def padded_extent(
+    corners: Sequence[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """The scene's extent: the bounding box plus a margin of 10% of its longer side (at least
+    1 m) all round, so picks on a line that runs past the grid's edge are not culled."""
+    xmin, ymin, xmax, ymax = scene_extent(corners)
+    margin = max(1.0, 0.1 * max(xmax - xmin, ymax - ymin))
+    return xmin - margin, ymin - margin, xmax + margin, ymax + margin
 
 
 def scene_centre(corners: Sequence[tuple[float, float]]) -> tuple[float, float]:

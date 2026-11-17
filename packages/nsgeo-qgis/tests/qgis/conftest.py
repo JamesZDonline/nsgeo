@@ -72,7 +72,17 @@ class _CameraRecorder:
         self.poses.append(args)
 
 
-def _make_fake_canvas3d():
+class _LegacyCameraRecorder:
+    """QGIS 3.40's camera controller: no `setLookingAtMapPoint`, only `resetView(distance)`."""
+
+    def __init__(self) -> None:
+        self.resets: list = []
+
+    def resetView(self, distance) -> None:  # noqa: N802 -- QGIS's name
+        self.resets.append(distance)
+
+
+def _make_fake_canvas3d(legacy_camera=False):
     """A `QObject` standing in for QGIS's `Qgs3DMapCanvas`, which hangs under offscreen.
 
     As QGIS does, it copies the map's layers into its settings when made and whenever the
@@ -86,7 +96,7 @@ def _make_fake_canvas3d():
         def __init__(self) -> None:
             super().__init__()
             self._settings = Qgs3DMapSettings()
-            self._camera = _CameraRecorder()
+            self._camera = _LegacyCameraRecorder() if legacy_camera else _CameraRecorder()
             self._project = QgsProject.instance()
             self._copy_layers()
             self._project.layersAdded.connect(self._copy_layers)
@@ -141,6 +151,8 @@ class FakeIface:
         #: Host new views in a `QDockWidget`, not a `QDialog`; answer None to every create.
         self.dock3d = False
         self.refuse3d = False
+        #: Make new views' camera controllers QGIS 3.40's (no `setLookingAtMapPoint`).
+        self.legacy_camera3d = False
 
     def _make_holder(self, name, title=None):
         """The top-level window (a `QDialog`, or a `QDockWidget` when `dock3d` is set) that holds
@@ -166,13 +178,13 @@ class FakeIface:
         return holder
 
     def swap_holder3d(self, name):
-        """Dock (or undock) the view as the user does: a new holder with the same title."""
+        """Dock (or undock) the view as the user does: a new holder, titled with the view's
+        ORIGINAL name, as QgsDockableWidgetHelper does (it re-applies the title it stored)."""
         from qgis.PyQt import sip
 
         old = self.dialogs3d[name]
-        title = old.windowTitle()
         self.dock3d = not self.dock3d
-        self.dialogs3d[name] = self._make_holder(name, title)
+        self.dialogs3d[name] = self._make_holder(name)
         sip.delete(old)
 
     def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
@@ -180,7 +192,7 @@ class FakeIface:
         answers, when a view of that name is open (names are unique) or `refuse3d` is set."""
         if self.refuse3d or name in self.canvases3d:
             return None
-        canvas = _make_fake_canvas3d()
+        canvas = _make_fake_canvas3d(self.legacy_camera3d)
         self.canvases3d[name] = canvas
         self.dialogs3d[name] = self._make_holder(name)
         self.created3d += 1
