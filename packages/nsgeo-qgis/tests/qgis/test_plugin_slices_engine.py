@@ -41,6 +41,7 @@ from nsgeo_qgis.slices_plan import (
     SourceChoice,
     TooManyLevels,
     limit_windows,
+    transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
 from qgis.core import QgsApplication, QgsTask
@@ -1982,6 +1983,37 @@ def test_median_first_break_is_where_the_amplitude_breaks_under_the_transform(
         assert errors == []
         line = engine.prepared_lines()[0]
         assert engine.median_first_break() == pytest.approx(line.t0_ns + 38 * line.dt_ns)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("transform", [NO_TRANSFORM, *transform_names()])
+def test_median_first_break_finds_the_break_under_every_registered_transform(
+    qgis_app, tmp_path, transform
+):
+    """A tripwire (final review M3-1), passing on today's code: the estimate
+    reads only the literal `amp_square` through its root and every other
+    transform as prepared, which is right only for one that keeps |x|'s shape.
+    So every transform the registry offers, now or later, must find the break
+    within one sample. These lines rise to 0.3 of the band two rows before it,
+    so the break is that rise (row 38), and a transform that is not |x|-like (a
+    higher power, a log) moves the pick off it and fails here.
+
+    The envelope may pick up to three samples early: these bands are flat steps,
+    not wavelets, and the envelope of a step spreads ahead of it along the
+    Hilbert transform's 1/t tail, reaching 0.2 of the peak three rows out. On
+    the real surveys it picks within a sample (measured 2026-11-17: campus one
+    sample early, GPS exact)."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=transform, preset="radar")
+        assert errors == []
+        line = engine.prepared_lines()[0]
+        estimate = engine.median_first_break()
+        assert estimate is not None
+        late = (estimate - (line.t0_ns + 38 * line.dt_ns)) / line.dt_ns  # in samples
+        early = 3 if transform == "amp_envelope" else 1
+        assert -early - 1e-6 <= late <= 1 + 1e-6, (transform, late)
     finally:
         engine.dispose()
 
