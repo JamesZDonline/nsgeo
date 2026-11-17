@@ -139,6 +139,10 @@ KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
 KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
 SITE_VIEW_SUFFIX = " · site view, not normalised"
 OTHER_CLOCK_SUFFIX = " · {n} picks on another clock"
+NO_DISTANCE_CALIBRATION = (
+    "This line has no distance calibration (no traces per metre, as with time-triggered "
+    "collection), so a hyperbola cannot be fitted."
+)
 
 
 def _time_base_of_provenance(provenance_json: str) -> str:
@@ -276,8 +280,8 @@ class ProfileDock(QgsDockWidget):
         # fit; every reset of `_velocity_points` ends it too.
         self._just_saved: tuple[str, str] | None = None
         # Why the last box drew nothing. It shows in the velocity strip's note
-        # and ends with the next edit, Clear, Save fit, a line switch or
-        # velocity mode going off.
+        # and ends with the next edit (a dot added or removed, or another box),
+        # Clear, Save fit, a line switch or velocity mode going off.
         self._box_note = ""
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
@@ -1275,7 +1279,11 @@ class ProfileDock(QgsDockWidget):
                 try:
                     self._trace_box(first_trace, last_trace, top_ns, bottom_ns)
                 except ValueError as exc:
-                    reason = str(exc)
+                    reason = (
+                        NO_DISTANCE_CALIBRATION
+                        if self._line_has_no_distance_calibration()
+                        else str(exc)
+                    )
             if reason:
                 self._box_note = reason
             self._update_velocity_fit()
@@ -1315,6 +1323,7 @@ class ProfileDock(QgsDockWidget):
                 return
             if 0 <= index < len(self._velocity_points):
                 del self._velocity_points[index]
+                self._reset_box_state()
                 self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not discard the velocity point: {exc}", Qgis.MessageLevel.Critical)
@@ -1510,11 +1519,7 @@ class ProfileDock(QgsDockWidget):
                     self.velocity_readout.setText(readout)
                 except ValueError as exc:
                     if self._line_has_no_distance_calibration():
-                        self.velocity_readout.setText(
-                            "This line has no distance calibration (no traces per metre, "
-                            "as with time-triggered collection), so a hyperbola cannot "
-                            "be fitted."
-                        )
+                        self.velocity_readout.setText(NO_DISTANCE_CALIBRATION)
                     else:
                         self.velocity_readout.setText(str(exc))
             time_zero_note = self._velocity_time_zero_note(

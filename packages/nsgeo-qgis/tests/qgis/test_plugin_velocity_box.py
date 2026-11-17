@@ -206,6 +206,40 @@ def test_a_box_on_empty_ground_says_why_and_keeps_the_dots(plugin):
     assert "hyperbola" in note.lower() or "faint" in note.lower() or "few points" in note
 
 
+def test_a_right_click_discard_clears_the_box_note(plugin):
+    # The note says why the last box drew nothing, and ends with the next
+    # edit; a dot removed with a right-click is one.
+    v, dock = _view(plugin), plugin.profile_dock
+    hand = _three_hand_dots(plugin)
+    _drag(v, *_box_around(v, traces=(5, 40), ns=(60.0, 90.0)))  # noise only
+    reason = dock.velocity_note.text().split(". ")[0]  # the box's sentence comes first
+    assert reason
+    x, y = _px(v, 50, 17.0)
+    QTest.mouseClick(v, Qt.MouseButton.RightButton, NO_MOD, _pos(v, x, y))
+    assert dock.velocity_points() == hand[1:]
+    assert reason not in dock.velocity_note.text()
+
+
+def test_a_box_on_a_line_with_no_distance_calibration_says_so_plainly(plugin, tmp_path):
+    # Time-triggered collection has no traces per metre. The read-out already
+    # says so in plain words; a box says the same, not the core's message.
+    s, v, dock = plugin.session, _view(plugin), plugin.profile_dock
+    path = synthetic_dzt(tmp_path / "raw", "TIMEMODE.DZT", n_traces=N_TRACES, traces_per_metre=0.0)
+    line = Line.open(path, GridPlacement("A", "y", 3.0, 0.0))
+    s.add_lines([line])
+    key = s.line_key(line)
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    _drag(v, *_box_around(v))
+    note = dock.velocity_note.text()
+    assert note.startswith(
+        "This line has no distance calibration (no traces per metre, as with time-triggered "
+        "collection), so a hyperbola cannot be fitted."
+    )
+    assert "traces_per_metre" not in note
+    assert dock.velocity_points() == []
+
+
 def test_a_box_drawn_backwards_or_past_the_edge_is_normalised_and_clipped(plugin):
     v = _view(plugin)
     got = []
