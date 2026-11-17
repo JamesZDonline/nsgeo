@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,7 @@ class SurfaceLayers:
         self._token = ""
         self._owed = False
         self._disposed = False
+        self._listeners: list[Callable[[], None]] = []
         self._timer = QTimer()
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
@@ -126,6 +128,20 @@ class SurfaceLayers:
         self.project.cleared.connect(self._on_cleared)
 
     # ---- entry points ----------------------------------------------------------
+    def layers_by_feature(self) -> dict[str, Any]:
+        """Feature id -> the live mesh layer on the map (a layer taken out of the project is
+        left out)."""
+        out: dict[str, Any] = {}
+        for fid, shown in self._shown.items():
+            layer = self.project.mapLayer(shown.layer_id)
+            if layer is not None and not isdeleted(layer):
+                out[fid] = layer
+        return out
+
+    def add_listener(self, callback: Callable[[], None]) -> None:
+        """Call `callback` at the end of every `sync` (the 3-D view follows the layers)."""
+        self._listeners.append(callback)
+
     def request_sync(self, *_: Any) -> None:
         """Ask for a `sync` at the next turn of the event loop; many asks make one."""
         try:
@@ -298,6 +314,17 @@ class SurfaceLayers:
         return layer
 
     def sync(self) -> None:
+        """Bring the map in line with the saved builds (see `_sync`), then tell the listeners."""
+        try:
+            self._sync()
+        finally:
+            for callback in list(self._listeners):
+                try:
+                    callback()
+                except Exception as exc:  # noqa: BLE001 -- one listener must not stop the rest
+                    _log(f"a surface layers listener failed: {exc}")
+
+    def _sync(self) -> None:
         """Bring the map in line with the saved builds, then delete the files no build owns
         (never while a build runs: the sync is then owed, and the caller makes it afterwards)."""
         self._timer.stop()

@@ -62,6 +62,56 @@ class _FakeSignal:
             slot(*args)
 
 
+class _CameraRecorder:
+    """The 3-D view's camera controller: records where it was asked to look."""
+
+    def __init__(self) -> None:
+        self.poses: list = []
+
+    def setLookingAtMapPoint(self, *args) -> None:  # noqa: N802 -- QGIS's name
+        self.poses.append(args)
+
+
+def _make_fake_canvas3d():
+    """A `QObject` standing in for QGIS's `Qgs3DMapCanvas`, which hangs under offscreen.
+
+    As QGIS does, it copies the map's layers into its settings when made and whenever the
+    project gains or loses layers. The FakeIface's `QgsMapCanvas` has no layer-tree bridge (its
+    `layers()` is always empty), so the checked layers of the layer tree stand for them."""
+    from qgis._3d import Qgs3DMapSettings
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtCore import QObject
+
+    class FakeCanvas3D(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._settings = Qgs3DMapSettings()
+            self._camera = _CameraRecorder()
+            self._project = QgsProject.instance()
+            self._copy_layers()
+            self._project.layersAdded.connect(self._copy_layers)
+            self._project.layersRemoved.connect(self._copy_layers)
+            self.destroyed.connect(self._unhook)
+
+        def _copy_layers(self, *_) -> None:
+            self._settings.setLayers(self._project.layerTreeRoot().checkedLayers())
+
+        def _unhook(self, *_) -> None:
+            try:
+                self._project.layersAdded.disconnect(self._copy_layers)
+                self._project.layersRemoved.disconnect(self._copy_layers)
+            except (TypeError, RuntimeError):
+                pass
+
+        def mapSettings(self):  # noqa: N802 -- QGIS's name
+            return self._settings
+
+        def cameraController(self):  # noqa: N802 -- QGIS's name
+            return self._camera
+
+    return FakeCanvas3D()
+
+
 class FakeIface:
     """The parts of QgisInterface the plugin touches."""
 
@@ -84,6 +134,43 @@ class FakeIface:
         self.menu_actions: list = []
         #: `(layer, page)` for each `showLayerProperties` call (#180).
         self.layer_properties: list = []
+        #: The fake 3-D views (M16 C), by name: what is open now, and every one ever made.
+        self.canvases3d: dict = {}
+        self.dialogs3d: dict = {}
+        self.created3d = 0
+
+    def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """A fake canvas and a top-level dialog titled `name`, as the real call makes."""
+        from qgis.PyQt.QtWidgets import QDialog
+
+        class _Dialog(QDialog):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        canvas = _make_fake_canvas3d()
+        dialog = _Dialog()
+        dialog.setWindowTitle(name)
+        self.canvases3d[name] = canvas
+        self.dialogs3d[name] = dialog
+        self.created3d += 1
+        return canvas
+
+    def closeMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """Delete both, so `destroyed` fires, as closing the real view does."""
+        from qgis.PyQt import sip
+
+        canvas = self.canvases3d.pop(name, None)
+        dialog = self.dialogs3d.pop(name, None)
+        if canvas is not None and not sip.isdeleted(canvas):
+            sip.delete(canvas)
+        if dialog is not None and not sip.isdeleted(dialog):
+            sip.delete(dialog)
+
+    def mapCanvases3D(self):  # noqa: N802 -- QGIS's name
+        return list(self.canvases3d.values())
 
     def mainWindow(self):
         return self._main
