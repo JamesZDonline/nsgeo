@@ -61,6 +61,23 @@ def _alive(obj: Any) -> bool:
     return obj is not None and not sip.isdeleted(obj)
 
 
+def _hide_from_identify(layer: Any) -> None:
+    """Keep the derived picks out of QGIS's Identify tool. The flag operators return QFlags on
+    QGIS 3 (PyQt5) but a plain int on QGIS 4 (PyQt6); hiding is cosmetic, so a failure is
+    logged and the view still opens."""
+    flags = layer.flags()
+    try:
+        layer.setFlags(flags & ~QgsMapLayer.LayerFlag.Identifiable)
+        return
+    except TypeError:
+        pass
+    try:
+        value = int(flags) & ~int(QgsMapLayer.LayerFlag.Identifiable)
+        layer.setFlags(QgsMapLayer.LayerFlag(value))
+    except Exception as exc:  # noqa: BLE001 -- cosmetic; never block the view
+        _log(f"3-D view: could not hide the derived picks from Identify: {exc}")
+
+
 def _mesh_renderer(layer: Any, stretch: float) -> Any | None:
     """The mesh 3-D renderer for a surface layer: depth is the 2DM's Z (dataset group 0, taken
     as absolute), stretched, coloured by the layer's own 2-D depth colours."""
@@ -289,13 +306,21 @@ class Scene3D:
         if self._picks_alive():
             return
         grid_crs = self.layers.crs()
-        layer = QgsVectorLayer("PointZ?field=true_depth_m:double", PICKS_LAYER_NAME, "memory")
-        if grid_crs is not None and grid_crs.isValid():
+        has_crs = grid_crs is not None and grid_crs.isValid()
+        # the CRS goes in the URI so QGIS never runs its "Specify CRS" validation on this layer
+        if has_crs and grid_crs.authid():
+            uri = f"PointZ?crs={grid_crs.authid()}&field=true_depth_m:double"
+        else:
+            uri = "PointZ?field=true_depth_m:double"
+        options = QgsVectorLayer.LayerOptions()
+        options.skipCrsValidation = True
+        layer = QgsVectorLayer(uri, PICKS_LAYER_NAME, "memory", options)
+        if has_crs:
             layer.setCrs(grid_crs)
         # QGIS asks "scratch layers will be lost" on exit / New / Open while a memory layer holds
         # features; this one is rebuilt from the picks, so there is nothing to lose
         layer.setCustomProperty("skipMemoryLayersCheck", 1)
-        layer.setFlags(layer.flags() & ~QgsMapLayer.LayerFlag.Identifiable)
+        _hide_from_identify(layer)
         layer.setRenderer(QgsNullSymbolRenderer())
         layer.setRenderer3D(_picks_renderer())
         self.project.addMapLayer(layer, False)

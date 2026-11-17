@@ -370,6 +370,7 @@ def test_a_moved_grid_is_framed_again(scene):
     poses = iface.canvases3d[VIEW_NAME].cameraController().poses
     s3d.refresh()
     assert len(poses) == 1  # nothing moved
+    before = iface.canvases3d[VIEW_NAME].mapSettings().origin().x()
     g = session.grid(A)
     session.replace_grid(
         Grid(
@@ -384,7 +385,8 @@ def test_a_moved_grid_is_framed_again(scene):
     )
     s3d.refresh()
     assert len(poses) == 2 and poses[1][0].x() == pytest.approx(poses[0][0].x() + 50.0)
-    assert len(iface.canvases3d[VIEW_NAME].mapSettings().origin().toString()) > 0
+    after = iface.canvases3d[VIEW_NAME].mapSettings().origin().x()
+    assert after == pytest.approx(before + 50.0)
 
 
 def test_the_scene_extent_has_a_margin_round_the_grid(scene):
