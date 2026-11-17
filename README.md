@@ -99,6 +99,7 @@ release's notes list everything in it.
 | | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
 | | Colour a slice with QGIS's own symbology: a colour ramp, typed min/max or a cut that follows each depth, kept per scope and in the export ([#180]) | next release |
 | | A grid velocity from its fits: a grid's Set velocity… lists every saved fit on its lines, averages the ones you tick and remembers which fits it used; slices take their depths from the grid's velocity. A site that remembers its fits saves as schema 3, which 0.4.0 cannot open ([#127], [#86]) | next release |
+| | Processing steps keep one bad sample from spreading and refuse a setting that cannot work, saying which to change; a project holding a now-refused setting still opens, with that step turned off or reset and a note in the log; migration's real-data test; a new Trace stack step averages each trace with its neighbours ([#43], [#40], [#44], [#42], [#46], [#125], [#114]) | next release |
 
 ### In progress
 
@@ -134,13 +135,6 @@ release's notes list everything in it.
   settings sections fold, so a section you have set is out of the wheel's way;
   the panel fits the Processing panel's width. Built, in its second
   walkthrough round.
-- **Processing steps: edge cases and trace stacking** ([#43], [#40], [#44],
-  [#42], [#46], [#125], [#114]). Dewow, background removal, AGC, time zero and
-  bandpass stop returning a blank, NaN or uncropped line from a setting that
-  cannot work or from one bad sample, and say which setting to change; saved
-  settings are checked properly when they load; migration gets its real-data
-  test; and a new Trace stack step averages each trace with its neighbours.
-  Built and walked through; awaiting merge.
 
 ### Next, in order
 
