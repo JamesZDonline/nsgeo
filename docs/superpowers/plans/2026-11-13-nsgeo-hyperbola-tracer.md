@@ -58,6 +58,7 @@ the gesture, §6 the panel, §7 the shortcut, §10 the tests.
 - `"No hyperbola was found in the box."`
 - `"The hyperbola in the box is too faint to trace."`
 - `"Too few points were left after cleaning ({n}); a fit needs at least 4."`
+- `"The traced points are too flat to give a velocity: draw the box further down the hyperbola's legs."` *(added 2026-11-16, spec §4.3 step 4)*
 - Any `fit_hyperbola` message passes through unchanged.
 
 **Plugin, the velocity strip's note** (`ProfileDock.velocity_note`):

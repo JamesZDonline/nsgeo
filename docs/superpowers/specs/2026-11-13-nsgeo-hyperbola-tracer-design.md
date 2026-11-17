@@ -175,6 +175,20 @@ leg ends. The faint floor must let the dots follow a leg as far as the author wo
      refit, take the first dot as the apex guess.
    - Fewer survivors give fewer dots.
    - Fewer than 4 dots gives no result.
+4. **Check that the fit can be trusted** *(added 2026-11-16 after the review)*. Fit the dots
+   about to be returned exactly as the panel will, with the first dot as the apex guess. Refuse
+   when either holds:
+   - **The apex lies outside the dots.** If the fitted apex is more than about 3 trace spacings
+     beyond the dots' span, the dots follow a dipping reflector or some other feature, not a
+     hyperbola with its apex in the box (§4.1). The reason is "no hyperbola".
+   - **The dots are too flat.** If the fitted moveout from the apex to the farthest dot is under
+     about 0.45 of the wavelet's period, the dots lie inside the window that holds them to one
+     lobe. Their curvature is then not resolved, and the fit's σ is far too small. On the real
+     lines this happens when a tight box leaves only the top of a hyperbola. The reason is "too
+     flat".
+
+   Refusing inside the tracer also means any `fit_hyperbola` refusal leaves the author's dots in
+   place (§6).
 
 Why thin: neighbouring traces are not independent readings. Sixty dots would make σ look several
 times better than it is, and that would mislead the grid average and its 2σ flag.
@@ -190,6 +204,7 @@ On failure it raises `ValueError` with a plain reason, as `fit_hyperbola` does. 
 - there is no hyperbola in the box;
 - the hyperbola is too faint to trace;
 - too few dots are left after cleaning;
+- the traced dots are too flat to give a velocity (§4.3 step 4);
 - any reason `fit_hyperbola` itself gives.
 
 ### 4.5 Speed
@@ -319,6 +334,11 @@ walkthrough.
   - **A fading leg:** the dropped traces are the faded ones.
   - **Apex and one leg:** traced.
   - **Noise only:** "no hyperbola". A box too small gives its own reason.
+  - **A dipping reflector with no hyperbola:** "no hyperbola". A dipping reflector across a
+    hyperbola traces the hyperbola or refuses; it never returns the reflector's slope as a
+    velocity.
+  - **Only the top of a hyperbola** (a deep apex in a box whose bottom leaves little moveout):
+    "too flat".
   - **Uneven trace spacing:** still traced correctly.
   - **At most about 10 dots**, apex-nearest first.
 
@@ -359,6 +379,13 @@ recorded in the manifest so the test skips that comparison and names why, or "th
 wrong", which is a bug to fix. Until the author rules, the test marks it as a strict expected
 failure that names it. **Never tune the tracer just to make a disagreement pass.** A fit the
 tracer cannot trace at all is listed the same way.
+
+*(Added 2026-11-16.)* There is a third ruling: **"different but expected"**. On 12 fits the
+traced velocity reads 1.06–1.19× the hand one. An independent migration check put the true
+velocity between the two picks. The band stretches down the legs: the tracer follows the leading
+crossing and reads about 5% fast, while hand legs follow the bright middle and read about 4% slow.
+The author accepted this. Such a fit is recorded with its own band around the accepted ratio, and
+the test asserts the traced-to-hand ratio stays inside it, so a later lobe jump still fails.
 
 **Plugin tests (QGIS tier).** Use real `QTest` mouse events, not calls to the handlers.
 - A drag in velocity mode emits the box. A wobble shorter than the drag distance places a dot.
@@ -437,3 +464,6 @@ Three tasks, then the walkthrough:
   the direct wave, so that traced fits and the clock share one rule (§4.2).
 - A flat layer lying across the apex's own edge biases a traced v 1.2–1.3× fast. A strict xfail
   pins it.
+- A fading leg on ground with flat layers keeps a few dots past its end, on the layers, which
+  makes v 0.5–2% fast on planted lines. A strict xfail pins it. A candidate fix is to judge the
+  faint floor on the box with its row means removed.
