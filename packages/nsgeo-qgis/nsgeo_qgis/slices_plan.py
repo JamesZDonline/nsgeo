@@ -204,14 +204,45 @@ class Resolution:
             raise ValueError(f"t1_ns must exceed t0_ns, got {self.t0_ns}..{self.t1_ns}")
 
 
+#: #177: a cube may hold this many levels per sample of its deepest line. The
+#: wheel once took dz to 0.001 ns, a cube 200 times deeper than any record.
+LEVELS_PER_SAMPLE = 2
+
+
+class TooManyLevels(ValueError):
+    """A resolution whose z axis is past `LEVELS_PER_SAMPLE` times the samples."""
+
+
+def level_limit_problem(resolution: Resolution, samples: Sequence[int]) -> str | None:
+    """Why `resolution` makes too many levels for lines of `samples` samples, or None.
+
+    No lines, no limit."""
+    if not samples:
+        return None
+    nz = ZAxis.from_range(resolution.t0_ns, resolution.t1_ns, resolution.dz_ns).nz
+    deepest = max(samples)
+    limit = LEVELS_PER_SAMPLE * deepest
+    if nz <= limit:
+        return None
+    if len(set(samples)) == 1:
+        why = f"twice the {deepest:,} samples in each line"
+    else:
+        why = f"twice the {deepest:,} samples in its deepest line"
+    return (
+        f"Too many levels: dz {resolution.dz_ns:.4g} ns from {resolution.t0_ns:,g} to "
+        f"{resolution.t1_ns:,g} ns makes {nz:,} levels; this cube allows {limit:,} ({why}). "
+        "Narrow z0\u2013z1 or raise dz."
+    )
+
+
 #: What a grid is finished with unless the user says otherwise (interpolation
 #: spec §8): kriging, out to three quarters of a line spacing (the user's
 #: decision of 2026-11-03, interpolation spec §5.2). Half a spacing was the
 #: first default and striped nominal gaps: binning moves each line up to half
 #: a cell, so a gap's middle cell can be ceil(spacing / cell) * cell / 2 from
 #: data, at most (spacing + cell) / 2, which 0.75 covers for any cell up to
-#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.2 m
-#: cell its middle rows are 0.4 m from data.
+#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.1 m
+#: cell its middle rows are about 0.5 m from data, past the 0.375 m reach.
 DEFAULT_METHOD = "kriging"
 DEFAULT_MAX_DISTANCE_SPACINGS = 0.75
 #: The neighbour search reaches at least this many line spacings (plan call 1).
@@ -475,12 +506,13 @@ def preview_note(
 ) -> str:
     """Why the site is drawn coarser than its grids, and what would draw it in full."""
     note = (
-        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail. "
+        f"Preview at {pitch:g} m pixels: the site ({width_m:.0f} \u00d7 {height_m:.0f} m) "
+        f"is too big to draw at {cell:g} m. "
         f"It draws in full at a {finest:g} m cell or coarser."
     )
     if stretching:
-        note += f" Leaving out {name_list(stretching)} would also let it draw in full."
+        grids = "grid" if len(stretching) == 1 else "grids"
+        note = f"{note[:-1]}, or without {grids} {name_list(stretching)}."
     return note
 
 
@@ -693,8 +725,9 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 
 #: Issue #81: the cell a grid starts from, in metres -- fixed, not a
 #: fraction of the line spacing, because along a line the detail is set by
-#: the trace spacing. `default_cell` caps it at half the line spacing.
-DEFAULT_CELL_M = 0.2
+#: the trace spacing. `default_cell` caps it at half the line spacing. 0.1 m
+#: since the session A walkthrough (the author's call; it was 0.2 m).
+DEFAULT_CELL_M = 0.1
 
 
 def default_cell(spacing_m: float, floor: float) -> float:

@@ -22,12 +22,14 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     bands_detail,
     choose_residency,
     combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
+    level_limit_problem,
     mixed_clock_note,
     name_list,
     old_cube_note,
@@ -358,17 +360,18 @@ def test_a_site_source_shares_one_transform_and_names_each_grid_once():
         SiteSource(transform="amp_envelope", grids=(a, b, again_a))
 
 
-def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
-    """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
-    line the detail is set by the trace spacing, so a widely spaced grid
+def test_the_default_cell_is_0_1_m_no_larger_than_half_the_spacing():
+    """#81: a fixed 0.1 m (0.2 m until the session A walkthrough), not a
+    fraction of the line spacing -- along a line the detail is set by the
+    trace spacing, so a widely spaced grid
     keeps fine cells. Spec 4's "no larger than half the line spacing"
     still caps it, and the frame's affordable floor (`smallest_safe_cell`,
     walkthrough W7) still wins over both."""
     from nsgeo_qgis.slices_plan import default_cell
 
-    assert default_cell(0.5, 0.01) == pytest.approx(0.2)
-    assert default_cell(1.0, 0.01) == pytest.approx(0.2)  # not 0.4: fixed, not relative
-    assert default_cell(0.25, 0.01) == pytest.approx(0.125)  # half the spacing
+    assert default_cell(0.5, 0.01) == pytest.approx(0.1)
+    assert default_cell(1.0, 0.01) == pytest.approx(0.1)  # not 0.5: fixed, not relative
+    assert default_cell(0.15, 0.01) == pytest.approx(0.075)  # half the spacing
     assert default_cell(0.5, 0.3) == pytest.approx(0.3)  # the floor wins
 
 
@@ -594,13 +597,14 @@ def test_name_list_reads_as_a_sentence():
 
 def test_preview_note_is_exact_copy():
     base = (
-        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
-        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "Preview at 0.4 m pixels: the site (1234 \u00d7 568 m) is too big to draw at 0.05 m. "
         "It draws in full at a 0.12 m cell or coarser."
     )
     assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
-    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
-        base + " Leaving out C and D would also let it draw in full."
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C"]) == base[:-1] + ", or without grid C."
+    assert (
+        preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"])
+        == base[:-1] + ", or without grids C and D."
     )
 
 
@@ -832,3 +836,28 @@ def test_combined_time_base_is_one_rule_for_a_set_of_grids():
     assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
     with pytest.raises(ValueError):
         combined_time_base([])
+
+
+def test_the_level_limit_message_is_exact():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    assert level_limit_problem(res, [512, 512, 512]) == (
+        "Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube "
+        "allows 1,024 (twice the 512 samples in each line). Narrow z0\u2013z1 or raise dz."
+    )
+
+
+def test_the_level_limit_names_the_deepest_line_when_counts_differ():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    problem = level_limit_problem(res, [512, 1024])
+    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in problem
+
+
+def test_native_dz_over_the_whole_record_is_within_the_limit():
+    assert level_limit_problem(Resolution(0.25, 0.21653, -11.086, 99.546), [512]) is None
+    assert level_limit_problem(Resolution(0.25, 0.001, 0.0, 100.0), []) is None
+
+
+def test_the_wheel_hazard_dz_is_over_the_limit_and_too_many_levels_is_a_value_error():
+    res = Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=110.0)
+    assert level_limit_problem(res, [512]) is not None
+    assert issubclass(TooManyLevels, ValueError)

@@ -29,11 +29,15 @@ from nsgeo_qgis.slices_plan import (
     REFINING_SLICE_INDICATOR,
     Resolution,
     SliceFinish,
+    level_limit_problem,
     limit_windows,
     old_cube_note,
+    smallest_safe_cell,
     transform_names,
 )
+from nsgeo_qgis.ui import folds
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
@@ -43,9 +47,11 @@ from plugin_testing import (
     needs_real_data,
     slow_jobs,
     synthetic_dzt,
+    wheel_event,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QApplication, QMessageBox, QScrollArea
 from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -1175,24 +1181,24 @@ def test_a_cube_saved_before_a_spacing_edit_follows_the_new_spacing(docked):
     assert dock.grid_finish.max_distance_metres.text() == "= 1 m"
 
 
-def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(docked):
+def test_a_grid_starts_from_square_a_0_1_m_cell_and_the_default_interpolation(docked):
     """#81: what a grid's slices start from before anything is remembered
-    for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
+    for it. `GRID`'s spacing is 0.5 m, where 0.1 m is under half the
     spacing, so nothing is clamped here."""
     dock, _ = docked
     assert dock.transform_combo.value() == "amp_square"
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.slice_finish() == SliceFinish()  # kriging out to 0.75 x spacing, no smoothing
 
 
-@pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
+@pytest.mark.parametrize(("spacing", "cell"), [(0.15, 0.075), (1.0, 0.1)])
 def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
     qgis_app, tmp_path, spacing, cell
 ):
-    """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
-    0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
+    """#81: a fixed 0.1 m, capped at spec 4's half the line spacing -- so
+    0.075 m on a 0.15 m-spaced grid, and still 0.1 m (not 0.5) at 1 m. The
     max distance is always half the grid's own spacing."""
     session = SiteSession()
     session.new_site(tmp_path)
@@ -2129,9 +2135,7 @@ def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
         # a "fix" that merely let the groups be squashed would lose rows.
         assert scroll.widget().minimumSizeHint().height() >= 600
 
-        # ... and the dock still OPENS at a usable width, so this is not
-        # the degenerate fix of making everything collapsible to nothing.
-        assert dock.sizeHint().width() >= 280
+        # How wide it opens is pinned in test_plugin_slices_width.py (#50).
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2178,7 +2182,9 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         seeded = dock.cell_spin.value()
         assert frame_cells(big.size_x, big.size_y, seeded) <= MAX_FRAME_CELLS
 
-        # Hold the down-arrow. Far more presses than the range can absorb.
+        # Hold the down-arrow from well above the floor (the 0.1 m seed is
+        # clamped to it). Far more presses than the range can absorb.
+        dock.cell_spin.setValue(0.5)
         for _ in range(500):
             dock.cell_spin.stepBy(-1)
             assert frame_cells(big.size_x, big.size_y, dock.cell_spin.value()) <= (
@@ -2186,11 +2192,15 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
             ), f"cell {dock.cell_spin.value()} on a 300 m grid cannot be drawn"
 
         # ... and one click is a usable increment, not a leap to the end
-        # of the range. The old behaviour went 0.5 -> minimum in one.
-        dock.cell_spin.setValue(seeded)
+        # of the range. The old behaviour went 0.5 -> minimum in one. (The
+        # 0.1 m seed is clamped to this grid's 0.15 m floor, so it starts
+        # from 0.5 m, above the floor.)
+        start = 0.5
+        assert start > dock.cell_spin.minimum()
+        dock.cell_spin.setValue(start)
         dock.cell_spin.stepBy(-1)
-        assert dock.cell_spin.value() < seeded
-        assert seeded - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
+        assert dock.cell_spin.value() < start
+        assert start - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2287,12 +2297,19 @@ def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app
         dock.cell_spin.setValue(0.001)
         dock.flush_debounce()
 
-        assert errors, "an undrawable geometry must say so"
-        assert "too many to draw" in errors[-1], errors
-        assert "0.15" in errors[-1], f"the refusal must name a cell that works: {errors[-1]}"
+        entries = dock.warnings_panel.entries()
+        assert [e.kind for e in entries] == [REFUSAL], entries
+        assert "too many to draw" in entries[0].text
+        assert "0.15" in entries[0].text, f"it must name a cell that works: {entries[0].text}"
+        assert "Still showing" in entries[0].text
+        assert errors == [], "one place only: the Warnings section, not a toast"
         assert dock.engine.frame is before, (
             "the engine must still hold the geometry it had, not a frame it cannot draw"
         )
+
+        dock.cell_spin.setValue(0.25)
+        dock.flush_debounce()
+        assert dock.warnings_panel.entries() == ()
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2329,17 +2346,26 @@ def test_the_coverage_legend_says_what_a_blank_cell_means(docked):
     assert "blank" not in amplitude.lower(), amplitude
 
 
-def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
+def test_the_legend_label_elides_rather_than_widening_the_dock(qgis_app):
     """A `QLabel`'s minimum width is its text width unless it wraps, and a
     dock's minimum width is a hard floor on the QGIS main window's -- the
     same mechanism that made this dock force a 556 px window in round 1.
-    The coverage legend is the longest string this dock ever shows.
+    The coverage legend is the longest string this dock ever shows. It is cut
+    off with "…" and not wrapped (#121): a wrapped legend changes height with its
+    text, which moves the panel under the wheel. The tooltip carries the whole text.
     """
     dock = SlicesDock(SiteSession())
     try:
-        assert dock.legend_label.wordWrap()
-        dock.legend_label.setText("1 – 15 traces per cell · blank = no line crossed")
-        assert dock.legend_label.minimumSizeHint().width() <= 200
+        text = "1 – 15 traces per cell · blank = no line crossed"
+        dock.legend_label.setText(text)
+        dock.legend_label.setParent(None)  # shown on its own, narrower than its text
+        dock.legend_label.resize(60, dock.legend_label.height())
+        dock.legend_label.show()
+        from qgis.PyQt.QtWidgets import QLabel
+
+        assert dock.legend_label.text() == text
+        assert QLabel.text(dock.legend_label).endswith("…"), "what is drawn is cut off"
+        assert dock.legend_label.toolTip() == text
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2650,10 +2676,10 @@ def test_a_resolution_edit_is_remembered_for_that_grid_only(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     assert not session.dirty
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
-    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert session.slice_resolution("A") == {"cell": 0.15}
     assert session.slice_resolution("B") == {}
     assert session.dirty
 
@@ -2663,7 +2689,7 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.engine.wait_for_preparation(20_000)
     seed_cell = dock.cell_spin.value()
     seed_dz = dock.dz_spin.value()
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(seed_dz * 2)
     dock.grid_finish.max_distance_spin.setValue(1.5)
     dock.flush_debounce()
@@ -2675,11 +2701,11 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
 
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
     assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     # On the engine too, not only in the boxes, and drawn.
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.15)
     assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
     assert dock.current_values() is not None
@@ -2689,7 +2715,7 @@ def test_seeding_never_remembers_a_resolution(docked_two_grids):
     dock, session = docked_two_grids
     # B's own spacing seeds a different cell, so every switch below really
     # moves the box (and emits) rather than passing for want of a change.
-    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.3))
+    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.1))
     _settle_sources(dock, session)
     seen: list[float] = []
     dock.cell_spin.valueChanged.connect(seen.append)
@@ -2706,7 +2732,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
 ):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(0.5)
     dock.z0_spin.setValue(2.0)
     dock.z1_spin.setValue(30.0)
@@ -2716,7 +2742,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     session.save()
     stored = session.slice_source("A")
     assert stored["resolution"] == {
-        "cell": 0.1,
+        "cell": 0.15,
         "dz_ns": 0.5,
         "t0_ns": 2.0,
         "t1_ns": 30.0,
@@ -2728,7 +2754,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     dock2 = SlicesDock(reopened)
     try:
         assert dock2.grid_combo.currentText() == "A"
-        assert dock2.cell_spin.value() == pytest.approx(0.1)
+        assert dock2.cell_spin.value() == pytest.approx(0.15)
         assert dock2.dz_spin.value() == pytest.approx(0.5)
         assert dock2.z0_spin.value() == pytest.approx(2.0)
         assert dock2.z1_spin.value() == pytest.approx(30.0)
@@ -2736,7 +2762,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         dock2.flush_debounce()
         assert dock2.engine.wait_for_preparation(20_000)
         # The restored values reached the engine and drew a slice.
-        assert dock2.engine.frame.cell == pytest.approx(0.1)
+        assert dock2.engine.frame.cell == pytest.approx(0.15)
         assert dock2.engine.z.t0_ns == pytest.approx(2.0)
         assert dock2.engine.z.dz_ns == pytest.approx(0.5)
         assert dock2.engine.z.t_end_ns == pytest.approx(30.0)
@@ -2898,7 +2924,7 @@ def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_gri
 def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
     _save_cube(dock, session, "A__res", dock.view_settings())
@@ -2920,10 +2946,10 @@ def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
         "smooth_x_m",
         "smooth_y_m",
     }
-    assert remembered["cell"] == pytest.approx(0.1)
+    assert remembered["cell"] == pytest.approx(0.15)
     _switch(dock, "B")
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
 
 
 # ---- minimum curvature: preview while the depth moves, refine once it rests --
@@ -4174,3 +4200,671 @@ def test_the_symbology_button_is_off_while_coverage_shows(docked):
     assert "Show coverage" in dock.symbology_button.toolTip()
     dock.coverage_check.setChecked(False)
     assert dock.symbology_button.isEnabled()
+
+
+# ---- the wheel (#177; walkthrough W1) ----
+
+
+def _short_and_active(dock):
+    """Floated short enough to scroll, shown and active, so focus is real."""
+    dock.setFloating(True)
+    dock.resize(420, 300)
+    dock.show()
+    dock.activateWindow()
+    assert QTest.qWaitForWindowActive(dock)
+    scroll = dock.findChild(QScrollArea)
+    scroll.verticalScrollBar().setValue(0)
+    return scroll
+
+
+@pytest.mark.parametrize("name", ("cell_spin", "dz_spin", "z0_spin", "z1_spin", "thickness_spin"))
+def test_the_slices_boxes_take_the_wheel_unfocused(docked, name):
+    """Walkthrough W1: the author tried the click-first rule on the Resolution
+    boxes and chose Qt's own wheel back, with folding to keep it away."""
+    dock, _ = docked
+    _ready(dock)
+    _short_and_active(dock)
+    dock.slice_slider.setFocus()
+    box = getattr(dock, name)
+    assert box.focusPolicy() == Qt.FocusPolicy.WheelFocus
+    before = box.value()
+    QApplication.sendEvent(box, wheel_event(120))
+    assert box.value() == pytest.approx(before + box.singleStep(), abs=1e-4)
+
+
+def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(GRID)
+    session.add_grid(big)
+    session.add_lines([_line(tmp_path, "A", "FILE__001", 1.0)])
+    session.add_lines([_line(tmp_path, "Big", "FILE__010", 1.0)])
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        dock.grid_combo.setCurrentText("Big")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        record = _save_cube(dock, session, "cube1", dock.view_settings())
+        record["cell"] = 0.05
+        dock.grid_combo.setCurrentText("A")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.cell_spin.setValue(0.3)  # neither the floor nor a seed, so the restore shows
+        dock.flush_debounce()
+
+        dock.restore_cube("cube1")
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+
+        assert dock.cell_spin.value() == pytest.approx(smallest_safe_cell(300.0, 300.0), abs=1e-3)
+        assert dock.warnings_panel.entries() == ()
+        assert errors == []
+        assert session.site.cubes["cube1"]["cell"] == 0.05
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_warning_coming_and_going_keeps_the_box_you_type_in(docked):
+    dock, _ = docked
+    _ready(dock)  # preparation done, so nothing clears the entries behind the test
+    scroll = _short_and_active(dock)
+    bar = scroll.verticalScrollBar()
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x " * 200)])
+    QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
+    bar.setValue(bar.maximum())
+    assert bar.value() > 0
+    dock.dz_spin.setFocus()
+    dock.dz_spin.setValue(0.75)
+    before = bar.value()
+    dock.warnings_panel.set_entries([])  # the range shrinks under the value
+    QTest.qWait(100)
+    assert bar.value() != before, "the scroll value moved, so the hazard was exercised"
+    assert dock.dz_spin.hasFocus()
+    assert dock.dz_spin.value() == 0.75
+
+
+def test_a_long_warning_never_widens_the_panel(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.setFloating(True)
+    dock.show()
+    content = dock.findChild(QScrollArea).widget()
+    QApplication.processEvents()
+    before = content.minimumSizeHint().width()
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x" * 400)])
+    QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
+    assert content.minimumSizeHint().width() == before
+
+
+# ---- #177: dz floors at the sample interval; a cube past twice its samples is refused ----
+
+
+def _first_dt(session, grid_id=None):
+    keys = session.keys() if grid_id is None else _grid_keys(session, grid_id)
+    return session.line_for_key(keys[0]).header.dt_ns
+
+
+def test_dz_cannot_go_below_the_sample_interval_in_this_grid(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dt = _first_dt(session)
+    assert dock.dz_spin.minimum() == pytest.approx(dt, abs=1e-4)
+    dock.dz_spin.setValue(0.001)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    dock.dz_spin.stepBy(1)
+    assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + dt, abs=1e-4)
+
+
+def test_dz_says_why_it_stops_at_the_sample_interval(docked):
+    """Walkthrough D1: at its floor, dz says "(sample interval)" beside the
+    number, and its tooltip says why it can't go lower."""
+    from nsgeo_qgis.ui.site_scope import set_spins_quietly
+    from nsgeo_qgis.ui.slices_dock import DZ_FLOOR_NOTE
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    note = dock.dz_floor_note
+    assert note.text() == DZ_FLOOR_NOTE == "(sample interval)"
+    assert "sample interval" in note.toolTip()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert not note.isHidden()
+    dock.dz_spin.stepBy(1)  # the arrows and the wheel
+    assert note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum())  # a seed or restore, signals blocked
+    assert not note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum() * 3)
+    assert note.isHidden()
+    dock.dz_spin.setValue(0.001)  # below the floor: clamped to it
+    assert not note.isHidden()
+
+
+def test_dz_says_it_while_a_floor_moves_under_it(docked):
+    """The floor moves with signals blocked (the scope switch, a seed): the
+    note follows it, not only dz's own changes."""
+    from nsgeo_qgis.ui.site_scope import set_dz_floor
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    floor = dock.dz_spin.minimum()
+    assert dock.dz_spin.value() == floor and not dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor / 2)  # a finer floor: dz now sits above it
+    assert dock.dz_spin.value() == floor
+    assert dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor)  # back onto dz
+    assert not dock.dz_floor_note.isHidden()
+
+
+def test_a_grid_left_with_no_lines_drops_dz_back_to_no_floor(docked):
+    """Spec 3.2: with no line there is no interval, so neither the old floor
+    nor its note stays."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() > 0.01 and not dock.dz_floor_note.isHidden()
+    session.remove_lines(tuple(session.keys()))
+    QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(0.001)
+    assert dock.dz_floor_note.isHidden()
+
+
+def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    dock = SlicesDock(session)
+    try:
+        assert dock.dz_spin.minimum() == pytest.approx(0.001)
+        dock.dz_spin.setValue(0.001)
+        assert dock.dz_floor_note.isHidden()
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def _assert_at_the_floor_and_built(dock):
+    """The box shows the floor and the cube built within the level limit."""
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert dock.dz_spin.value() > 0.2
+    assert dock.engine.z is not None
+    assert dock.engine.z.nz <= 1024
+    assert dock.warnings_panel.entries() == ()
+
+
+def test_a_remembered_dz_below_the_floor_comes_back_at_the_floor(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.remember_slice_resolution("A", dz_ns=0.001)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("A")
+    _assert_at_the_floor_and_built(dock)
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record stands"
+
+
+@pytest.fixture
+def docked_fine_b(qgis_app, tmp_path):
+    """Grid A as `docked`, and grid B recorded finer: 512 samples over 25 ns
+    (0.0488 ns), so the two grids' dz floors differ."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FINE__0{i}.DZT", n_traces=60, range_ns=25.0),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"FINE__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    yield dock, session
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked_fine_b):
+    dock, session = docked_fine_b
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__low", view)
+    record["z"]["dz_ns"] = 0.001
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
+    dock.restore_cube("A__low")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    _assert_at_the_floor_and_built(dock)
+    assert record["z"]["dz_ns"] == 0.001
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record is remembered as saved"
+
+
+@pytest.mark.parametrize("lines", ["none", "stale_first"])
+def test_a_cube_record_without_usable_first_line_still_sets_its_grids_floor(docked_fine_b, lines):
+    """A record with no `lines` key, or whose first key left the site, restored
+    while the finer grid is shown: the floor is the cube grid's own."""
+    dock, session = docked_fine_b
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__lines", view)
+    if lines == "none":
+        del record["lines"]
+    else:
+        record["lines"] = ["GONE__999", *record["lines"]]
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
+    dock.restore_cube("A__lines")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_failed_apply_clears_the_refusal_the_last_one_left(docked, monkeypatch):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+
+    def fail(resolution):
+        raise RuntimeError("the engine failed")
+
+    monkeypatch.setattr(dock.engine, "set_resolution", fail)
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert errors == ["the engine failed"]
+
+
+def test_the_dz_floor_travels_with_the_scope(docked_fine_b):
+    from nsgeo_qgis.ui.site_scope import capture_spins
+
+    dock, session = docked_fine_b
+    assert dock.engine.wait_for_preparation(20_000)
+    before = capture_spins(dock).dz_min
+    assert before == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    assert dock.site_engine.wait_until_idle(60_000)
+    QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the site's floor"
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert capture_spins(dock).dz_min == before
+
+
+def test_a_z_range_past_the_level_limit_is_refused_in_this_grid_and_the_map_stays(docked):
+    dock, session = docked
+    _ready(dock)
+    z = dock.engine.z
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert dock.engine.z is z
+    entries = dock.warnings_panel.entries()
+    assert [e.kind for e in entries] == [REFUSAL]
+    assert entries[0].text.startswith("Too many levels: dz 0.5 ns from 2 to 100,000 ns")
+    assert errors == []
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.engine.z is not None and dock.engine.z.nz <= 1024
+
+
+@needs_real_data
+def test_real_lines_floor_at_0_2165_and_allow_1024_levels(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    session.add_lines(
+        [
+            Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+            for i in range(4)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(30_000)
+        assert dock.dz_spin.minimum() == pytest.approx(0.2165, abs=1e-4)
+        samples = [session.line_for_key(k).header.n_samples for k in session.keys()]  # noqa: SIM118 -- SiteSession.keys()
+        assert set(samples) == {512}
+        seeded = Resolution(
+            dock.cell_spin.value(),
+            dock.dz_spin.minimum(),
+            dock.z0_spin.value(),
+            dock.z1_spin.value(),
+        )
+        assert level_limit_problem(seeded, samples) is None
+        deep = dataclasses.replace(seeded, t1_ns=100_000.0)
+        assert "1,024 (twice the 512 samples in each line)" in level_limit_problem(deep, samples)
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+# ---- #157 item 6: sections that fold, and the coverage view explained ----
+
+FOLDING = ("resolution_group", "grid_finish", "display_group")
+
+
+def _shown(dock):
+    dock.setFloating(True)
+    dock.resize(420, 900)
+    dock.show()
+    QCoreApplication.processEvents()
+
+
+@pytest.mark.parametrize("name", FOLDING)
+def test_each_settings_section_folds_and_unfolds(docked, name):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    _ready(dock)
+    _shown(dock)
+    box = getattr(dock, name)
+    assert isinstance(box, QgsCollapsibleGroupBox)
+    open_height = box.height()
+    box.setCollapsed(True)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert box.isCollapsed()
+    assert box.height() < open_height
+    box.setCollapsed(False)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert not box.isCollapsed()
+    assert box.height() == open_height
+
+
+def test_source_position_and_warnings_do_not_fold(docked):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    for name in ("source_group", "position_group", "warnings_panel"):
+        assert not isinstance(getattr(dock, name), QgsCollapsibleGroupBox)
+
+
+def test_every_section_starts_unfolded(docked):
+    dock, _ = docked
+    _shown(dock)
+    boxes = [getattr(dock, n) for n in FOLDING]
+    boxes += [dock.site_finish, dock.normalisation_panel.group]
+    assert all(not b.isCollapsed() for b in boxes)
+
+
+def _drawn_folded(box):
+    return box.height() < 60 and box.maximumHeight() < 60
+
+
+def _drawn_open(box):
+    return box.height() > 60
+
+
+def test_the_two_interpolation_panels_fold_together(docked):
+    """Through real scope switches: a fold made in one scope is DRAWN in the other."""
+    dock, _ = docked
+    _shown(dock)
+    dock.set_scope("site")
+    _events_n()
+    assert dock.site_finish.isVisible() and not dock.grid_finish.isVisible()
+    dock.site_finish.setCollapsed(True)
+    _events_n()
+    assert _drawn_folded(dock.site_finish)
+    dock.set_scope("grid")
+    _events_n()
+    assert dock.grid_finish.isCollapsed()
+    assert _drawn_folded(dock.grid_finish), (dock.grid_finish.height(),)
+    # and the reverse: unfold here, the site's draws open
+    dock.grid_finish.setCollapsed(False)
+    _events_n()
+    dock.set_scope("site")
+    _events_n()
+    assert not dock.site_finish.isCollapsed()
+    assert _drawn_open(dock.site_finish), dock.site_finish.height()
+
+
+def _events_n():
+    for _ in range(8):
+        QCoreApplication.processEvents()
+
+
+def test_folds_are_remembered_across_a_restart(docked):
+    dock, session = docked
+    _shown(dock)
+    dock.display_group.setCollapsed(True)
+    QCoreApplication.processEvents()
+    assert folds.fold_settings().value("nsgeo/slices/folded/display", type=bool) is True
+    again = SlicesDock(session)
+    try:
+        _shown(again)
+        _events_n()
+        assert again.display_group.isCollapsed()
+        assert _drawn_folded(again.display_group)
+        assert not again.resolution_group.isCollapsed()
+        assert _drawn_open(again.resolution_group)
+    finally:
+        again.refiner.shutdown()
+        again.engine.wait_for_preparation(20_000)
+        again.engine.dispose()
+        again.deleteLater()
+
+
+def _fold_unfold_display_keeps_dz(dock):
+    """dz focused; Display folds, the panel is scrolled up, Display unfolds and
+    scrolls itself into view. Returns (dz still focused, the unfold's scroll)."""
+    scroll = _short_and_active(dock)
+    bar = scroll.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    dock.display_group.setCollapsed(True)
+    _events_n()
+    bar.setValue(0)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    before = bar.value()
+    dock.display_group.setCollapsed(False)
+    _events_n()
+    return dock.dz_spin.hasFocus(), bar.value() - before
+
+
+def test_a_section_folding_does_not_take_focus_from_dz(docked):
+    dock, _ = docked
+    kept, moved = _fold_unfold_display_keeps_dz(dock)
+    assert moved > 0, "the unfold must scroll the panel, or this tests nothing"
+    assert kept
+
+
+def test_the_folding_boxes_are_not_tab_stops(docked):
+    dock, _ = docked
+    boxes = [dock.resolution_group, dock.grid_finish, dock.site_finish, dock.display_group]
+    assert all(b.focusPolicy() == Qt.FocusPolicy.NoFocus for b in boxes)
+    assert dock.normalisation_panel.group.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+def test_fold_state_never_touches_a_real_settings_file(tmp_path):
+    from pathlib import Path
+
+    assert Path(folds.fold_settings().fileName()).parent == tmp_path
+
+
+def test_the_coverage_tooltip_explains_what_and_how_a_preview_draws_it(docked):
+    dock, _ = docked
+    assert dock.coverage_check.toolTip() == (
+        "Shows how many traces fell in each cell, instead of the amplitude.\n"
+        "Use it to see where your lines ran and where there is no data: blank cells had no "
+        "line through them.\n"
+        "In a Whole site preview each pixel shows the largest count among the cells under it, "
+        "so lines look wider than they are."
+    )
+
+
+# ---- final review I1/M1: a restore onto another grid, and a failed apply ----
+
+
+def _make_dock(session):
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    return SlicesDock(session)
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+@pytest.fixture
+def docked_mixed_radar(qgis_app, tmp_path):
+    """Grid A with 512-sample lines, grid B with 2,048 over the same range."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"DEEP__0{i}.DZT", n_traces=60, n_samples=2048),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"DEEP__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(docked_mixed_radar):
+    dock, session = docked_mixed_radar
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dz = dock.dz_spin.minimum()
+    assert dz == pytest.approx(110.864 / 2047, abs=1e-3)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(90.0)  # inside what the lines cover, so nothing is clamped
+    dock.dz_spin.setValue(dz)
+    dock.flush_debounce()
+    deep = dock.engine.z
+    assert deep is not None and deep.nz > 1024, "more levels than A's lines would allow"
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    _save_cube(dock, session, "B__deep", view)
+    dock.grid_combo.setCurrentText("A")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("B__deep")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "B"
+    z = dock.engine.z
+    assert z is not None
+    assert z.nz == deep.nz
+    assert z.dz_ns == pytest.approx(deep.dz_ns)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+@pytest.fixture
+def docked_big_and_small(qgis_app, tmp_path):
+    """A 300 m grid (whose cell floor is about 0.15 m) and a 6 m one."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("Small", (900.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    session.add_lines([_line(tmp_path, "Big", f"BIG__00{i}", 1.0 + i) for i in range(2)])
+    session.add_lines([_line(tmp_path, "Small", f"SMALL__00{i}", 1.0 + i) for i in range(2)])
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def _saved_small_fine_cube(dock, session):
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("Small")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.05)
+    dock.flush_debounce()
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    return _save_cube(dock, session, "Small__fine", view)
+
+
+def test_restoring_a_fine_cell_cube_while_a_large_grid_shows_draws_it_unrefused(
+    docked_big_and_small,
+):
+    dock, session = docked_big_and_small
+    _saved_small_fine_cube(dock, session)
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "Small"
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_onto_another_grid_clears_the_refusal_of_the_one_left(docked_big_and_small):
+    dock, session = docked_big_and_small
+    record = _saved_small_fine_cube(dock, session)
+    del record["z"]
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    big_floor = dock.cell_spin.minimum()
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.cell_spin.minimum() < big_floor, "the record has no resolution: Small's floor"
+
+
+def test_a_z_range_the_resolution_rejects_clears_the_last_refusal(docked):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    dock.z1_spin.setValue(1.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert len(errors) == 1 and "must exceed" in errors[0]
