@@ -4626,7 +4626,7 @@ def test_a_lost_time_zero_with_no_first_break_says_the_range_was_left(
     cube must not come back on the wrong clock without a word."""
     dock, session = docked_banded_radar
     _prepared_with_owed_record(dock, session, time_base="time_zero")
-    monkeypatch.setattr(dock.engine, "median_first_break", lambda threshold=0.2: None)
+    monkeypatch.setattr(dock.engine, "median_first_break", lambda: None)
     errors: list[str] = []
     dock.error.connect(errors.append)
 
@@ -4667,10 +4667,12 @@ _REAL_SURVEYS = [
 
 @contextlib.contextmanager
 def _real_docked(tmp_path, paths, length_m, presets):
-    """A dock on real lines across a grid `length_m` long, with `presets`."""
+    """A dock on real lines across a grid `length_m` long, with `presets`.
+    The lines run half a metre apart, and the grid is wide enough for them."""
     session = SiteSession()
     session.new_site(tmp_path)
-    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 3.0, length_m, "EPSG:32616", 0.5))
+    width_m = max(3.0, 0.5 * (len(paths) + 1))
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, width_m, length_m, "EPSG:32616", 0.5))
     session.add_lines(
         [
             Line.open(p, GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, p.stem))
@@ -4712,17 +4714,70 @@ def test_a_real_data_old_record_restores_moved_by_the_median_zero(
         _assert_shifted_once(dock, errors)
 
 
-@pytest.mark.parametrize(("paths", "length_m", "band"), _REAL_SURVEYS)
+def _step(name, **params):
+    return {"step": name, "params": params, "enabled": True}
+
+
+#: The author's own processing on each real survey, less its Time zero step:
+#: what a preset that has lost Time zero runs. The gain steps are what moved
+#: a first break picked on the prepared lines (PF-1).
+_CAMPUS_STEPS = [
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step("gain_curve", points=[[0.478, -0.807], [17.98, 8.33], [33.90, -2.98], [98.82, -3.08]]),
+]
+_GPS_STEPS = [
+    _step("time_cutoff", end_ns=45.0),
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step(
+        "gain_curve",
+        points=[[-1.559, 0.0], [7.29, -0.079], [12.47, 6.15], [19.55, -0.142], [45.0, 0.0]],
+    ),
+]
+#: All ten campus lines, not the first four: on lines 1-4 the gain steps
+#: leave a prepared-line pick where it was, and on five of the other six they
+#: move it four samples late, which made the median two samples late (PF-1).
+_REAL_PROCESSING = [
+    pytest.param(
+        CAMPUS_LINES,
+        12.0,
+        _CAMPUS_STEPS,
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        _GPS_STEPS,
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("paths", "length_m", "steps"), _REAL_PROCESSING)
 def test_the_first_break_estimate_matches_time_zero_on_real_lines(
-    qgis_app, tmp_path, paths, length_m, band
+    qgis_app, tmp_path, paths, length_m, steps
 ):
     """Spec §9, the check that the estimate is fair: the median first break a
     restore shifts by when its preset has lost Time zero agrees with the median
-    line zero Time zero itself finds, within one sample. Both are read as This
-    grid prepares the lines, under its own transform (amp_square, the default),
-    as a restore reads them. Read straight off the squared lines, the estimate
-    was two samples late on both surveys."""
-    presets = {"radar": [_DEWOW], "zeroed": [_TIME_ZERO, _DEWOW]}
+    line zero Time zero itself finds, within one sample. The lost side runs the
+    author's own processing less Time zero; the found side puts Time zero in
+    front of it, where it runs on the raw record. Both are read as This grid
+    prepares the lines, under its own transform (the default), as a restore
+    reads them.
+
+    Picked on the prepared lines, the estimate was two samples late on the
+    campus lines (PF-1): the gain steps moved it. The pick is now each raw
+    record's, so the transform cannot move it either; no transform is pinned.
+
+    With Time zero in front, `time_cutoff`'s 45 ns is on the time-zero clock,
+    and without it on the radar's: it ends the record well after the first
+    arrival either way."""
+    presets = {"radar": list(steps), "zeroed": [_TIME_ZERO, *steps]}
     with _real_docked(tmp_path, paths, length_m, presets) as (dock, _session):
         assert dock.engine.wait_for_preparation(60_000)
         read = {}
@@ -4730,12 +4785,10 @@ def test_the_first_break_estimate_matches_time_zero_on_real_lines(
             dock.preset_combo.setCurrentText(preset)
             assert dock.engine.wait_for_preparation(60_000)
             assert dock.engine.choice.preset == preset and dock.engine.is_prepared
+            assert dock.engine.line_count == len(paths), preset
             read[preset] = (dock.engine.median_first_break(), dock.engine.median_zero())
         dt = dock.engine.prepared_lines()[0].dt_ns
         transform = dock.engine.choice.transform
-    # The square-root branch is what this checks on real ground: should the
-    # default change, this says so rather than quietly checking another branch.
-    assert transform == "amp_square", transform
     first_break, zero = read["radar"][0], read["zeroed"][1]
     assert first_break == pytest.approx(zero, abs=dt), (transform, first_break, zero, dt)
 
