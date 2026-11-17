@@ -21,7 +21,7 @@ from the stack of the traces along the scan's curve, so every trace follows
 the same one. A zero crossing does not depend on how bright the trace is, so
 the edge does not drift deeper as a leg fades.
 
-Every dot stays on that lobe: the crossing is locked to it (ruling R13). On
+Every dot stays on that lobe: the crossing is locked to it (spec §4.2). On
 each trace it is looked for only in a narrow window around where the lobe is
 expected, the scan's curve plus the lobe's offset on the stack. A trace with
 no crossing there gives no dot; the tracer never takes the next lobe up or
@@ -65,9 +65,9 @@ MIN_DOTS = 4
 V_MIN_M_NS = 0.03
 V_MAX_M_NS = 0.30
 #: Traces times samples a box may hold. Read at call time (tests change it).
-#: Measured on a real 1780-trace line with the coherent scan: a box of 196 000
-#: cells (960 traces by 204 samples) traces in 0.5 s, 82 000 cells in 0.55 s.
-#: The largest box drawn around a saved hand fit traces in 0.24 s.
+#: Measured on a real line: a box of 196 000 cells (960 traces by 204 samples)
+#: traces in about 0.5 s (0.46-0.56 s over ten runs); the largest box drawn
+#: around a saved hand fit, in 0.17 s.
 MAX_BOX_CELLS = 200_000
 
 _MIN_BOX = 8  # traces and samples

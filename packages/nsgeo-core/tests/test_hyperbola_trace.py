@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from nsgeo import hyperbola_trace as ht
 from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
-from nsgeo.velocity_fit import fit_hyperbola, hyperbola_time
+from nsgeo.velocity_fit import fit_hyperbola
 
 from tests.planted import (
     REAL_DT_NS,
@@ -121,6 +121,27 @@ def test_a_fading_leg_drops_the_faded_traces():
     # apex's crossing noise. Over 100 seeds 2 sigma misses on 34, each time by
     # under 0.35% (this seed: 0.31% against a sigma of 0.15%).
     assert _fit(dots, x).v_m_ns == pytest.approx(0.07, rel=0.01)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "a known limit (spec §14): a fading leg on ground with flat layers keeps a few "
+        "dots past its end"
+    ),
+)
+def test_a_fading_leg_among_layers_drops_the_faded_traces():
+    # The layers' lobes on the raw box reach 0.2-0.3 of the band's, above the
+    # faint floor, so the dots run on along them past the leg's end and the
+    # velocity comes out 0.5-2% fast. A candidate fix judges the floor on the
+    # box with its row means removed.
+    data, t, x = _scene(
+        [Planted(100, 15.0, 0.07, fade_from_trace=25)],
+        layers=real_layers(N_SAMPLES, 0.25 * REAL_PERIOD_NS),
+    )
+    dots = trace_hyperbola(data, t, x, TraceBox(40, 160, 10.0, 35.0))
+    assert all(abs(d[0] - 100) <= 35 for d in dots)
 
 
 @pytest.mark.parametrize(
@@ -313,13 +334,14 @@ def test_no_dot_jumps_a_lobe(seed):
     # further below the expected crossing than above it took the next lobe
     # down (#140, the author: "a little noisy"). The next crossing into a lobe
     # of the same sign is a whole period away, so a dot within a quarter period
-    # of the fit through the dots is on the same lobe as the rest.
+    # of the planted edge (plant puts it on t(x)) is on the planted lobe. The
+    # fit through the dots would not do: any lobe, kept by every dot, fits.
     data, t, x = _layered_scene(15.0, 0.07, 25, 0.625, seed)
     dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 13.0, 24.0))
     traces = np.array([d[0] for d in dots])
     times = np.array([d[1] for d in dots])
-    fit = _fit(dots, x)
-    assert np.abs(times - hyperbola_time(fit, x[traces])).max() <= REAL_PERIOD_NS / 4
+    truth = np.sqrt(15.0**2 + 4.0 * (x[traces] - x[100]) ** 2 / 0.07**2)
+    assert np.abs(times - truth).max() <= REAL_PERIOD_NS / 4
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -329,8 +351,9 @@ def test_a_precursor_growing_down_the_legs_does_not_lift_the_dots(seed):
     # 0.2 at the apex to past 0.5 near the box's ends, as on the real lines
     # (0.25 at the apex, 0.51 at the last clicked dot, 0.75 beyond). Taking the
     # crossing anywhere within a quarter period of where the lobe is expected
-    # followed the layers there, and the dots floated off the band (#140,
-    # ruling R13). Locked to a narrow window, they stay on the planted edge.
+    # followed the layers there, and the dots floated off the band (#140).
+    # Locked to a narrow window around the lobe's expected crossing (spec
+    # §4.2), they stay on the planted edge.
     data, t, x = _layered_scene(15.0, 0.07, 25, 0.25, seed)
     dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 13.0, 24.0))
     traces = np.array([d[0] for d in dots])
