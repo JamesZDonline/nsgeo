@@ -5,18 +5,21 @@ tests/data/local/hand-fits/. Nothing here holds a site name, path or number;
 the tests assert the agreement rules only. CI has no such data and skips.
 
 `rulings.json` maps "<absolute DZT path>#<fit id>" to the author's ruling that
-the hand fit was off (the comparison is skipped); `pending.json` maps a key to
-a note on a disagreement awaiting a ruling (the test is a strict xfail). A
-key plus "|boxes" does the same for the three-box test alone. `expected.json`
-maps a key to {"ratio": [lo, hi], "reason": ...}: a difference the author has
-accepted as expected, so the traced-to-hand velocity ratio must lie in
-[lo, hi], and the traced sigma stay within ``EXPECTED_MAX_REL_SIGMA`` of its
-velocity, instead of the two agreeing (the three-box test is unchanged). Each
+the hand fit was off (the comparison with the hand fit is skipped; the box
+test, which never reads the hand fit's velocity, still runs); `pending.json`
+maps a key to a note on a disagreement awaiting a ruling (the test is a strict
+xfail). A key plus "|boxes" does the same for the box test alone.
+`expected.json` maps a key to {"ratio": [lo, hi], "reason": ...}: a difference
+the author has accepted as expected, so the traced-to-hand velocity ratio must
+lie in [lo, hi], and the traced sigma stay within ``EXPECTED_MAX_REL_SIGMA`` of
+its velocity, instead of the two agreeing (the box test is unchanged). Each
 fit's band is centred on its accepted ratio, so a lobe jump still fails.
 
-In the three-box test a box the tracer refuses is left out: a refusal is not
-a disagreement (the author redraws the box). The 20% box must trace, at least
-two boxes must trace in all, and every traced pair must agree.
+The box test draws five boxes around the hand dots (``BOXES``), from 10% to
+75% of their extent on each side, as loose as a hand-drawn box gets. A box the
+tracer refuses is left out: a refusal is not a disagreement (the author
+redraws the box). The 20% box must trace, at least two boxes must trace in
+all, and every traced pair must agree.
 
 A saved stack may have Migration or an amplitude transform switched on. The
 panel refuses to trace with those on and tells the author to switch them off,
@@ -62,6 +65,11 @@ REFUSED_STEPS = ("migrate_fk", "amp_abs", "amp_square", "amp_envelope")
 #: An accepted difference must still be a precise trace: a ratio inside its
 #: band means little when the traced sigma could hide a jump.
 EXPECTED_MAX_REL_SIGMA = 0.05
+#: The box test's boxes, (margin, shift) for `_box`; the 20% box first. On the
+#: author's lines a box 1.4-2.5 times a hyperbola's extent once took another
+#: lobe (#140), so the loosest two are half and three quarters of the extent
+#: again on each side.
+BOXES = ((0.20, 0.0), (0.10, 0.0), (0.35, 0.10), (0.50, 0.0), (0.75, 0.0))
 
 
 @dataclass
@@ -131,7 +139,7 @@ def _params(suffix=""):
         marks = []
         if case.missing:
             marks.append(pytest.mark.skip(reason=f"{case.missing}"))
-        if case.key in RULINGS:
+        if case.key in RULINGS and not suffix:  # a ruling is on the hand fit alone
             marks.append(pytest.mark.skip(reason=f"author's ruling: {RULINGS[case.key]}"))
         if case.key + suffix in PENDING:
             marks.append(
@@ -204,9 +212,9 @@ def test_a_traced_fit_agrees_with_the_hand_fit(case):
 
 
 @pytest.mark.parametrize("case", _params("|boxes"))
-def test_three_boxes_agree_with_each_other(case):
-    fits = [_trace_fit(case, _box(case, 0.20))]  # a refusal here fails the test
-    for margin, shift in ((0.10, 0.0), (0.35, 0.10)):
+def test_boxes_from_tight_to_loose_agree_with_each_other(case):
+    fits = [_trace_fit(case, _box(case, *BOXES[0]))]  # a refusal here fails the test
+    for margin, shift in BOXES[1:]:
         with contextlib.suppress(ValueError):  # a refusal is not a disagreement
             fits.append(_trace_fit(case, _box(case, margin, shift)))
     assert len(fits) >= 2, "only the 20% box traced"
