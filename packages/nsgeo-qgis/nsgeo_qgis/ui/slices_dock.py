@@ -1127,6 +1127,11 @@ class SlicesDock(QgsDockWidget):
         picking that very cube and dispatch a whole redundant
         `restore_cube` (and its ~0.9 s re-preparation) of the state that
         is already on screen.
+
+        A `select` also takes the last restore's notes down (spec §8): the
+        Cube box leaves the restored cube for the record just saved, which
+        those notes do not describe. A refill with no `select` keeps the
+        Cube box where it was, and its notes with it.
         """
         try:
             self._updating += 1
@@ -1134,8 +1139,12 @@ class SlicesDock(QgsDockWidget):
             cube_ids = sorted(site.cubes) if site is not None else []
             items = ["(unsaved)", *cube_ids]
             self._refill(self.cube_combo, items)
-            if select is not None and select in items:
-                self.cube_combo.setCurrentText(select)
+            if select is not None:
+                if select in items:
+                    self.cube_combo.setCurrentText(select)
+                if self._grid_notes:
+                    self._grid_notes = []
+                    self.show_warnings()
         finally:
             self._updating -= 1
 

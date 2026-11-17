@@ -4314,6 +4314,28 @@ def test_a_restore_that_fails_past_its_checks_takes_the_last_notes_down(docked_z
     assert _notes(dock) == []
 
 
+def test_saving_a_cube_takes_the_last_restore_s_notes_down(docked_zeroed):
+    """Spec §8 (final review F-I1): Save cube… selects the record it just wrote
+    (`refresh_cube_combo(select=...)`), so the Cube box leaves the restored cube
+    and that cube's notes go with it. A refill with no `select` (a survey
+    signal's rebuild) leaves the Cube box where it was, and the note stands."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")  # picked, as the user picks it
+    note = old_cube_note(-dock.engine.median_zero())
+    assert _notes(dock) == [note]
+
+    # Recorded as `plugin.save_cube` records it; `_save_cube` refills with no `select`.
+    _save_cube(dock, session, "A__saved", dock.view_settings(), time_base=TIME_BASE_TIME_ZERO)
+    assert dock.cube_combo.currentText() == "A__old"
+    assert _notes(dock) == [note]
+
+    dock.refresh_cube_combo(select="A__saved")
+
+    assert dock.cube_combo.currentText() == "A__saved"
+    assert _notes(dock) == []
+
+
 def test_closing_the_site_while_a_restore_waits_for_a_site_task_is_quiet(
     docked_zeroed, message_log, monkeypatch
 ):
