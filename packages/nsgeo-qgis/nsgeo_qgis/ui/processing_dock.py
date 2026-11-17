@@ -602,7 +602,8 @@ class ProcessingDock(QgsDockWidget):
         axis (`time_zero` crops `n_samples` and relabels `t0_ns` -- see
         `nsgeo.processing.timezero`) is accounted for, exactly as the new
         step's own `apply()` will see it. Only used today to seed a new
-        curve step's identity default (see `add_step_with_dialog`), so the
+        step's required parameters (see `add_step_with_dialog`): a curve's
+        identity default, and a time at the record's end, so the
         distinction only bites once something ahead of it in the stack
         changes the sample axis.
 
@@ -611,11 +612,17 @@ class ProcessingDock(QgsDockWidget):
         Nyquist, say) -- that is a problem with that step, not a reason
         this method should raise too: it falls back to the stack's raw
         source instead, same as before this method looked at `result()` at
-        all, and to the line's header when nothing has loaded yet. Logged
-        when it fires: the seed then lands on the raw axis while the
-        viewer keeps its last good (possibly quite different) transform,
+        all. Logged when it fires: the seed then lands on the raw axis while
+        the viewer keeps its last good (possibly quite different) transform,
         so a curve step seeded right now can end up with control points
-        off the drawn axis with nothing said otherwise."""
+        off the drawn axis with nothing said otherwise.
+
+        With no samples loaded yet it reads the line's header, the radar's
+        clock (`input_axis`), unless an enabled `time_zero` is in the stack:
+        then the header is the wrong clock and the real one is unknown, so it
+        is `(0.0, dt, n_samples)` from the header. On the time-zero clock the
+        record starts at 0 and has at most the header's samples, so a time
+        seeded at its end crops nothing (#163 item 3)."""
         key = self.key()
         assert key is not None
         axis = self.input_axis(len(self.session.stack_for(key).entries))

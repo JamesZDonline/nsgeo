@@ -1088,12 +1088,13 @@ class SiteScope:
     def warnings(self) -> list[Entry]:
         """What stands in the way of the site, for the Warnings section: the
         preview note while drawn, the reason when nothing is drawn, and the
-        clock warning when the drawn grids are not all on one clock (some have
+        clock warning when the site's grids are not all on one clock (some have
         no Time zero step; a site wholly on the radar clock says nothing, since
-        its grids still line up). Queued and preparing grids are counted from
-        their presets, ready ones from the steps they were prepared with. A
-        preview site still exports at full detail, so it says nothing about
-        the export."""
+        its grids still line up). The grids counted are those the site draws or
+        will draw (`grid_time_bases`): a ready grid by the steps it was
+        prepared with, a queued or preparing one by its preset; a grid with no
+        lines or a failed preparation is left out. A preview site still
+        exports at full detail, so it says nothing about the export."""
         engine = self.engine
         entries: list[Entry] = []
         if self.drawn:

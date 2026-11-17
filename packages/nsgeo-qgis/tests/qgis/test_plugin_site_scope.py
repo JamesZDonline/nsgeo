@@ -3672,7 +3672,8 @@ def test_grid_time_bases_reads_each_grids_preset(plugin):
 
 
 def test_a_grid_with_no_lines_has_no_clock(plugin):
-    """A grid with no lines is left out of `grid_time_bases`, as a failed one is."""
+    """A grid with no lines is left out of `grid_time_bases`, as a failed one is.
+    A guard: it holds on today's code (#163 item 6 asked for the test)."""
     session = plugin.session
     session.add_grid(dataclasses.replace(session.site.grids[0], id="Z"))
     _preset_per_grid(session)
