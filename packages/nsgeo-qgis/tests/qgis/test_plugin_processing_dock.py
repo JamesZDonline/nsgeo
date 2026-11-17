@@ -56,7 +56,7 @@ def test_add_menu_is_grouped_in_processing_order(opened):
     _, dock, _ = opened
     assert _menu_layout(dock.add_menu) == [
         ("Time", ["time_zero", "time_cutoff"]),
-        ("Filters", ["dewow", "bandpass"]),
+        ("Filters", ["dewow", "bandpass", "trace_stack"]),
         ("Background", ["background_mean", "background_sliding", "background_svd"]),
         ("Migration", ["migrate_fk"]),
         ("Gain", ["gain_curve", "gain_agc", "gain_parametric"]),

@@ -415,7 +415,7 @@ In **nsgeo Processing**, click **Add step** and choose a step. The menu lists
 them in the usual processing order, in four groups:
 
 - **Time:** Time zero, Time cutoff
-- **Filters:** Dewow, Bandpass
+- **Filters:** Dewow, Bandpass, Trace stack
 - **Background:** Background removal (mean), Background removal (sliding),
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
@@ -423,6 +423,12 @@ them in the usual processing order, in four groups:
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
+
+A setting that cannot work (for example a window shorter than two samples on
+this line) is refused with a message saying which setting to change. If a
+project you open holds a setting nsgeo no longer accepts at all, such as an
+epsilon of 0 or a missing value, that step is turned off, reset or removed,
+and the nsgeo log says what changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
@@ -804,7 +810,8 @@ example, 512 samples over 50 ns is about 0.1 ns, so the shortest safe window is
 about 0.2 ns. The default windows (4 ns for Dewow, 200 traces for
 Background removal (sliding) and 20 ns for Automatic gain control) are safe unless your sample
 interval is longer than 2 ns. If a profile goes blank, select the step and widen
-its window. Your DZT files are untouched.
+its window. Your DZT files are untouched. Versions after 0.4.0 refuse such a
+window and name the shortest one that works.
 
 ---
 

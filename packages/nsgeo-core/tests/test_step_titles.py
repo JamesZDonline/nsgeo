@@ -26,6 +26,7 @@ TITLES = {
     "time_cutoff": "Time cutoff",
     "dewow": "Dewow",
     "bandpass": "Bandpass",
+    "trace_stack": "Trace stack",
     "background_mean": "Background removal (mean)",
     "background_sliding": "Background removal (sliding)",
     "background_svd": "Remove leading components (SVD)",
@@ -76,7 +77,7 @@ def test_no_two_steps_share_a_title_or_a_place_in_their_group():
 def test_grouped_steps_is_the_processing_flow():
     assert grouped_steps() == [
         ("Time", ["time_zero", "time_cutoff"]),
-        ("Filters", ["dewow", "bandpass"]),
+        ("Filters", ["dewow", "bandpass", "trace_stack"]),
         (
             "Background",
             ["background_mean", "background_sliding", "background_svd"],
