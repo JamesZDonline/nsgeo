@@ -430,15 +430,14 @@ class NsgeoPlugin:
             lambda: self.processing_dock.diff_button.setChecked(False)
         )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
-        # ProcessingDock reacts to line_loaded only to re-show its form (a
-        # time field has no clock before the samples load); it does not
-        # re-sync the gain strip. ProfileDock re-renders on it too, so a
-        # curve step selected before this line's
-        # profiles arrive would otherwise stay exactly as
-        # _sync_gain_strip last left it -- e.g. hidden for want of an axis
-        # -- with nothing to re-check it once ProfileDock's own render
-        # gives it one. Re-running _sync_gain_strip here on the same
-        # signal ProfileDock re-renders from closes that gap.
+        # ProfileDock re-renders on line_loaded, but ProcessingDock does not
+        # re-check the gain strip on it (it reacts only to re-show a form
+        # built before the samples loaded: a time field has no clock until
+        # then). So a curve step selected before this line's profiles arrive
+        # would stay exactly as _sync_gain_strip last left it -- e.g. hidden
+        # for want of an axis -- with nothing to re-check it once
+        # ProfileDock's own render gives it one. Re-running _sync_gain_strip
+        # here on the same signal ProfileDock re-renders from closes that gap.
         self.session.line_loaded.connect(self._resync_gain_strip)
         # Walkthrough round 2, W8: the same shape of gap as the gain strip
         # just above, for the profile band. The band is a property of the
@@ -872,9 +871,10 @@ class NsgeoPlugin:
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
         See its own connection in `initGui` for why this is needed at all:
-        `line_loaded` is the one render-triggering event `ProcessingDock`
-        never reacts to, so nothing else re-checks a strip `_sync_gain_strip`
-        last left hidden for want of an axis that has since arrived."""
+        `ProcessingDock` reacts to `line_loaded` only to re-show a form built
+        before the samples loaded, not to re-check the gain strip, so nothing
+        else re-checks a strip `_sync_gain_strip` last left hidden for want
+        of an axis that has since arrived."""
         if self.session is None or self.processing_dock is None:
             return
         if key != self.session.current_key:
