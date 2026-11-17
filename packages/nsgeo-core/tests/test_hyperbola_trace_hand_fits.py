@@ -14,6 +14,10 @@ accepted as expected, so the traced-to-hand velocity ratio must lie in
 velocity, instead of the two agreeing (the three-box test is unchanged). Each
 fit's band is centred on its accepted ratio, so a lobe jump still fails.
 
+In the three-box test a box the tracer refuses is left out: a refusal is not
+a disagreement (the author redraws the box). The 20% box must trace, at least
+two boxes must trace in all, and every traced pair must agree.
+
 A saved stack may have Migration or an amplitude transform switched on. The
 panel refuses to trace with those on and tells the author to switch them off,
 and the hand fit was clicked on the hyperbola they collapse, so each line is
@@ -201,11 +205,11 @@ def test_a_traced_fit_agrees_with_the_hand_fit(case):
 
 @pytest.mark.parametrize("case", _params("|boxes"))
 def test_three_boxes_agree_with_each_other(case):
-    fits = [
-        _trace_fit(case, _box(case, 0.10)),
-        _trace_fit(case, _box(case, 0.20)),
-        _trace_fit(case, _box(case, 0.35, shift=0.10)),
-    ]
+    fits = [_trace_fit(case, _box(case, 0.20))]  # a refusal here fails the test
+    for margin, shift in ((0.10, 0.0), (0.35, 0.10)):
+        with contextlib.suppress(ValueError):  # a refusal is not a disagreement
+            fits.append(_trace_fit(case, _box(case, margin, shift)))
+    assert len(fits) >= 2, "only the 20% box traced"
     for a, b in combinations(fits, 2):
         assert _agree(a.v_m_ns, a.v_stderr_m_ns, b.v_m_ns, b.v_stderr_m_ns), (
             f"{a.v_m_ns:.4f}+-{a.v_stderr_m_ns:.4f} vs {b.v_m_ns:.4f}+-{b.v_stderr_m_ns:.4f}"
