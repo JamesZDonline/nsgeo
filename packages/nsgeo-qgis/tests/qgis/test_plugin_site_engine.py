@@ -1054,7 +1054,7 @@ def test_grids_too_far_apart_draw_a_coarser_preview_and_say_why(site3, make_site
     assert k >= 1 and site.lattice.pixel == 2**k * RES.cell
     assert site.lattice.n_pixels <= site.max_pixels
     assert site.full_lattice.pixel == RES.cell
-    assert "Leaving out C" in site.preview_note
+    assert "without grid C" in site.preview_note
     drawn = site.slice_at(20.0, 5.0, **TICK)
     assert drawn.lattice == site.lattice
     assert drawn.array.shape == (site.lattice.height, site.lattice.width)

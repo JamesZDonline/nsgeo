@@ -334,7 +334,9 @@ If a line went in with the wrong start, offset, direction or grid, right-click
 the grid and choose **Edit lines…**. A table opens with every line on the grid,
 in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
 **Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
-panel shows.
+panel shows. Closing a **Grid** list hands the
+keyboard back to the table, so scrolling the table never changes a line's grid.
+A **Grid** box takes the mouse wheel only when you reach it with **Tab**.
 
 The panel under the table changes every selected line at once. Type a start and
 press **Set**, press **Snap to grid edge**, type an amount and press **Shift**
@@ -415,7 +417,7 @@ In **nsgeo Processing**, click **Add step** and choose a step. The menu lists
 them in the usual processing order, in four groups:
 
 - **Time:** Time zero, Time cutoff
-- **Filters:** Dewow, Bandpass
+- **Filters:** Dewow, Bandpass, Trace stack
 - **Background:** Background removal (mean), Background removal (sliding),
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
@@ -423,6 +425,12 @@ them in the usual processing order, in four groups:
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
+
+A setting that cannot work (for example a window shorter than two samples on
+this line) is refused with a message saying which setting to change. If a
+project you open holds a setting nsgeo no longer accepts at all, such as an
+epsilon of 0 or a missing value, that step is turned off, reset or removed,
+and the nsgeo log says what changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
@@ -489,9 +497,16 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Shift and use the mouse wheel over the map to step through the slices.
 3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), and the
    top and bottom of the volume (**z0**, **z1**). Hover over each control for an
-   explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
+   explanation. A grid starts at a 0.1 m cell, or half the line spacing if that
    is smaller. Each grid remembers the resolution you set for it, and saving the
    site saves it.
+   **dz** can't go below the radar's own sample interval, and reads
+   *(sample interval)* beside the number when it is there. In **Whole site** it
+   can't go below the finest grid's interval, and it starts at the coarsest
+   one's. The mouse wheel changes any box under the pointer. Once a section is
+   set, fold it away from its header, so scrolling the panel can't change it:
+   the **Resolution**, **Interpolation**, **Normalisation** and **Display**
+   headers fold, and nsgeo remembers which are folded.
 4. **Interpolation** decides what is drawn in the cells no line crossed, and
    whether the slice is smoothed. The same box appears for **Whole site**, with
    its own settings.
@@ -538,9 +553,10 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
-   full detail. Past a size it draws a preview at a coarser pixel and says so in
-   the panel. An export is not limited by the preview: it works out its own
-   cells at the size you choose (see step 6).
+   full detail. Past a size it draws a preview at a coarser pixel and says so
+   under **Warnings**, below **Position**, where refusals appear too. An
+   export is not limited by the preview: it works out its own cells at the
+   size you choose (see step 6).
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
    - **my own colours** keeps whatever you set on the slice layer's
@@ -563,7 +579,9 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    as a low number depends on the cell size: at a fine cell, one or two traces a
    cell is normal, because a cell holds only a few traces along the line. Compare a
    cell with its neighbours, or with the line spacing and the cell size, and
-   look for the cells that stand out as low.
+   look for the cells that stand out as low. In a **Whole site** preview each
+   pixel shows the largest count among the cells under it, so lines look wider
+   than they are.
    Use it to spot gaps and thin coverage between lines before you trust a slice
    in that spot. With **Show coverage** ticked, an export also writes the
    counts as a second file beside it, named like the export with
@@ -804,7 +822,8 @@ example, 512 samples over 50 ns is about 0.1 ns, so the shortest safe window is
 about 0.2 ns. The default windows (4 ns for Dewow, 200 traces for
 Background removal (sliding) and 20 ns for Automatic gain control) are safe unless your sample
 interval is longer than 2 ns. If a profile goes blank, select the step and widen
-its window. Your DZT files are untouched.
+its window. Your DZT files are untouched. Versions after 0.4.0 refuse such a
+window and name the shortest one that works.
 
 ---
 

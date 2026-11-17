@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from nsgeo.processing._util import refuse_non_finite
 from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
@@ -120,4 +121,5 @@ class AmpEnvelope(_NoParams):
     order = 2
 
     def apply(self, rg: Radargram) -> Radargram:
+        refuse_non_finite(rg.data, "the filter would spread each one along its whole trace")
         return rg.replace(data=analytic_envelope(rg.data))
