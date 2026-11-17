@@ -4764,15 +4764,18 @@ def test_the_first_break_estimate_matches_time_zero_on_real_lines(
 ):
     """Spec §9, the check that the estimate is fair: the median first break a
     restore shifts by when its preset has lost Time zero agrees with the median
-    line zero Time zero itself finds, within one sample. The lost side runs the
-    author's own processing less Time zero; the found side puts Time zero in
-    front of it, where it runs on the raw record. Both are read as This grid
-    prepares the lines, under its own transform (the default), as a restore
-    reads them.
+    line zero Time zero itself finds, within half a sample: they are the same
+    pick on the same raw records, so they match exactly, and a whole sample off
+    is a different row. The lost side runs the author's own processing less
+    Time zero; the found side puts Time zero in front of it, where it runs on
+    the raw record. Both are read as This grid prepares the lines, under its own
+    transform (the default), as a restore reads them.
 
     Picked on the prepared lines, the estimate was two samples late on the
-    campus lines (PF-1): the gain steps moved it. The pick is now each raw
-    record's, so the transform cannot move it either; no transform is pinned.
+    campus lines and one sample late on these four GPS lines (PF-1): the gain
+    steps moved it. One sample passed the one-sample tolerance this test had
+    before, so GPS pinned nothing. The pick is now each raw record's, so the
+    transform cannot move it either; no transform is pinned.
 
     With Time zero in front, `time_cutoff`'s 45 ns is on the time-zero clock,
     and without it on the radar's: it ends the record well after the first
@@ -4790,7 +4793,7 @@ def test_the_first_break_estimate_matches_time_zero_on_real_lines(
         dt = dock.engine.prepared_lines()[0].dt_ns
         transform = dock.engine.choice.transform
     first_break, zero = read["radar"][0], read["zeroed"][1]
-    assert first_break == pytest.approx(zero, abs=dt), (transform, first_break, zero, dt)
+    assert first_break == pytest.approx(zero, abs=dt / 2), (transform, first_break, zero, dt)
 
 
 def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):

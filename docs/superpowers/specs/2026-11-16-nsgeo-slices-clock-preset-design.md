@@ -225,8 +225,10 @@ Each must fail before its fix.
 - **Real lines,** on both surveys where the local data exists, skipped cleanly in CI:
   - restoring an unmarked cube moves the range by the median line zero (about 0.5 ns campus,
     1.3–1.6 ns GPS);
-  - the first-break estimate used for "lost" agrees with the time-zero median within one sample
-    on each survey. This is the check that the estimate is fair.
+  - the first-break estimate used for "lost" agrees with the time-zero median within half a
+    sample on each survey. This is the check that the estimate is fair. Both are Time zero's own
+    pick on the same raw records, so they match exactly; half a sample, not one, so that a pick a
+    whole sample off fails (PF-1: the prepared-line pick was one sample late on the GPS lines).
 
 ## 10. The walkthrough
 
