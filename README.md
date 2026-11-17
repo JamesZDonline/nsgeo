@@ -126,7 +126,8 @@ release's notes list everything in it.
   if you edit while its lines prepare or its preset has since gained or lost
   Time zero; a quick switch to another survey no longer carries the last one's
   palette or slice time over; and a grid the panel falls back to opens on the
-  preset Whole site draws it with. Building.
+  preset Whole site draws it with. Built and reviewed, awaiting its
+  walkthrough.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
