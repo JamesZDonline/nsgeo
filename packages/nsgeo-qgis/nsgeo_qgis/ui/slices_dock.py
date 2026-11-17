@@ -32,12 +32,13 @@ the scope left.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import retime_ns, sets_time_zero
+from nsgeo.processing import TIME_BASE_RADAR, retime_ns, time_base_of
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
@@ -89,11 +90,13 @@ from nsgeo_qgis.slices_plan import (
     SliceFinish,
     SourceChoice,
     TooManyLevels,
+    clock_change_note,
     default_cell,
     depth_scroll_steps,
     estimate_memory,
     format_bytes,
     frame_cells,
+    no_break_note,
     old_cube_note,
     smallest_safe_cell,
 )
@@ -105,6 +108,16 @@ from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
 from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, Entry, WarningsPanel
+
+
+@dataclass(frozen=True)
+class OwedShift:
+    """A restored record's range, still on the clock it was saved on (#162)."""
+
+    to: str  # the clock it moves onto: TIME_BASE_TIME_ZERO or TIME_BASE_RADAR
+    cube_id: str
+    preset: str
+    marked: bool  # False: a record from before #97, with no time_base
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -446,14 +459,16 @@ class SlicesDock(QgsDockWidget):
         #: `_run_pending_grid_prepare` clears it when that one turns out a
         #: no-op too.
         self._pending_palette: str | None = None
-        #: A restored record from before the time-zero clock, whose preset now
-        #: sets one: `_on_prepared` moves its z range by the median zero and
-        #: says so. Consumed by every `_on_prepared` (which also covers a preparation
-        #: with failed lines). Dropped (spec §2, `_drop_restore_pending`) by a
-        #: new site and by a source change -- by hand, from the site list, or a
-        #: grid the combo fell back to on its own -- and never by a refresh
-        #: that keeps the source (#162 item 2).
-        self._pending_z_shift = False
+        #: A restored record whose range is on another clock than its preset is
+        #: now (spec §4): one from before the time-zero clock whose preset sets
+        #: one, or a marked one whose preset has gained or lost Time zero since.
+        #: `_settle_z` moves its z range onto the preset's clock and says so
+        #: (`_shift_z_to_clock`). Consumed by every `_on_prepared` (which also
+        #: covers a preparation with failed lines). Dropped (spec §2,
+        #: `_drop_restore_pending`) by a new site and by a source change -- by
+        #: hand, from the site list, or a grid the combo fell back to on its
+        #: own -- and never by a refresh that keeps the source (#162 item 2).
+        self._pending_z_shift: OwedShift | None = None
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -1746,31 +1761,44 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
-    def _shift_z_by_median_zero(self) -> bool:
-        """Move both z spins to the time-zero clock for a restored old record.
+    def _shift_z_to_clock(self, owed: OwedShift) -> bool:
+        """Move both z spins onto the clock a restored record's preset is on now
+        (spec §4, #162 item 1).
 
-        The record's range was on the radar clock; `retime_ns(t, 0.0, median)`
-        puts a time on the clock of a line whose zero is `median` (the
-        median of the prepared lines' zeros). With nothing prepared there is
-        no median, so nothing moves and nothing is said. Said as a note in
-        Warnings (spec §8), not a toast. Signal-blocked writes, as
-        `_clamp_z_to_prepared` does, so the caller must push the result at
-        the engine (`_apply_resolution`) when this returns True; `_settle_z`
-        is the one caller."""
-        median = self.engine.median_zero()
+        - **To time zero** (a record on the radar's clock): `retime_ns(t, 0.0,
+          median)` puts a time on the clock of a line whose zero is `median`,
+          the median of the prepared lines' zeros. The range moves by -median.
+        - **To radar** (the preset has lost Time zero): each prepared line's
+          zero reads 0.0, so the median first break stands in for it
+          (`engine.median_first_break`), and `retime_ns(t, median, 0.0)` moves
+          the range by +median, the reverse.
+
+        With nothing prepared there is nothing to measure: nothing moves and
+        nothing is said. With prepared lines but no first break on any, the
+        range is left as saved and a note says so (Review Focus 5). Said as a
+        note in Warnings (spec §8), not a toast. Signal-blocked writes, as
+        `_clamp_z_to_prepared` does, so the caller must push the result at the
+        engine (`_apply_resolution`); `_settle_z` is the one caller. Returns
+        whether the range moved."""
+        to_radar = owed.to == TIME_BASE_RADAR
+        median = self.engine.median_first_break() if to_radar else self.engine.median_zero()
         if median is None:
+            if self.engine.is_prepared:
+                self._add_grid_note(no_break_note(owed.cube_id, owed.preset))
             return False
+        from_zero, to_zero = (median, 0.0) if to_radar else (0.0, median)
+        shift = retime_ns(0.0, from_zero, to_zero)
         self._updating += 1
         try:
             for spin in (self.z0_spin, self.z1_spin):
                 spin.blockSignals(True)
                 try:
-                    spin.setValue(retime_ns(spin.value(), 0.0, median))
+                    spin.setValue(retime_ns(spin.value(), from_zero, to_zero))
                 finally:
                     spin.blockSignals(False)
         finally:
             self._updating -= 1
-        # The grid remembers the shifted range, not the record's radar-clock
+        # The grid remembers the shifted range, not the record's saved-clock
         # one (the spins were written with signals blocked, so nothing else
         # would re-remember it). Remembered before the caller's clamp, as
         # every restore remembers its record's range: the clamp is no edit
@@ -1780,7 +1808,11 @@ class SlicesDock(QgsDockWidget):
             self.session.remember_slice_resolution(
                 grid_id, t0_ns=self.z0_spin.value(), t1_ns=self.z1_spin.value()
             )
-        self._add_grid_note(old_cube_note(-median))
+        self._add_grid_note(
+            clock_change_note(owed.cube_id, owed.preset, owed.to, shift)
+            if owed.marked
+            else old_cube_note(shift)
+        )
         return True
 
     def _add_grid_note(self, text: str) -> None:
@@ -1800,7 +1832,7 @@ class SlicesDock(QgsDockWidget):
         list (`_switch_resumed_grid`, through `_sync_included`), or a grid the
         combo fell back to on its own (`_sync_included`). Never on a refresh
         that keeps the source."""
-        self._pending_z_shift = False
+        self._pending_z_shift = None
         self._pending_palette = None
         if self._grid_notes:
             self._grid_notes = []
@@ -1822,8 +1854,10 @@ class SlicesDock(QgsDockWidget):
         a spin. The checks (frame cap, level limit) are the push's own."""
         owed = False
         if self._pending_z_shift and not self.engine.is_running:
-            self._pending_z_shift = False
-            self._shift_z_by_median_zero()
+            pending, self._pending_z_shift = self._pending_z_shift, None
+            # Pushed whether or not it moved: the restore stopped its debounce
+            # for this settle, so its range has not reached the engine yet.
+            self._shift_z_to_clock(pending)
             owed = True
         clamped = self._clamp_z_to_prepared()
         return owed or clamped
@@ -1835,7 +1869,7 @@ class SlicesDock(QgsDockWidget):
         dispatched nothing.
 
         Steps aside entirely while a preparation runs with a shift owed: the
-        range is still on the radar's clock, and that preparation's
+        range is still on the clock it was saved on, and that preparation's
         `_on_prepared` shifts, clamps and pushes it (spec §3)."""
         if self._pending_z_shift and self.engine.is_running:
             return
@@ -1922,8 +1956,8 @@ class SlicesDock(QgsDockWidget):
             # preparation. Before anything asks the engine for a slice: the
             # seeded z range was read off a raw DZT header, and a preset that
             # crops the sample axis makes that range uncoverable (see
-            # `_clamp_z_to_prepared`); a restored old record's range is on the
-            # radar's clock until it is shifted (spec §3).
+            # `_clamp_z_to_prepared`); a restored record's range is on the clock
+            # it was saved on until it is shifted (spec §3, §4).
             settled = self._settle_z()
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
@@ -2200,13 +2234,14 @@ class SlicesDock(QgsDockWidget):
         corresponding widgets exactly where they were -- `CubeRecipe`'s
         own contract for an old-format record.
 
-        What the restore changed on the way -- an old record's range moved to
-        the time-zero clock, lines left out because they moved grid -- is said
-        as ⓘ notes in Warnings, not toasts (spec §8). The range reaches the
-        engine through one settle sequence, shift then clamp then push (spec
-        §3, `_settle_z`), and a restore whose preparation waits for a site
-        task owes its resolution rather than applying it to the grid still
-        prepared (#200).
+        What the restore changed on the way -- a range moved onto the clock its
+        preset is on now (spec §4: a record from before the time-zero clock, or
+        a preset that has gained or lost Time zero since the save), lines left
+        out because they moved grid -- is said as ⓘ notes in Warnings, not
+        toasts (spec §8). The range reaches the engine through one settle
+        sequence, shift then clamp then push (spec §3, `_settle_z`), and a
+        restore whose preparation waits for a site task owes its resolution
+        rather than applying it to the grid still prepared (#200).
         """
         try:
             record = self.session.site.cubes[cube_id]
@@ -2264,8 +2299,13 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
-                self._pending_z_shift = recipe.time_base is None and sets_time_zero(
-                    self.session.site.presets.get(recipe.choice.preset, [])
+                # Spec §4: a record with no clock is from before #97, so radar.
+                saved = recipe.time_base or TIME_BASE_RADAR
+                now = time_base_of(self._live_preset_steps(recipe.choice.preset))
+                self._pending_z_shift = (
+                    OwedShift(now, cube_id, recipe.choice.preset, recipe.time_base is not None)
+                    if now != saved
+                    else None
                 )
                 # A line moved to another grid since the cube was saved is left
                 # out: its key still names a line, but it is no longer this

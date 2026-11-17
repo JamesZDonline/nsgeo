@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import gc
 import threading
@@ -13,7 +14,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import retime_ns
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo.velocity import VelocityModel
@@ -29,8 +30,10 @@ from nsgeo_qgis.slices_plan import (
     REFINING_SLICE_INDICATOR,
     Resolution,
     SliceFinish,
+    clock_change_note,
     level_limit_problem,
     limit_windows,
+    no_break_note,
     old_cube_note,
     smallest_safe_cell,
     transform_names,
@@ -52,7 +55,7 @@ from plugin_testing import (
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication, QMessageBox, QScrollArea
-from tests.real_data import GRID2_LINES
+from tests.real_data import CAMPUS_LINES, GPS_LINES, GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -77,6 +80,12 @@ def docked_banded(qgis_app, tmp_path):
     """Time-zero preset on lines whose flat bands sit at rows 40, 40 and 41:
     two lines on the earlier zero, one a sample later (the GPS survey's case)."""
     yield from _docked_with(tmp_path, TIME_ZERO_PRESET, band_rows=(40, 40, 41))
+
+
+@pytest.fixture
+def docked_banded_radar(qgis_app, tmp_path):
+    """The banded lines under a preset with no Time zero step: the radar's clock."""
+    yield from _docked_with(tmp_path, PRESET, band_rows=(40, 40, 41))
 
 
 def _banded_dzt(folder, name, band_row):
@@ -4091,14 +4100,16 @@ def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroe
     _assert_pushed_shifted(dock, pushed)
 
 
-def _assert_shifted_once(dock, errors):
+def _assert_shifted_once(dock, errors, note=None):
+    """The owed record's range (5..40 ns, radar clock) moved once by the median
+    zero, said once in Warnings: `note`, or an unmarked record's by default."""
     median = dock.engine.median_zero()
-    assert median is not None
+    assert median is not None and abs(median) > 1e-3, median
     assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
     # The engine, not just the spins: the slice and Save cube read this.
     assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
-    note = old_cube_note(-median)
+    note = note or old_cube_note(-median)
     assert _notes(dock).count(note) == 1, _notes(dock)
     assert note not in errors, errors
     assert not dock._pending_z_shift
@@ -4480,6 +4491,7 @@ def test_a_marked_record_is_not_shifted(docked_zeroed):
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
     assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
 
 
 def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
@@ -4494,6 +4506,160 @@ def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
     assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
+
+
+# ---- #162 item 1: a preset whose clock changed since the save -----------------
+
+
+def test_a_radar_record_whose_preset_gained_time_zero_restores_moved_by_the_median_zero(
+    docked_zeroed,
+):
+    """A cube saved on the radar's clock (its record says so), restored after
+    its preset took up Time zero. Only a record with no clock was shifted, so
+    this one came back a line zero away under its own name, with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, time_base="radar")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    median = dock.engine.median_zero()
+    _assert_shifted_once(
+        dock, errors, note=clock_change_note("A__old", "p", TIME_BASE_TIME_ZERO, -median)
+    )
+
+
+def test_a_time_zero_record_whose_preset_lost_it_restores_moved_by_the_median_first_break(
+    docked_banded_radar,
+):
+    """A cube saved with Time zero, restored after its preset dropped the step.
+    The lines are on the radar's clock and each zero reads 0.0, so the range
+    moves by the median first break, `retime_ns(t, break, 0.0)`. It came back
+    as saved, a line zero away under its own name, with no note."""
+    dock, session = docked_banded_radar
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    first_break = dock.engine.median_first_break()
+    dt = dock.engine.prepared_lines()[0].dt_ns
+    assert first_break is not None and abs(first_break) > dt, first_break
+    # Inside the prepared range with the break added, so the clamp moves nothing.
+    low, high = dock.engine.prepared_z_bounds()
+    t0 = round(low + abs(first_break) + 1.0, 3)
+    t1 = round(min(high - abs(first_break) - 1.0, t0 + 30.0), 3)
+    _owed_record(dock, session, time_base="time_zero", z={"t0_ns": t0, "t1_ns": t1, "dz_ns": 0.5})
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.median_first_break() == pytest.approx(first_break)
+    assert dock.z0_spin.value() == pytest.approx(t0 + first_break, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(t1 + first_break, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(t0 + first_break, abs=1e-3)
+    note = clock_change_note("A__old", "p", TIME_BASE_RADAR, first_break)
+    assert _notes(dock) == [note]
+    assert note not in errors, errors
+    assert not dock._pending_z_shift
+
+
+def test_a_lost_time_zero_with_no_first_break_says_the_range_was_left(
+    docked_banded_radar, monkeypatch
+):
+    """Review Focus 5: the preset lost Time zero, and no prepared line has a
+    first break to shift by. The range stays as saved, and a note says so: the
+    cube must not come back on the wrong clock without a word."""
+    dock, session = docked_banded_radar
+    _prepared_with_owed_record(dock, session, time_base="time_zero")
+    monkeypatch.setattr(dock.engine, "median_first_break", lambda threshold=0.2: None)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.is_prepared
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(5.0, abs=1e-3)
+    assert _notes(dock) == [no_break_note("A__old", "p")]
+    assert not dock._pending_z_shift
+
+
+_DEWOW = {"step": "dewow", "params": {}, "enabled": True}
+_TIME_ZERO = {"step": "time_zero", "params": {}, "enabled": True}
+
+#: The real surveys, four lines each, with the grid length that holds them and
+#: the median line zero the author measured on each (spec §1). Each skips when
+#: its lines are not in tests/data/local (CI).
+_REAL_SURVEYS = [
+    pytest.param(
+        CAMPUS_LINES[:4],
+        12.0,
+        (0.3, 0.7),
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        (1.2, 1.7),
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@contextlib.contextmanager
+def _real_docked(tmp_path, paths, length_m, presets):
+    """A dock on real lines across a grid `length_m` long, with `presets`."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 3.0, length_m, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, p.stem))
+            for i, p in enumerate(paths)
+        ]
+    )
+    session.site.presets.update(presets)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        yield dock, session
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize(("paths", "length_m", "band"), _REAL_SURVEYS)
+def test_a_real_data_old_record_restores_moved_by_the_median_zero(
+    qgis_app, tmp_path, paths, length_m, band
+):
+    """A record with no clock, restored on real lines under a preset with Time
+    zero, moves by the median line zero, of the size the author measured on
+    that survey. A guard: it holds today."""
+    with _real_docked(tmp_path, paths, length_m, {"p": [_TIME_ZERO, _DEWOW]}) as (dock, session):
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.flush_debounce()
+        assert dock.engine.wait_for_preparation(60_000)
+        _owed_record(dock, session)
+        dock.engine.clear()
+        errors: list[str] = []
+        dock.error.connect(errors.append)
+
+        dock.restore_cube("A__old")
+        assert dock.engine.wait_for_preparation(60_000)
+
+        median = dock.engine.median_zero()
+        assert band[0] <= abs(median) <= band[1], median
+        _assert_shifted_once(dock, errors)
 
 
 def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):

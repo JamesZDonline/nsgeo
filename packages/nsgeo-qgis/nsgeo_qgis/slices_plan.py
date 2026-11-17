@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nsgeo.processing import get_step, grouped_steps
+from nsgeo.processing import TIME_BASE_TIME_ZERO, get_step, grouped_steps
 from nsgeo.slices import (
     METHODS,
     NEIGHBOURS_PER_QUADRANT,
@@ -450,6 +450,33 @@ def old_cube_note(shift_ns: float) -> str:
     return (
         "This cube was saved before times were measured from each line's first break. "
         f"It was rebuilt that way, with its range moved by {shift_ns:+.2f} ns."
+    )
+
+
+def clock_change_note(cube_id: str, preset: str, to: str, shift_ns: float) -> str:
+    """The one line said when a cube saved on one clock is rebuilt on the other
+    because its preset has gained or lost Time zero since (#162 item 1). `to` is
+    the clock it moved onto. `old_cube_note` stays for a record with no clock."""
+    if to == TIME_BASE_TIME_ZERO:
+        return (
+            f"Cube {cube_id!r} was saved on the radar's clock, and preset {preset!r} now has "
+            "Time zero. It was rebuilt from each line's first break, with its range moved by "
+            f"{shift_ns:+.2f} ns (the median line zero)."
+        )
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        f"It was rebuilt on the radar's clock, with its range moved by {shift_ns:+.2f} ns, "
+        "the median first break as Time zero finds it by default."
+    )
+
+
+def no_break_note(cube_id: str, preset: str) -> str:
+    """Said when a cube's preset has lost Time zero and no prepared line has a
+    first break to move its range by: the range stays as saved, on the wrong
+    clock, and this says so rather than leave it unsaid."""
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        "No line has a first break to move it by, so its range was left as saved."
     )
 
 

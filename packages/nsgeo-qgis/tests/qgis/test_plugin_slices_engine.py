@@ -1896,6 +1896,77 @@ def test_a_stored_resolution_past_the_limit_builds_nothing_once_lines_arrive(sou
     assert errors == []
 
 
+# ---- #162 item 1: the radar-clock first break of the prepared lines ----------
+
+
+def _banded_engine(tmp_path, band_rows):
+    """An engine on three banded lines (`_banded_dzt`; None for a silent line,
+    every sample zero) under "radar", a preset with no Time zero step."""
+    from test_plugin_slices_dock import _banded_dzt
+    from tests.synthetic import write_dzt
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    paths = []
+    for i, row in enumerate(band_rows):
+        name = f"FILE__00{i + 1}.DZT"
+        if row is None:
+            (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+            write_dzt(tmp_path / "raw" / name, np.zeros((512, 60), dtype=np.int32))
+            paths.append(tmp_path / "raw" / name)
+        else:
+            paths.append(_banded_dzt(tmp_path / "raw", name, row))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("A", "y", 1.0 + i, 0.0, 1, p.stem))
+            for i, p in enumerate(paths)
+        ]
+    )
+    session.site.presets["radar"] = []
+    errors: list[str] = []
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
+    return engine, session, errors
+
+
+def test_median_first_break_is_the_median_band_row(qgis_app, tmp_path):
+    """The shift a restore owes when its preset has lost Time zero: the median,
+    over the prepared lines, of each one's radar-clock first break. Two lines
+    break at row 40 and one at 41, so the median is row 40."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41))
+    try:
+        assert engine.median_first_break() is None, "nothing prepared yet"
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == []
+        line = engine.prepared_lines()[0]
+        assert line.zero_ns == 0.0  # the radar's clock
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40 * line.dt_ns)
+    finally:
+        engine.dispose()
+
+
+def test_median_first_break_leaves_out_a_line_with_no_signal(qgis_app, tmp_path):
+    """A line whose samples are all zero has no first break, so it is left out
+    of the median rather than read as row 0; with no break on any line there is
+    no median (Review Focus 5)."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 41, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        line = engine.prepared_lines()[0]
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40.5 * line.dt_ns)
+    finally:
+        engine.dispose()
+    engine, session, errors = _banded_engine(tmp_path / "silent", (None, None, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        assert engine.median_first_break() is None
+    finally:
+        engine.dispose()
+
+
 def test_set_resolution_refuses_before_storing(sourced):
     engine, session, errors, _ = sourced
     _prepare(engine, session)
