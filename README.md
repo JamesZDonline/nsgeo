@@ -181,7 +181,8 @@ Grouped by area. The order within a group is not a priority.
   large sites at fine cells, holding one grid at a time so they fit in memory
   ([#167]); move the colour ramp's stops and watch the slice recolour as you
   drag ([#183]); a fine cell no longer freezes QGIS while its fill is worked
-  out, about 105 s for Whole site at 0.02 m on ten grids ([#193]).
+  out, about 105 s for Whole site at 0.02 m on ten grids ([#193]); choose a
+  grid's preset straight from the Whole site grid list ([#199]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -240,6 +241,7 @@ Grouped by area. The order within a group is not a priority.
 [#193]: https://github.com/JamesZDonline/nsgeo/issues/193
 [#195]: https://github.com/JamesZDonline/nsgeo/issues/195
 [#197]: https://github.com/JamesZDonline/nsgeo/issues/197
+[#199]: https://github.com/JamesZDonline/nsgeo/issues/199
 
 ## Why
 
