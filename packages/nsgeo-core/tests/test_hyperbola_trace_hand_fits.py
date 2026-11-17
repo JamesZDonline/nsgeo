@@ -7,7 +7,10 @@ the tests assert the agreement rules only. CI has no such data and skips.
 `rulings.json` maps "<absolute DZT path>#<fit id>" to the author's ruling that
 the hand fit was off (the comparison is skipped); `pending.json` maps a key to
 a note on a disagreement awaiting a ruling (the test is a strict xfail). A
-key plus "|boxes" does the same for the three-box test alone.
+key plus "|boxes" does the same for the three-box test alone. `expected.json`
+maps a key to {"ratio": [lo, hi], "reason": ...}: a difference the author has
+accepted as expected, so the traced-to-hand velocity ratio must lie in
+[lo, hi] instead of the two agreeing (the three-box test is unchanged).
 
 A saved stack may have Migration or an amplitude transform switched on. The
 panel refuses to trace with those on and tells the author to switch them off,
@@ -38,13 +41,14 @@ from tests.real_data import DATA, HAND_FIT_SITES
 FOLDER = DATA / "hand-fits"
 
 
-def _read(name: str) -> dict[str, str]:
+def _read(name: str) -> dict:
     path = FOLDER / name
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 RULINGS = _read("rulings.json")
 PENDING = _read("pending.json")
+EXPECTED = _read("expected.json")
 
 #: The steps the panel refuses to trace with: Migration and the amplitude
 #: transforms (spec §3, decision 3).
@@ -173,6 +177,14 @@ def _agree(a_v, a_sig, b_v, b_sig) -> bool:
 def test_a_traced_fit_agrees_with_the_hand_fit(case):
     traced = _trace_fit(case, _box(case, 0.2))
     t, h = traced, case.hand
+    expected = EXPECTED.get(case.key)
+    if expected is not None:
+        lo, hi = expected["ratio"]
+        ratio = t.v_m_ns / h.v_m_ns
+        assert lo <= ratio <= hi, (
+            f"traced/hand {ratio:.3f} outside [{lo}, {hi}]: {expected['reason']}"
+        )
+        return
     assert _agree(t.v_m_ns, t.v_stderr_m_ns, h.v_m_ns, h.v_stderr_m_ns), (
         f"traced {t.v_m_ns:.4f}+-{t.v_stderr_m_ns:.4f} hand {h.v_m_ns:.4f}+-{h.v_stderr_m_ns:.4f}"
     )
