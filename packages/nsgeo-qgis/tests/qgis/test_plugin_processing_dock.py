@@ -417,6 +417,16 @@ def test_a_cutoff_added_behind_time_zero_before_the_samples_load_crops_nothing(q
     assert stack.result().n_samples == stack.intermediate(0).n_samples
 
 
+def test_a_line_loading_again_leaves_a_bounded_form_alone(opened):
+    session, dock, key = opened
+    dock.add_step("time_cutoff")
+    spin = dock.form.editors["end_ns"]
+    spin.lineEdit().setText("7.5")
+    session.line_loaded.emit(key)
+    assert dock.form.editors["end_ns"] is spin
+    assert spin.lineEdit().text() == "7.5"
+
+
 def test_the_cutoff_spinbox_range_for_a_first_step_is_the_source(opened):
     session, dock, key = opened
     dock.add_step("time_cutoff")

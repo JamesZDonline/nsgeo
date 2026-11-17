@@ -172,6 +172,9 @@ class ProcessingDock(QgsDockWidget):
         # (row -1, nothing open yet) is never mistaken for an echo.
         self._shown: tuple[str | None, int] = (None, -2)
         self._shown_step: Any = None
+        # (key, row) of a form built while its time field had no clock
+        # (`input_axis` was None); `line_loaded` re-shows only that one.
+        self._form_axis_unknown: tuple[str, int] | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -463,6 +466,7 @@ class ProcessingDock(QgsDockWidget):
             if shown == self._shown:
                 return  # already showing "nothing"
             self._shown, self._shown_step = shown, None
+            self._form_axis_unknown = None
             self.form.clear()
             return
         step, _ = self.session.stack_for(key).entries[row]
@@ -470,9 +474,12 @@ class ProcessingDock(QgsDockWidget):
             return  # an echo of our own commit, or add_step()'s second emit
         self._shown, self._shown_step = shown, step
         range_kwargs: dict[str, Any] = {}
+        self._form_axis_unknown = None
         if any(spec.kind == "time" for spec in get_step(step.name).schema()):
             axis = self.input_axis(row)
-            if axis is not None:
+            if axis is None:
+                self._form_axis_unknown = (key, row)
+            else:
                 t0, dt, n = axis
                 range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
         self.form.set_step(step.name, step.params, **range_kwargs)
@@ -484,7 +491,7 @@ class ProcessingDock(QgsDockWidget):
             if key != self.key():
                 return
             row = self.list.currentRow()
-            if row < 0:
+            if row < 0 or self._form_axis_unknown != (key, row):
                 return
             self._shown = (None, -2)
             self._show_form(row)
