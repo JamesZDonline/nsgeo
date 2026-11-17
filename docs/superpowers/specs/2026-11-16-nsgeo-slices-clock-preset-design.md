@@ -101,8 +101,9 @@ behaves the same.
 - **Time zero → radar** (the preset has since lost Time zero): the prepared lines are on the
   radar's clock and each reports a zero of 0.0, so there is no line zero to read. The shift is
   the median **first break** of the prepared lines, picked by Time zero's own rule at its default
-  threshold (`first_break_ns`, 0.2), and the range moves later by it. A new engine read beside
-  `median_zero` gives it.
+  threshold (`first_break_ns`, 0.2). The range moves by `retime_ns(t, median, 0.0)`, the reverse
+  of the gained case, so its sign follows the break's. A new engine read beside `median_zero` gives
+  it.
   - **The accepted catch:** the cube's record does not keep its Time zero settings. Only its npz
     does, and a restore never reads the npz. A cube made with Sample mode or another threshold
     can be a few samples off, and the steps the preset runs before the pick can move it by about
