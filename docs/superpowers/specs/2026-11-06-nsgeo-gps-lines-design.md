@@ -150,6 +150,13 @@ These are the user's, in the order they were made.
     max distance (0.75× its spacing), so the slivers where walked lines drifted apart stay blank:
     they are real thin coverage, and a tape placement only hides them by assuming even spacing. To
     fill them for a figure, the user raises max distance for that grid, as today.
+13. **An outline can have holes** (the user, 2026-11-16). On one survey, roads along the top and
+    bottom edges of a grid gave high-amplitude reflections down the whole profile, and they
+    overwhelmed the features of interest in the slices. An outline drawn inside the roads blanks
+    them; a road through the middle of a grid is conceivable, and needs a hole, since one outline
+    cannot cut a strip out of the middle and keep both sides. Blanked cells (outside the outline
+    or in a hole) must also drop out of the slices' colour stretch, so a masked road no longer
+    sets the colours (§5.4).
 ---
 
 ## 4. Claude's calls
@@ -178,9 +185,19 @@ Made without the user; each is open to veto.
 - **C8. Shared ruler or walked distance:** a GPS line shares the area's ruler when its overall
   direction is within about 20° of one of the area's axes; otherwise it uses distance walked. The
   builder may tune the angle.
-- **C9. Switching an old tape-placed line to GPS** is remove-and-re-import through Import GPS
-  lines…, then Move to grid ▸. Picks follow the line through that (line editing, #35). No dedicated
-  button.
+- **C9. Switching a tape-placed line to GPS is an action on the line, in place** (revised
+  2026-11-16, after the user asked how a re-imported line would be known as the same one). The
+  first version was remove-and-re-import, then Move to grid ▸. A line is known by its file path
+  (`nsgeo.project.line_key`), so picks did come back (they wait in the picks layer, #35), but
+  removing a line drops its processing stack, velocity override and stored fits (`_drop_lines`),
+  and the removal question does not say so. Instead, **Place by GPS** on one or more tape lines
+  (Survey panel) reads the DZG beside each line's own DZT and swaps its `GridPlacement` for a
+  `TrackPlacement` with the same `grid_id`, the way an edit swaps placements today: the key is
+  unchanged, so processing, velocity, fits (stored by trace and time) and picks all stay, and picks
+  follow the new positions as they do after any edit. It takes a destagger value as Import GPS
+  lines… does; the tape line's own `travel_shift` measured a different thing and is not carried
+  over. A line with no usable DZG is refused with the import's reasons. M17a's import refuses a
+  file already in the site with "already in the site"; it does not tell the user to remove it.
 - **C10. The saved project holds the fixes it placed the line from** (trace index, projected
   position, quality, altitude), so reopening a project gives identical positions even if the DZG is
   moved, edited or lost. A DZG is small (~50–100 fixes per line).
@@ -199,7 +216,8 @@ Made without the user; each is open to veto.
   fixes keep their latitude and longitude as read (C10), so re-projecting stays possible.
 - **C13. The outline is #130's perimeter, and any grid can have one** (from the builder check).
   #130 proposes exactly this model: an optional polygon in grid-local metres, inside the grid's
-  rectangle, that only clips. One field serves both, and nothing marks a grid as an "area". So:
+  rectangle, that only clips. One field serves both, and nothing marks a grid as an "area". The
+  polygon may have holes (decision 13). So:
   - drawing or reshaping an outline never moves the grid's frame. The outline stays inside the
     rectangle; to grow past it, the user edits the grid's rectangle in the grid dialog, where the
     existing rules for any tape lines on it apply;
@@ -261,11 +279,22 @@ the fixes it uses in a projected CRS (metres), `grid_id` (C2), and `label`.
 
 ### 5.4 The area outline
 
-`Grid` gains an optional outline: a closed polygon in grid-local metres. The cube frame is the
-grid's rectangle as now (`CubeFrame.for_grid`). Cells outside the outline are left empty in every
-slice and export: AND the outline's cell mask into the same place the interpolation's `reach_mask`
-already removes cells too far from data. JSON round trip, with a schema change only when an outline
-exists (the way M15 handles `schema_version`).
+`Grid` gains an optional outline: a closed polygon in grid-local metres, with zero or more holes
+(decision 13), each a closed polygon inside it. The cube frame is the grid's rectangle as now
+(`CubeFrame.for_grid`). A cell is kept when its centre is inside the outline and in no hole; every
+other cell is left empty in every slice and export: AND the outline's cell mask into the same place
+the interpolation's `reach_mask` already removes cells too far from data. JSON round trip, with a
+schema change only when an outline exists (the way M15 handles `schema_version`).
+
+- **The colour stretch ignores masked cells.** `limit_over_slices` already measures only finite
+  values; the masked cells must be blank (NaN) by the time `shared_limit` reads the cube, and a
+  test must show it: a cube whose masked region holds values far above the rest gets the same
+  limit as a cube without them.
+- **The fill runs before the mask.** Traces outside the outline or in a hole still feed cells
+  inside it, up to the max distance (and minimum curvature can overshoot a little beside a strong
+  contrast). That keeps an outline's edge from going thin, but a cell just inside a road's edge can
+  still be bright; the guide says to draw the outline a little inside the road.
+- **Profiles are untouched:** an outline masks slices and exports only.
 
 ---
 
@@ -312,6 +341,8 @@ Where the action lives (toolbar, Survey panel, or both) is the builder's call.
   holds it.
 - **Reshape:** move, add and remove outline points after the area exists, inside its rectangle
   (C13).
+- **Holes:** draw a hole inside an outline, reshape it and remove it (decision 13). A grid with no
+  outline gets one equal to its rectangle when its first hole is drawn.
 
 How drawing and reshaping look and behave is open: mock it up (lavish) and agree it with the user
 before building, as with the grid dialog (#80). The grid dialog's map corner picking (#63) and its
@@ -422,8 +453,9 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   distance; migration re-samples a GPS line to even spacing, migrates and maps back. Tape lines,
   being evenly spaced, look exactly as before. Expect a fix round after the walkthrough: the profile
   view is where walkthroughs have found the most (#67, the time cutoff, the gain strip).
-- **M17c — GPS areas.** Grid outline and its mask; Fit to these tracks; drawing and reshaping;
-  Move to grid ▸ for GPS lines (C3); shared rulers (decision 8, C8), exact for zigzag lines once
+- **M17c — GPS areas.** Grid outline with holes and its mask, which the colour stretch ignores
+  (decision 13); Fit to these tracks; drawing and reshaping; Move to grid ▸ for GPS lines (C3);
+  Place by GPS for tape lines (C9); shared rulers (decision 8, C8), exact for zigzag lines once
   M17b is in; slices of areas. Needs line editing merged.
 
 ---
@@ -456,7 +488,9 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   line looks unchanged; a velocity fitted on a GPS line vs the same diffraction by wheel spacing.
 - **M17c walkthrough:** Fit to these tracks on the 60 lines; reshape the outline; move the lines in
   and one back out; zigzag profiles line up on one ruler; slices of the area with nothing outside
-  the outline; Whole site with an area beside an existing tape grid.
+  the outline; Whole site with an area beside an existing tape grid. On the survey with roads along
+  two edges: an outline inside the roads, and the slices' colours no longer set by them; a hole
+  across the middle. Place by GPS on a tape line with processing, a fit and picks: all three stay.
 
 ---
 
@@ -491,6 +525,10 @@ The delay spike and the builder check raised three questions; the user answered 
 2026-11-06: the along-track correction (decision 10), true-distance profiles (decision 11) and
 gaps in GPS slices (decision 12). The builder check's other two questions became Claude's calls
 C12 (a site-level CRS) and C13 (the outline is #130's perimeter, on any grid).
+
+On 2026-11-16, after M17a was built, the user added holes to the outline (decision 13) and asked
+how a re-imported line would be known as the same line, which revised C9 to an in-place
+**Place by GPS**.
 
 ---
 

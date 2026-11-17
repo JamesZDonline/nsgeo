@@ -178,7 +178,7 @@ def test_a_file_already_in_the_site_shows_how_to_switch(session, tmp_path):
         "4 of 4",
         "—",
         "2.50 / 2.40 m",
-        "already in the site (remove it first to place it by GPS)",
+        "already in the site",
     ]
     d.reject()
 

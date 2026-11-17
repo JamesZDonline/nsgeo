@@ -30,7 +30,7 @@ from nsgeo.io import (
 from nsgeo.model import Line
 
 NO_DZG = "no DZG beside it"
-ALREADY_IN_SITE = "already in the site (remove it first to place it by GPS)"
+ALREADY_IN_SITE = "already in the site"
 
 
 @dataclass(frozen=True)

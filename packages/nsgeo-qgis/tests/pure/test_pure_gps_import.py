@@ -104,7 +104,7 @@ def test_an_unreadable_dzt_is_refused_not_raised(tmp_path):
 def test_a_file_already_in_the_site_is_refused_with_how_to_switch(tmp_path):
     path = make(tmp_path, "FILE__001.DZT")
     (row,) = plan([path], taken=lambda p: p == path)
-    assert row.refusal == "already in the site (remove it first to place it by GPS)"
+    assert row.refusal == "already in the site"
     assert row.line is None
     # planned, then refused: its counts and ends are still there
     assert (row.n_traces, row.n_fixes, row.n_fixed) == (200, 4, 4)
