@@ -185,6 +185,10 @@ These are the user's, in the order they were made.
       lines share no main direction does it fall back to the minimum-area rectangle.
     - Lines imported unattached by M17a keep loading. Move to grid ▸ puts them into a grid, and Fit
       to these tracks makes one around them.
+    - **GPS available is said once, at import.** With the switch on Grid, the dialog notes how many
+      of the chosen files have a usable GPS log beside them. Nothing marks it after that: not the
+      Survey panel, the map or the summary. In the user's words, they choose how to import, "but not
+      be nagged if they decide they trust the grid more than the gps".
 ---
 
 ## 4. Claude's calls
@@ -403,6 +407,10 @@ gives. Whole site's per-grid engines take areas like any grid.
 - **A new grid** is fitted when the user imports: decision 14's rectangle, in the site's CRS, with
   its spacing measured (C7) and shown so it can be typed over. Whether it opens in the grid dialog
   before the lines are added, as Fit to these tracks does, is for the mock-up.
+- **GPS available, in Grid mode only:** a plain note beside the switch, e.g. "12 of 20 files have
+  a GPS log beside them". Usable means at least one RTK fix, so a log with none is not counted; the
+  dialog reads the logs it would read in GPS mode. The note is the only place this shows (decision
+  14): no marker on Survey panel rows, the map or the import summary.
 - **An existing grid** takes the lines as they are. Traces outside its rectangle are not in its
   slices, so the summary says how many metres of each line fall outside.
 - **Has to handle:** a single line (a new grid one spacing wide, spacing typed); lines walked in
@@ -552,7 +560,8 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 - **M17b walkthrough:** Add data ▾ ▸ GPR… with GPS on the 60 lines into a new grid: the rectangle
   lined up with the lines, half a spacing outside the outer ones; slices of it. The second survey
   into an existing grid, with a line partly outside it named in the summary. A tape import through
-  the same dialog, unchanged. M17a's unattached lines moved into a grid, and a grid fitted around
+  the same dialog, unchanged, with its note counting the files that have a GPS log and no marker
+  anywhere after import. M17a's unattached lines moved into a grid, and a grid fitted around
   others. Edit lines with GPS rows; editing the grid leaves its GPS lines in place.
 - **M17c walkthrough:** `FILE__016` and `FILE__028` show their lifts as gaps; a feature lines up on
   neighbouring profiles across a lift; picks, a velocity fit and mirroring on a GPS line; a tape
