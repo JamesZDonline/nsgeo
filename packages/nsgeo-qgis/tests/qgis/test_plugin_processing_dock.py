@@ -376,6 +376,47 @@ def test_the_cutoff_spinbox_spans_the_record_as_the_cutoff_step_receives_it(open
     assert spin.singleStep() == pytest.approx(zeroed.dt_ns)
 
 
+def _unloaded(qgis_app, tmp_path):
+    """A line opened before its samples arrive (stack.source is None), with a
+    time_zero step ahead of anything the test adds."""
+    session = SiteSession()
+    dock = ProcessingDock(session)
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    assert session.stack_for(key).source is None
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    return session, dock, key, line
+
+
+def test_a_time_field_behind_time_zero_is_unbounded_until_the_samples_load(qgis_app, tmp_path):
+    session, dock, key, line = _unloaded(qgis_app, tmp_path)
+    dock.add_step("time_cutoff")
+    h = session.line_for_key(key).header
+    spin = dock.form.editors["end_ns"]
+    # No source, so no clock to bound by: not the radar-clock range of the header.
+    assert spin.maximum() != pytest.approx(h.position_ns + h.n_samples * h.dt_ns)
+    assert spin.maximum() > 1e6
+    session.set_profiles(key, line.load())
+    stack = session.stack_for(key)
+    zeroed = stack.intermediate(0)
+    spin = dock.form.editors["end_ns"]
+    assert spin.minimum() == pytest.approx(zeroed.t0_ns + zeroed.dt_ns)
+    assert spin.maximum() == pytest.approx(zeroed.t0_ns + zeroed.n_samples * zeroed.dt_ns)
+
+
+def test_a_cutoff_added_behind_time_zero_before_the_samples_load_crops_nothing(qgis_app, tmp_path):
+    session, dock, key, line = _unloaded(qgis_app, tmp_path)
+    dock.add_step("time_cutoff")
+    session.set_profiles(key, line.load())
+    stack = session.stack_for(key)
+    assert stack.result().n_samples == stack.intermediate(0).n_samples
+
+
 def test_the_cutoff_spinbox_range_for_a_first_step_is_the_source(opened):
     session, dock, key = opened
     dock.add_step("time_cutoff")

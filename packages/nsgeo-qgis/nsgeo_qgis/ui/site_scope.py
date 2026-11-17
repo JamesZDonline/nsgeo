@@ -183,32 +183,25 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
     return SiteSource(transform=transform, grids=tuple(grids))
 
 
-def grid_time_bases(
-    session: Any, source: SiteSource, site_engine: Any | None = None
-) -> dict[str, str]:
+def grid_time_bases(session: Any, source: SiteSource, site_engine: Any) -> dict[str, str]:
     """Each grid's clock, as the picture and the export have it (#97, ruling R15).
 
     A ready grid is read from the steps its preparation captured
-    (`provenance().steps`), which a later save over the preset does not
+    (`prepared_steps`), which a later save over the preset does not
     change. A grid still queued or preparing has no cubes yet, so its live
     preset stands in. A grid with no lines or a failed preparation is not
-    drawn or exported, so it is left out. Without `site_engine` every grid
-    is read from its live preset.
+    drawn or exported, so it is left out.
     """
     out: dict[str, str] = {}
     for choice in source.grids:
-        steps: Any = None
-        if site_engine is not None:
-            state = state_text(site_engine, choice.grid_id)
-            engine = site_engine.engine_for(choice.grid_id)
-            if state == "ready" and engine is not None:
-                steps = engine.provenance().steps
-            elif state in ("queued", "waiting") or state.startswith("preparing"):
-                steps = None
-            else:
-                continue
-        if steps is None:
+        state = state_text(site_engine, choice.grid_id)
+        engine = site_engine.engine_for(choice.grid_id)
+        if state == "ready" and engine is not None:
+            steps: Any = engine.prepared_steps
+        elif state in ("queued", "waiting") or state.startswith("preparing"):
             steps = session.site.presets.get(choice.preset, [])
+        else:
+            continue
         out[choice.grid_id] = time_base_of(steps)
     return out
 
@@ -1097,8 +1090,10 @@ class SiteScope:
         preview note while drawn, the reason when nothing is drawn, and the
         clock warning when the drawn grids are not all on one clock (some have
         no Time zero step; a site wholly on the radar clock says nothing, since
-        its grids still line up). A preview site still exports at full detail,
-        so it says nothing about the export."""
+        its grids still line up). Queued and preparing grids are counted from
+        their presets, ready ones from the steps they were prepared with. A
+        preview site still exports at full detail, so it says nothing about
+        the export."""
         engine = self.engine
         entries: list[Entry] = []
         if self.drawn:

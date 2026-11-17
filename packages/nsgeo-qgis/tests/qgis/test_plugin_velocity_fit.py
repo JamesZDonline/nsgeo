@@ -1238,3 +1238,23 @@ def test_one_update_builds_the_distance_axis_the_same_number_of_times_however_ma
     for i in range(4):
         s.add_velocity_fit(key, StoredFit(20.0 + i, 0.1, 0.004, 0.2, 20 + i, ((20, 20.0),), "t"))
     assert _count() == one
+
+
+def test_a_saved_curve_is_drawn_on_the_shown_clock(plugin, monkeypatch):
+    """A guard: it holds today. `velocity_curve_points` retimes the fit's curve
+    from the line's zero to the shown radargram's, and nothing else pins that."""
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    s.append_step(key, build_step("time_zero", mode="sample", sample=80))
+    _click_hyperbola(plugin)
+    fit = dock.velocity_fit_result()
+    assert fit is not None
+    distance, _, _ = dock._velocity_axis()
+    z = s.line_zero(key)
+    before = dock.velocity_curve_points(fit, distance, zero=z)
+    monkeypatch.setattr(dock, "shown_zero_ns", lambda: z + 1.0)
+    after = dock.velocity_curve_points(fit, distance, zero=z)
+    assert len(after) == len(before)
+    for (tr_b, t_b), (tr_a, t_a) in zip(before, after, strict=True):
+        assert tr_a == tr_b
+        assert t_a == pytest.approx(t_b - 1.0, abs=1e-9)

@@ -430,8 +430,10 @@ class NsgeoPlugin:
             lambda: self.processing_dock.diff_button.setChecked(False)
         )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
-        # ProcessingDock never reacts to line_loaded (only ProfileDock
-        # does, to re-render), so a curve step selected before this line's
+        # ProcessingDock reacts to line_loaded only to re-show its form (a
+        # time field has no clock before the samples load); it does not
+        # re-sync the gain strip. ProfileDock re-renders on it too, so a
+        # curve step selected before this line's
         # profiles arrive would otherwise stay exactly as
         # _sync_gain_strip last left it -- e.g. hidden for want of an axis
         # -- with nothing to re-check it once ProfileDock's own render

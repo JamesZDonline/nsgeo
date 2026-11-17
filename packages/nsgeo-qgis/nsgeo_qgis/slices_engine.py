@@ -1787,6 +1787,11 @@ class SliceEngine(QObject):
         """
         self._cube = None
 
+    @property
+    def prepared_steps(self) -> tuple[dict[str, Any], ...]:
+        """The preset's steps as they stood when preparation was dispatched."""
+        return self._steps
+
     def provenance(self) -> Provenance:
         """What a reader needs to trust the cube.
 
