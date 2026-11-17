@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-13.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-16.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -100,6 +100,7 @@ release's notes list everything in it.
 | | Colour a slice with QGIS's own symbology: a colour ramp, typed min/max or a cut that follows each depth, kept per scope and in the export ([#180]) | next release |
 | | A grid velocity from its fits: a grid's Set velocity… lists every saved fit on its lines, averages the ones you tick and remembers which fits it used; slices take their depths from the grid's velocity. A site that remembers its fits saves as schema 3, which 0.4.0 cannot open ([#127], [#86]) | next release |
 | | Processing steps keep one bad sample from spreading and refuse a setting that cannot work, saying which to change; a project holding a now-refused setting still opens, with that step turned off or reset and a note in the log; migration's real-data test; a new Trace stack step averages each trace with its neighbours ([#43], [#40], [#44], [#42], [#46], [#125], [#114]) | next release |
+| | The Slices panel: dz stops at the radar's sample interval and says so, and a cube too deep is refused; warnings and refusals get their own section, and the settings sections fold out of the wheel's way; a Whole site refresh leaves a box you are typing in alone; Edit lines' Grid column ignores the wheel until clicked; grids start at a 0.1 m cell; the panel fits the Processing panel's width ([#177], [#176], [#105], [#121]) | next release |
 
 ### In progress
 
@@ -126,15 +127,6 @@ release's notes list everything in it.
   switching velocity mode on first. Built and checked against the author's
   own hand fits and an independent migration check; in review before its
   walkthrough.
-- **Slices panel: scroll wheel, typing, width and notes** ([#177], [#176],
-  [#105], [#121], and parts of [#157], [#163] and [#50]). The scroll wheel no
-  longer moves a line to another grid in Edit lines until you click its Grid
-  box; dz can't go below the radar's own sample interval, and says so; grids
-  start at a 0.1 m cell; a Whole site refresh leaves a box you are typing in
-  alone; warnings and refusals get their own section in the panel, and its
-  settings sections fold, so a section you have set is out of the wheel's way;
-  the panel fits the Processing panel's width. Built, in its second
-  walkthrough round.
 
 ### Next, in order
 
@@ -207,7 +199,6 @@ Grouped by area. The order within a group is not a priority.
 [#44]: https://github.com/JamesZDonline/nsgeo/issues/44
 [#46]: https://github.com/JamesZDonline/nsgeo/issues/46
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
-[#50]: https://github.com/JamesZDonline/nsgeo/issues/50
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
@@ -233,7 +224,6 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
-[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
