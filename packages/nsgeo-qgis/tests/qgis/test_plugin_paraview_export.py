@@ -4,6 +4,7 @@ clock, the fill cache, cancelling and the refusals. Real DZT lines, real files o
 from __future__ import annotations
 
 import json
+import math
 import re
 import types
 from pathlib import Path
@@ -1093,5 +1094,8 @@ def test_pick_depths_are_none_where_they_cannot_be_found(synth_site):
         ("raw/none.DZT", _pick(key, 5, 10.0)),
         ("cut:abc", _pick(key, 5, 10.0)),
         (key, _pick(key, 5, float("nan"))),
+        (key, _pick(key, 5, 10.0)),
     ]
-    assert export.pick_depths(GRID.id, rows) == [None, None, None]
+    got = export.pick_depths(GRID.id, rows)
+    assert got[:3] == [None, None, None]
+    assert isinstance(got[3], float) and math.isfinite(got[3]) and got[3] > 0.0

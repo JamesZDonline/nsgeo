@@ -23,7 +23,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import logging
 import math
 import os
 import re
@@ -66,6 +65,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QEventLoop
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.paraview_scene import (
     ExportSummary,
     export_refusal,
@@ -249,9 +249,6 @@ def place_picks(
         x, y = frame.to_local(line.coords[trace : trace + 1])[0]
         out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
     return out
-
-
-_log = logging.getLogger(__name__)
 
 
 class ParaViewExport:
@@ -506,8 +503,10 @@ class ParaViewExport:
                 if key not in zeros:
                     try:
                         zeros[key] = self._zero_of(key, steps)
-                    except Exception:
-                        _log.warning("pick depths: no time zero for line %s", key, exc_info=True)
+                    except Exception as exc:
+                        _log(
+                            f"3-D view: no time zero for line {key}, its picks are left out: {exc}"
+                        )
                         zeros[key] = None
                 zero = zeros[key]
                 if zero is None:
