@@ -120,6 +120,12 @@ release's notes list everything in it.
   (`.DZG`) beside each DZT and place the line along the track it was
   walked, with no grid: import, the map (with stretches that had no RTK
   fix marked), the Survey panel, and a destagger you can type. Building.
+- **Slices: the right clock and preset after a change** ([#162], [#102], [#152],
+  part of [#163]). A restored cube comes back on the clock it was saved on, even
+  if you edit while its lines prepare or its preset has since gained or lost
+  Time zero; a quick switch to another survey no longer carries the last one's
+  palette or slice time over; and a grid the panel falls back to opens on the
+  preset Whole site draws it with. Designing.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
@@ -148,7 +154,7 @@ than reworking M16–M17 afterwards.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; and the three ways a restored cube can still come
-back on the wrong clock without a note ([#162]).
+back on the wrong clock without a note ([#162], in progress above).
 
 ### Wishlist, not yet scheduled
 
@@ -205,6 +211,7 @@ Grouped by area. The order within a group is not a priority.
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
 [#88]: https://github.com/JamesZDonline/nsgeo/issues/88
 [#89]: https://github.com/JamesZDonline/nsgeo/issues/89
+[#102]: https://github.com/JamesZDonline/nsgeo/issues/102
 [#105]: https://github.com/JamesZDonline/nsgeo/issues/105
 [#108]: https://github.com/JamesZDonline/nsgeo/issues/108
 [#114]: https://github.com/JamesZDonline/nsgeo/issues/114
@@ -222,9 +229,11 @@ Grouped by area. The order within a group is not a priority.
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
+[#152]: https://github.com/JamesZDonline/nsgeo/issues/152
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
