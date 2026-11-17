@@ -274,6 +274,7 @@ def test_the_gap_table_is_dotted_pink_and_not_selectable(site):
     session, layers, tmp = site
     session.add_lines([gps_line(tmp / "raw", "FILE__001.DZT", {15: 4, 75: 5, 125: 4, 185: 4})])
     layer = layers.layers["rtk_gaps"]
+    assert layer.readOnly()
     symbol = layer.renderer().symbol()
     assert symbol.color().name() == RTK_GAP_COLOUR
     assert symbol.width() == pytest.approx(0.8)
@@ -444,9 +445,18 @@ def test_reopening_a_tape_only_site_does_not_open_an_existing_rtk_gaps_table(sit
     session, layers, tmp = site
     session.add_lines([gps_line(tmp / "raw", "FILE__001.DZT", {15: 4, 75: 5, 125: 4, 185: 4})])
     session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, CRS, 0.5))
+    assert layers.feature_count("rtk_gaps") == 1
+    gap_id = layers.layers["rtk_gaps"].id()
     session.remove_line("raw/FILE__001.DZT")
+    # The site still has its grid, so this is the ordinary refresh path.
+    assert "rtk_gaps" not in layers.layers
+    assert "rtk_gaps" not in _group_names(layers)
+    assert layers.project.mapLayer(gap_id) is None
     session.save()
     assert _gpkg_has_gaps_table(session)  # the table stays; the layer does not
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=rtk_gaps", "x", "ogr")
+    assert sum(1 for _ in on_disk.getFeatures()) == 0  # emptied before it left
+    del on_disk
     layers.detach()
     project = QgsProject.instance()
     project.clear()

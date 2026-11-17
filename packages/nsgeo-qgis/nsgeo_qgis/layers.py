@@ -15,9 +15,9 @@
 The package CRS is the site's CRS (pinned by its first GPS line, else the
 first grid's); other grids are transformed into it on write. If that CRS
 changes (or a package predates a field or table this version of `TABLES`
-expects), every table is
-rebuilt: the derived tables are simply overwritten, since they are fully
-refilled anew immediately afterward, but `picks` has no other source of
+expects), every table the site has is rebuilt (`rtk_gaps` only while the
+site has GPS lines): the derived tables are simply overwritten, since they are
+fully refilled anew immediately afterward, but `picks` has no other source of
 truth, so its rebuild migrates every row into a fresh table and verifies
 it before ever touching the original (see `_rebuild_picks`).
 """
@@ -161,11 +161,13 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         ],
     ),
 }
+# `rtk_gaps` exists only while the site has GPS lines (`_has_gps_lines`).
 DERIVED = ("grids", "lines", "marks", "cuts", "rtk_gaps")
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
-# slice preview and exported GeoTIFFs join below them.
+# slice preview and exported GeoTIFFs join below them. A name here is where
+# the table goes when the site has it: `rtk_gaps` only with GPS lines.
 LEGEND_ORDER = ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
 
 # One colour for every cut, and none of the grid colours (cut spec §4.8).
@@ -616,8 +618,8 @@ class SiteLayers(QObject):
         if site is None:
             return
         if (not site.grids and not site.lines) or self.crs() is None:
+            self._drop_rtk_gaps()  # empties it first, so the clear below skips it
             self._clear_derived_tables()
-            self._drop_rtk_gaps()
             return
         try:
             if not self._has_gps_lines():
