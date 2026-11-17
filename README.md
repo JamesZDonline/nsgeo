@@ -102,16 +102,13 @@ release's notes list everything in it.
 | | Processing steps keep one bad sample from spreading and refuse a setting that cannot work, saying which to change; a project holding a now-refused setting still opens, with that step turned off or reset and a note in the log; migration's real-data test; a new Trace stack step averages each trace with its neighbours ([#43], [#40], [#44], [#42], [#46], [#125], [#114]) | next release |
 | | The Slices panel: dz stops at the radar's sample interval and says so, and a cube too deep is refused; warnings and refusals get their own section, and the settings sections fold out of the wheel's way; a Whole site refresh leaves a box you are typing in alone; Edit lines' Grid column ignores the wheel until clicked; grids start at a 0.1 m cell; the panel fits the Processing panel's width ([#177], [#176], [#105], [#121]) | next release |
 | | Export for ParaView, the first of M16's four plans: one action writes a grid's prepared volume, picks and lines, at the grid's own 3-D cell, depth step and depth end, to a folder ParaView opens ready to explore ([#190]) | next release |
+| | Surfaces from picks, M16's second plan: select picks on the map and nsgeo builds the surface they name, leaving holes where the radar saw nothing; it shows on the map coloured by depth, goes into the ParaView export, and is listed in a Surfaces panel with its fit and whether it needs a rebuild; a pick can belong to several surfaces ([#202]) | next release |
 
 ### In progress
 
-- **M16: 3-D**, in four plans. **Plan A, Export for ParaView:** merged
-  ([#190], above). **Plan B, surfaces from picks:** select picks on the map
-  and nsgeo builds the surface they name, leaving holes where the radar saw
-  nothing; it shows on the map, in the ParaView export and in a Surfaces
-  panel with its fit, and a pick can belong to several surfaces. Walked
-  through, in review ([#202]). Then the QGIS 3-D view, and cuts in the
-  ParaView scene.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]) and
+  **Plan B, surfaces from picks** ([#202]) are merged (above). Next, the
+  QGIS 3-D view, and cuts in the ParaView scene.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
