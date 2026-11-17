@@ -612,7 +612,7 @@ def test_defaults_take_the_panel_values_then_the_record(site):
     first = export.defaults("Grid A")
     assert first.transform == "amp_square" and first.stretch == 3.0
     assert first.dz_ns == session.line_for_key(session.keys()[0]).header.dt_ns
-    assert first.cell == 0.2  # default_cell(0.5 m spacing)
+    assert first.cell == 0.1  # default_cell: DEFAULT_CELL_M, under half the 0.5 m spacing
     session.remember_slice_resolution("Grid A", cell=0.4)
     session.remember_volume("Grid A", dz_ns=0.3, stretch=2.0)
     again = export.defaults("Grid A")

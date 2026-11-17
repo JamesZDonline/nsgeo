@@ -409,11 +409,11 @@ def test_enter_in_a_spin_commits_and_refreshes_but_does_not_export(plugin):
     before = dialog.size_label.text()
     dialog.cell_spin.setFocus()
     dialog.cell_spin.selectAll()
-    QTest.keyClicks(dialog.cell_spin, "0.1")
+    QTest.keyClicks(dialog.cell_spin, "0.15")  # off the 0.1 m default
     assert dialog.size_label.text() == before  # nothing committed yet
     QTest.keyClick(dialog.cell_spin, Qt.Key.Key_Return)
     assert dialog.result() == 0 and dialog.isVisible() and not dialog.open_after()
-    assert dialog.cell_spin.value() == pytest.approx(0.1)
+    assert dialog.cell_spin.value() == pytest.approx(0.15)
     assert dialog.size_label.text() != before
     QTest.keyClick(dialog.path_edit, Qt.Key.Key_Return)
     assert dialog.isVisible()
