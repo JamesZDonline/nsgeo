@@ -15,7 +15,7 @@ from nsgeo_qgis.ui.gps_import_dialog import (
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
 from qgis.core import QgsCoordinateReferenceSystem, QgsProject
-from qgis.PyQt.QtCore import QEvent
+from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 from tests.real_data import GPS_LINES
 
@@ -209,7 +209,7 @@ def colours(d, row, col):
 
 
 def plain(d, row, col):
-    return d.table.item(row, col).background().style() == 0  # Qt.NoBrush
+    return d.table.item(row, col).background().style() == Qt.BrushStyle.NoBrush
 
 
 def test_the_cells_worth_a_look_are_amber_and_refused_statuses_red(session, tmp_path):

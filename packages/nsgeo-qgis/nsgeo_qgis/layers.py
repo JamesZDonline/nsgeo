@@ -65,6 +65,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
+from nsgeo_qgis.qtcompat import without_layer_flag
 from nsgeo_qgis.session import Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
@@ -2081,7 +2082,7 @@ class SiteLayers(QObject):
         stroke.setUseCustomDashPattern(True)
         stroke.setCustomDashVector([0.5, 1.0])  # mm on, mm off
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-        layer.setFlags(layer.flags() & ~QgsMapLayer.LayerFlag.Identifiable)
+        without_layer_flag(layer, QgsMapLayer.LayerFlag.Identifiable)
         layer.triggerRepaint()
 
     def refill_cuts(self) -> None:
