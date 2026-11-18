@@ -20,6 +20,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Keep tmp_path folders only for tests that failed; a passing run leaves none.
+tmp_path_retention_policy = "failed"
 
 [tool.mypy]
 # 3.12, not the package's 3.9 floor: numpy >= 2 ships stubs using PEP 695

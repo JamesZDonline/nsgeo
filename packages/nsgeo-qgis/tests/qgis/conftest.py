@@ -19,6 +19,13 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 qgis_core = pytest.importorskip("qgis.core")
 
+# `pytest -m real_data` runs the tests CI cannot; see real_data_marks.py.
+from real_data_marks import (  # noqa: E402,F401
+    pytest_collection_modifyitems,
+    pytest_configure,
+    pytest_runtest_makereport,
+)
+
 
 @pytest.fixture(scope="session")
 def qgis_app():
