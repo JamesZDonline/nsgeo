@@ -158,6 +158,12 @@ class SiteSession(QObject):
     preview_changed = pyqtSignal(str, int)  # ("", -1) when cleared
     stack_changed = pyqtSignal(str)
     picks_changed = pyqtSignal()
+    # M16 B: a surface was made, renamed, rebuilt-with-new-settings, or lost
+    # or gained picks. Written straight to the package like picks; never dirty.
+    features_changed = pyqtSignal()
+    # M16 B: a grid's remembered slice source (preset, lines, resolution, 3-D choice, gain)
+    # really changed; carries the grid's id. A surface's staleness reads these.
+    slice_sources_changed = pyqtSignal(str)
     presets_changed = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -1231,6 +1237,7 @@ class SiteSession(QObject):
             return
         sources[grid_id] = new
         self._set_dirty(True)
+        self.slice_sources_changed.emit(grid_id)
 
     def remember_slice_source(
         self, grid_id: str, *, preset: str, lines: tuple[str, ...] | None
@@ -1272,6 +1279,17 @@ class SiteSession(QObject):
         )
         if merged is not None:
             self._update_source(grid_id, resolution=merged)
+
+    def volume_record(self, grid_id: str) -> dict[str, float | str]:
+        """A copy of the grid's remembered 3-D settings (M16), or {}."""
+        entry = self._require_site().slice_sources.get(grid_id) or {}
+        return dict(entry.get("volume", {}))
+
+    def remember_volume(self, grid_id: str, **fields: float | str) -> None:
+        """Merge the given 3-D fields into the grid's record. Marks the site dirty only
+        when something changed; keeps the preset, lines, gain and resolution."""
+        merged = {**self.volume_record(grid_id), **fields}
+        self._update_source(grid_id, volume=merged)
 
     def grid_gain(self, grid_id: str) -> float:
         entry = self._require_site().slice_sources.get(grid_id, {})

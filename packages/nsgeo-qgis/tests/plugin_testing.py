@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
+import types
 import zlib
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pytest
+from nsgeo.geometry.grid import Grid
 from tests.real_data import CAMPUS_LINES
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
@@ -17,6 +20,40 @@ LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
 #: The ten campus lines only. The other surveys under tests/data/local reuse
 #: their file names (#141); each has its own list in the core's real_data.py.
 REAL_DZT = CAMPUS_LINES
+
+GRID = Grid("Grid A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+STEPS_ZERO = [
+    {"step": "time_zero", "params": {}, "enabled": True},
+    {"step": "dewow", "params": {}, "enabled": True},
+    {"step": "background_mean", "params": {}, "enabled": True},
+]
+STEPS_RADAR = STEPS_ZERO[1:]
+
+
+class Dock:
+    """What the exporter reads from the Slices dock: two engines and the transform combo."""
+
+    def __init__(self, session):
+        from nsgeo_qgis.slices_engine import SliceEngine
+
+        self.engine = SliceEngine(session)
+        self.site_engine = SliceEngine(session)
+        self.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
+        self.registered: list = []
+        self.foreign_preparing = False
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine):
+        self.registered.append(engine)
+        try:
+            yield
+        finally:
+            self.registered.remove(engine)
+
+    def dispose(self):
+        self.engine.dispose()
+        self.site_engine.dispose()
+
 
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
