@@ -502,6 +502,9 @@ class Scene3D:
             managed = list(self.surface_layers.layers_by_feature().values())
             if self.picks_layer is not None:
                 managed.append(self.picks_layer)
+            # Every layer this view gave a renderer, whatever SurfaceLayers' bookkeeping says
+            # (it forgets a deleted surface before it removes the layer).
+            managed += [self.project.mapLayer(i) for i in list(self._applied) if i in wanted]
             for layer in managed:
                 if _alive(layer) and layer.id() in wanted and layer.renderer3D() is not None:
                     layer.setRenderer3D(None)

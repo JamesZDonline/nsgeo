@@ -39,11 +39,14 @@ STRETCH_STEP: float = 0.5
 
 
 def scene_stretch(value: object) -> float:
-    """`value` when it is a finite number above 0, else the default."""
+    """`value` when it is a finite number above 0, else the default; kept within the range the
+    Surfaces panel's box can show, so the view and the box always agree."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return DEFAULT_STRETCH
     value = float(value)
-    return value if math.isfinite(value) and value > 0.0 else DEFAULT_STRETCH
+    if not (math.isfinite(value) and value > 0.0):
+        return DEFAULT_STRETCH
+    return min(max(value, STRETCH_MIN), STRETCH_MAX)
 
 
 def view_title(grid_name: str, stretch: float, n_stale: int) -> str:

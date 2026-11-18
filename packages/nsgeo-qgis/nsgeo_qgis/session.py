@@ -1299,7 +1299,11 @@ class SiteSession(QObject):
         return scene_stretch(entry.get("view_stretch"))
 
     def set_view_stretch(self, grid_id: str, value: float) -> None:
-        if isinstance(value, bool) or not (math.isfinite(value) and value > 0):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not (math.isfinite(value) and value > 0)
+        ):
             raise ValueError(f"the depth stretch must be a positive number, got {value!r}")
         self._update_source(grid_id, view_stretch=float(value))
 

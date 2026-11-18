@@ -228,12 +228,45 @@ def test_a_rebuild_clears_the_old_layers_renderer_while_it_is_still_in_the_proje
     assert (True, True) in log
 
 
-def test_the_picks_layer_loses_its_renderer_before_the_site_closes_it(scene):
+def test_a_layer_only_the_view_applied_a_renderer_to_is_cleared_too(scene):
+    """The view does not depend on SurfaceLayers' bookkeeping order (review C1)."""
     s3d, session, surfaces, surface_layers, iface, _ = scene
     s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    assert layer.id() in s3d._applied
+    surface_layers._shown.pop(record.feature_id)  # SurfaceLayers has already forgotten it
+    assert layer.id() not in [x.id() for x in surface_layers.layers_by_feature().values()]
+    s3d._on_layers_will_be_removed([layer.id()])
+    assert layer.renderer3D() is None
+
+
+def test_surface_layers_keep_a_surface_until_its_layer_is_removed(scene):
+    """A deleted surface is still listed while QGIS announces its layer's removal."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer_id = surface_layers.layers_by_feature()[record.feature_id].id()
+    seen: list = []
+    QgsProject.instance().layersWillBeRemoved.connect(
+        lambda ids: seen.append(
+            layer_id in ids
+            and layer_id in [x.id() for x in surface_layers.layers_by_feature().values()]
+        )
+    )
+    surfaces.delete(record.feature_id)
+    surface_layers.sync()
+    assert seen == [True]
+
+
+def test_deleting_a_surface_with_the_view_open_clears_its_renderer_first(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
     log: list = []
-    _record_renderer_clears(s3d.picks_layer, QgsProject.instance(), log)
-    QgsProject.instance().removeMapLayer(s3d.picks_layer.id())
+    _record_renderer_clears(layer, QgsProject.instance(), log)
+    surfaces.delete(record.feature_id)
+    surface_layers.sync()
     assert (True, True) in log
 
 
@@ -670,7 +703,12 @@ def test_closing_the_site_closes_the_view(surface_plugin):
     assert plugin.scene3d.is_open() and _scene_layers_in_project()
     shown = list(plugin.surface_layers.layers_by_feature().values())
     assert shown and all(lyr.renderer3D() is not None for lyr in shown)
+    log: list = []
+    project = QgsProject.instance()
+    for lyr in [*shown, plugin.scene3d.picks_layer]:
+        _record_renderer_clears(lyr, project, log)
     plugin.session.close_site()
+    assert log.count((True, True)) == len(shown) + 1
     assert not plugin.scene3d.is_open()
     assert not _scene_layers_in_project()
     assert all(lyr.renderer3D() is None for lyr in shown if _alive(lyr))

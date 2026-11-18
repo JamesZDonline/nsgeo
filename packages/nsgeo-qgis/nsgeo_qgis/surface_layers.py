@@ -353,7 +353,10 @@ class SurfaceLayers:
                 wanted[fid] = build_key(report["files"])
         for fid in list(self._shown):
             if fid not in wanted:
-                self._drop_layer(self._shown.pop(fid).layer_id)
+                # Drop the layer before forgetting it: the 3-D view clears its renderer as the
+                # layer goes, and looks the layer up here.
+                self._drop_layer(self._shown[fid].layer_id)
+                del self._shown[fid]
         for fid in list(self._dismissed):
             if fid not in wanted:
                 del self._dismissed[fid]

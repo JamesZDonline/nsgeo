@@ -846,7 +846,9 @@ closing it never marks the site changed.
   the panel's grid combo. In **Whole site** it keeps the last grid it showed.
 - **The stretch.** Depth is stretched so thin soil is easier to read. Set it in the
   Surfaces panel (**3D view depth stretch**, one per grid, ×3 by default): choose a
-  grid in the panel's grid list and the box turns on. It is saved with the site. The
+  grid in the panel's grid list and the box turns on (the list holds the grids that have a
+  surface; a grid with picks but no surface yet shows at its saved stretch, or ×3). It is saved
+  with the site. The
   ParaView export has its own stretch in its dialog, and the two do not follow each
   other. Each title states its own ("depth stretched ×3").
 - **It follows your work.** A new pick appears, and a rebuilt surface is replaced in

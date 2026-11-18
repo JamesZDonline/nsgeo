@@ -865,7 +865,73 @@ def test_an_unreadable_style_starts_again_from_the_real_limit(mapped):
     assert len(seen) == 1
 
 
-def test_the_slice_layer_is_skipped_by_qgis_scratch_layer_check(mapped):
-    sl, _, _, _ = mapped
+def test_the_slice_layer_is_not_a_temporary_layer_to_qgis(qgis_app, tmp_path, monkeypatch):
+    """QGIS warns on a new project or on exit when `isTemporary()`; a file under the platform
+    temp folder counts, so the previews live in the cache folder (Qt's test mode keeps that
+    folder out of the real cache; pytest's tmp_path is itself under the temp folder)."""
+    from qgis.PyQt.QtCore import QStandardPaths
+
+    QStandardPaths.setTestModeEnabled(True)
+    try:
+        monkeypatch.undo()  # the autouse fixture's tmp_path root: use the real cache_root
+        monkeypatch.setattr(slice_layer, "_swept", True)
+        _check_not_temporary(tmp_path)
+    finally:
+        QStandardPaths.setTestModeEnabled(False)
+
+
+def _check_not_temporary(tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    sl = SliceLayer(layers)
     sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="x")
-    assert sl.layer.customProperty("skipMemoryLayersCheck") == 1
+    try:
+        assert sl.layer.isTemporary() is False
+    finally:
+        sl.dispose()
+        layers.detach()
+        project.clear()
+
+
+def test_the_preview_folder_is_named_for_the_process_and_removed_on_dispose(mapped):
+    sl, _, _, _ = mapped
+    assert sl._dir.name.startswith(f"nsgeo-slice-{os.getpid()}-")
+    sl.dispose()
+    assert not sl._dir.exists()
+
+
+def test_the_sweep_removes_a_dead_process_folder_only(tmp_path, monkeypatch):
+    root = tmp_path / "cache" / "nsgeo"
+    dead = root / "nsgeo-slice-999999-abcd1234"
+    live = root / f"nsgeo-slice-{os.getpid()}-abcd1234"
+    other = root / "something-else"
+    odd = root / "nsgeo-slice-notapid"
+    for d in (dead, live, other, odd):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(slice_layer, "cache_root", lambda: root)
+    monkeypatch.setattr(slice_layer, "_swept", False)
+    monkeypatch.setattr(slice_layer, "_pid_alive", lambda pid: pid == os.getpid())
+    made = slice_layer._make_preview_dir()
+    try:
+        assert not dead.exists()
+        assert live.exists() and other.exists() and odd.exists()
+        assert made.parent == root
+    finally:
+        made.rmdir()
+
+
+def test_without_a_cache_folder_the_temp_folder_is_used(monkeypatch):
+    monkeypatch.setattr(slice_layer, "cache_root", lambda: None)
+    made = slice_layer._make_preview_dir()
+    try:
+        assert made.name.startswith("nsgeo-slice-")
+    finally:
+        made.rmdir()
+
+
+def test_the_real_pid_check_tells_this_process_from_a_dead_one():
+    assert slice_layer._pid_alive(os.getpid()) is True
+    assert slice_layer._pid_alive(2**22 + 12345) is False

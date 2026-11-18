@@ -37,6 +37,12 @@ def test_scene_stretch_is_the_grids_own_or_the_default():
         assert scene_stretch(bad) == DEFAULT_STRETCH
 
 
+def test_scene_stretch_is_kept_within_the_boxs_range():
+    assert scene_stretch(100) == 50.0
+    assert scene_stretch(0.01) == 0.1
+    assert scene_stretch(2.25) == 2.25
+
+
 def test_camera_frames_the_grid_at_mid_depth():
     pose = camera_pose([(0, 0), (20, 0), (20, 16), (0, 16)], [1.0, 3.0], 3.0)
     assert (pose.x, pose.y) == (10.0, 8.0)

@@ -1134,3 +1134,6 @@ def test_view_stretch_round_trips_and_a_bad_one_is_dropped(tmp_path):
     doc["slice_sources"] = {"A": {"view_stretch": "wide"}, "B": {"view_stretch": True}}
     path.write_text(json.dumps(doc))
     assert load_site(path).slice_sources == {"A": {}, "B": {}}
+    doc["slice_sources"] = {"A": {"view_stretch": 0}, "B": {"view_stretch": -2.0}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}

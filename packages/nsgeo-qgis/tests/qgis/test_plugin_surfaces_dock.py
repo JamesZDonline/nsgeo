@@ -594,15 +594,46 @@ def test_the_view_stretch_box_is_off_for_all_grids_and_shows_a_grids_own(surface
     assert not dock.stretch_spin.isEnabled()
 
 
-def test_loading_the_view_stretch_never_marks_the_site_dirty(surface_plugin):
+def test_loading_the_view_stretch_never_writes_a_default_or_marks_dirty(surface_plugin):
+    """The hazard is a grid with nothing stored: showing 3.0 must not store 3.0."""
     plugin = surface_plugin
     dock = plugin.surfaces_dock
     _made(plugin)
-    plugin.session.set_view_stretch("Grid A", 4.0)
-    plugin.session._set_dirty(False)
+    session = plugin.session
+    assert "view_stretch" not in (session.slice_source("Grid A") or {})
+    session._set_dirty(False)
     dock.grid_combo.setCurrentText("Grid A")
     dock.refresh()
     dock.grid_combo.setCurrentIndex(0)
     dock.grid_combo.setCurrentText("Grid A")
-    assert dock.stretch_spin.value() == 4.0
+    assert dock.stretch_spin.value() == 3.0
+    assert "view_stretch" not in (session.slice_source("Grid A") or {})
+    assert session.dirty is False
+
+
+def test_the_view_stretch_box_rests_at_the_default_when_off(surface_plugin):
+    dock = surface_plugin.surfaces_dock
+    assert dock.stretch_spin.value() == 3.0 and not dock.stretch_spin.isEnabled()
+    _made(surface_plugin)
+    dock.grid_combo.setCurrentText("Grid A")
+    surface_plugin.session.set_view_stretch("Grid A", 7.0)
+    dock.refresh()
+    assert dock.stretch_spin.value() == 7.0
+    dock.grid_combo.setCurrentIndex(0)
+    assert dock.stretch_spin.value() == 3.0 and not dock.stretch_spin.isEnabled()
+
+
+def test_showing_another_grids_default_never_writes_it(surface_plugin, tmp_path):
+    """From a grid at 2.0 to one with nothing stored the box changes (to 3.0): that change is a
+    load, not an edit."""
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    _made(plugin)
+    _second_grid_surface(plugin, tmp_path)
+    dock.grid_combo.setCurrentText("Grid A")
+    dock.stretch_spin.setValue(2.0)
+    plugin.session._set_dirty(False)
+    dock.grid_combo.setCurrentText("Grid B")
+    assert dock.stretch_spin.value() == 3.0
+    assert "view_stretch" not in (plugin.session.slice_source("Grid B") or {})
     assert plugin.session.dirty is False

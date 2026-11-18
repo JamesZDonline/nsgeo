@@ -808,3 +808,12 @@ def _fold_settings(tmp_path, monkeypatch):
 
     store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
     monkeypatch.setattr(folds, "fold_settings", lambda: store)
+
+
+@pytest.fixture(autouse=True)
+def _slice_previews_in_tmp(tmp_path, monkeypatch):
+    """The Slices preview folders never reach the real cache folder (R19)."""
+    from nsgeo_qgis import slice_layer
+
+    monkeypatch.setattr(slice_layer, "cache_root", lambda: tmp_path / "cache" / "nsgeo")
+    monkeypatch.setattr(slice_layer, "_swept", False)

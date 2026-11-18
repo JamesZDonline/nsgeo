@@ -45,6 +45,7 @@ from nsgeo_qgis.scene3d_plan import (
     STRETCH_TIP,
 )
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slices_plan import DEFAULT_STRETCH
 from nsgeo_qgis.surface_plan import (
     DELETE_BUTTON,
     DELETE_TITLE,
@@ -114,7 +115,9 @@ class SurfacesDock(QgsDockWidget):
         self.stretch_spin.setRange(STRETCH_MIN, STRETCH_MAX)
         self.stretch_spin.setSingleStep(STRETCH_STEP)
         self.stretch_spin.setDecimals(1)
-        self.stretch_spin.setToolTip(STRETCH_TIP)
+        self.stretch_spin.setValue(DEFAULT_STRETCH)
+        self.stretch_spin.setEnabled(False)
+        self.stretch_spin.setToolTip(STRETCH_ALL_TIP)
         top.addWidget(self.stretch_spin, 1, 1)
         top.setColumnStretch(1, 1)
         layout.addLayout(top)
@@ -476,6 +479,7 @@ class SurfacesDock(QgsDockWidget):
         self._loading = True
         try:
             if chosen == ALL_GRIDS or not self.session.is_open:
+                self.stretch_spin.setValue(DEFAULT_STRETCH)
                 self.stretch_spin.setEnabled(False)
                 self.stretch_spin.setToolTip(STRETCH_ALL_TIP)
             else:
