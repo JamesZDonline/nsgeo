@@ -7,6 +7,7 @@ import tracemalloc
 
 import numpy as np
 import pytest
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO
 from nsgeo.slices import METHODS, plan_fill
 from nsgeo_qgis.slices_plan import (
     CURVATURE_PLAN_BYTES_PER_CELL,
@@ -25,6 +26,7 @@ from nsgeo_qgis.slices_plan import (
     TooManyLevels,
     bands_detail,
     choose_residency,
+    clock_change_note,
     combined_time_base,
     estimate_memory,
     format_bytes,
@@ -32,6 +34,7 @@ from nsgeo_qgis.slices_plan import (
     level_limit_problem,
     mixed_clock_note,
     name_list,
+    no_break_note,
     old_cube_note,
     preset_transform_conflict,
     preview_note,
@@ -818,6 +821,37 @@ def test_the_old_cube_note_names_the_shift_with_its_sign():
         "It was rebuilt that way, with its range moved by -2.40 ns."
     )
     assert old_cube_note(1.0).endswith("moved by +1.00 ns.")
+
+
+@pytest.mark.parametrize("shift", [-0.52, 0.52])
+def test_clock_change_note_names_the_cube_the_preset_and_the_signed_shift(shift):
+    """#162 item 1: a marked cube whose preset gained or lost Time zero since
+    it was saved. The note names both, and the shift with its sign."""
+    gained = clock_change_note("A__old", "p", TIME_BASE_TIME_ZERO, shift)
+    lost = clock_change_note("A__old", "p", TIME_BASE_RADAR, shift)
+    for text in (gained, lost):
+        assert "'A__old'" in text and "preset 'p'" in text, text
+        assert f"{shift:+.2f} ns" in text, text
+    assert "saved on the radar's clock" in gained and "now has Time zero" in gained, gained
+    assert "saved with Time zero" in lost and "no longer has it" in lost, lost
+    assert gained == (
+        "Cube 'A__old' was saved on the radar's clock, and preset 'p' now has Time zero. "
+        "It was rebuilt from each line's first break, with its range moved by "
+        f"{shift:+.2f} ns (the median line zero)."
+    )
+    assert lost == (
+        "Cube 'A__old' was saved with Time zero, and preset 'p' no longer has it. "
+        f"It was rebuilt on the radar's clock, with its range moved by {shift:+.2f} ns, "
+        "the median first break as Time zero finds it by default."
+    )
+
+
+def test_no_break_note_names_the_cube_and_the_preset():
+    """Review Focus 5: no first break to shift by, so the range was left as saved."""
+    assert no_break_note("A__old", "p") == (
+        "Cube 'A__old' was saved with Time zero, and preset 'p' no longer has it. "
+        "No line has a first break to move it by, so its range was left as saved."
+    )
 
 
 def test_mixed_clock_note_names_the_radar_grids():

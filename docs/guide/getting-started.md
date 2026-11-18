@@ -84,7 +84,9 @@ Two things stop an older version reading a site that 0.4.0 has saved:
 
 A cube saved before 0.4.0, whose preset has a Time zero step, comes back
 shifted by the median line zero when you restore it, so its slices sit at the
-depths they showed before, and the Slices panel says so.
+depths they showed before, and the Slices panel says so. A cube whose preset
+has gained or lost Time zero since it was saved comes back the same way, and
+the Slices panel's Warnings says by how much.
 
 ### Uninstalling
 
