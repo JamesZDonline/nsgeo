@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from nsgeo_qgis import slice_layer
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME, SliceLayer, build_shader
+from nsgeo_qgis.slice_layer import cache_root as _real_cache_root  # before the autouse patch
 from qgis.core import Qgis, QgsProject, QgsSingleBandPseudoColorRenderer
 from qgis.PyQt.QtGui import qAlpha, qRed
 
@@ -873,9 +875,15 @@ def test_the_slice_layer_is_not_a_temporary_layer_to_qgis(qgis_app, tmp_path, mo
 
     QStandardPaths.setTestModeEnabled(True)
     try:
-        monkeypatch.undo()  # the autouse fixture's tmp_path root: use the real cache_root
+        # the real cache_root, not the autouse fixture's tmp_path one; only that patch is
+        # replaced, so the other autouse guards (modals, swallowed slot exceptions) stay on
+        monkeypatch.setattr(slice_layer, "cache_root", _real_cache_root)
         monkeypatch.setattr(slice_layer, "_swept", True)
+        root = _real_cache_root()
+        assert root is not None and ".qttest" in root.parts
         _check_not_temporary(tmp_path)
+        with contextlib.suppress(OSError):
+            root.rmdir()  # empty once the preview folder is gone; leave nothing in ~/.qttest
     finally:
         QStandardPaths.setTestModeEnabled(False)
 
