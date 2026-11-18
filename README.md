@@ -181,7 +181,8 @@ Grouped by area. The order within a group is not a priority.
   ([#158]); a frequency profile
   ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
   until it is fixed, instead of a six-second toast ([#197]).
-- **Sites and the Survey panel:** more than one site in a QGIS project
+- **Sites and the Survey panel:** opening a site zooms the map to it
+  ([#205]); more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
@@ -266,6 +267,7 @@ Grouped by area. The order within a group is not a priority.
 [#202]: https://github.com/JamesZDonline/nsgeo/pull/202
 [#203]: https://github.com/JamesZDonline/nsgeo/issues/203
 [#204]: https://github.com/JamesZDonline/nsgeo/issues/204
+[#205]: https://github.com/JamesZDonline/nsgeo/issues/205
 
 ## Why
 
