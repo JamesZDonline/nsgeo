@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-16.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-18.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -104,6 +104,7 @@ release's notes list everything in it.
 | | Export for ParaView, the first of M16's four plans: one action writes a grid's prepared volume, picks and lines, at the grid's own 3-D cell, depth step and depth end, to a folder ParaView opens ready to explore ([#190]) | next release |
 | | Surfaces from picks, M16's second plan: select picks on the map and nsgeo builds the surface they name, leaving holes where the radar saw nothing; it shows on the map coloured by depth, goes into the ParaView export, and is listed in a Surfaces panel with its fit and whether it needs a rebuild; a pick can belong to several surfaces ([#202]) | next release |
 | | A restored cube comes back on the clock it was saved on, even if its preset has since gained or lost Time zero or you edit while it prepares, and says how it moved in Warnings; a quick switch of survey or grid carries nothing over, a new survey opens at its first slice, and a grid the panel falls back to opens on the preset Whole site draws it with ([#162], [#102], [#152], [#200]) | next release |
+| | Trace a hyperbola from a box: in velocity mode, drag a box around a diffraction hyperbola and nsgeo marks about ten dots on the leading edge of its band, ready to edit and save like clicked ones, or says why it can't; Ctrl+click (Cmd+click on a Mac) places velocity dots without switching velocity mode on first ([#140], [#88]) | next release |
 
 ### In progress
 
@@ -124,13 +125,6 @@ release's notes list everything in it.
   fix marked), the Survey panel, and a destagger you can type. Walked
   through; PR [#208](https://github.com/JamesZDonline/nsgeo/pull/208) awaits
   merge.
-- **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
-  drag a box around a diffraction hyperbola and the plugin marks about ten
-  dots on the leading edge of its band, ready to edit and save like
-  clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
-  switching velocity mode on first. Built, reviewed and checked against the
-  author's own hand fits and an independent migration check; awaiting its
-  walkthrough.
 
 ### Next, in order
 
@@ -169,10 +163,13 @@ Grouped by area. The order within a group is not a priority.
   ([#187]); exports record where the grid's velocity came from ([#188]); show
   migration's velocity beside a traced one, as a second, independent number
   ([#195]); warn when a grid's velocity from fits is on another clock than its
-  slices ([#201]).
+  slices ([#201]); the hyperbola tracer's known limits on layered ground and
+  on very wide boxes ([#209]) and its review follow-ups ([#212]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
-  ([#158]); a frequency profile
+  ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
+  clock share one rule ([#210]); the profile no longer jumps when the velocity
+  strip appears ([#211]); a frequency profile
   ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
   until it is fixed, instead of a six-second toast ([#197]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
@@ -262,6 +259,10 @@ Grouped by area. The order within a group is not a priority.
 [#203]: https://github.com/JamesZDonline/nsgeo/issues/203
 [#204]: https://github.com/JamesZDonline/nsgeo/issues/204
 [#205]: https://github.com/JamesZDonline/nsgeo/issues/205
+[#209]: https://github.com/JamesZDonline/nsgeo/issues/209
+[#210]: https://github.com/JamesZDonline/nsgeo/issues/210
+[#211]: https://github.com/JamesZDonline/nsgeo/issues/211
+[#212]: https://github.com/JamesZDonline/nsgeo/issues/212
 
 ## Why
 
