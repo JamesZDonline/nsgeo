@@ -282,6 +282,9 @@ def test_the_gap_table_is_dotted_pink_and_not_selectable(site):
     assert stroke.useCustomDashPattern()
     assert list(stroke.customDashVector()) == [0.5, 1.0]
     assert not (layer.flags() & QgsMapLayer.LayerFlag.Identifiable)
+    # Only Identifiable is cleared: the layer can still be removed and searched.
+    assert layer.flags() & QgsMapLayer.LayerFlag.Removable
+    assert layer.flags() & QgsMapLayer.LayerFlag.Searchable
     # ... and selecting a gap navigates nowhere: MapLink binds no slot to it.
     link = MapLink(session, layers, QgsMapCanvas())
     try:
