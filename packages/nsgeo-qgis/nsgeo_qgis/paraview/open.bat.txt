@@ -1,0 +1,5 @@
+@echo off
+rem Open this export in ParaView with the scene set up.
+set "HERE=%~dp0"
+set "NSGEO_SCENE_DIR=%HERE%"
+start "" /D "%HERE%.." "{{PARAVIEW}}" --script="%HERE%open_scene.py"

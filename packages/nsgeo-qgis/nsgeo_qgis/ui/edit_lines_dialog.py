@@ -43,7 +43,7 @@ from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QColor, QGuiApplication
+from qgis.PyQt.QtGui import QColor, QFocusEvent, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -73,6 +73,7 @@ from nsgeo_qgis.line_edit import (
 )
 from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.wheel_guard import guard_wheel
 
 (
     COL_LABEL,
@@ -143,6 +144,38 @@ class _MeasureRun:
     labels: dict[str, str]
     job: MeasureJob
     paths: dict[str, str]  # row key -> resolved file path, the cache's key
+
+
+class _PopupFocusCombo(QComboBox):
+    """A Grid combo that hands focus back when its popup closes, however it
+    closes: a pick, Escape or a click away (#176)."""
+
+    def __init__(self, give_back: Callable[[], None]) -> None:
+        super().__init__()
+        self._give_back = give_back
+
+    def hidePopup(self) -> None:  # noqa: N802 -- Qt override
+        super().hidePopup()
+        try:
+            self._give_back()
+        except Exception as exc:  # noqa: BLE001 -- a Qt override
+            QgsMessageLog.logMessage(
+                f"grid combo focus: {exc!r}", "nsgeo", Qgis.MessageLevel.Warning
+            )
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: N802 -- Qt override
+        # Qt 6: the popup is its own window and the dialog is re-activated
+        # after hidePopup returns, so Qt's popup-close focus restore can land
+        # here afterwards. Focus coming back from our own popup goes on to
+        # the table.
+        super().focusInEvent(event)
+        try:
+            if event.reason() == Qt.FocusReason.PopupFocusReason:
+                self._give_back()
+        except Exception as exc:  # noqa: BLE001 -- a Qt override
+            QgsMessageLog.logMessage(
+                f"grid combo focus: {exc!r}", "nsgeo", Qgis.MessageLevel.Warning
+            )
 
 
 class EditLinesDialog(QDialog):
@@ -216,9 +249,11 @@ class EditLinesDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
         for r in range(len(self._order)):
-            combo = QComboBox()
+            combo = _PopupFocusCombo(self._focus_table)
             combo.addItems(self._grid_ids)
             combo.currentTextChanged.connect(lambda text, r=r: self._on_grid_picked(r, text))
+            guard_wheel(combo, self.table)
+            combo.activated.connect(self._focus_table)
             self.table.setCellWidget(r, COL_GRID, combo)
             self._combos.append(combo)
         self.table.itemChanged.connect(self._on_item_changed)
@@ -772,6 +807,13 @@ class EditLinesDialog(QDialog):
             self.table.resizeColumnsToContents()
         finally:
             self._updating = False
+
+    def _focus_table(self, _index: int = 0) -> None:
+        """After a grid is picked, focus goes back to the table (#176)."""
+        try:
+            self.table.setFocus()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
 
     def _on_grid_picked(self, row: int, text: str) -> None:
         if self._updating or not 0 <= row < len(self._order):

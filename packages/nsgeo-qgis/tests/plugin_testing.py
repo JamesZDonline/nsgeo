@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
+import types
 import zlib
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pytest
+from nsgeo.geometry.grid import Grid
 from tests.real_data import CAMPUS_LINES
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
@@ -19,10 +22,44 @@ LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
 #: their file names (#141); each has its own list in the core's real_data.py.
 REAL_DZT = CAMPUS_LINES
 
+GRID = Grid("Grid A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+STEPS_ZERO = [
+    {"step": "time_zero", "params": {}, "enabled": True},
+    {"step": "dewow", "params": {}, "enabled": True},
+    {"step": "background_mean", "params": {}, "enabled": True},
+]
+STEPS_RADAR = STEPS_ZERO[1:]
+
+
+class Dock:
+    """What the exporter reads from the Slices dock: two engines and the transform combo."""
+
+    def __init__(self, session):
+        from nsgeo_qgis.slices_engine import SliceEngine
+
+        self.engine = SliceEngine(session)
+        self.site_engine = SliceEngine(session)
+        self.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
+        self.registered: list = []
+        self.foreign_preparing = False
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine):
+        self.registered.append(engine)
+        try:
+            yield
+        finally:
+            self.registered.remove(engine)
+
+    def dispose(self):
+        self.engine.dispose()
+        self.site_engine.dispose()
+
+
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
 
-def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
+def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, n_samples: int = 512, **kw) -> Path:
     """A small synthetic DZT with a visible pattern, written into `folder`."""
     from tests.synthetic import write_dzt
 
@@ -30,7 +67,7 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     # crc32, not hash(): str hashing is salted per-process (PYTHONHASHSEED),
     # so the same `name` would otherwise seed different data every run.
     rng = np.random.default_rng(zlib.crc32(name.encode()))
-    data = (rng.normal(size=(512, n_traces)) * 1e6).astype(np.int32)
+    data = (rng.normal(size=(n_samples, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000  # a flat band, so background removal has something to remove
     path = folder / name
     write_dzt(path, data, **kw)
@@ -648,3 +685,20 @@ def open_gps(path, crs=CRS, travel_shift=0.0, grid_id=None):
     placement = track_from_log(log, lonlat_to_xy(QgsCoordinateReferenceSystem(crs)), crs)
     placement = dataclasses.replace(placement, travel_shift=travel_shift, grid_id=grid_id)
     return Line.open(path, placement)
+
+
+def wheel_event(dy: int = -120) -> Any:
+    """A plain vertical wheel notch, built as it works on Qt 5 and Qt 6."""
+    from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(2, 2),
+        QPointF(2, 2),
+        QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )

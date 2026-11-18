@@ -10,7 +10,7 @@ backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do no
 need to install anything else.
 
 1. [Install](#1-install)
-2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
+2. [The toolbar and the panels](#2-the-toolbar-and-the-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
 5. [Known issues in 0.4.0](#5-known-issues-in-040)
@@ -94,7 +94,7 @@ stay exactly where they are.
 
 ---
 
-## 2. The toolbar and the four panels
+## 2. The toolbar and the panels
 
 ### The nsgeo toolbar
 
@@ -109,14 +109,15 @@ stay exactly where they are.
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
+| **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…**, **Import GPS lines…** and **Cut** stay greyed out until a
-site is open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…**, **Import GPS lines…**, **Cut** and **Surface from
+picks…** stay greyed out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
-QGIS docks the four panels around the map. You can drag, float or close them like
+QGIS docks the nsgeo panels around the map. You can drag, float or close them like
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
@@ -146,16 +147,18 @@ any other QGIS panel.
   **Presets**.
 - **nsgeo Slices** (right) builds time and depth slices across a grid. The first
   time nsgeo starts, it sits as a tab behind **nsgeo Processing**.
+- **nsgeo Surfaces** (right) lists the surfaces you have made from picks, and
+  shows how well each one fits. It sits as a tab beside **nsgeo Slices**.
 
 **Panels ▾** on the nsgeo toolbar ticks each panel that is open, including one
 sitting behind another tab. Tick a panel to bring it back in front, or untick it
 to close it. Below the ticks are three layouts:
 
 - **Profile work** keeps **nsgeo Survey** and **nsgeo Profile**, and closes
-  Processing and Slices.
-- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile
-  and Processing.
-- **Show all** opens all four again.
+  Processing, Slices and Surfaces.
+- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile,
+  Processing and Surfaces.
+- **Show all** opens all five again.
 
 A layout only opens and closes panels: each one comes back at the size and in
 the place you left it, and QGIS's own panels are left alone. **View → Panels**
@@ -335,7 +338,9 @@ If a line went in with the wrong start, offset, direction or grid, right-click
 the grid and choose **Edit lines…**. A table opens with every line on the grid,
 in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
 **Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
-panel shows.
+panel shows. Closing a **Grid** list hands the
+keyboard back to the table, so scrolling the table never changes a line's grid.
+A **Grid** box takes the mouse wheel only when you reach it with **Tab**.
 
 The panel under the table changes every selected line at once. Type a start and
 press **Set**, press **Snap to grid edge**, type an amount and press **Shift**
@@ -542,9 +547,16 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Shift and use the mouse wheel over the map to step through the slices.
 3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), and the
    top and bottom of the volume (**z0**, **z1**). Hover over each control for an
-   explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
+   explanation. A grid starts at a 0.1 m cell, or half the line spacing if that
    is smaller. Each grid remembers the resolution you set for it, and saving the
    site saves it.
+   **dz** can't go below the radar's own sample interval, and reads
+   *(sample interval)* beside the number when it is there. In **Whole site** it
+   can't go below the finest grid's interval, and it starts at the coarsest
+   one's. The mouse wheel changes any box under the pointer. Once a section is
+   set, fold it away from its header, so scrolling the panel can't change it:
+   the **Resolution**, **Interpolation**, **Normalisation** and **Display**
+   headers fold, and nsgeo remembers which are folded.
 4. **Interpolation** decides what is drawn in the cells no line crossed, and
    whether the slice is smoothed. The same box appears for **Whole site**, with
    its own settings.
@@ -591,9 +603,10 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
-   full detail. Past a size it draws a preview at a coarser pixel and says so in
-   the panel. An export is not limited by the preview: it works out its own
-   cells at the size you choose (see step 6).
+   full detail. Past a size it draws a preview at a coarser pixel and says so
+   under **Warnings**, below **Position**, where refusals appear too. An
+   export is not limited by the preview: it works out its own cells at the
+   size you choose (see step 6).
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
    - **my own colours** keeps whatever you set on the slice layer's
@@ -616,7 +629,9 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    as a low number depends on the cell size: at a fine cell, one or two traces a
    cell is normal, because a cell holds only a few traces along the line. Compare a
    cell with its neighbours, or with the line spacing and the cell size, and
-   look for the cells that stand out as low.
+   look for the cells that stand out as low. In a **Whole site** preview each
+   pixel shows the largest count among the cells under it, so lines look wider
+   than they are.
    Use it to spot gaps and thin coverage between lines before you trust a slice
    in that spot. With **Show coverage** ticked, an export also writes the
    counts as a second file beside it, named like the export with
@@ -750,7 +765,124 @@ no longer fit the new section, so the profile leaves them out and its title
 counts them (*1 picks on another clock*). They stay on the map and in the picks
 table, and they come back when you turn the setting back.
 
-### Step 9: Save, and next time
+### Step 9: Export for ParaView
+
+ParaView is a free program for looking at 3-D data. **ParaView…** on the
+**nsgeo Slices** panel (beside **Save cube…** and **Export GeoTIFF…**) writes one
+grid's volume for it: a block you can slice, and an isosurface that draws each
+strong reflection as a surface. The button is on whenever a site is open, in
+either scope, and it needs no prepared slice source. Exporting never changes
+what the Slices panel shows.
+
+1. Click **ParaView…**. The dialog opens on the panel's grid.
+   - **3-D resolution** is this grid's own **Cell** and **Depth step**, kept
+     apart from the Slices panel's, which the hint beside each box shows. Cells
+     finer than the panel's make a bigger, sharper block. A cell so fine the
+     grid would pass four million cells is refused, with the finest that works.
+     **Down to** sets how deep the export goes, in ns; the first time it starts
+     from the Slices panel's z1, and after that browsing slices never changes it.
+   - **The volume** sets how the block is made. **Transform** is the amplitude
+     transform, as in Step 7. **Depth stretch** makes the block taller than it
+     is deep; a legend in ParaView still shows true depth in metres. **Wave
+     period** is how smooth each reflection becomes: one smooth body per
+     reflection. **Sideways blur** smooths across the grid. **Depth balance** is
+     the stretch of ground, in metres of depth, that the volume averages to
+     decide what is typical at each depth. Each value is divided by that, so a
+     deep reflection is not lost beside a strong shallow one.
+   - **What will be written** says, before anything runs, which folder it will
+     fill (and that it replaces the last export), the size of the block, which
+     fill method it uses (the grid's own, from Step 7), and how many picks and
+     lines go with it. **Size** gives the export's size and the fill it keeps for
+     quick re-exports. **Disk** gives the free space. When the free space is less
+     than the export and its fill plus half a gigabyte to spare, the line turns
+     red and says how much is needed, and **Export** stays on, so you decide.
+     When the fill and the export would not fit at all (the fill needs its size
+     plus half a gigabyte or a tenth, whichever is more, free), the line says so
+     and both **Export** buttons are off: a disk that fills while the fill is
+     written can close QGIS.
+   - **ParaView** is the program, if you want nsgeo to start it. Use **Browse…**.
+     nsgeo remembers it for next time.
+2. Click **Export** to write the folder, or **Export and open** to write it and
+   start ParaView on it. With no ParaView set, only **Export** is offered.
+   If the lines are not already prepared in the Slices panel, nsgeo prepares them
+   first and shows **Preparing lines…**; that step cannot be cancelled. After it,
+   the progress can be. A cancelled export leaves the grid's previous export as it
+   was.
+
+The folder is `paraview/<grid>/` in the site folder. It holds:
+
+| File | What it is |
+|---|---|
+| `cube.vti` | The block: strength, amplitude and true depth. |
+| `picks.vtp` | Your picks, in 3-D. |
+| `lines.vtp` | The recorded lines at ground level, and the grid's outline. |
+| `export.json` | Every number the scene needs. |
+| `open_scene.py`, `open.sh`, `open.bat`, `README.md` | The scene, its launchers, and notes. |
+
+To open an export later, run `open.sh` (macOS and Linux) or `open.bat`
+(Windows) in the folder, or use **Export and open** again. They start ParaView
+with the scene set up. The fill, which is the slow part, is kept in
+`paraview/.cache/`, so exporting again with a different stretch, wave period, blur or
+balance takes a fraction of the time. Changing the cell, depth step, Down to, transform, preset or
+fill changes the fill, and so it is made again.
+On Windows, close ParaView before exporting the same grid again: it holds the
+folder, and nsgeo says so rather than replace it.
+
+**Where the volume starts.** It starts from the grid's own preset: its whole
+processing stack, gain steps included, and the transform you chose. The depth
+balance comes after the gain. A gain curve that already evens out the fade
+leaves the balance little to do. With automatic gain (AGC) a strong isolated
+reflection can be squeezed twice, once by the gain and once by the balance.
+To calibrate, export once with your usual preset and once with a lighter-gain
+preset, and compare the two at the isosurface value 2.5.
+
+### Making a surface from picks
+
+A surface follows one reflection across a grid. You mark where the reflection is
+with picks, and nsgeo draws a surface through them that stays on the reflection
+and leaves holes where the radar saw nothing. A surface shows on the map coloured
+by depth, goes into the next ParaView export (Step 9), and stays listed in the
+**nsgeo Surfaces** panel.
+
+**Pick only where the reflection is clear, and the same part of the wave each
+time.** A surface is only as good as its picks: pick the same peak or trough on
+every line, and leave a line out where you cannot tell. Picks on one grid only.
+Picks on cuts cannot be used yet.
+
+1. Make the **picks** layer current in QGIS and select picks with QGIS's own
+   Select tool: a box, a polygon, or by expression. At least three, not all in a
+   straight line, and saved (an unsaved pick is refused until you save the picks
+   layer's edits).
+2. Click **Surface from picks…**. Name the surface. **Settings** are folded away
+   and show their values; open them only to change how the surface is drawn
+   between your picks, how far it may follow the reflection from a pick (the
+   window), or the strength test that decides which cells are holes.
+   A pick can belong to several surfaces, so picks already in another surface join
+   this one and stay in the other; the dialog says which.
+3. Click **Create and build**. It builds at the grid's 3-D resolution, the one its
+   ParaView export uses. If the grid was exported at those settings the build
+   takes seconds; otherwise the first one fills the grid, which takes longer.
+   Cancelling keeps the previous build.
+4. **Read the fit.** Select the surface in the **nsgeo Surfaces** panel. **Fit,
+   last build** says how many picks lie within 2 cm of the surface, how many are on
+   holes, and where your picks sit against the strongest swing of the wave. The
+   list under it names the picks the surface doesn't follow: a pick on a hole, one
+   held at the edge of the window (the reflection lies beyond it), and one more than
+   the window from the surface.
+   Click one to select it on the map and open its line in the Profile panel, at
+   that pick: you can see whether it sits on the wrong reflection.
+5. **Rebuild after changes.** Changing a surface's picks, its settings, or the
+   grid's processing, lines, 3-D cell or velocity makes it **stale**: the map and
+   the next export keep showing the last build, and the panel says what changed.
+   Nothing rebuilds by itself, so a scene never changes in the middle of showing it.
+   Select the surface (or several) and click **Rebuild**. Browsing slices never
+   makes a surface stale.
+
+**Select its picks**, **Add selected picks** and **Remove selected picks** change
+which picks a surface holds. **Rename…** and **Delete…** are beside the list;
+deleting a surface never deletes a pick.
+
+### Step 10: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
@@ -765,8 +897,10 @@ Everything for a site lives in its site folder:
 | In the site folder | What it holds |
 |---|---|
 | `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**, and the list of your surfaces. |
+| `surfaces` | One folder per grid with each surface's last build: a mesh, its depths and a fit report. Regenerable: **Rebuild** writes them again. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
+| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,
@@ -774,6 +908,15 @@ cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
 whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
+
+**Surfaces are saved as you go**, like picks: each surface's name, settings and
+picks are written to `site.nsgeo.gpkg` the moment you change them, with no need to
+**Save site**. The built surfaces and the exports are regenerable files in the
+site folder (`surfaces` and `paraview`), so deleting them loses nothing. One thing
+is saved with **Save site** after all: a build remembers the grid's 3-D settings,
+and those live in `survey.nsgeo.json`. If you close without saving and the build
+was the first use of 3-D on that grid, the surfaces reopen marked stale
+(resolution); **Rebuild** clears it.
 
 A few things to know:
 

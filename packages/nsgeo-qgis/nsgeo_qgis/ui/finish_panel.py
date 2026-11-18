@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import (
@@ -23,7 +24,6 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QWidget,
@@ -77,7 +77,7 @@ def _spin(maximum: float, step: float, suffix: str, tip: str) -> QDoubleSpinBox:
     return spin
 
 
-class FinishPanel(QGroupBox):
+class FinishPanel(QgsCollapsibleGroupBox):
     edited = pyqtSignal(str, object)  # (field, value): only a user's edit
 
     def __init__(self, parent: QWidget | None = None, *, metres_label: bool) -> None:
@@ -100,6 +100,9 @@ class FinishPanel(QGroupBox):
             self.max_distance_metres = QLabel("")
             distance_row.addWidget(self.max_distance_metres)
         form = QFormLayout(self)
+        # A row too wide for the panel stacks its label above its box, so the
+        # row never sets the panel's minimum width (#121).
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         form.addRow("Method", self.method_combo)
         form.addRow("Max distance to data", distance_row)
         form.addRow("Smoothing X", self.smooth_x_spin)

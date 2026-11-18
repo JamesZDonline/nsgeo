@@ -122,6 +122,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
@@ -131,6 +132,7 @@ from nsgeo_qgis.slices_plan import (
     SiteSource,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     format_bytes,
     limit_windows,
     preview_note,
@@ -247,6 +249,7 @@ class SiteEngine(QObject):
         self._lattice: SiteLattice | None = None
         self._full_lattice: SiteLattice | None = None
         self._preview_note: str | None = None
+        self._geometry_problem: str | None = None
         #: The most pixels the site is drawn at; past it, a coarser preview.
         self.max_pixels: int = SITE_MAX_PIXELS
         #: The most pixels the grids' windows hold together at the drawn pitch.
@@ -295,6 +298,11 @@ class SiteEngine(QObject):
     @property
     def preview_note(self) -> str | None:
         return self._preview_note
+
+    @property
+    def geometry_problem(self) -> str | None:
+        """Why the last geometry rebuild failed, or `None` after one that completed."""
+        return self._geometry_problem
 
     @property
     def ready_grids(self) -> tuple[str, ...]:
@@ -484,6 +492,18 @@ class SiteEngine(QObject):
             return None
 
     # ---- preparation, one at a time ---------------------------------------
+    def add_exclusive(self, engine: SliceEngine) -> None:
+        """Hold dispatch back while `engine` has a live task (a preparation that is not
+        this site's own, e.g. the ParaView export's). Pair with `remove_exclusive`."""
+        if engine not in self._exclusive_with:
+            self._exclusive_with = (*self._exclusive_with, engine)
+
+    def remove_exclusive(self, engine: SliceEngine) -> None:
+        """Stop holding dispatch for `engine`; a queued grid starts on the next retry tick."""
+        self._exclusive_with = tuple(e for e in self._exclusive_with if e is not engine)
+        if self._queue and self._active:
+            self._retry.start()
+
     def _anything_live(self) -> bool:
         """The dispatch gate (Ruling 1, ruling T3-b): may any task still execute?
 
@@ -672,10 +692,24 @@ class SiteEngine(QObject):
         try:
             self._rebuild_geometry()
         except Exception as exc:  # noqa: BLE001 -- reached from callbacks
-            self._report(str(exc))
+            # Not a toast: the reason stands in the Warnings section
+            # (`geometry_problem`, set by `_rebuild_geometry`), where the next
+            # tick reads it.
+            _log(f"could not rebuild the site's geometry: {exc}")
 
     def _rebuild_geometry(self) -> None:
-        """The site axis, each ready grid's resolution on it, and the lattice."""
+        """The site axis, each ready grid's resolution on it, and the lattice.
+
+        A failure is kept in `geometry_problem` and re-raised; a rebuild that
+        completes clears it."""
+        try:
+            self._rebuild_geometry_now()
+        except Exception as exc:
+            self._geometry_problem = str(exc)
+            raise
+        self._geometry_problem = None
+
+    def _rebuild_geometry_now(self) -> None:
         self._drop_caches()
         self._site_z = None
         self._lattice = None
@@ -713,9 +747,12 @@ class SiteEngine(QObject):
                 # no resolution -- the grid is absent at every window.
                 self._apply_resolution(grid_id, None)
             else:
-                self._apply_resolution(
-                    grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
-                )
+                try:
+                    self._apply_resolution(
+                        grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
+                    )
+                except TooManyLevels as exc:
+                    raise TooManyLevels(f"Grid {grid_id}: {exc}") from exc
         # Together, last: a raise above never leaves a preview with no lattice.
         self._site_z = site_z
         self._lattice = lattice
@@ -1385,6 +1422,7 @@ class SiteEngine(QObject):
         self._lattice = None
         self._full_lattice = None
         self._preview_note = None
+        self._geometry_problem = None
         self._drop_caches()
         self._seen = {}
         self._redraw_ms = None

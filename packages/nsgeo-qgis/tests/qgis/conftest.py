@@ -6,6 +6,7 @@ matrix (no QGIS) stays green while `.venv-qgis` and the Docker job run it.
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import traceback
@@ -27,6 +28,9 @@ def qgis_app():
     app = QgsApplication([], False)
     app.initQgis()
     yield app
+    # A parentless dialog left in a reference cycle would otherwise be collected after
+    # exitQgis(), and its destruction then crashes the process.
+    gc.collect()
     app.exitQgis()
 
 
@@ -564,3 +568,116 @@ def site3_factory(qgis_app, tmp_path):
 def site3(site3_factory):
     """Three adjacent 6 x 6 m synthetic grids, A, B and C, four lines each."""
     return site3_factory()
+
+
+@pytest.fixture
+def synth_site(qgis_app, tmp_path):
+    """Two synthetic lines on a 3 x 12 m grid, in a site folder with a space in its path:
+    for tests that prepare nothing real (they run on CI). Yields `(session, dock, export)`."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import GRID, STEPS_ZERO, Dock, synthetic_dzt
+
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session = SiteSession()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    dock = Dock(session)
+    yield session, dock, ParaViewExport(session, dock)
+    dock.dispose()
+
+
+@pytest.fixture
+def built_site(synth_site):
+    """`(session, dock, export, layers, surfaces)`; surfaces build through `export`."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.surfaces import Surfaces
+    from qgis.core import QgsProject
+
+    session, dock, export = synth_site
+    project = QgsProject.instance()
+    project.clear()
+    layers = SiteLayers(session, project=project)
+    layers.refresh()  # the site is already open
+    surfaces = Surfaces(session, layers, export_for=lambda: export)
+    yield session, dock, export, layers, surfaces
+    layers.detach()
+    project.clear()
+
+
+@pytest.fixture
+def surface_plugin(fake_iface, tmp_path, answer_modal):
+    """The plugin over a synthetic site (two lines on `Grid A`, a preset `p`) with four saved
+    picks on its picks layer, none in a surface. Yields the plugin; `plugin.pick_fids` lists
+    the picks' fids in the order `PICKS` gives them."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.plugin import NsgeoPlugin
+    from nsgeo_qgis.session import Pick
+    from plugin_testing import GRID, STEPS_ZERO, synthetic_dzt
+    from qgis.core import QgsProject, QgsSettings
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    session = plugin.session
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    keys = session.keys()
+    before = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    for line, trace, time_ns in [(0, 5, 10.0), (0, 55, 11.0), (1, 5, 10.5), (1, 55, 11.5)]:
+        plugin.layers.write_pick(
+            Pick(
+                line_key=keys[line],
+                trace=trace,
+                time_ns=time_ns,
+                distance_m=None,
+                depth_m=None,
+                velocity_m_ns=None,
+                stack_json="",
+                note="",
+                created="2026-11-13T00:00:00+00:00",
+                zero_ns=None,
+            )
+        )
+    plugin.pick_fids = sorted(
+        {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()} - before
+    )
+    try:
+        yield plugin
+    finally:
+        plugin.unload()
+        QgsProject.instance().clear()
+        QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+        QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+
+
+@pytest.fixture(autouse=True)
+def _fold_settings(tmp_path, monkeypatch):
+    """Fold state never reaches a real QGIS settings file (#157 item 6)."""
+    from nsgeo_qgis.ui import folds
+    from qgis.PyQt.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(folds, "fold_settings", lambda: store)

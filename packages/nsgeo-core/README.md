@@ -116,13 +116,23 @@ several grids' slices into one site view.
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
 | `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
 | `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
+| `FIT_CLOSE_M` | How near a pick must sit to the surface to count as fitting: 2 cm. |
+| `FIT_NEAR_M` | The looser fit distance, 5 cm. |
 | `Footprint` | Where one grid lands on a site lattice: a window, and the bilinear taps of its pixels. |
+| `HULL_MARGIN_M` | How far past the picks' convex hull a surface may reach: 0.3 m. |
+| `IDW_MIN_DISTANCE_M` | The nearest distance inverse-distance joining uses, 5 cm, so a pick does not spike. |
+| `JOIN_REACH_M` | How far from a pick the minimum-curvature join reaches: 2 m. |
+| `JOINS` | The ways picks can be joined into a guide: `min_curvature`, `idw`. |
+| `JUMP_M` | The depth step between neighbouring cells above which a surface mesh does not join them: 6 cm. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging, minimum curvature. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
 | `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
+| `OFFSET_SEARCH_M` | How far from a pick the strongest swing is sought when measuring the offset: 5 cm. |
+| `Outlier` | A pick the surface does not honour, with its `reason`: `hole`, `edge` (the surface is held at the window's edge) or `far` (further than the window). |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
+| `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
 | `CROP_MAX_DISTANCE_SPACINGS` | The most a section's max distance may be, in line spacings, for its minimum curvature to be solved on crops; above it the whole frame is solved. |
@@ -136,16 +146,24 @@ several grids' slices into one site view.
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
+| `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset with its `offset_votes`, `offset_at_limit` and `offset_reliable` (False when at least half the votes sit on the search limit: a stronger reflection out of reach is likely pulling the surface, so check the picks; a sidelobe inside the search can still pull it unflagged), and the fit. |
+| `SurfaceFit` | How a surface sits against its picks, every pick counted once: within 2 cm, within 5 cm, further, `at_edge` (held at the window's edge) or on a hole; and the outliers. |
+| `SurfaceSettings` | How a surface is built: the join, the tracking window, the strength test and the smoothing. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
+| `VolumeSettings` | How a volume is prepared: the RMS wave period, the sideways blur and the depth-trend window. |
+| `VolumeStopped` | Preparing a volume gave up because its progress callback asked it to stop. |
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
+| `build_surface` | Follow the reflection a set of picks names, leave holes where it fades, and report the fit. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
+| `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
+| `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |
 | `finish_section` | Every level of a cube, finished and read along a section's columns, as the slice picture would show it. |
@@ -159,11 +177,13 @@ several grids' slices into one site view.
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
+| `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
 | `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_section_curvature` | One minimum-curvature plan per crop of a cut, built once for every level. |
 | `plan_windows` | Every window of a thickness, at a step. |
+| `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
 | `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
@@ -180,6 +200,8 @@ several grids' slices into one site view.
 | `solve_section_level_whole` | One level solved by minimum curvature on the whole frame and read along a cut's columns. |
 | `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
+| `surface_mesh` | Points, triangles and flat cell ids of a surface's kept cells, never joining cells that jump in depth. |
+| `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
 | `window_depths_m` | A window in metres, through a velocity model. |
@@ -277,3 +299,13 @@ Where a line's or a grid's velocity came from: the saved fits that made it.
 | `SourceFit` | One member of a record: the line key, fit id and `fitted_at` that identify the fit, and a copy of its numbers (t0, velocity, standard error, zero) as used, so the record holds after the fit is deleted or its line changes. `of` copies a `StoredFit`. |
 | `weighted_mean` | Inverse-variance mean of velocity and standard-error pairs, with its standard error. Raises `ValueError` for no fits or a standard error that is zero, negative or not finite. |
 | `METHOD_FIT`, `METHOD_WEIGHTED_MEAN` | The two ways a record's velocity is made: one picked fit, or the weighted mean of several. |
+
+### `nsgeo.vtkxml`
+
+Streaming VTK XML writers, numpy only, for files ParaView opens directly.
+
+| Name | Purpose |
+|---|---|
+| `write_image_data` | Writes float32 point arrays on a regular grid (`.vti`), each array fed as chunks so a volume never sits in memory whole. Written to a `.part` file and renamed; an array of the wrong length raises `ValueError` and leaves no file. Returns the bytes written. |
+| `write_poly_data` | Writes points, point arrays and vertex, line and polygon cells (`.vtp`). An empty point set is a valid file. Returns the bytes written. |
+| `image_data_bytes` | The exact payload `write_image_data` will write for a shape and array count, plus a fixed 4096-byte header allowance. |
