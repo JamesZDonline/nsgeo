@@ -43,6 +43,11 @@ class PreparedLine:
     coords: np.ndarray
     #: Radar-clock time the axis calls 0 (`Radargram.zero_ns`); 0.0 on the radar clock.
     zero_ns: float = 0.0
+    #: The radar-clock time of the raw record's first arrival as Time zero picks
+    #: it at its default threshold, or None for a record with no signal. Read
+    #: only to move a restored cube that was saved with Time zero onto the
+    #: radar's clock (#162).
+    first_break_ns: float | None = None
 
     def __post_init__(self) -> None:
         if self.data.ndim != 2:

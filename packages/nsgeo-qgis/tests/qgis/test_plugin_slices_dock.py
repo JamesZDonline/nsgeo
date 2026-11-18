@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import gc
 import threading
@@ -13,7 +14,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import retime_ns
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo.velocity import VelocityModel
@@ -29,15 +30,17 @@ from nsgeo_qgis.slices_plan import (
     REFINING_SLICE_INDICATOR,
     Resolution,
     SliceFinish,
+    clock_change_note,
     level_limit_problem,
     limit_windows,
+    no_break_note,
     old_cube_note,
     smallest_safe_cell,
     transform_names,
 )
-from nsgeo_qgis.ui import folds
+from nsgeo_qgis.ui import folds, site_scope
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
-from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
@@ -52,7 +55,7 @@ from plugin_testing import (
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication, QMessageBox, QScrollArea
-from tests.real_data import GRID2_LINES
+from tests.real_data import CAMPUS_LINES, GPS_LINES, GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -77,6 +80,12 @@ def docked_banded(qgis_app, tmp_path):
     """Time-zero preset on lines whose flat bands sit at rows 40, 40 and 41:
     two lines on the earlier zero, one a sample later (the GPS survey's case)."""
     yield from _docked_with(tmp_path, TIME_ZERO_PRESET, band_rows=(40, 40, 41))
+
+
+@pytest.fixture
+def docked_banded_radar(qgis_app, tmp_path):
+    """The banded lines under a preset with no Time zero step: the radar's clock."""
+    yield from _docked_with(tmp_path, PRESET, band_rows=(40, 40, 41))
 
 
 def _banded_dzt(folder, name, band_row):
@@ -2387,14 +2396,24 @@ def _line(tmp_path, grid_id, name, offset):
 def docked_two_grids(qgis_app, tmp_path):
     """`docked`, plus a second grid "B" with its own synthetic lines and a
     second preset "q", so a grid switch has something to restore."""
+    yield from _two_grids_with(tmp_path, PRESET)
+
+
+@pytest.fixture
+def docked_two_grids_zeroed(qgis_app, tmp_path):
+    """`docked_two_grids` with both presets setting time zero (#97)."""
+    yield from _two_grids_with(tmp_path, TIME_ZERO_PRESET)
+
+
+def _two_grids_with(tmp_path, preset):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
     session.add_grid(GRID_B)
     session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
     session.add_lines([_line(tmp_path, "B", f"FILE__01{i}", 1.0 + i) for i in range(2)])
-    session.site.presets["p"] = list(PRESET)
-    session.site.presets["q"] = list(PRESET)
+    session.site.presets["p"] = list(preset)
+    session.site.presets["q"] = list(preset)
     session.presets_changed.emit()
     session.save()
     dock = SlicesDock(session)
@@ -2642,6 +2661,132 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.included_keys() == _grid_keys(session, "A")
     assert session.slice_source("A")["lines"] is None
+
+
+# ---- #152: the grid the panel falls back to ---------------------------------
+def _another_palette(dock):
+    """An offered palette other than the one showing (the default after a preparation)."""
+    shown = dock.palette_combo.currentText()
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    return next(name for name in offered if name != shown)
+
+
+def _second_survey(tmp_path, presets=("p",)):
+    """Another survey on disk, under `tmp_path / "second"`: grid A, three
+    synthetic lines, and `presets` (each the dewow `PRESET`). Its grid has no
+    remembered slice source."""
+    folder = tmp_path / "second"
+    folder.mkdir()
+    other = SiteSession()
+    other.new_site(folder)
+    other.add_grid(GRID)
+    other.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+    )
+    for name in presets:
+        other.site.presets[name] = list(PRESET)
+    other.save()
+    return other.json_path
+
+
+def test_a_grid_the_combo_falls_back_to_opens_on_the_preset_whole_site_draws_it_with(
+    docked_two_grids,
+):
+    """#152: removing the selected grid moves the combo on its own. The grid it
+    falls back to used to keep the removed grid's preset; it opens on the one
+    Whole site draws it with, and nothing is written to its record."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")  # by hand: A remembers q
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("A")["preset"] == "q"
+    assert session.slice_source("B") in (None, {})
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == site_scope.default_preset(session, "B") == "p"
+    assert dock.engine.choice.preset == "p"
+    assert not session.slice_source("B")
+
+
+def test_a_grid_picked_by_hand_still_carries_the_preset_over(docked_two_grids):
+    """Guard (holds today): #152's rule is for a grid the combo moves to on its
+    own. A grid picked by hand keeps the preset showing, and the pick records
+    it as that grid's source."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.preset_combo.currentText() == "q"
+    assert session.slice_source("B")["preset"] == "q"
+
+
+def test_opening_a_survey_does_not_carry_a_same_named_preset_over(docked_two_grids, tmp_path):
+    """Guard (holds today): #152 (spec §5) counts the first grid of a survey just
+    opened as one the combo moved to on its own. A preset the last survey showed
+    is no choice made for it, even when the new survey has one of the same name.
+    It already opens on `p`: `open_site` closes the open survey first, and that
+    `site_closed` empties the preset combo, so the refill selects the first
+    preset. This pins it now that a site open goes through the fallback rule."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.preset_combo.currentText() == "q"
+    session.save()
+
+    session.open_site(_second_survey(tmp_path, presets=("p", "q")))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert session.slice_source("A") is None
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.engine.choice.preset == "p"
+
+
+def test_removing_the_grid_while_its_restore_prepares_drops_the_restore(docked_two_grids):
+    """Review Focus 1: the restored grid is removed before its preparation
+    lands, so the combo falls back to another grid. That is a source change:
+    the restored palette and shift are dropped, not applied to that grid."""
+    dock, session = docked_two_grids
+    session.site.presets["z"] = list(TIME_ZERO_PRESET)
+    session.presets_changed.emit()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("z")  # A's cube on a preset that sets time zero
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()  # B's too: the same transform
+    other = _another_palette(dock)
+    _owed_record(dock, session, palette=other)  # no clock marked: it owes a shift
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock._pending_palette is None
+    assert not dock._pending_z_shift
+    assert dock.palette_combo.currentText() == default
+    # No shift landed on B: neither a toast nor a note says so.
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
 
 
 # ---- #71: each grid remembers its own resolution ----------------------------
@@ -3699,6 +3844,11 @@ def test_a_line_imported_onto_a_default_grid_still_shows_stale(docked_two_grids,
     assert dock.source_status.text().startswith("stale")
 
 
+def _notes(dock) -> list[str]:
+    """The texts of the ⓘ notes in Warnings, in order (spec §8)."""
+    return [e.text for e in dock.warnings_panel.entries() if e.kind == NOTE]
+
+
 def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
@@ -3714,7 +3864,9 @@ def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_tw
     dock.restore_cube("A__m")
     assert dock.engine.wait_for_preparation(20_000)
     assert a_keys[2] not in dock.included_keys()
-    assert any("moved to another grid since it was saved" in e for e in errors), errors
+    moved = [n for n in _notes(dock) if "moved to another grid since it was saved" in n]
+    assert len(moved) == 1, _notes(dock)
+    assert not [e for e in errors if "moved to another grid" in e], errors
 
 
 def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
@@ -3762,10 +3914,10 @@ def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docke
 # ---- #97: cubes on the time-zero clock ------------------------------------
 
 
-def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None):
+def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None, palette="amp_black_high"):
     """A record as an earlier build wrote it: no `time_base`, z on the radar clock."""
     record = _save_cube(
-        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
     )
     record.pop("time_base", None)
     if time_base is not None:
@@ -3811,7 +3963,9 @@ def _clock_start_record(dock, session, cube_id="A__old"):
 def _assert_a_clean_old_restore(dock, errors):
     median = dock.engine.median_zero()
     assert not [m for m in errors if "does not cover" in m or "could not" in m], errors
-    assert errors.count(old_cube_note(-median)) == 1, errors
+    note = old_cube_note(-median)
+    assert _notes(dock).count(note) == 1, _notes(dock)
+    assert note not in errors, errors
     low, high = dock.engine.prepared_z_bounds()
     assert low - 1e-9 <= dock.engine.z.t0_ns < dock.engine.z.t_end_ns <= high + 1e-9
     assert dock.current_values() is not None
@@ -3908,14 +4062,14 @@ def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_l
     errors: list[str] = []
     dock.error.connect(errors.append)
     dock.restore_cube("A__old")
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
     dock._scope = "site"
     try:
         dock._on_prepared()  # the preparation lands while Whole site is showing
     finally:
         dock._scope = "grid"
-    assert dock._pending_z_shift is True
-    assert not errors.count(old_cube_note(-(dock.engine.median_zero() or 0.0)))
+    assert dock._pending_z_shift
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
 
     assert dock.engine.wait_for_preparation(20_000)
     dock._on_prepared()  # This grid's preparation lands
@@ -3923,32 +4077,42 @@ def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_l
     _assert_shifted_once(dock, errors)
 
 
-def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed):
+def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed, monkeypatch):
+    """With a shift owed and a preparation running, `_settle_and_push` leaves
+    both the shift and the push to that preparation's `_on_prepared`: no
+    range reaches the engine before its owed shift (spec §3)."""
     dock, session = docked_zeroed
     _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
     errors: list[str] = []
     dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
     dock.restore_cube("A__old")
     assert dock.engine.is_running
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
 
-    dock._apply_owed_z_shift()  # must not consume the flag or say anything
+    dock._settle_and_push()  # must not consume the flag, push or say anything
 
-    assert dock._pending_z_shift is True
-    assert not [m for m in errors if "first break" in m], errors
+    assert dock._pending_z_shift
+    assert pushed == [], "pushed while the shift was still owed"
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
     assert dock.engine.wait_for_preparation(20_000)
     _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
 
 
-def _assert_shifted_once(dock, errors):
+def _assert_shifted_once(dock, errors, note=None):
+    """The owed record's range (5..40 ns, radar clock) moved once by the median
+    zero, said once in Warnings: `note`, or an unmarked record's by default."""
     median = dock.engine.median_zero()
-    assert median is not None
+    assert median is not None and abs(median) > 1e-3, median
     assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
     # The engine, not just the spins: the slice and Save cube read this.
     assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
-    assert errors.count(old_cube_note(-median)) == 1, errors
-    assert dock._pending_z_shift is False
+    note = note or old_cube_note(-median)
+    assert _notes(dock).count(note) == 1, _notes(dock)
+    assert note not in errors, errors
+    assert not dock._pending_z_shift
 
 
 def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
@@ -3983,7 +4147,7 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     dock.error.connect(errors.append)
     dock._grid_prepare_pending = True  # R-P5: a site task is still live
     dock.restore_cube("A__old")
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
 
     dock._run_pending_grid_prepare()  # the engine holds the source: a no-op prepare
 
@@ -3996,14 +4160,359 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     dock._on_prepared()
     assert dock.z0_spin.value() == pytest.approx(20.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(30.0, abs=1e-3)
-    assert errors.count(old_cube_note(-dock.engine.median_zero())) == 1
+    # The edit took the note down, and no second shift said it again.
+    assert _notes(dock) == []
+    assert old_cube_note(-dock.engine.median_zero()) not in errors, errors
 
 
-def test_rebuilding_the_source_drops_an_owed_shift(docked_zeroed):
-    dock, _session = docked_zeroed
-    dock._pending_z_shift = True
+# ---- spec §3: one settle sequence (#162 item 3, #200), notes in Warnings (§8) ----
+
+
+def _record_pushes(dock, monkeypatch) -> list[float]:
+    """Each `t0_ns` pushed at This grid's engine, in order, refused or not."""
+    pushed: list[float] = []
+    inner = dock.engine.set_resolution
+
+    def record(resolution):
+        if resolution is not None:
+            pushed.append(resolution.t0_ns)
+        inner(resolution)
+
+    monkeypatch.setattr(dock.engine, "set_resolution", record)
+    return pushed
+
+
+def _assert_pushed_shifted(dock, pushed):
+    """The owed record's range (5..40 ns, radar clock) reached the engine
+    shifted by the median zero, and never unshifted."""
+    median = dock.engine.median_zero()
+    assert median is not None and abs(median) > 1e-3, median
+    assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
+    assert pushed, "the restored range never reached the engine"
+    assert all(t == pytest.approx(5.0 - median, abs=1e-3) for t in pushed), pushed
+    assert not [t for t in pushed if t == pytest.approx(5.0, abs=1e-3)], pushed
+
+
+def _site_task_live(monkeypatch, dock) -> list[bool]:
+    """Make the site engine report a live task (R-P5) while `live[0]` is True.
+    Patched on the class, as a property; monkeypatch undoes it."""
+    live = [True]
+    monkeypatch.setattr(type(dock.site_engine), "has_live_task", property(lambda _s: live[0]))
+    return live
+
+
+def test_an_owed_shift_is_pushed_only_after_it_is_applied(docked_zeroed, monkeypatch):
+    """#162 item 3: the preparation and the resolution are both owed, and the
+    engine already holds the source. `_run_pending_grid_prepare` clamped and
+    pushed the record's radar-clock range first, then shifted it and pushed
+    again: the range started a line zero late until the second push."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock._grid_prepare_pending = True
+    dock._resolution_owed = True
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    dock._run_pending_grid_prepare()
+
+    _assert_pushed_shifted(dock, pushed)
+
+
+def test_an_owed_shift_waits_for_the_preparation_it_is_owed_to(docked_zeroed, monkeypatch):
+    """#162 item 3, with a preparation running. The engine was cleared, so a
+    preparation is dispatched (the restore's own `prepare()`: no site task is
+    live) and `_run_pending_grid_prepare` finds it running. It pushed the
+    radar-clock range at once; the preparation's `_on_prepared` shifted it
+    only afterwards."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=True)
+    dock._grid_prepare_pending = True
+    dock._resolution_owed = True
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_pushed_shifted(dock, pushed)
+
+
+def test_a_restore_that_waits_for_a_site_task_and_owes_a_shift_pushes_it_shifted(
+    docked_zeroed, monkeypatch
+):
+    """Spec §3 with #200: the restore defers behind a live site task, the retry
+    dispatches the preparation (the engine was cleared), and the shift is owed
+    to it. Nothing is pushed before `_on_prepared` shifts the range, and the
+    note shows once. A guard: it pins today's code."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the retry dispatches
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    assert dock._grid_prepare_pending and dock._resolution_owed and dock._pending_z_shift
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.is_running, "the retry dispatched the preparation"
+    assert pushed == [], "pushed before the shift"
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
+
+
+@pytest.mark.parametrize("leave", ["edit", "scope"])
+def test_a_restore_note_goes_when_the_cube_is_left(docked_zeroed, leave):
+    """Spec §8: the note describes the cube the Cube box names. An edit marks
+    the cube unsaved and takes the note down; so does a scope change."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")  # picked, as the user picks it
+    assert not dock.engine.is_running
+    assert _notes(dock) == [old_cube_note(-dock.engine.median_zero())]
+
+    if leave == "edit":
+        dock.z1_spin.stepDown()
+        assert dock.cube_combo.currentText() == "(unsaved)"
+    else:
+        dock.set_scope("site")
+        assert dock.site_engine.wait_until_idle(60_000)
+        dock.set_scope("grid")
+
+    assert _notes(dock) == []
+
+
+def test_an_edit_while_a_restore_prepares_leaves_no_note_past_the_next_edit(docked_zeroed):
+    """Review I2-1, route (b): an edit inside the preparation window marks the
+    cube unsaved before its shift lands. The shift then moves the edited spins
+    and its note says why; the next edit, with the Cube box already reading
+    "(unsaved)", must take that note down."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.is_running
+
+    dock.z1_spin.stepDown()
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert _notes(dock), "the late note: the shift moved the edited range"
+
+    dock.z1_spin.stepDown()
+
+    assert _notes(dock) == []
+
+
+def test_a_restore_refused_at_its_checks_takes_the_last_notes_down(docked_zeroed):
+    """Review I2-1, route (a): a refused restore leaves the dock as it was, but
+    the Cube box leaves the cube it named, so that cube's notes go with it."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    record = _save_cube(
+        dock, session, "A__gone", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    record["preset"] = "does-not-exist"
+    dock.cube_combo.setCurrentText("A__old")
+    assert _notes(dock)
+
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert _notes(dock) == []
+
+
+def test_a_restore_that_fails_past_its_checks_takes_the_last_notes_down(docked_zeroed, monkeypatch):
+    """A restore that passed its checks drops the last cube's notes; one that
+    then fails says so in a toast, and Warnings shows what is left."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")
+    assert _notes(dock)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dock, "apply_view", boom)
+    dock.restore_cube("A__old")
+
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert _notes(dock) == []
+
+
+def test_saving_a_cube_takes_the_last_restore_s_notes_down(docked_zeroed):
+    """Spec §8 (final review F-I1): Save cube… selects the record it just wrote
+    (`refresh_cube_combo(select=...)`), so the Cube box leaves the restored cube
+    and that cube's notes go with it. A refill with no `select` (a survey
+    signal's rebuild) leaves the Cube box where it was, and the note stands."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")  # picked, as the user picks it
+    note = old_cube_note(-dock.engine.median_zero())
+    assert _notes(dock) == [note]
+
+    # Recorded as `plugin.save_cube` records it; `_save_cube` refills with no `select`.
+    _save_cube(dock, session, "A__saved", dock.view_settings(), time_base=TIME_BASE_TIME_ZERO)
+    assert dock.cube_combo.currentText() == "A__old"
+    assert _notes(dock) == [note]
+
+    dock.refresh_cube_combo(select="A__saved")
+
+    assert dock.cube_combo.currentText() == "A__saved"
+    assert _notes(dock) == []
+
+
+def test_closing_the_site_while_a_restore_waits_for_a_site_task_is_quiet(
+    docked_zeroed, message_log, monkeypatch
+):
+    """Review Focus 2: the restore waits behind a live site task (R-P5), and
+    the survey closes meanwhile. The retry then runs on a closed survey: no
+    toast, no logged failure, and no resolution left owed. A guard test: it
+    held before the restore owed its resolution (#200), as a closed survey
+    offers no source to prepare or push."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock._grid_prepare_pending, "the restore waits for the site task"
+    assert dock._resolution_owed
+
+    session.save()
+    session.close_site()
+    # Here, not after the retry below: the retry consumes the flag anyway.
+    assert not dock._resolution_owed, "the close dropped the owed resolution"
+    live[0] = False
+    dock._run_pending_grid_prepare()
+
+    assert errors == []
+    assert not [m for m in message_log if "could not" in m], message_log
+
+
+def test_restoring_the_same_old_cube_twice_before_it_prepares_shifts_once(docked_zeroed):
+    """Review Focus 3: picked twice before its preparation lands, the old cube
+    is shifted once, and says so once. A guard on the shift, which held
+    before; only the note's place (Warnings, spec §8) is new."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_a_restore_that_leaves_lines_out_and_shifts_shows_both_notes(docked_two_grids_zeroed):
+    """Review Focus 4: an unmarked record of A, one of whose lines has moved to
+    B since. Both notes show in Warnings, and one edit takes both down."""
+    dock, session = docked_two_grids_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    _owed_record(dock, session)  # "A__old", every line of A
+    session.move_lines([a_keys[2]], "B")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    notes = _notes(dock)
+    moved = [n for n in notes if "moved to another grid since it was saved" in n]
+    assert old_cube_note(-dock.engine.median_zero()) in notes, notes
+    assert len(moved) == 1 and len(notes) == 2, notes
+    assert not [e for e in errors if "first break" in e or "moved to another" in e], errors
+
+    dock.z1_spin.stepDown()
+    assert _notes(dock) == []
+
+
+@pytest.mark.parametrize("signal", ["lines_changed", "grids_changed", "presets_changed"])
+def test_an_edit_while_a_restore_prepares_keeps_its_shift_and_note(docked_zeroed, signal):
+    """#162 item 2: an edit that leaves the source as it was does not forget
+    what a restore still owes. `rebuild_source` answers all three signals, and
+    it used to drop the owed shift on every one: the cube came back on the
+    radar clock, a line zero away, under its own name and with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
+    getattr(session, signal).emit()
+
+    assert dock.engine.wait_for_preparation(20_000)
+    _assert_shifted_once(dock, errors)
+
+
+def test_rebuilding_the_source_keeps_what_a_restore_owes_on_the_same_site(docked_zeroed):
+    """#162 item 2 (spec §2): only a new site or a source change drops a
+    restore's pending values. A rebuild on the same site, with the source as it
+    was, keeps both for the preparation still running."""
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    other = _another_palette(dock)
+    _prepared_with_owed_record(dock, session, palette=other)  # engine cleared
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
     dock.rebuild_source()
-    assert dock._pending_z_shift is False
+
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+
+def test_a_restored_palette_does_not_carry_into_the_next_survey(docked, tmp_path):
+    """#163 item 4: a palette a restore still owes belongs to the survey it was
+    made in. Closing that survey mid-preparation used to leave it pending, and
+    the next survey's first preparation applied it."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    dock.engine.clear()
+    dock.restore_cube("A__test")
+    assert dock.engine.is_running
+
+    session.save()
+    session.close_site()
+    assert dock._pending_palette is None
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.palette_combo.currentText() == default
+
+
+def test_a_survey_opened_after_closing_one_in_this_grid_starts_at_its_first_slice(docked, tmp_path):
+    """#102, without Whole site: the slider's own index was the closed survey's.
+    With no axis left to carry a time from, nothing placed it again, so the next
+    survey opened at the old one's slice."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    assert dock.slice_slider.value() > 0
+    session.save()
+    session.close_site()
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+
+    assert dock.slice_slider.value() == 0
 
 
 def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):
@@ -4031,7 +4540,8 @@ def test_a_marked_record_is_not_shifted(docked_zeroed):
 
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
 
 
 def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
@@ -4045,7 +4555,245 @@ def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
 
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
+
+
+# ---- #162 item 1: a preset whose clock changed since the save -----------------
+
+
+def test_a_radar_record_whose_preset_gained_time_zero_restores_moved_by_the_median_zero(
+    docked_zeroed,
+):
+    """A cube saved on the radar's clock (its record says so), restored after
+    its preset took up Time zero. Only a record with no clock was shifted, so
+    this one came back a line zero away under its own name, with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, time_base="radar")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    median = dock.engine.median_zero()
+    _assert_shifted_once(
+        dock, errors, note=clock_change_note("A__old", "p", TIME_BASE_TIME_ZERO, -median)
+    )
+
+
+def test_a_time_zero_record_whose_preset_lost_it_restores_moved_by_the_median_first_break(
+    docked_banded_radar,
+):
+    """A cube saved with Time zero, restored after its preset dropped the step.
+    The lines are on the radar's clock and each zero reads 0.0, so the range
+    moves by the median first break, `retime_ns(t, break, 0.0)`. It came back
+    as saved, a line zero away under its own name, with no note."""
+    dock, session = docked_banded_radar
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    first_break = dock.engine.median_first_break()
+    dt = dock.engine.prepared_lines()[0].dt_ns
+    assert first_break is not None and abs(first_break) > dt, first_break
+    # Inside the prepared range with the break added, so the clamp moves nothing.
+    low, high = dock.engine.prepared_z_bounds()
+    t0 = round(low + abs(first_break) + 1.0, 3)
+    t1 = round(min(high - abs(first_break) - 1.0, t0 + 30.0), 3)
+    _owed_record(dock, session, time_base="time_zero", z={"t0_ns": t0, "t1_ns": t1, "dz_ns": 0.5})
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.median_first_break() == pytest.approx(first_break)
+    assert dock.z0_spin.value() == pytest.approx(t0 + first_break, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(t1 + first_break, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(t0 + first_break, abs=1e-3)
+    note = clock_change_note("A__old", "p", TIME_BASE_RADAR, first_break)
+    assert _notes(dock) == [note]
+    assert note not in errors, errors
+    assert not dock._pending_z_shift
+
+
+def test_a_lost_time_zero_with_no_first_break_says_the_range_was_left(
+    docked_banded_radar, monkeypatch
+):
+    """Review Focus 5: the preset lost Time zero, and no prepared line has a
+    first break to shift by. The range stays as saved, and a note says so: the
+    cube must not come back on the wrong clock without a word."""
+    dock, session = docked_banded_radar
+    _prepared_with_owed_record(dock, session, time_base="time_zero")
+    monkeypatch.setattr(dock.engine, "median_first_break", lambda: None)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.is_prepared
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(5.0, abs=1e-3)
+    assert _notes(dock) == [no_break_note("A__old", "p")]
+    assert not dock._pending_z_shift
+
+
+_DEWOW = {"step": "dewow", "params": {}, "enabled": True}
+_TIME_ZERO = {"step": "time_zero", "params": {}, "enabled": True}
+
+#: The real surveys, four lines each, with the grid length that holds them and
+#: the median line zero the author measured on each (spec §1). Each skips when
+#: its lines are not in tests/data/local (CI).
+_REAL_SURVEYS = [
+    pytest.param(
+        CAMPUS_LINES[:4],
+        12.0,
+        (0.3, 0.7),
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        (1.2, 1.7),
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@contextlib.contextmanager
+def _real_docked(tmp_path, paths, length_m, presets):
+    """A dock on real lines across a grid `length_m` long, with `presets`.
+    The lines run half a metre apart, and the grid is wide enough for them."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    width_m = max(3.0, 0.5 * (len(paths) + 1))
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, width_m, length_m, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, p.stem))
+            for i, p in enumerate(paths)
+        ]
+    )
+    session.site.presets.update(presets)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        yield dock, session
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize(("paths", "length_m", "band"), _REAL_SURVEYS)
+def test_a_real_data_old_record_restores_moved_by_the_median_zero(
+    qgis_app, tmp_path, paths, length_m, band
+):
+    """A record with no clock, restored on real lines under a preset with Time
+    zero, moves by the median line zero, of the size the author measured on
+    that survey. A guard: it holds today."""
+    with _real_docked(tmp_path, paths, length_m, {"p": [_TIME_ZERO, _DEWOW]}) as (dock, session):
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.flush_debounce()
+        assert dock.engine.wait_for_preparation(60_000)
+        _owed_record(dock, session)
+        dock.engine.clear()
+        errors: list[str] = []
+        dock.error.connect(errors.append)
+
+        dock.restore_cube("A__old")
+        assert dock.engine.wait_for_preparation(60_000)
+
+        median = dock.engine.median_zero()
+        assert band[0] <= abs(median) <= band[1], median
+        _assert_shifted_once(dock, errors)
+
+
+def _step(name, **params):
+    return {"step": name, "params": params, "enabled": True}
+
+
+#: The author's own processing on each real survey, less its Time zero step:
+#: what a preset that has lost Time zero runs. The gain steps are what moved
+#: a first break picked on the prepared lines (PF-1).
+_CAMPUS_STEPS = [
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step("gain_curve", points=[[0.478, -0.807], [17.98, 8.33], [33.90, -2.98], [98.82, -3.08]]),
+]
+_GPS_STEPS = [
+    _step("time_cutoff", end_ns=45.0),
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step(
+        "gain_curve",
+        points=[[-1.559, 0.0], [7.29, -0.079], [12.47, 6.15], [19.55, -0.142], [45.0, 0.0]],
+    ),
+]
+#: All ten campus lines, not the first four: on lines 1-4 the gain steps
+#: leave a prepared-line pick where it was, and on five of the other six they
+#: move it four samples late, which made the median two samples late (PF-1).
+_REAL_PROCESSING = [
+    pytest.param(
+        CAMPUS_LINES,
+        12.0,
+        _CAMPUS_STEPS,
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        _GPS_STEPS,
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("paths", "length_m", "steps"), _REAL_PROCESSING)
+def test_the_first_break_estimate_matches_time_zero_on_real_lines(
+    qgis_app, tmp_path, paths, length_m, steps
+):
+    """Spec §9, the check that the estimate is fair: the median first break a
+    restore shifts by when its preset has lost Time zero agrees with the median
+    line zero Time zero itself finds, within half a sample: they are the same
+    pick on the same raw records, so they match exactly, and a whole sample off
+    is a different row. The lost side runs the author's own processing less
+    Time zero; the found side puts Time zero in front of it, where it runs on
+    the raw record. Both are read as This grid prepares the lines, under its own
+    transform (the default), as a restore reads them.
+
+    Picked on the prepared lines, the estimate was two samples late on the
+    campus lines and one sample late on these four GPS lines (PF-1): the gain
+    steps moved it. One sample passed the one-sample tolerance this test had
+    before, so GPS pinned nothing. The pick is now each raw record's, so the
+    transform cannot move it either; no transform is pinned.
+
+    With Time zero in front, `time_cutoff`'s 45 ns is on the time-zero clock,
+    and without it on the radar's: it ends the record well after the first
+    arrival either way."""
+    presets = {"radar": list(steps), "zeroed": [_TIME_ZERO, *steps]}
+    with _real_docked(tmp_path, paths, length_m, presets) as (dock, _session):
+        assert dock.engine.wait_for_preparation(60_000)
+        read = {}
+        for preset in ("radar", "zeroed"):
+            dock.preset_combo.setCurrentText(preset)
+            assert dock.engine.wait_for_preparation(60_000)
+            assert dock.engine.choice.preset == preset and dock.engine.is_prepared
+            assert dock.engine.line_count == len(paths), preset
+            read[preset] = (dock.engine.median_first_break(), dock.engine.median_zero())
+        dt = dock.engine.prepared_lines()[0].dt_ns
+        transform = dock.engine.choice.transform
+    first_break, zero = read["radar"][0], read["zeroed"][1]
+    assert first_break == pytest.approx(zero, abs=dt / 2), (transform, first_break, zero, dt)
 
 
 def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):
@@ -4061,8 +4809,8 @@ def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_p
 
     assert dock.engine.median_zero() is None
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
-    assert dock._pending_z_shift is False
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert not dock._pending_z_shift
     assert not [m for m in message_log if "could not" in m], message_log
 
 
@@ -4765,8 +5513,10 @@ def docked_mixed_radar(qgis_app, tmp_path):
     _dispose(dock)
 
 
-def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(docked_mixed_radar):
-    dock, session = docked_mixed_radar
+def _deep_cube_saved_with_a_shown(dock, session, palette: str | None = "amp_black_high"):
+    """Save "B__deep", a cube of B with more levels than A's lines allow, then
+    show A again. Returns the cube's z axis. A `palette` of None saves it with
+    an offered palette that is not B's default (`_another_palette`)."""
     assert dock.engine.wait_for_preparation(20_000)
     dock.grid_combo.setCurrentText("B")
     assert dock.engine.wait_for_preparation(20_000)
@@ -4778,10 +5528,18 @@ def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(do
     dock.flush_debounce()
     deep = dock.engine.z
     assert deep is not None and deep.nz > 1024, "more levels than A's lines would allow"
-    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    if palette is None:
+        palette = _another_palette(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
     _save_cube(dock, session, "B__deep", view)
     dock.grid_combo.setCurrentText("A")
     assert dock.engine.wait_for_preparation(20_000)
+    return deep
+
+
+def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(docked_mixed_radar):
+    dock, session = docked_mixed_radar
+    deep = _deep_cube_saved_with_a_shown(dock, session)
     errors: list[str] = []
     dock.error.connect(errors.append)
     dock.restore_cube("B__deep")
@@ -4794,6 +5552,82 @@ def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(do
     assert z.dz_ns == pytest.approx(deep.dz_ns)
     assert dock.warnings_panel.entries() == ()
     assert errors == []
+
+
+def test_a_restore_that_waits_for_a_site_task_applies_its_resolution_to_its_own_grid(
+    docked_mixed_radar, monkeypatch
+):
+    """#200: a site task is still live, so R-P5 defers the restore's
+    preparation and the engine still holds A. The restore flushed its
+    resolution at once, against A's level limit, which refused B's deep cube.
+    It is owed instead, and lands on B once B is prepared."""
+    dock, session = docked_mixed_radar
+    deep = _deep_cube_saved_with_a_shown(dock, session)
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("B__deep")
+
+    assert dock.warnings_panel.entries() == ()
+    assert dock._resolution_owed
+    assert dock.engine.choice.grid_id == "A"
+
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+
+    assert dock.grid_combo.currentText() == "B"
+    z = dock.engine.z
+    assert z is not None
+    assert z.nz == deep.nz
+    assert z.dz_ns == pytest.approx(deep.dz_ns)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_that_waits_for_a_site_task_keeps_its_palette(docked_mixed_radar, monkeypatch):
+    """#200: the restore's preparation is owed while a site task is live, so
+    no preparation is running when `restore_cube` returns. That read as a no-op
+    preparation and dropped the cube's palette, and the owed preparation's
+    `_on_prepared` then drew B on its default palette."""
+    dock, session = docked_mixed_radar
+    _deep_cube_saved_with_a_shown(dock, session, palette=None)
+    palette = session.site.cubes["B__deep"]["view"]["palette"]
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("B__deep")
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+
+    assert dock.grid_combo.currentText() == "B"
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert palette in offered, offered
+    assert dock.palette_combo.currentText() == palette
+
+
+def test_a_waiting_restore_whose_source_is_prepared_leaves_no_palette_pending(docked, monkeypatch):
+    """The restore waits behind a site task for a source the engine already
+    holds, so the owed preparation is a no-op and no `_on_prepared` follows.
+    The palette the restore set stands, and none stays pending for a later,
+    unrelated preparation to apply (fix round 1's rule)."""
+    dock, session = docked
+    _ready(dock)
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("A__test")
+    assert dock._pending_palette == other, "held for the owed preparation"
+    live[0] = False
+    dock._run_pending_grid_prepare()
+
+    assert not dock.engine.is_running
+    assert dock._pending_palette is None
+    assert dock.palette_combo.currentText() == other
 
 
 @pytest.fixture
@@ -4854,6 +5688,31 @@ def test_a_restore_onto_another_grid_clears_the_refusal_of_the_one_left(docked_b
     QCoreApplication.processEvents()
     assert dock.warnings_panel.entries() == ()
     assert dock.cell_spin.minimum() < big_floor, "the record has no resolution: Small's floor"
+
+
+def test_a_restore_owed_a_shift_clears_the_refusal_of_the_grid_left_at_once(
+    docked_two_grids_zeroed,
+):
+    """Parked Ruling 36, sharpening the test above: a restore that owes a shift
+    pushes nothing until its preparation lands, so no apply clears A's
+    refusal for it. Only the restore's own clearing does, and Warnings is
+    empty as soon as `restore_cube` returns. A guard test: it holds today."""
+    dock, session = docked_two_grids_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")  # B's lines on a preset that sets time zero
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    _owed_record(dock, session, cube_id="B__old")  # no clock marked: it owes a shift
+    dock.grid_combo.setCurrentText("A")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+
+    dock.restore_cube("B__old")
+
+    assert dock._pending_z_shift, "the shift waits for B's preparation"
+    assert dock.warnings_panel.entries() == ()
 
 
 def test_a_z_range_the_resolution_rejects_clears_the_last_refusal(docked):

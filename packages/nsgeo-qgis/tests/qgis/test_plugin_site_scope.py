@@ -2145,6 +2145,29 @@ def test_a_carried_time_never_overrides_a_later_resolution_change(plugin):
     assert dock._pending_top_ns is None
 
 
+def test_a_survey_opened_after_closing_one_in_whole_site_starts_at_its_first_slice(
+    plugin, site3_factory
+):
+    """#102: closing a survey under Whole site switches back to This grid, which
+    carries the site's time over. That time was the closed survey's, so the
+    next survey opened at it instead of at its own first slice."""
+    dock = whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    _events()
+    plugin.session.save()
+    plugin.session.close_site()
+    _events()
+    assert dock.scope() == "grid"
+    assert dock._pending_top_ns is None
+    assert not dock._resolution_owed
+
+    plugin.session.open_site(site3_factory().json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+
+    assert dock.slice_slider.value() == 0
+
+
 def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugin, monkeypatch):
     monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
     dock = plugin.slices_dock
@@ -3635,15 +3658,34 @@ def test_the_warnings_say_nothing_when_every_grid_is_on_the_radar_clock(plugin):
 
 
 def test_grid_time_bases_reads_each_grids_preset(plugin):
+    """Before Whole site is entered no grid has been prepared, so each is read
+    from its preset."""
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, C="radar")
     source = site_scope_module.site_source(session, "ABC", "amp_square")
-    assert site_scope_module.grid_time_bases(session, source) == {
+    assert site_scope_module.grid_time_bases(session, source, plugin.slices_dock.site_engine) == {
         "A": "time_zero",
         "B": "time_zero",
         "C": "radar",
     }
+
+
+def test_a_grid_with_no_lines_has_no_clock(plugin):
+    """A grid with no lines is left out of `grid_time_bases`, as a failed one is.
+    A guard: it holds on today's code (#163 item 6 asked for the test)."""
+    session = plugin.session
+    session.add_grid(dataclasses.replace(session.site.grids[0], id="Z"))
+    _preset_per_grid(session)
+    session.remember_slice_source("Z", preset="p", lines=None)
+    dock = whole_site(plugin)
+    source = site_scope_module.site_source(session, "ABCZ", "amp_square")
+    assert [c.grid_id for c in source.grids] == ["A", "B", "C", "Z"]
+    dock.site_engine.set_source(source)
+    assert site_scope_module.state_text(dock.site_engine, "Z") == "no lines"
+    bases = site_scope_module.grid_time_bases(session, source, dock.site_engine)
+    assert "Z" not in bases
+    assert set(bases) == {"A", "B", "C"}
 
 
 def test_the_clock_warning_follows_the_steps_the_grids_were_prepared_with(plugin):

@@ -103,6 +103,7 @@ release's notes list everything in it.
 | | The Slices panel: dz stops at the radar's sample interval and says so, and a cube too deep is refused; warnings and refusals get their own section, and the settings sections fold out of the wheel's way; a Whole site refresh leaves a box you are typing in alone; Edit lines' Grid column ignores the wheel until clicked; grids start at a 0.1 m cell; the panel fits the Processing panel's width ([#177], [#176], [#105], [#121]) | next release |
 | | Export for ParaView, the first of M16's four plans: one action writes a grid's prepared volume, picks and lines, at the grid's own 3-D cell, depth step and depth end, to a folder ParaView opens ready to explore ([#190]) | next release |
 | | Surfaces from picks, M16's second plan: select picks on the map and nsgeo builds the surface they name, leaving holes where the radar saw nothing; it shows on the map coloured by depth, goes into the ParaView export, and is listed in a Surfaces panel with its fit and whether it needs a rebuild; a pick can belong to several surfaces ([#202]) | next release |
+| | A restored cube comes back on the clock it was saved on, even if its preset has since gained or lost Time zero or you edit while it prepares, and says how it moved in Warnings; a quick switch of survey or grid carries nothing over, a new survey opens at its first slice, and a grid the panel falls back to opens on the preset Whole site draws it with ([#162], [#102], [#152], [#200]) | next release |
 
 ### In progress
 
@@ -122,13 +123,6 @@ release's notes list everything in it.
   walked, with no grid: import, the map (with stretches that had no RTK
   fix marked), the Survey panel, and a destagger you can type. Built;
   walkthrough under way.
-- **Slices: the right clock and preset after a change** ([#162], [#102], [#152],
-  part of [#163]). A restored cube comes back on the clock it was saved on, even
-  if you edit while its lines prepare or its preset has since gained or lost
-  Time zero; a quick switch to another survey no longer carries the last one's
-  palette or slice time over; and a grid the panel falls back to opens on the
-  preset Whole site draws it with. Built and reviewed, awaiting its
-  walkthrough.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
@@ -158,8 +152,7 @@ than reworking M16–M17 afterwards.
    is ready to plan, now that [#180] has merged.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
-that cuts carry picks too; and the three ways a restored cube can still come
-back on the wrong clock without a note ([#162], in progress above).
+that cuts carry picks too.
 
 ### Wishlist, not yet scheduled
 
@@ -244,7 +237,6 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
-[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
@@ -264,6 +256,7 @@ Grouped by area. The order within a group is not a priority.
 [#199]: https://github.com/JamesZDonline/nsgeo/issues/199
 [#201]: https://github.com/JamesZDonline/nsgeo/issues/201
 [#190]: https://github.com/JamesZDonline/nsgeo/pull/190
+[#200]: https://github.com/JamesZDonline/nsgeo/issues/200
 [#202]: https://github.com/JamesZDonline/nsgeo/pull/202
 [#203]: https://github.com/JamesZDonline/nsgeo/issues/203
 [#204]: https://github.com/JamesZDonline/nsgeo/issues/204

@@ -215,6 +215,17 @@ def solve_key(values: np.ndarray) -> bytes:
     return digest.digest()
 
 
+def _raw_first_break(record: Radargram) -> float | None:
+    """The radar-clock time of a raw record's first arrival, picked by the Time
+    zero step itself at its default threshold, or None for a record with no
+    signal, which the step refuses ("Time zero found no first arrival").
+    Called on the preparation worker, before the preset runs."""
+    try:
+        return float(build_step("time_zero").apply(record).zero_ns)
+    except ValueError:
+        return None
+
+
 class PendingSolve:
     """One minimum-curvature solve for the refine worker (a `RefineJob`,
     plan calls 6 and 8).
@@ -455,6 +466,24 @@ class SliceEngine(QObject):
         if not self._lines:
             return None
         return float(np.median([line.zero_ns for line in self._lines]))
+
+    def median_first_break(self) -> float | None:
+        """The median of the prepared lines' radar-clock first breaks: the shift
+        a restore owes when its preset has lost Time zero (#162 item 1).
+
+        Each line's break is picked during preparation, on its RAW record, by
+        the Time zero step itself at its default threshold
+        (`_raw_first_break`). That is where Time zero runs in an ordinary
+        preset, where it comes first, so neither the preset's other steps nor
+        the transform move the pick. Picked on the prepared lines instead, the
+        author's gain steps moved it two samples (0.43 ns) late on the campus
+        lines, nearly the whole shift (PF-1).
+
+        A line with no signal has no first break (the step refuses it), and is
+        left out rather than read as row 0, as `first_break_ns` would. None with
+        nothing prepared or no break on any line."""
+        breaks = [line.first_break_ns for line in self._lines if line.first_break_ns is not None]
+        return float(np.median(breaks)) if breaks else None
 
     def prepared_z_bounds(self) -> tuple[float, float] | None:
         """The two-way time range EVERY prepared line covers, or None.
@@ -869,6 +898,8 @@ class SliceEngine(QObject):
                 try:
                     profiles = line.load()
                     radargram = Radargram.from_profile(profiles[0])
+                    # The raw record's, never `result`'s: see `median_first_break`.
+                    first_break = _raw_first_break(radargram)
                     stack = self._build_stack(steps, transform)
                     stack.source = radargram
                     result = stack.result()
@@ -880,6 +911,7 @@ class SliceEngine(QObject):
                             t0_ns=result.t0_ns,
                             coords=coords,
                             zero_ns=float(result.zero_ns),
+                            first_break_ns=first_break,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 -- one bad line must not
@@ -1756,6 +1788,11 @@ class SliceEngine(QObject):
         immediate, wasted rebuild on the very next slice.
         """
         self._cube = None
+
+    @property
+    def prepared_steps(self) -> tuple[dict[str, Any], ...]:
+        """The preset's steps as they stood when preparation was dispatched."""
+        return self._steps
 
     def provenance(self) -> Provenance:
         """What a reader needs to trust the cube.
