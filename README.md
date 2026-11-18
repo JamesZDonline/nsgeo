@@ -121,8 +121,9 @@ release's notes list everything in it.
 - **M17a: GPS lines**, the first of four plans. Read the RTK GPS log
   (`.DZG`) beside each DZT and place the line along the track it was
   walked, with no grid: import, the map (with stretches that had no RTK
-  fix marked), the Survey panel, and a destagger you can type. Built;
-  walkthrough under way.
+  fix marked), the Survey panel, and a destagger you can type. Walked
+  through; PR [#208](https://github.com/JamesZDonline/nsgeo/pull/208) awaits
+  merge.
 - **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
   drag a box around a diffraction hyperbola and the plugin marks about ten
   dots on the leading edge of its band, ready to edit and save like
