@@ -51,7 +51,6 @@ from nsgeo_qgis.scene3d_plan import (
     padded_extent,
     scene_centre,
     scene_grid,
-    scene_stretch,
     stretched_z,
     view_title,
 )
@@ -177,6 +176,7 @@ class Scene3D:
             signal.connect(self.request_refresh)
         surface_layers.add_listener(self.request_refresh)
         self.project.cleared.connect(self._on_cleared)
+        self.project.layersWillBeRemoved.connect(self._on_layers_will_be_removed)
 
     # ---- state -------------------------------------------------------------------
     def is_open(self) -> bool:
@@ -285,6 +285,8 @@ class Scene3D:
                 signal.disconnect(self.request_refresh)
         with contextlib.suppress(TypeError, RuntimeError):
             self.project.cleared.disconnect(self._on_cleared)
+        with contextlib.suppress(TypeError, RuntimeError):
+            self.project.layersWillBeRemoved.disconnect(self._on_layers_will_be_removed)
 
     # ---- the pieces --------------------------------------------------------------
     def _grid_ids(self) -> list[str]:
@@ -296,7 +298,7 @@ class Scene3D:
         return (g.origin, g.azimuth, g.size_x, g.size_y, g.crs)
 
     def _stretch(self, grid: str) -> float:
-        return scene_stretch(self.session.volume_record(grid))
+        return self.session.view_stretch(grid)
 
     def _picks_alive(self) -> bool:
         layer = self.picks_layer
@@ -490,6 +492,22 @@ class Scene3D:
                 self._teardown()
         except Exception as exc:  # noqa: BLE001 -- a slot
             _log(f"could not clean up after the 3-D view: {exc}")
+
+    def _on_layers_will_be_removed(self, layer_ids: list[str]) -> None:
+        """An open 3-D scene keeps a raw pointer to each layer it draws, and QGIS crashes on the
+        next layer update if such a layer is deleted: clear the renderer of every layer of ours
+        about to be deleted, while it is still alive (walkthrough L2 and C2)."""
+        try:
+            wanted = set(layer_ids)
+            managed = list(self.surface_layers.layers_by_feature().values())
+            if self.picks_layer is not None:
+                managed.append(self.picks_layer)
+            for layer in managed:
+                if _alive(layer) and layer.id() in wanted and layer.renderer3D() is not None:
+                    layer.setRenderer3D(None)
+                    self._applied.pop(layer.id(), None)
+        except Exception as exc:  # noqa: BLE001 -- a slot
+            _log(f"could not clear a 3-D renderer before its layer was removed: {exc}")
 
     def _on_cleared(self) -> None:
         """The project was cleared: its layers are gone, so forget them."""

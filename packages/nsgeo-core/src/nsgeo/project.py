@@ -395,6 +395,9 @@ def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     volume = _clean_volume(entry.get("volume"))
     if volume:
         out["volume"] = volume
+    view_stretch = _finite(entry.get("view_stretch"))
+    if view_stretch is not None:
+        out["view_stretch"] = view_stretch
     return out
 
 

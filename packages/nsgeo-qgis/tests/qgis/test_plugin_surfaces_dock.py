@@ -542,3 +542,67 @@ def test_a_grid_that_lost_all_its_lines_reads_as_unavailable(surface_plugin):
     assert state.built and state.stale == ("unavailable",)
     plugin.surfaces_dock.refresh()  # the panel survives it
     assert _rows(plugin.surfaces_dock)[0][4] == "stale"
+
+
+def _second_grid_surface(plugin, tmp_path):
+    """Grid B with a line, four picks and a surface; returns nothing (B then lists in the panel)."""
+    from nsgeo.geometry import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from plugin_testing import synthetic_dzt
+    from test_plugin_surface_build import PICKS, _pick
+
+    session = plugin.session
+    session.add_grid(Grid("Grid B", (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    paths = [synthetic_dzt(tmp_path / "rawb", f"B__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("Grid B", "y", 0.5 + i, 0.0, 1, p.stem))
+            for i, p in enumerate(paths)
+        ]
+    )
+    keys = session.keys_on_grid("Grid B")
+    layers = plugin.surfaces.layers
+    for line, trace, time_ns in PICKS:
+        layers.write_pick(_pick(keys[line], trace, time_ns))
+    fids = sorted(f.id() for f in layers.layers["picks"].dataProvider().getFeatures())[-4:]
+    plugin.surfaces.create("Bowl B", fids, SurfaceSettings(strength=0.0))
+    plugin.surfaces_dock.refresh()
+
+
+def test_the_view_stretch_box_is_off_for_all_grids_and_shows_a_grids_own(surface_plugin, tmp_path):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    _made(plugin)
+    assert dock.grid_combo.currentText() == ALL_GRIDS
+    assert not dock.stretch_spin.isEnabled()
+    assert dock.stretch_spin.toolTip() == "Choose a grid to set its 3D view depth stretch."
+    dock.grid_combo.setCurrentText("Grid A")
+    assert dock.stretch_spin.isEnabled() and dock.stretch_spin.value() == 3.0
+    assert (dock.stretch_spin.minimum(), dock.stretch_spin.maximum()) == (0.1, 50.0)
+    assert dock.stretch_spin.singleStep() == 0.5 and dock.stretch_spin.decimals() == 1
+    plugin.session._set_dirty(False)
+    dock.stretch_spin.setValue(2.0)
+    assert plugin.session.view_stretch("Grid A") == 2.0 and plugin.session.dirty
+    _second_grid_surface(plugin, tmp_path)
+    assert plugin.session.slice_source("Grid B") is None  # only Grid A's was set
+    dock.grid_combo.setCurrentText("Grid B")
+    assert dock.stretch_spin.value() == 3.0
+    dock.grid_combo.setCurrentText("Grid A")
+    assert dock.stretch_spin.value() == 2.0
+    dock.grid_combo.setCurrentIndex(0)
+    assert not dock.stretch_spin.isEnabled()
+
+
+def test_loading_the_view_stretch_never_marks_the_site_dirty(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    _made(plugin)
+    plugin.session.set_view_stretch("Grid A", 4.0)
+    plugin.session._set_dirty(False)
+    dock.grid_combo.setCurrentText("Grid A")
+    dock.refresh()
+    dock.grid_combo.setCurrentIndex(0)
+    dock.grid_combo.setCurrentText("Grid A")
+    assert dock.stretch_spin.value() == 4.0
+    assert plugin.session.dirty is False

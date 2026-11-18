@@ -863,3 +863,9 @@ def test_an_unreadable_style_starts_again_from_the_real_limit(mapped):
     _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style", limit=lambda: 7.0)
     assert _range(sl) == (-7.0, 7.0)
     assert len(seen) == 1
+
+
+def test_the_slice_layer_is_skipped_by_qgis_scratch_layer_check(mapped):
+    sl, _, _, _ = mapped
+    sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="x")
+    assert sl.layer.customProperty("skipMemoryLayersCheck") == 1

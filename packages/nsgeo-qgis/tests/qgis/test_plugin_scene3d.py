@@ -175,13 +175,96 @@ def test_the_stretch_restretches_picks_and_surfaces(scene):
     s3d, session, surfaces, surface_layers, iface, _ = scene
     s3d.open()
     depths = _depths_of(scene, A)
-    session.remember_volume(A, stretch=2.0)
+    session.set_view_stretch(A, 2.0)
     s3d.refresh()
     assert _z(scene) == pytest.approx(sorted(-d * 2.0 for d in depths))
     (record,) = [r for r in surfaces.records() if r.grid_id == A]
     assert _vertical_scale(surface_layers.layers_by_feature()[record.feature_id]) == 2.0
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
     assert "×2" in iface.dialogs3d[VIEW_NAME].windowTitle()
+
+
+def test_the_exports_stretch_no_longer_moves_the_view(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    depths = _depths_of(scene, A)
+    session.remember_volume(A, stretch=7.0)  # the ParaView export's own setting
+    s3d.refresh()
+    assert _z(scene) == pytest.approx(sorted(-d * 3.0 for d in depths))
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
+
+
+def _record_renderer_clears(layer, project, log):
+    layer.renderer3DChanged.connect(
+        lambda: log.append((project.mapLayer(layer.id()) is not None, layer.renderer3D() is None))
+    )
+
+
+def test_a_surface_layer_loses_its_3d_renderer_before_it_is_deleted(scene):
+    """The view's scene keeps a raw pointer to each layer it draws: a layer deleted with its
+    renderer on crashed QGIS (walkthrough L2)."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    layer_id = layer.id()
+    assert layer.renderer3D() is not None
+    log: list = []
+    _record_renderer_clears(layer, QgsProject.instance(), log)
+    QgsProject.instance().removeMapLayer(layer_id)
+    assert (True, True) in log
+
+
+def test_a_rebuild_clears_the_old_layers_renderer_while_it_is_still_in_the_project(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    old = surface_layers.layers_by_feature()[record.feature_id]
+    log: list = []
+    _record_renderer_clears(old, QgsProject.instance(), log)
+    surfaces.set_settings(record.feature_id, SurfaceSettings(strength=0.0, window_m=0.03))
+    surfaces.build([record.feature_id], progress=_noop)
+    surface_layers.sync()
+    assert (True, True) in log
+
+
+def test_the_picks_layer_loses_its_renderer_before_the_site_closes_it(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    log: list = []
+    _record_renderer_clears(s3d.picks_layer, QgsProject.instance(), log)
+    QgsProject.instance().removeMapLayer(s3d.picks_layer.id())
+    assert (True, True) in log
+
+
+def test_a_layer_the_view_does_not_manage_keeps_its_renderer_when_removed(scene):
+    from nsgeo_qgis.scene3d import _picks_renderer
+    from qgis.core import QgsVectorLayer
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    other = QgsVectorLayer("PointZ?crs=EPSG:32616", "other", "memory")
+    other.setRenderer3D(_picks_renderer())
+    QgsProject.instance().addMapLayer(other, False)
+    log: list = []
+    other.renderer3DChanged.connect(lambda: log.append(1))
+    QgsProject.instance().removeMapLayer(other.id())
+    assert log == []
+
+
+def test_the_scene_gives_up_the_removal_handler_on_dispose(scene):
+    from nsgeo_qgis.scene3d import _picks_renderer
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    s3d.dispose()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    layer.setRenderer3D(_picks_renderer())
+    log: list = []
+    layer.renderer3DChanged.connect(lambda: log.append(1))
+    QgsProject.instance().removeMapLayer(layer.id())
+    assert log == []
 
 
 def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene):
@@ -299,7 +382,7 @@ def test_a_docked_view_is_retitled_and_a_swapped_holder_still_is(scene):
     assert holder.raised == before + 1
     iface.swap_holder3d(VIEW_NAME)
     assert not isinstance(iface.dialogs3d[VIEW_NAME], QDockWidget)
-    session.remember_volume(A, stretch=2.0)
+    session.set_view_stretch(A, 2.0)
     s3d.refresh()
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
 
@@ -336,7 +419,7 @@ def test_picks_update_in_the_open_scene_after_a_new_pick_a_stretch_and_a_grid_sw
     surfaces.layers.write_pick(_pick(session.keys_on_grid(A)[0], 30, 10.2))
     session.picks_changed.emit()
     assert spin_until(lambda: len(seen) == 1)
-    session.remember_volume(A, stretch=2.0)
+    session.set_view_stretch(A, 2.0)
     s3d.refresh()
     assert len(seen) == 2
     s3d.dock_state.grid = B

@@ -1122,3 +1122,15 @@ def test_slice_colours_that_are_not_an_object_read_as_unset(tmp_path):
     doc["slice_colours"] = "own"
     path.write_text(json.dumps(doc))
     assert load_site(path).slice_colours == {}
+
+
+def test_view_stretch_round_trips_and_a_bad_one_is_dropped(tmp_path):
+    site = _two_grid_site()
+    site.slice_sources = {"A": {"view_stretch": 2.5}, "B": {"preset": "p"}}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert load_site(path).slice_sources == site.slice_sources
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {"A": {"view_stretch": "wide"}, "B": {"view_stretch": True}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}

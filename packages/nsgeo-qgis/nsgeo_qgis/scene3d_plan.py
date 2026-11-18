@@ -8,7 +8,7 @@ Pure: no qgis import, so the pure tier and mypy run it. The text lives here, not
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from nsgeo_qgis.slices_plan import DEFAULT_STRETCH
@@ -28,9 +28,18 @@ VIEW_REFUSED: str = (
 )
 
 
-def scene_stretch(record: Mapping[str, object]) -> float:
-    """The record's `stretch` when it is a finite number above 0, else the default."""
-    value = record.get("stretch")
+STRETCH_LABEL: str = "3D view depth stretch ×"
+STRETCH_ALL_TIP: str = "Choose a grid to set its 3D view depth stretch."
+STRETCH_TIP: str = (
+    "How much the QGIS 3-D view stretches depth for this grid. The ParaView export has its own."
+)
+STRETCH_MIN: float = 0.1
+STRETCH_MAX: float = 50.0
+STRETCH_STEP: float = 0.5
+
+
+def scene_stretch(value: object) -> float:
+    """`value` when it is a finite number above 0, else the default."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return DEFAULT_STRETCH
     value = float(value)

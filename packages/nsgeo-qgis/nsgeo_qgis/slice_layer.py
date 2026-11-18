@@ -551,6 +551,8 @@ class SliceLayer(QObject):
 
     def _create_layer(self, path: Path, name: str = LAYER_NAME) -> None:
         layer = QgsRasterLayer(str(path), name, "gdal")
+        # it lives in a temp folder, so QGIS would warn of "scratch layers" on exit; it is a preview
+        layer.setCustomProperty("skipMemoryLayersCheck", 1)
         # #180: the user's edits in Layer Properties arrive as these.
         layer.rendererChanged.connect(self._on_style_signal)
         layer.styleChanged.connect(self._on_style_signal)

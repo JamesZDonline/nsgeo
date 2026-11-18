@@ -32,8 +32,8 @@ def test_scene_grid_follows_this_grid_and_keeps_the_last_in_whole_site():
 
 
 def test_scene_stretch_is_the_grids_own_or_the_default():
-    assert scene_stretch({"stretch": 2.0}) == 2.0
-    for bad in ({}, {"stretch": 0.0}, {"stretch": float("nan")}, {"stretch": "x"}):
+    assert scene_stretch(2.0) == 2.0
+    for bad in (None, 0.0, -1.0, float("nan"), float("inf"), "x", True):
         assert scene_stretch(bad) == DEFAULT_STRETCH
 
 

@@ -2051,3 +2051,24 @@ def test_slice_colours_survive_save_and_reopen(session):
     reopened = SiteSession()
     reopened.open_site(session.root / SURVEY_FILE)
     assert reopened.slice_colours("site") == {"own": True, "style": "<qgis>s</qgis>"}
+
+
+def test_view_stretch_defaults_sets_marks_dirty_and_signals(session):
+    session.add_grid(GRID)
+    session.save()
+    assert session.view_stretch("A") == 3.0
+    changed = Spy(session.slice_sources_changed)
+    session.set_view_stretch("A", 2.0)
+    assert session.view_stretch("A") == 2.0 and session.dirty
+    assert changed.calls == [("A",)]
+    assert session.slice_source("A") == {"view_stretch": 2.0}
+    assert session.volume_record("A") == {}  # the ParaView export's setting is separate
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_set_view_stretch_refuses_a_bad_value(session, bad):
+    session.add_grid(GRID)
+    session.save()
+    with pytest.raises(ValueError, match="stretch"):
+        session.set_view_stretch("A", bad)
+    assert session.view_stretch("A") == 3.0 and not session.dirty

@@ -844,10 +844,11 @@ closing it never marks the site changed.
 
 - **Which grid.** The grid the Slices panel shows. In **This grid** the view follows
   the panel's grid combo. In **Whole site** it keeps the last grid it showed.
-- **The stretch.** Depth is stretched so thin soil is easier to read. The stretch is
-  the grid's ParaView export setting (×3 by default), so the view and the export
-  agree. The view's title states it ("depth stretched ×3"). Change it in the
-  **Export for ParaView** dialog and the view follows.
+- **The stretch.** Depth is stretched so thin soil is easier to read. Set it in the
+  Surfaces panel (**3D view depth stretch**, one per grid, ×3 by default): choose a
+  grid in the panel's grid list and the box turns on. It is saved with the site. The
+  ParaView export has its own stretch in its dialog, and the two do not follow each
+  other. Each title states its own ("depth stretched ×3").
 - **It follows your work.** A new pick appears, and a rebuilt surface is replaced in
   place. A **stale** surface is labelled in the Layers panel, and the title counts
   the stale surfaces on the grid.
