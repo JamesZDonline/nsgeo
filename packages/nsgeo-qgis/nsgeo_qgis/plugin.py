@@ -167,8 +167,9 @@ from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
 VELOCITY_TIP = (
-    "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
-    "Right-click a point to remove it."
+    "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
+    "or drag a box around it to trace it. Right-click a point to remove it. "
+    "Ctrl+click (Cmd+click on a Mac) works with this off."
 )
 VELOCITY_ON_CUT_TIP = (
     "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
@@ -421,6 +422,7 @@ class NsgeoPlugin:
         self.profile_dock = ProfileDock(self.session, main)
         self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
         self.profile_dock.pick_requested.connect(self._on_pick_requested)
+        self.profile_dock.velocity_mode_requested.connect(self._on_velocity_mode_requested)
         self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.docks.append(self.profile_dock)
 
@@ -529,13 +531,15 @@ class NsgeoPlugin:
             lambda: self.processing_dock.diff_button.setChecked(False)
         )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
-        # ProcessingDock never reacts to line_loaded (only ProfileDock
-        # does, to re-render), so a curve step selected before this line's
-        # profiles arrive would otherwise stay exactly as
-        # _sync_gain_strip last left it -- e.g. hidden for want of an axis
-        # -- with nothing to re-check it once ProfileDock's own render
-        # gives it one. Re-running _sync_gain_strip here on the same
-        # signal ProfileDock re-renders from closes that gap.
+        # ProfileDock re-renders on line_loaded, but ProcessingDock does not
+        # re-check the gain strip on it (it reacts only to re-show a form with
+        # a time field and an enabled Time zero above its row, built before
+        # the samples loaded: that field has no clock until then). So a curve
+        # step selected before this line's profiles arrive would stay exactly
+        # as _sync_gain_strip last left it -- e.g. hidden for want of an axis
+        # -- with nothing to re-check it once ProfileDock's own render gives
+        # it one. Re-running _sync_gain_strip here on the same signal
+        # ProfileDock re-renders from closes that gap.
         self.session.line_loaded.connect(self._resync_gain_strip)
         # Walkthrough round 2, W8: the same shape of gap as the gain strip
         # just above, for the profile band. The band is a property of the
@@ -1020,8 +1024,10 @@ class NsgeoPlugin:
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
         See its own connection in `initGui` for why this is needed at all:
-        `line_loaded` is the one render-triggering event `ProcessingDock`
-        never reacts to, so nothing else re-checks a strip `_sync_gain_strip`
+        `ProcessingDock` reacts to `line_loaded` only to re-show a form with a
+        time field and an enabled Time zero above its row, built before the
+        samples loaded (that field has no clock until then), not to re-check
+        the gain strip, so nothing else re-checks a strip `_sync_gain_strip`
         last left hidden for want of an axis that has since arrived."""
         if self.session is None or self.processing_dock is None:
             return
@@ -2240,6 +2246,20 @@ class NsgeoPlugin:
             self.profile_dock.set_pick_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_velocity_mode_requested(self) -> None:
+        """Ctrl/Cmd+click on the profile with velocity mode off: switch it on
+        when it can be, so the same click goes on to place the dot or box."""
+        try:
+            if self.profile_dock is None or self.act_velocity is None:
+                return
+            if self.act_velocity.isEnabled():
+                self.act_velocity.setChecked(True)
+                self._toggle_velocity_fit_mode(True)
+            elif self.session is not None and is_cut_key(self.session.current_key or ""):
+                self.message(VELOCITY_ON_CUT_TIP, Qgis.MessageLevel.Info)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
     def _toggle_velocity_fit_mode(self, checked: bool) -> None:
         """The Velocity toolbar toggle. Drives the dock, never the view."""

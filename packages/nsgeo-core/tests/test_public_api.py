@@ -15,6 +15,7 @@ EXPECTED_PUBLIC = {
     "io",
     "model",
     "geometry",
+    "hyperbola_trace",
     "processing",
     "slices",
     "project",

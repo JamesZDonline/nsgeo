@@ -84,7 +84,9 @@ Two things stop an older version reading a site that 0.4.0 has saved:
 
 A cube saved before 0.4.0, whose preset has a Time zero step, comes back
 shifted by the median line zero when you restore it, so its slices sit at the
-depths they showed before, and the Slices panel says so.
+depths they showed before, and the Slices panel says so. A cube whose preset
+has gained or lost Time zero since it was saved comes back the same way, and
+the Slices panel's Warnings says by how much.
 
 ### Uninstalling
 
@@ -106,7 +108,7 @@ stay exactly where they are.
 | **Add grid…** | Places a new grid on the map. |
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
-| **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
+| **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
 | **3D view** | Opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). |
