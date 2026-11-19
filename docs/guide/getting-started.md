@@ -454,7 +454,9 @@ changed.
   loudest parts of the line are at each depth, and the black line is the trace
   under the cursor. The dotted lines are the limits of what the profile can
   show. Anything past them is drawn red, and is solid black or white on the
-  profile.
+  profile. The strip stops at 120 dB either way. A point outside the record
+  sits on the strip's edge, where you can drag it in or right-click it away.
+  **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

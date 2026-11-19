@@ -12,9 +12,9 @@ from nsgeo_qgis.ui.gain_strip import DB_LIMIT, HANDLE_RADIUS, GainStrip, Headroo
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from plugin_testing import send_double_click as _send_double_click
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtGui import QFontMetrics
 from qgis.PyQt.QtTest import QTest
@@ -1016,6 +1016,8 @@ def test_gain_strip_slots_do_not_raise_after_unload(fake_iface, tmp_path):
 
     plugin._sync_gain_strip(0)  # must not raise
     plugin._on_gain_points([[0.0, 0.0], [1.0, 1.0]])  # must not raise
+    plugin._on_gain_reset()  # must not raise
+    plugin._resync_gain_strip("x")  # must not raise
 
 
 # ---- headroom under the curve (#10) --------------------------------------
@@ -1468,3 +1470,227 @@ def test_a_failing_move_or_double_click_is_logged_not_raised(strip, monkeypatch)
         QTest.mouseRelease(
             strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(0, 0)
         )
+
+
+# ---- the gain slots: refusal, Reset, the strip's clock, failures (#49 #9 #15 #25) ----
+
+
+def _finish(plugin, answer_modal):
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def _toast(fake_iface):
+    item = fake_iface.messageBar().currentItem()
+    return "" if item is None else item.text()
+
+
+def test_a_refused_curve_snaps_back_with_a_toast(fake_iface, tmp_path, answer_modal):
+    """#49: a payload the core refuses (130 dB) used to stay drawn on the strip
+    while the step kept its old points."""
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        strip = plugin.profile_dock.gain_strip
+        before = s.stack_for(key).entries[0][0]
+        shown = plugin.profile_dock.shown_zero_ns()
+        zero = plugin.profile_dock.step_input_zero_ns(0)
+        strip.set_points([[0.0, 0.0], [50.0, 130.0]], plugin._gain_owner)
+        strip.points_changed.emit(strip.points())
+        assert s.stack_for(key).entries[0][0] is before
+        assert np.ravel(strip.points()) == pytest.approx(
+            np.ravel(plugin._points_on_clock(before.params["points"], zero, shown))
+        )
+        assert "120" in _toast(fake_iface)
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def _curve_row_ctx(plugin, s, key, row):
+    from nsgeo_qgis.lookup import identity_curve
+
+    return identity_curve(*plugin.processing_dock.input_axis(row))
+
+
+def test_reset_asks_and_writes_the_flat_curve(fake_iface, tmp_path, answer_modal):
+    from nsgeo_qgis import plugin as plugin_mod
+
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        n = len(_step_points(s, key, 0))
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert _step_points(s, key, 0) == _curve_row_ctx(plugin, s, key, 0)
+        assert len(asked) == 1
+        args = asked[0][0]
+        assert args[1] == plugin_mod.RESET_TITLE
+        assert args[2] == plugin_mod.RESET_QUESTION.format(n=n)
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_answered_no_changes_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        before = s.stack_for(key).entries[0][0]
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert s.stack_for(key).entries[0][0] is before
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_of_a_flat_curve_asks_nothing(fake_iface, tmp_path, answer_modal):
+    from nsgeo_qgis.lookup import identity_curve
+
+    plugin, s, key = _plugin_with_time_zero_after_curve(
+        fake_iface, tmp_path, points=[[0.0, 0.0], [20.0, 0.0], [40.0, 0.0]]
+    )
+    try:
+        # No answer_modal for the question: an unanswered modal fails the test.
+        plugin.profile_dock.gain_reset_requested.emit()
+        want = identity_curve(*plugin.processing_dock.input_axis(0))
+        assert _step_points(s, key, 0) == want
+        # Already the identity: nothing is written, the session stays clean.
+        before = s.stack_for(key).entries[0][0]
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert s.stack_for(key).entries[0][0] is before
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_behind_time_zero_is_on_the_time_zero_clock(fake_iface, tmp_path, answer_modal):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        header_t0 = s.line_for_key(key).header.position_ns
+        t0, _dt, _n = plugin.processing_dock.input_axis(1)
+        assert t0 == 0.0 and header_t0 != 0.0  # the clocks differ
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert _step_points(s, key, 1)[0][0] == t0
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_the_strip_waits_for_its_clock(fake_iface, tmp_path, answer_modal, monkeypatch):
+    import nsgeo_qgis
+    from nsgeo_qgis.loader import LineLoader
+
+    monkeypatch.setattr(LineLoader, "request", lambda self, k: None)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.open_line(key)  # no profiles yet
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        assert plugin.profile_dock.gain_strip.isHidden()
+        s.set_profiles(key, line.load())
+        strip = plugin.profile_dock.gain_strip
+        assert not strip.isHidden()
+        zero = plugin.profile_dock.shown_zero_ns()
+        input_zero = plugin.profile_dock.step_input_zero_ns(1)
+        want = plugin._points_on_clock(_step_points(s, key, 1), input_zero, zero)
+        assert np.ravel(strip.points()) == pytest.approx(np.ravel(want))
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_each_gain_slot_reports_an_exception(fake_iface, tmp_path, answer_modal, monkeypatch):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    try:
+        bar = fake_iface.messageBar()
+        cases = [
+            (plugin.profile_dock, "show_gain_strip", lambda: plugin._sync_gain_strip(0)),
+            (plugin.processing_dock, "current_row", lambda: plugin._resync_gain_strip(key)),
+            (
+                s,
+                "replace_step",
+                lambda: plugin._on_gain_points([[0.0, 0.0], [30.0, 5.0]]),
+            ),
+            (plugin.processing_dock, "input_axis", plugin._on_gain_reset),
+        ]
+        for obj, attr, call in cases:
+            if hasattr(bar, "clearWidgets"):
+                bar.clearWidgets()
+            with monkeypatch.context() as m:
+                m.setattr(obj, attr, boom)
+                call()
+            assert "boom" in _toast(fake_iface), attr
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_unload_forgets_the_gain_curve(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    assert plugin._gain_owner is not None and plugin._gain_step is not None
+    _finish(plugin, answer_modal)
+    assert plugin._gain_owner is None and plugin._gain_step is None
+
+
+@needs_real_data
+def test_the_real_strip_stops_at_120_and_resets(fake_iface, tmp_path, answer_modal):
+    import nsgeo_qgis
+    from nsgeo_qgis.lookup import identity_curve
+
+    path = next(p for p in REAL_DZT if p.name == "FILE__007.DZT")
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    line = Line.open(path, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 118.0]]))
+    plugin.processing_dock.list.setCurrentRow(0)
+    strip = plugin.profile_dock.gain_strip
+    dock = plugin.profile_dock
+    try:
+        dock.show()
+        strip.show()
+        pts = strip.points()
+        start = QPoint(int(strip.x_of_db(pts[1][1])), int(strip.y_of_time(pts[1][0])))
+        assert strip.handle_at(start) == 1
+        end = QPoint(strip.width() + 400, start.y())
+        QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        _send_move_while_pressed(strip, end)
+        QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        assert _step_points(s, key, 0)[1][1] == 120.0
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        dock.gain_reset_requested.emit()
+        assert _step_points(s, key, 0) == identity_curve(*plugin.processing_dock.input_axis(0))
+    finally:
+        dock.hide()
+        dock.deleteLater()
+        from qgis.PyQt.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        _finish(plugin, answer_modal)
