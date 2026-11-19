@@ -824,3 +824,21 @@ def _slice_previews_in_tmp(tmp_path, monkeypatch):
 
     monkeypatch.setattr(slice_layer, "cache_root", lambda: tmp_path / "cache" / "nsgeo")
     monkeypatch.setattr(slice_layer, "_swept", False)
+
+
+@pytest.fixture
+def make_site():
+    """SiteEngines for one test, disposed (after any preparation ends) on teardown."""
+    from nsgeo_qgis.site_engine import SiteEngine
+
+    made: list[SiteEngine] = []
+
+    def make(session, **kwargs) -> SiteEngine:
+        engine = SiteEngine(session, **kwargs)
+        made.append(engine)
+        return engine
+
+    yield make
+    for engine in made:
+        engine.wait_until_idle(20_000)
+        engine.dispose()

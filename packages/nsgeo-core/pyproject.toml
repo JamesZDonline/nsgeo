@@ -36,3 +36,9 @@ no_implicit_optional = true
 # Deliberately not `strict = true`: numpy's stubs and the step-registry
 # decorator produce a stream of Any-related errors that would be silenced
 # with ignores rather than fixed, which is worse than not asking.
+
+# QGIS is not installed where mypy runs (CI's lint job, the core venv), so the
+# plugin modules that touch it are checked with its names as Any.
+[[tool.mypy.overrides]]
+module = ["qgis", "qgis.*"]
+ignore_missing_imports = true

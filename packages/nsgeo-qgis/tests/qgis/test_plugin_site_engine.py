@@ -59,22 +59,6 @@ TICK = {"finish": FINISH, "method": "none", "manual": {}}
 MC = SliceFinish(method="min_curvature", max_distance_spacings=1.5)
 
 
-@pytest.fixture
-def make_site():
-    """SiteEngines for one test, disposed (after any preparation ends) on teardown."""
-    made: list[SiteEngine] = []
-
-    def make(session, **kwargs) -> SiteEngine:
-        engine = SiteEngine(session, **kwargs)
-        made.append(engine)
-        return engine
-
-    yield make
-    for engine in made:
-        engine.wait_until_idle(20_000)
-        engine.dispose()
-
-
 def prepared(make_site, site3, source=None, resolution=RES, **kwargs):
     """A SiteEngine with every grid of `source` prepared and `resolution` set."""
     errors: list[str] = []

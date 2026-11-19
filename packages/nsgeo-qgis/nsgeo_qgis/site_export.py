@@ -136,7 +136,6 @@ def plan_site_export(
     *,
     cell: float,
     lattice: SiteLattice,
-    transform: str,
     method: str,
     finish: SliceFinish,
     gains: Mapping[str, float],
@@ -156,8 +155,14 @@ def plan_site_export(
     if site_z is None or not ready:
         raise RuntimeError("no site geometry: prepare the grids and set a resolution first")
     records = []
+    transforms: dict[str, str] = {}
+    axes: dict[str, ZAxis | None] = {}
     for grid_id in ready:
         engine = site_engine.engine_for(grid_id)
+        if engine is None or engine.choice is None:
+            raise RuntimeError(f"grid {grid_id} is not prepared")
+        transforms[grid_id] = engine.choice.transform
+        axes[grid_id] = engine.z
         grid = site_engine.session.grid(grid_id)
         velocity = velocities.get(grid_id)
         records.append(
@@ -172,16 +177,20 @@ def plan_site_export(
                 time_base=time_base_of(engine.provenance().steps),
             )
         )
+    if len(set(transforms.values())) != 1:
+        named = ", ".join(f"{g} {t}" for g, t in transforms.items())
+        raise RuntimeError(f"the grids were prepared with different transforms: {named}")
+    transform = next(iter(transforms.values()))
     bands = []
     for window in plan_windows(site_z, thickness_levels, step_levels):
         top, thickness = band_window_ns(site_z, window)
         depths: dict[str, tuple[float, float] | None] = {}
         absent: set[str] = set()
         for grid_id in ready:
-            z = site_engine.engine_for(grid_id).z
+            z = axes[grid_id]
             grid_window = window_on(z, top, thickness) if z is not None else None
             velocity = velocities.get(grid_id)
-            if grid_window is None:
+            if z is None or grid_window is None:
                 depths[grid_id] = None
                 absent.add(grid_id)
             elif velocity is None:
@@ -334,7 +343,6 @@ def site_export_job(
     cell: float,
     pixel: float,
     *,
-    transform: str,
     method: str,
     finish: SliceFinish,
     gains: Mapping[str, float],
@@ -355,7 +363,6 @@ def site_export_job(
         step_levels,
         cell=cell,
         lattice=lattice,
-        transform=transform,
         method=method,
         finish=finish,
         gains=gains,

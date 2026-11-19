@@ -1682,7 +1682,6 @@ class NsgeoPlugin:
             self.message("prepare the site's grids before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        transform = dock.site_panel.transform()
         method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
         gains = dock.site_gains()
@@ -1708,7 +1707,6 @@ class NsgeoPlugin:
                 step_levels,
                 cell,
                 pixel,
-                transform=transform,
                 method=method,
                 finish=finish,
                 gains=gains,
