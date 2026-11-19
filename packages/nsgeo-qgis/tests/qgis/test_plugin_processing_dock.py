@@ -16,7 +16,7 @@ from nsgeo_qgis.ui.processing_dock import (
 )
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QModelIndex, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QModelIndex, Qt
 from qgis.PyQt.QtGui import QPalette
 from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox, QWidgetAction
 
@@ -613,6 +613,11 @@ def test_a_cut_shows_that_processing_does_not_apply(opened):
 # ---- a refusal that stays (#197) ------------------------------------------
 
 
+def _events(n: int = 5) -> None:
+    for _ in range(n):
+        QCoreApplication.processEvents()
+
+
 def _refusing_dewow():
     # One sample at the synthetic lines' 0.2165 ns sampling.
     return build_step("dewow", window_ns=0.2)
@@ -738,10 +743,16 @@ def test_a_preset_that_refuses_is_noted(opened):
 
 
 def test_the_note_never_widens_the_panel(opened):
+    """Fails if WarningsPanel's labels lose setWordWrap(True) or the Ignored
+    horizontal policy. The dock is shown and its events processed before both
+    measurements: an unshown dock keeps a cached minimum and hides the mutant."""
     _, dock, _ = opened
+    dock.show()
+    _events()
     width = dock.minimumSizeHint().width()
     long = "x" * 40 + " " + " ".join(["words"] * 80)
     dock.warnings.set_entries([Entry(REFUSAL, long[:400])])
+    _events()
     assert dock.warnings.isVisibleTo(dock.widget())
     assert dock.minimumSizeHint().width() == width
 
