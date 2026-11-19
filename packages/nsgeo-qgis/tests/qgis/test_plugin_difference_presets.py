@@ -396,3 +396,42 @@ def test_presets_menu_delete_submenu_is_reused_not_leaked(plugin):
     submenus = [m for m in pd.presets_menu.findChildren(QMenu) if m.title() == "Delete"]
     assert len(submenus) == 1
     assert [a.text() for a in submenus[0].actions()] == [f"p{i}" for i in range(5)]
+
+
+def _stack_with_dewow_differenced(plugin):
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    s.append_step(key, build_step("time_zero", mode="sample", sample=40))
+    pd.add_step("dewow")
+    pd.add_step("background_mean")
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    assert prd.difference_label.text() == "Difference: Dewow"
+    errors: list[str] = []
+    prd.error.connect(errors.append)
+    return s, key, pd, prd, errors
+
+
+def _assert_follows_dewow(s, key, pd, prd, errors):
+    assert errors == []
+    assert pd.diff_button.isChecked()
+    assert prd.difference_label.text() == "Difference: Dewow"
+    np.testing.assert_allclose(prd.current_radargram().data, s.stack_for(key).difference(0).data)
+
+
+def test_a_dragged_step_across_time_zero_keeps_its_difference(plugin):
+    """#13 / final review: Dewow dragged above Time zero (which changes the
+    sample count) keeps the Difference view on Dewow. Fails if
+    `current_radargram` stops re-finding the differenced step by identity
+    (the index then points at Time zero: a toast, the button unchecked)."""
+    s, key, pd, prd, errors = _stack_with_dewow_differenced(plugin)
+    pd.list.model().moveRow(QModelIndex(), 1, QModelIndex(), 0)
+    assert [st.name for st, _ in s.stack_for(key).entries][0] == "dewow"
+    _assert_follows_dewow(s, key, pd, prd, errors)
+
+
+def test_move_selected_across_time_zero_keeps_its_difference(plugin):
+    s, key, pd, prd, errors = _stack_with_dewow_differenced(plugin)
+    pd.move_selected(-1)
+    assert [st.name for st, _ in s.stack_for(key).entries][0] == "dewow"
+    _assert_follows_dewow(s, key, pd, prd, errors)

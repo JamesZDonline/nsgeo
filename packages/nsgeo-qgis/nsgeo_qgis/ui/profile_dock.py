@@ -277,6 +277,9 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
+        # The step object the Difference view is on (final review, #13): a
+        # move re-indexes it, and the view follows the object, not the row.
+        self._difference_step: Any = None
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
@@ -721,6 +724,7 @@ class ProfileDock(QgsDockWidget):
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         if was_diff:
             self.difference_cleared.emit()
@@ -1106,6 +1110,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip = None
         was_diff = self._difference_index >= 0
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         try:
             self._clear_view_only()
@@ -1759,6 +1764,7 @@ class ProfileDock(QgsDockWidget):
         if index == self._difference_index:
             return
         self._difference_index = index
+        self._difference_step = None
         try:
             self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -1825,6 +1831,7 @@ class ProfileDock(QgsDockWidget):
             return None
         declined: str | None = None
         if self._effective_difference_index >= 0:
+            self._follow_differenced_step(stack)
             # Its own `try`, and a declined difference falls through to the
             # ordinary view below rather than returning None. Returning None
             # left whatever was on screen: another step's difference, with
@@ -1869,6 +1876,24 @@ class ProfileDock(QgsDockWidget):
                 self.error.emit(str(exc))
             return None
 
+    def _follow_differenced_step(self, stack: StepStack) -> None:
+        """Keep the Difference view on the step object it was set on when a
+        move re-indexes it. Found elsewhere by identity: the index follows.
+        Not found (edited in place, or removed): the index stands, and the
+        object tracked becomes whatever sits there now (None when out of
+        range), so today's decline paths are unchanged."""
+        entries = stack.entries
+        idx = self._difference_index
+        tracked = self._difference_step
+        if tracked is None or (idx < len(entries) and entries[idx][0] is tracked):
+            self._difference_step = entries[idx][0] if idx < len(entries) else None
+            return
+        for j, (step, _on) in enumerate(entries):
+            if step is tracked:
+                self._difference_index = j
+                return
+        self._difference_step = entries[idx][0] if idx < len(entries) else None
+
     def _decline_difference(self, message: str) -> None:
         """Report `message` and revert an active difference view: shared
         by both except branches of `current_radargram`'s difference `try`
@@ -1878,6 +1903,7 @@ class ProfileDock(QgsDockWidget):
         self.error.emit(message)
         if self._difference_index >= 0:
             self._difference_index = -1
+            self._difference_step = None
             self.difference_label.setText("")
             self.difference_cleared.emit()
 
