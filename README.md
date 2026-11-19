@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-18.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-19.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -124,6 +124,11 @@ release's notes list everything in it.
   fine cell no longer freezes QGIS while its fill is worked out, in Whole
   site or This grid: the fill is worked out in the background, with its
   progress and a Cancel. Also the site engine's review follow-ups. Designing.
+- **Lines in bulk and at import** ([#129], [#57], [#58], [#221], [#16],
+  [#17]). Choose a processing preset when importing lines; a selection of
+  lines on the map selects them in the Survey panel; set a preset or a
+  velocity on a selection of lines at once; removing lines says what goes
+  with them. Designing.
 
 ### Next, in order
 
@@ -166,8 +171,8 @@ Grouped by area. The order within a group is not a priority.
   lines alone hides its lines when you zoom out, as a tape site does
   ([#222]); balancing
   lines walked in different directions (the second half of [#47]); a preset or
-  velocity override for a selection of lines at once ([#58]; editing their
-  placement together is done).
+  velocity override for a selection of lines at once ([#58], in progress
+  above; editing their placement together is done).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
   ([#187]); exports record where the grid's velocity came from ([#188]); show
@@ -175,7 +180,7 @@ Grouped by area. The order within a group is not a priority.
   ([#195]); warn when a grid's velocity from fits is on another clock than its
   slices ([#201]); the hyperbola tracer's known limits on layered ground and
   on very wide boxes ([#209]) and its review follow-ups ([#212]).
-- **Processing and the profile:** choose a preset when importing ([#129]); hide
+- **Processing and the profile:** choose a preset when importing ([#129], in progress above); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
   clock share one rule ([#210]); the profile no longer jumps when the velocity
@@ -185,7 +190,7 @@ Grouped by area. The order within a group is not a priority.
   with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); removing a line says that its processing, velocity and saved fits
-  go with it ([#221]); more than one site in a QGIS project
+  go with it ([#221], in progress above); more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
@@ -217,6 +222,8 @@ Grouped by area. The order within a group is not a priority.
   walkthrough).
 
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
+[#16]: https://github.com/JamesZDonline/nsgeo/issues/16
+[#17]: https://github.com/JamesZDonline/nsgeo/issues/17
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
 [#36]: https://github.com/JamesZDonline/nsgeo/issues/36
 [#40]: https://github.com/JamesZDonline/nsgeo/issues/40
@@ -225,6 +232,7 @@ Grouped by area. The order within a group is not a priority.
 [#44]: https://github.com/JamesZDonline/nsgeo/issues/44
 [#46]: https://github.com/JamesZDonline/nsgeo/issues/46
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
+[#57]: https://github.com/JamesZDonline/nsgeo/issues/57
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
 [#75]: https://github.com/JamesZDonline/nsgeo/issues/75
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
