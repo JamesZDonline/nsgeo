@@ -1008,10 +1008,16 @@ class NsgeoPlugin:
             if name is None:
                 self.profile_dock.show_gain_strip(None)
                 return
-            if self.processing_dock is not None and self.processing_dock.input_axis(row) is None:
+            stack = self.session.stack_for(key)
+            if stack.source is None and any(
+                st.name == "time_zero" and on for st, on in entries[:row]
+            ):
                 # The step's clock is not known yet (samples still loading
-                # behind a Time zero): a strip drawn now would sit on the wrong
-                # clock. `_resync_gain_strip` shows it on `line_loaded`.
+                # behind an enabled Time zero): a strip drawn now would sit on
+                # the wrong clock. `_resync_gain_strip` shows it on
+                # `line_loaded`. Decided without evaluating the stack: this
+                # runs on every drag echo, and evaluating a refusing stack
+                # logs a warning each time.
                 self.profile_dock.show_gain_strip(None)
                 return
             # The owner token the strip compares against the one already on

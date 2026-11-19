@@ -1532,8 +1532,9 @@ def test_reset_answered_no_changes_nothing(fake_iface, tmp_path, answer_modal):
     plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
     try:
         before = s.stack_for(key).entries[0][0]
-        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
         plugin.profile_dock.gain_reset_requested.emit()
+        assert len(asked) == 1  # it did ask: without the slot nothing is asked
         assert s.stack_for(key).entries[0][0] is before
     finally:
         _finish(plugin, answer_modal)
@@ -1560,6 +1561,7 @@ def test_reset_of_a_flat_curve_asks_nothing(fake_iface, tmp_path, answer_modal):
 
 def test_reset_behind_time_zero_is_on_the_time_zero_clock(fake_iface, tmp_path, answer_modal):
     import nsgeo_qgis
+    from nsgeo_qgis.lookup import identity_curve
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
@@ -1573,14 +1575,18 @@ def test_reset_behind_time_zero_is_on_the_time_zero_clock(fake_iface, tmp_path, 
     s.set_profiles(key, line.load())
     s.open_line(key)
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
-    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    s.append_step(key, build_step("gain_curve", points=[[5.0, 0.0], [40.0, 12.0]]))
     plugin.processing_dock.list.setCurrentRow(1)
     try:
         header_t0 = s.line_for_key(key).header.position_ns
         t0, _dt, _n = plugin.processing_dock.input_axis(1)
         assert t0 == 0.0 and header_t0 != 0.0  # the clocks differ
-        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
         plugin.profile_dock.gain_reset_requested.emit()
+        assert len(asked) == 1
+        # The whole curve, on the clock of what the step receives (Time zero's),
+        # not the header's position_ns.
+        assert _step_points(s, key, 1) == identity_curve(*plugin.processing_dock.input_axis(1))
         assert _step_points(s, key, 1)[0][0] == t0
     finally:
         _finish(plugin, answer_modal)
@@ -1655,6 +1661,14 @@ def test_unload_forgets_the_gain_curve(fake_iface, tmp_path, answer_modal):
 
 @needs_real_data
 def test_the_real_strip_stops_at_120_and_resets(fake_iface, tmp_path, answer_modal):
+    """Guard test (real FILE__007): a real drag far past the strip's edge
+    writes exactly 120.0 dB, and Reset gives the identity on the file's
+    input axis. Fails under these mutations (checked): removing BOTH
+    `GainStrip._limited` and the `DB_LIMIT` cap in `GainStrip._db_range`
+    (the step then holds 118.0; removing either one alone still reaches
+    120, so each is pinned by the strip tests in this file instead); and
+    making `_on_gain_reset` return before `replace_step` (the Reset half).
+    """
     import nsgeo_qgis
     from nsgeo_qgis.lookup import identity_curve
 
@@ -1693,4 +1707,36 @@ def test_the_real_strip_stops_at_120_and_resets(fake_iface, tmp_path, answer_mod
         from qgis.PyQt.QtWidgets import QApplication
 
         QApplication.processEvents()
+        _finish(plugin, answer_modal)
+
+
+def test_a_refusing_step_above_the_curve_adds_no_log_noise_per_write(
+    fake_iface, tmp_path, answer_modal, message_log
+):
+    """Every drag move echoes through `_sync_gain_strip`; deciding "is the
+    clock known" by evaluating the stack logged "input_axis: stack does not
+    evaluate cleanly" on each one when a step above the curve refuses."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    # A step above the curve that cannot run on this line (past the record).
+    s.append_step(key, build_step("time_zero", mode="sample", sample=100000))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        message_log.clear()
+        for _ in range(5):
+            plugin._sync_gain_strip(1)
+        assert [m for m in message_log if "does not evaluate" in m] == []
+    finally:
         _finish(plugin, answer_modal)
