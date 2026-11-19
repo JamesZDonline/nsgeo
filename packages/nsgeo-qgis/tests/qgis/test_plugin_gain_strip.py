@@ -1665,8 +1665,9 @@ def test_the_real_strip_stops_at_120_and_resets(fake_iface, tmp_path, answer_mod
     writes exactly 120.0 dB, and Reset gives the identity on the file's
     input axis. Fails under these mutations (checked): removing BOTH
     `GainStrip._limited` and the `DB_LIMIT` cap in `GainStrip._db_range`
-    (the step then holds 118.0; removing either one alone still reaches
-    120, so each is pinned by the strip tests in this file instead); and
+    (the step then holds 118.0). `_limited` alone is a backstop no gesture
+    can reach (the `_db_range` cap and `_clamped` already bound every
+    write), so only removing both clamps fails this test; and
     making `_on_gain_reset` return before `replace_step` (the Reset half).
     """
     import nsgeo_qgis
