@@ -959,6 +959,33 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.lines_changed.emit()
 
+    def set_lines_velocity(self, keys: Iterable[str], model: VelocityModel | None) -> list[str]:
+        """Set (or, with None, clear) the velocity override of every line in
+        `keys` and drop each one's velocity source record, as one change: one
+        dirty mark and one `lines_changed`, and nothing at all when no line
+        would change. Saved fits stay on the lines (#58).
+
+        A line already holding exactly `model` with no record is left alone.
+        All or nothing: an unknown key raises `KeyError` with the site untouched.
+        Returns the keys that changed.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        lines = [self.line_for_key(key) for key in unique]
+        changing = [
+            (key, line)
+            for key, line in zip(unique, lines)
+            if line.velocity != model or line.velocity_source is not None
+        ]
+        if not changing:
+            return []
+        for key, line in changing:
+            # A bare number has no source: the record goes (grid velocity spec §7.2).
+            self._replace_line(key, dataclasses.replace(line, velocity=model, velocity_source=None))
+        self._set_dirty(True)
+        self.lines_changed.emit()
+        return [key for key, _ in changing]
+
     def apply_line_velocity(
         self, key: str, model: VelocityModel | None, source: VelocitySource | None
     ) -> None:
@@ -1251,6 +1278,47 @@ class SiteSession(QObject):
             self._set_dirty(True)
             self.stack_changed.emit(other)
         return changed
+
+    def apply_stack_to(self, source_key: str, keys: Iterable[str]) -> list[str]:
+        """Copy the stack of `source_key` onto every line in `keys` but the source,
+        as one change (`apply_stack_to_grid`'s body for a list of keys). All or
+        nothing: an unknown key raises `KeyError` with the site untouched.
+        Returns the keys changed."""
+        site = self._require_site()
+        self.line_for_key(source_key)
+        targets = [k for k in dict.fromkeys(keys) if k != source_key]
+        for key in targets:
+            self.line_for_key(key)
+        dicts = self.stack_for(source_key).to_dicts()
+        return self._replace_stacks(site, targets, dicts)
+
+    def apply_preset_to(self, name: str, keys: Iterable[str]) -> list[str]:
+        """Replace the stack of every line in `keys` with a fresh one from the
+        preset `name` (`apply_preset`'s body per key), as one change. All or
+        nothing: an unknown key or preset raises `KeyError` with the site
+        untouched. Returns the keys changed (all of them)."""
+        site = self._require_site()
+        dicts = site.presets[name]
+        unique = list(dict.fromkeys(keys))
+        for key in unique:
+            self.line_for_key(key)
+        return self._replace_stacks(site, unique, dicts)
+
+    def _replace_stacks(
+        self, site: Site, keys: list[str], dicts: list[dict[str, Any]]
+    ) -> list[str]:
+        if not keys:
+            return []
+        fresh_stacks = [StepStack.from_dicts(dicts) for _ in keys]  # builds first: may raise
+        for key, fresh in zip(keys, fresh_stacks):
+            self._attach_source(key, fresh)
+            site.stacks[key] = fresh
+        # Dirty before the emits: a synchronous stack_changed slot must never
+        # see a change it is handling as if the site were clean.
+        self._set_dirty(True)
+        for key in keys:
+            self.stack_changed.emit(key)
+        return list(keys)
 
     # ---- presets ----------------------------------------------------------
     def preset_names(self) -> list[str]:
