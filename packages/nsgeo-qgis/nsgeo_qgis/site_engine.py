@@ -85,7 +85,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -99,30 +98,23 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
-    bilinear_taps,
     compose_footprints,
     covered_pixels,
     find_seams,
     finest_fitting_cell,
     fitting_lattice,
-    footprint,
     grid_axis,
     limit_over_slices,
     normalise,
     site_axis,
-    slice_extent,
     stretching_grids,
     window_on,
 )
-from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
-    QgsPointXY,
-    QgsProject,
-)
+from qgis.core import QgsProject
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.log import log as _log
+from nsgeo_qgis.site_geometry import extent_in, gather_footprint
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
@@ -136,15 +128,12 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
     preview_note,
+    window_levels,
 )
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
 #: engine -- its own or a peer -- is still preparing.
 _RETRY_MS = 50
-
-#: Points per edge when a frame's outline is transformed into another CRS.
-#: A transverse Mercator edge is not quite straight in a neighbouring zone.
-_EDGE_POINTS = 8
 
 
 def _ignore() -> None:
@@ -648,7 +637,17 @@ class SiteEngine(QObject):
             self._report(f"could not re-queue grid {grid_id!r} after it moved: {exc}")
 
     def _on_grids_changed(self) -> None:
-        """`grids_changed`, delivered before the engines' own (see the module docstring)."""
+        """`grids_changed`, delivered before the engines' own (see the module docstring).
+
+        When a grid has left, the geometry is rebuilt right here, inside the
+        emission (#75). That is deliberate and safe: the rebuild reads the
+        session's grids and the frames and axes of the engines still ready,
+        and a grid that only moved reaches `_on_grid_moved` afterwards, which
+        rebuilds again once its engine has cleared. A rebuild that fails is
+        kept in `geometry_problem` for the next tick, never raised. It is not
+        deferred with a timer: the dock reads the geometry straight after
+        `remove_grid` returns, and a deferral would leave it stale for a tick.
+        """
         try:
             if self._disposed or self._source is None or not self.session.is_open:
                 return
@@ -801,56 +800,12 @@ class SiteEngine(QObject):
     ) -> dict[str, tuple[float, float, float, float]]:
         """Each ready grid's extent in the site CRS, as its frame at `cell` spans."""
         site_crs = self._site_crs()
+        context = QgsProject.instance().transformContext()
         extents = {}
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
-            extents[grid_id] = self._extent_in(frame, site_crs)
+            extents[grid_id] = extent_in(frame, site_crs, context)
         return extents
-
-    @staticmethod
-    def _transform(points: np.ndarray, source: str, target: str) -> np.ndarray:
-        """(n, 2) points from `source` to `target`; a missing transform raises.
-
-        An invalid `QgsCoordinateTransform` returns its input unchanged
-        while reporting success (`layers._require_transform`), which would
-        draw a grid in the wrong place without a word.
-        """
-        transform = QgsCoordinateTransform(
-            QgsCoordinateReferenceSystem(source),
-            QgsCoordinateReferenceSystem(target),
-            QgsProject.instance(),
-        )
-        if not transform.isValid():
-            raise RuntimeError(f"no coordinate transform from {source} to {target}")
-        out = np.empty((len(points), 2), dtype=float)
-        for i, (x, y) in enumerate(np.asarray(points, dtype=float)):
-            moved = transform.transform(QgsPointXY(float(x), float(y)))
-            out[i] = (moved.x(), moved.y())
-        return out
-
-    @classmethod
-    def _extent_in(cls, frame: CubeFrame, crs: str) -> tuple[float, float, float, float]:
-        if frame.crs == crs:
-            return slice_extent(frame)
-        x_hat, y_hat = frame.axes()
-        w, h = frame.nx * frame.cell, frame.ny * frame.cell
-        t = np.linspace(0.0, 1.0, _EDGE_POINTS + 1)
-        local = np.concatenate(
-            [
-                np.column_stack([t * w, np.zeros_like(t)]),
-                np.column_stack([np.full_like(t, w), t * h]),
-                np.column_stack([t * w, np.full_like(t, h)]),
-                np.column_stack([np.zeros_like(t), t * h]),
-            ]
-        )
-        outline = np.asarray(frame.origin) + local[:, :1] * x_hat + local[:, 1:] * y_hat
-        moved = cls._transform(outline, frame.crs, crs)
-        return (
-            float(moved[:, 0].min()),
-            float(moved[:, 1].min()),
-            float(moved[:, 0].max()),
-            float(moved[:, 1].max()),
-        )
 
     def _drop_caches(self) -> None:
         self._gathers = {}
@@ -911,26 +866,7 @@ class SiteEngine(QObject):
         frame = self._engines[grid_id].frame
         if frame is None:
             raise RuntimeError(f"grid {grid_id!r} has no frame")
-        xmin, ymin, xmax, ymax = self._extent_in(frame, lattice.crs)
-        p = lattice.pixel
-        col0 = max(0, math.floor((xmin - lattice.x0) / p) - 1)
-        col1 = min(lattice.width, math.ceil((xmax - lattice.x0) / p) + 1)
-        row0 = max(0, math.floor((lattice.y1 - ymax) / p) - 1)
-        row1 = min(lattice.height, math.ceil((lattice.y1 - ymin) / p) + 1)
-        if col1 > col0 and row1 > row0:
-            cols = np.arange(col0, col1)
-            rows = np.arange(row0, row1)
-            # The same centres as `SiteLattice.pixel_centres`, restricted.
-            xs = lattice.x0 + (cols.astype(float) + 0.5) * p
-            ys = lattice.y1 - (rows.astype(float) + 0.5) * p
-            grid_x, grid_y = np.meshgrid(xs, ys)
-            centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-            if frame.crs != lattice.crs:
-                centres = self._transform(centres, lattice.crs, frame.crs)
-            taps = bilinear_taps(frame, centres)
-            gathered = footprint(taps, row1 - row0, col1 - col0, row0, col0)
-        else:
-            gathered = footprint(bilinear_taps(frame, np.empty((0, 2))), 0, 0)
+        gathered = gather_footprint(frame, lattice, QgsProject.instance().transformContext())
         self._gathers[grid_id] = gathered
         return gathered
 
@@ -1219,7 +1155,7 @@ class SiteEngine(QObject):
         z = self._site_z
         if z is None:
             raise RuntimeError("no site time axis: no ready grid covers the z range")
-        thickness_levels = max(1, int(round(thickness_ns / z.dz_ns)))
+        thickness_levels = window_levels(thickness_ns, thickness_ns, z.dz_ns)[0]
         return [
             (z.t0_ns + w.k0 * z.dz_ns, w.n_levels * z.dz_ns)
             for w in limit_windows(z, thickness_levels)

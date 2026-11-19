@@ -52,16 +52,14 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
     QgsCoordinateTransformContext,
-    QgsPointXY,
     QgsProject,
     QgsRasterLayer,
 )
 
 from nsgeo_qgis.export_pipeline import ExportBand, ExportGrid, ExportSpec
 from nsgeo_qgis.site_engine import SiteEngine
+from nsgeo_qgis.site_geometry import transform_points
 from nsgeo_qgis.slice_export import apply_band_windows, write_north_up
 from nsgeo_qgis.slices_plan import SliceFinish, combined_time_base
 
@@ -249,16 +247,7 @@ def world_to_frame(
     """
 
     def move(points: np.ndarray) -> np.ndarray:
-        transform = QgsCoordinateTransform(
-            QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target), context
-        )
-        if not transform.isValid():
-            raise RuntimeError(f"no coordinate transform from {source} to {target}")
-        out = np.empty((len(points), 2), dtype=float)
-        for i, (x, y) in enumerate(np.asarray(points, dtype=float)):
-            moved = transform.transform(QgsPointXY(float(x), float(y)))
-            out[i] = (moved.x(), moved.y())
-        return out
+        return transform_points(points, source, target, context)
 
     return move
 

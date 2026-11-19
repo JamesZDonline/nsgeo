@@ -952,6 +952,57 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     assert errors == [], errors
 
 
+def test_a_mixed_crs_site_gathers_the_same_after_the_move(site3_factory, make_site):
+    """C is declared in the next UTM zone: its gather's taps are those of the
+    footprint window's pixel centres, moved into C's CRS one point at a time."""
+    site3 = site3_factory(crs={"C": "EPSG:32615"})
+    site, errors = prepared(make_site, site3)
+    lattice = site.lattice
+    frame = site.engine_for("C").frame
+    assert frame.crs == "EPSG:32615" and lattice.crs == "EPSG:32616"
+    got = site._gather("C", lattice)
+    assert got.n_pixels > 50
+    p = lattice.pixel
+    cols = np.arange(got.col0, got.col1)
+    rows = np.arange(got.row0, got.row1)
+    xs = lattice.x0 + (cols + 0.5) * p
+    ys = lattice.y1 - (rows + 0.5) * p
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+    to_c = QgsCoordinateTransform(
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        QgsCoordinateReferenceSystem("EPSG:32615"),
+        QgsProject.instance(),
+    )
+    moved = np.array(
+        [(m.x(), m.y()) for m in (to_c.transform(QgsPointXY(x, y)) for x, y in centres)]
+    )
+    expected = bilinear_taps(frame, moved)
+    np.testing.assert_array_equal(got.taps.nearest, expected.nearest)
+    np.testing.assert_array_equal(got.taps.ids, expected.ids)
+    np.testing.assert_allclose(got.taps.weights, expected.weights, atol=1e-6)
+    assert errors == [], errors
+
+
+def test_a_preparation_that_reads_no_line_fails_with_the_first_error(site3, make_site, monkeypatch):
+    """The asynchronous failure path: B's lines cannot be read at all."""
+    real_load = Line.load
+
+    def load(self):
+        if self.placement.grid_id == "B":
+            raise OSError("disk gone")
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", load)
+    errors: list[str] = []
+    site = make_site(site3.session, on_error=errors.append)
+    site.set_source(site3.source())
+    wait_for_site(site, 60_000)
+    assert site.grid_state("B").startswith("failed: ")
+    assert "disk gone" in site.grid_state("B")
+    assert site.ready_grids == ("A", "C")
+
+
 def test_a_rotated_site_composes_each_grid_bilinearly(site3, make_site):
     """Each grid's taps are kept to its own window on the lattice and sampled
     there only. B laid at 30 degrees overlaps C at a corner, which must still

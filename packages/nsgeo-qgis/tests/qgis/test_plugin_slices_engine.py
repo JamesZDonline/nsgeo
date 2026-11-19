@@ -1540,11 +1540,13 @@ def test_the_hook_can_be_given_to_the_constructor(qgis_app):
         return None
 
     engine = SliceEngine(session, on_grid_moved=hook)
+    plain = SliceEngine(session)
     try:
         assert engine.on_grid_moved is hook
-        assert SliceEngine(session).on_grid_moved is None
+        assert plain.on_grid_moved is None
     finally:
         engine.dispose()
+        plain.dispose()
 
 
 def test_cancel_preparation_stops_the_task_and_keeps_nothing_else_running(sourced, monkeypatch):
