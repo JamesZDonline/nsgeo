@@ -189,6 +189,36 @@ These are the user's, in the order they were made.
       of the chosen files have a usable GPS log beside them. Nothing marks it after that: not the
       Survey panel, the map or the summary. In the user's words, they choose how to import, "but not
       be nagged if they decide they trust the grid more than the gps".
+15. **The Add data dialog as mocked up** (the user, 2026-11-19, two rounds of the M17b mock-up,
+    `.lavish/m17b-add-data.html`, built on session D's dialogs with its Processing preset box).
+    - **A new grid is made in the dialog** (option A+): Target grid lists **New grid** first, then
+      the site's GPR grids. New grid shows a Name (filled in, not used by another grid, before
+      Import is enabled), a Spacing measured from the tracks that can be typed over, and a Fitted
+      line with the rectangle's size and azimuth. The rectangle is drawn dashed on the map while
+      the dialog is open, follows the files as they are added and removed, and goes when the dialog
+      closes. Import makes the grid and adds the lines in one step; velocity and corners are set
+      afterwards with Edit grid…, as for any grid. Not the Grid dialog first (option B).
+    - **The switch reads "Place lines by: Grid | GPS".**
+    - **The mode it opens in:** Grid the first time, then the mode last used. A grid's own
+      shortcut (the Survey panel's **Import DZT files…**, renamed **Add GPR data…**) opens in GPS
+      mode when the grid's lines are all GPS lines, in Grid mode when they are all tape lines, and
+      in the last-used mode when it is empty or holds both.
+    - **Files GPS cannot place** (no DZG, or no RTK-fixed position): the user asked whether they
+      could be placed by offset, start and direction instead of being dropped. Chosen: **handed on
+      to Grid mode** (option B). Import places the GPS lines (and makes the grid); when files were
+      left over, the dialog stays open, switched to Grid mode on that grid with only those files,
+      each one's offset and direction guessed from the GPS lines either side of it in file order,
+      shown amber with a note naming the neighbours. Import places them; Cancel leaves them out.
+      The guess is made only when those neighbours run along one of the grid's axes; otherwise the
+      rows start as Grid mode starts them. Not dropped (A), and not tape cells inside the GPS
+      table (C), where a typed offset would move each time a file changed a new grid's fit.
+    - **Into an existing grid**, the table gains an **Outside <grid>** column (metres of each line
+      outside the rectangle, amber), and a line wholly outside is refused ("outside <grid>"):
+      almost always the wrong grid. Claude's call, shown in the mock-up and approved with it.
+    - **Edge cases shown and approved:** switching mode keeps the files (each mode keeps its own
+      settings); a single line leaves Spacing empty until typed and makes a grid one spacing wide;
+      lines with no main direction get the smallest rectangle, and Fitted says so; the new grid is
+      fitted from the ready rows only; a magnetometer grid is never listed.
 ---
 
 ## 4. Claude's calls
@@ -418,7 +448,8 @@ gives. Whole site's per-grid engines take areas like any grid.
 - **The old entries:** the toolbar's Import DZT… and Import GPS lines… fold into Add data. The
   Survey panel's per-grid **Import DZT files…** stays as a shortcut that opens the dialog with that
   grid chosen. The layout is mocked up (lavish) and agreed with the user before building, as M17a's
-  dialog was.
+  dialog was. *Done 2026-11-19: decision 15 records the mock-up's answers, and §16 the calls M17b's
+  plan makes.*
 
 ---
 
@@ -614,6 +645,9 @@ On 2026-11-17, walking through M17a, the user replaced the separate GPS import w
 data ▾** menu and made GPS lines always go into a grid (decision 14), which relettered the
 milestones: M17b GPS grids, M17c true-distance profiles, M17d outlines and the rest.
 
+On 2026-11-19 the user answered the M17b mock-up in two rounds (decision 15), adding the hand-on
+of files GPS cannot place to Grid mode.
+
 ---
 
 ## 15. What main changed before planning (2026-11-13)
@@ -654,3 +688,42 @@ Main moved ~300 commits between this design and the M17a plan. What matters here
   `_crs_scale_error`), reading the site's CRS as `site.grids[0].crs`. M17a moves the rule into a
   module both dialogs use, and gives the site its own CRS (C12).
 
+---
+
+## 16. M17b's calls (2026-11-19, with its plan)
+
+Made by Claude while planning M17b; each is open to veto at the walkthrough.
+
+- **The fit** (§6.3, decision 14), in the core's `nsgeo.geometry.track_fit`:
+  - A line's direction is its last trace's position minus its first, as an axis (a line and its
+    reverse point the same way). Lines shorter than 1 m have none and do not vote.
+  - The **main direction** is the length-weighted mean of those axes (on doubled angles). Lines
+    within 20° of it (C8's angle) run **along** it. The lines share a main direction when the
+    along lines hold at least half of the summed first-to-last lengths; one line always does.
+  - **Spacing** is the median gap between neighbouring along lines, each line taken at its mean
+    position across the main direction. None with fewer than two along lines, or with no main
+    direction: the dialog then waits for a typed one.
+  - **The rectangle:** +Y along the main direction (azimuth folded into −90°…90°, stored as
+    0…360); along edges at the extreme trace positions of every line; cross edges half a spacing
+    outside the outer along lines' mean positions, widened if needed to hold every trace of a line
+    that is not along. With no main direction, the smallest-area rectangle around every trace,
+    half a spacing outside it on all four sides, +Y along its longer side.
+- **Metres outside a grid:** the walked length of every trace-to-trace step whose midpoint lies
+  outside the rectangle. A line is wholly outside when no trace lies inside.
+- **The hand-on guess:** a leftover file's offset is interpolated by file position between the
+  nearest placed GPS lines before and after it (each at its mean position across the grid's axis);
+  at an end, one grid spacing further on per file, away from the line before; its direction is
+  opposite the line before it in file order (placed or guessed), or opposite the line after it for
+  the first file. Made only when every neighbour used runs within 20° of the same grid axis.
+- **GPS lines in Edit lines…:** a GPS row's Label, Destagger and Grid can be edited; Offset, Dir,
+  Start and Scale show "—" and cannot. Bulk changes to those four, Fit to grid edges and Measure
+  leave GPS rows alone and the status line says how many. Moving a GPS line to another grid only
+  changes its grid (C3).
+- **Fit to these tracks** is offered on a Survey panel selection of GPS lines only (the map's
+  selection is the panel's since #57). It opens Add grid… filled in with the fitted rectangle and
+  spacing, the Id left blank; OK adds the grid and moves the lines into it. One line gets the
+  Grid dialog's default spacing to start from.
+- **#222:** GPS lines in a grid hide on zoom-out by their grid's spacing like any line; GPS lines
+  in no grid (from M17a) use the spacing measured from their own tracks.
+- **Messages:** the dialog reports each Import as it happens (it can stay open for the hand-on), not
+  only when it closes.
