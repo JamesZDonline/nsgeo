@@ -758,6 +758,32 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 DEFAULT_CELL_M = 0.1
 
 
+def snap_inside(value: float, decimals: int, *, upper: bool) -> float:
+    """`value` rounded to `decimals`, never ESCAPING the bound it describes.
+
+    A plain `round()` is wrong at a boundary: `QDoubleSpinBox.setValue`
+    rounds to the box's own precision, and rounding a lower bound DOWN (or
+    an upper bound UP) puts the spin a few ten-thousandths of a nanosecond
+    outside the range every prepared line actually covers -- which is
+    exactly the `CoverageError` the caller is clamping to avoid, now made
+    intermittent and dependent on the fourth decimal place of a header.
+    Rounds away from the forbidden side instead.
+    """
+    step = 10.0**-decimals
+    snapped = round(value, decimals)
+    if upper and snapped > value:
+        snapped -= step
+    elif not upper and snapped < value:
+        snapped += step
+    return round(snapped, decimals)
+
+
+def window_levels(thickness_ns: float, step_ns: float, dz_ns: float) -> tuple[int, int]:
+    """`(thickness_levels, step_levels)` on a z axis of `dz_ns`: each rounded, and at least 1,
+    so a step smaller than `dz_ns` still advances by something."""
+    return max(1, int(round(thickness_ns / dz_ns))), max(1, int(round(step_ns / dz_ns)))
+
+
 def default_cell(spacing_m: float, floor: float) -> float:
     """The cell a grid is seeded with: `DEFAULT_CELL_M`, no larger than half
     the line spacing (spec 4), and never under `floor`, the finest cell the

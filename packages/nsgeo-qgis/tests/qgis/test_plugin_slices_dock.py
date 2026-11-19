@@ -2081,40 +2081,6 @@ def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path)
         dock.deleteLater()
 
 
-@pytest.mark.parametrize(
-    ("value", "decimals", "upper"),
-    [
-        (-0.47636787593364716, 3, False),  # the real files' own prepared t0
-        (99.56100623309612, 4, True),  # ... and their prepared end
-        (-0.4766, 3, False),  # rounds the WRONG way without the correction
-        (12.34565, 4, True),
-        (-11.0864, 3, False),
-        (0.001, 3, False),  # exact at the precision: must not drift a step
-        (0.001, 3, True),
-        (-2.5, 1, True),
-        (-2.5, 1, False),
-    ],
-)
-def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper):
-    """`_snap_inside` exists because `QDoubleSpinBox.setValue` rounds to the
-    box's own precision, and a bound rounded the wrong way is a bound
-    escaped -- re-raising the very `CoverageError` the clamp is there to
-    prevent, now only for certain headers and only in the fourth decimal
-    place. Pins both halves: the result is ON the spin's grid, and on the
-    legal side of `value`.
-    """
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
-
-    snapped = _snap_inside(value, decimals, upper=upper)
-    assert snapped == round(snapped, decimals)  # lands on the spin's grid
-    if upper:
-        assert snapped <= value, (snapped, value)
-    else:
-        assert snapped >= value, (snapped, value)
-    # Tight: never gives away more than one step of the spin's precision.
-    assert abs(snapped - value) < 10.0**-decimals
-
-
 def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
     """A dock widget's minimum size is a HARD floor on the main window's:
     QGIS cannot shrink a dock area below it, so a tall dock drags the whole
@@ -2808,12 +2774,12 @@ def _settle_sources(dock, session):
 
 
 def _snapped_bounds(dock):
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
+    from nsgeo_qgis.slices_plan import snap_inside
 
     low, high = dock.engine.prepared_z_bounds()
     return (
-        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
-        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+        snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        snap_inside(high, dock.z1_spin.decimals(), upper=True),
     )
 
 

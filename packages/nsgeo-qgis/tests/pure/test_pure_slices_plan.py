@@ -38,7 +38,9 @@ from nsgeo_qgis.slices_plan import (
     old_cube_note,
     preset_transform_conflict,
     preview_note,
+    snap_inside,
     transform_names,
+    window_levels,
 )
 from plugin_testing import REAL_DZT, needs_real_data
 
@@ -921,3 +923,39 @@ def test_stale_slice_dirs_keeps_live_unknown_and_foreign_folders():
     names = ["nsgeo-slice-1-aa", "nsgeo-slice-2-bb", "nsgeo-slice-3-cc", "x", "nsgeo-slice-zz"]
     state = {1: False, 2: True, 3: None}
     assert stale_slice_dirs(names, lambda pid: state[pid]) == ["nsgeo-slice-1-aa"]
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals", "upper"),
+    [
+        (-0.47636787593364716, 3, False),  # the real files' own prepared t0
+        (99.56100623309612, 4, True),  # ... and their prepared end
+        (-0.4766, 3, False),  # rounds the WRONG way without the correction
+        (12.34565, 4, True),
+        (-11.0864, 3, False),
+        (0.001, 3, False),  # exact at the precision: must not drift a step
+        (0.001, 3, True),
+        (-2.5, 1, True),
+        (-2.5, 1, False),
+    ],
+)
+def test_snap_inside_never_escapes_its_bound(value, decimals, upper):
+    """A bound rounded the wrong way is a bound escaped (the spin box rounds to its own
+    precision, and a lower bound rounded down is outside every prepared line's range)."""
+    snapped = snap_inside(value, decimals, upper=upper)
+    assert snapped == round(snapped, decimals)  # on the spin's grid
+    if upper:
+        assert snapped <= value, (snapped, value)
+    else:
+        assert snapped >= value, (snapped, value)
+    assert abs(snapped - value) < 10.0**-decimals  # gives away less than one step
+
+
+def test_snap_inside_lands_on_the_legal_side_at_the_boundary():
+    assert snap_inside(2.00049, 3, upper=False) == 2.001
+    assert snap_inside(5.9996, 3, upper=True) == 5.999
+
+
+def test_window_levels_rounds_and_floors_at_one():
+    assert window_levels(1.0, 0.25, 0.5) == (2, 1)
+    assert window_levels(0.1, 0.1, 0.5) == (1, 1)

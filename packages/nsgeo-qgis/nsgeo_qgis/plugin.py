@@ -1678,6 +1678,12 @@ class NsgeoPlugin:
         assert self.session is not None and self.slices_dock is not None
         dock = self.slices_dock
         site = dock.site_engine
+        if site.is_running:  # the button is disabled too, but this is reachable without it
+            self.message(
+                "wait until the site's grids finish preparing, then export.",
+                Qgis.MessageLevel.Warning,
+            )
+            return
         if not site.ready_grids or site.lattice is None or site.site_z is None:
             self.message("prepare the site's grids before exporting.", Qgis.MessageLevel.Warning)
             return

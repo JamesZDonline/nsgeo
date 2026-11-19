@@ -100,6 +100,8 @@ from nsgeo_qgis.slices_plan import (
     no_break_note,
     old_cube_note,
     smallest_safe_cell,
+    snap_inside,
+    window_levels,
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
@@ -119,26 +121,6 @@ class OwedShift:
     cube_id: str
     preset: str
     marked: bool  # False: a record from before #97, with no time_base
-
-
-def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
-    """`value` rounded to `decimals`, never ESCAPING the bound it describes.
-
-    A plain `round()` is wrong at a boundary: `QDoubleSpinBox.setValue`
-    rounds to the box's own precision, and rounding a lower bound DOWN (or
-    an upper bound UP) puts the spin a few ten-thousandths of a nanosecond
-    outside the range every prepared line actually covers -- which is
-    exactly the `CoverageError` the caller is clamping to avoid, now made
-    intermittent and dependent on the fourth decimal place of a header.
-    Rounds away from the forbidden side instead.
-    """
-    step = 10.0**-decimals
-    snapped = round(value, decimals)
-    if upper and snapped > value:
-        snapped -= step
-    elif not upper and snapped < value:
-        snapped += step
-    return round(snapped, decimals)
 
 
 COVERAGE_TIP = (
@@ -1951,8 +1933,8 @@ class SlicesDock(QgsDockWidget):
         if bounds is None:
             return False
         low, high = bounds
-        top = _snap_inside(low, self.z0_spin.decimals(), upper=False)
-        bottom = _snap_inside(high, self.z1_spin.decimals(), upper=True)
+        top = snap_inside(low, self.z0_spin.decimals(), upper=False)
+        bottom = snap_inside(high, self.z1_spin.decimals(), upper=True)
         z0, z1 = self.z0_spin.value(), self.z1_spin.value()
         new_z0 = top if z0 < low else z0
         new_z1 = bottom if z1 > high else z1
@@ -2791,7 +2773,7 @@ class SlicesDock(QgsDockWidget):
         """`step_spin`'s nanoseconds, in levels of `z` -- at least 1, so a
         step spin box smaller than `dz_ns` still advances by something
         rather than stalling `step_slice`/the readout's index forever."""
-        return max(1, int(round(self.step_spin.value() / z.dz_ns)))
+        return window_levels(self.thickness_spin.value(), self.step_spin.value(), z.dz_ns)[1]
 
     def thickness_step_levels(self) -> tuple[int, int]:
         """`(thickness_levels, step_levels)`, in levels of the current z
@@ -2808,8 +2790,7 @@ class SlicesDock(QgsDockWidget):
         z = self.engine.z
         if z is None:
             raise RuntimeError("no slice geometry: choose a source and a resolution first")
-        thickness_levels = max(1, int(round(self.thickness_spin.value() / z.dz_ns)))
-        return thickness_levels, self._step_levels(z)
+        return window_levels(self.thickness_spin.value(), self.step_spin.value(), z.dz_ns)
 
     def step_slice(self, delta: int) -> None:
         """Move the slider by `delta` STEPS, not levels -- the unit a
@@ -2819,6 +2800,12 @@ class SlicesDock(QgsDockWidget):
         target = self.slice_slider.value() + delta * step_levels
         target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), target))
         self.slice_slider.setValue(target)
+
+    @property
+    def finish_debounce_ms(self) -> int:
+        """The pause, in ms, an Interpolation edit waits before it redraws: This grid's own,
+        and the Whole site's too (`SiteScope.finish_debounce`)."""
+        return int(self._finish_debounce.interval())
 
     def flush_debounce(self) -> None:
         """Apply a pending Resolution change immediately. Used by tests,

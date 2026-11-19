@@ -30,7 +30,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 from nsgeo.processing import TIME_BASE_RADAR, time_base_of
@@ -61,11 +61,92 @@ from nsgeo_qgis.slices_plan import (
     default_cell,
     mixed_clock_note,
     smallest_safe_cell,
+    snap_inside,
+    window_levels,
 )
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import SiteRow
 from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
+
+if TYPE_CHECKING:
+    from qgis.PyQt.QtCore import pyqtBoundSignal
+    from qgis.PyQt.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QDoubleSpinBox,
+        QGroupBox,
+        QLabel,
+        QPushButton,
+        QSlider,
+    )
+
+    from nsgeo_qgis.refine import Refiner
+    from nsgeo_qgis.session import SiteSession
+    from nsgeo_qgis.site_engine import SiteEngine
+    from nsgeo_qgis.ui.finish_panel import FinishPanel
+    from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
+    from nsgeo_qgis.ui.slices_dock import ElidedLabel
+    from nsgeo_qgis.ui.transform_combo import TransformCombo
+
+
+class SlicesDockView(Protocol):
+    """Everything `site_scope` reads or calls on the Slices dock, and nothing else.
+
+    `SlicesDock` satisfies it. The dock owns these widgets, engines and signals; this
+    module only reads them, so a rename in the dock is a type error here, not a late
+    AttributeError in a slot. The dock is also a `QObject` (`QTimer(dock)` and
+    `RefineFlow(dock, ...)` parent to it), which a Protocol cannot say."""
+
+    # The Resolution and Position spins (`dz_spin` is a `QDoubleSpinBox` subclass).
+    cell_spin: QDoubleSpinBox
+    dz_spin: QDoubleSpinBox
+    z0_spin: QDoubleSpinBox
+    z1_spin: QDoubleSpinBox
+    thickness_spin: QDoubleSpinBox
+    step_spin: QDoubleSpinBox
+    slice_slider: QSlider
+    # Display.
+    coverage_check: QCheckBox
+    resident_check: QCheckBox
+    stretch_combo: QComboBox
+    palette_combo: QComboBox
+    grid_combo: QComboBox
+    transform_combo: TransformCombo
+    readout: QLabel
+    velocity_label: QLabel
+    site_depths_label: QLabel
+    status_label: QLabel
+    legend_label: ElidedLabel
+    export_button: QPushButton
+    save_button: QPushButton
+    grid_scope_button: QPushButton
+    site_scope_button: QPushButton
+    source_group: QGroupBox
+    # The panels the site wires up, and the state it reads.
+    site_panel: SiteSourcePanel
+    normalisation_panel: NormalisationPanel
+    grid_finish: FinishPanel
+    site_finish: FinishPanel
+    refiner: Refiner
+    site_engine: SiteEngine
+    session: SiteSession
+    # Signals (a bound signal, as read off an instance).
+    error: pyqtBoundSignal
+    slice_changed: pyqtBoundSignal
+    window_changed: pyqtBoundSignal
+    window_cleared: pyqtBoundSignal
+
+    def scope(self) -> str: ...
+
+    def show_refine(self) -> None: ...
+
+    def show_warnings(self) -> None: ...
+
+    def own_colours_on(self) -> bool: ...
+
+    @property
+    def finish_debounce_ms(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -333,7 +414,7 @@ def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
 
 def levels(z: ZAxis, thickness_ns: float, step_ns: float) -> tuple[int, int]:
     """`(thickness_levels, step_levels)` on `z`, rounded as M11 rounds them."""
-    return max(1, int(round(thickness_ns / z.dz_ns))), max(1, int(round(step_ns / z.dz_ns)))
+    return window_levels(thickness_ns, step_ns, z.dz_ns)
 
 
 def readout(z: ZAxis, window: SliceWindow, thickness_levels: int, step_levels: int) -> str:
@@ -403,7 +484,7 @@ def max_distance_tooltip(session: Any, included: Iterable[str], spacings: float)
 # ---- the widgets the two scopes share ----------------------------------------------
 
 
-def show_scope_widgets(dock: Any) -> None:
+def show_scope_widgets(dock: SlicesDockView) -> None:
     """Show the dock's scope: Whole site swaps Source for the grid list and
     adds Normalisation (spec 4.1); Position, Resolution and Display stay."""
     site = dock.scope() == "site"
@@ -432,7 +513,7 @@ def show_scope_widgets(dock: Any) -> None:
         dock.stretch_combo.blockSignals(False)
 
 
-def capture_spins(dock: Any) -> Spins:
+def capture_spins(dock: SlicesDockView) -> Spins:
     return Spins(
         cell=dock.cell_spin.value(),
         cell_min=dock.cell_spin.minimum(),
@@ -444,7 +525,7 @@ def capture_spins(dock: Any) -> Spins:
     )
 
 
-def set_spins_quietly(dock: Any, **values: float) -> bool:
+def set_spins_quietly(dock: SlicesDockView, **values: float) -> bool:
     """Set Resolution spins with their signals blocked (a seed or a restore,
     never the user's change); whether any moved."""
     spins = {"cell": dock.cell_spin, "dz": dock.dz_spin, "z0": dock.z0_spin}
@@ -466,7 +547,7 @@ def set_spins_quietly(dock: Any, **values: float) -> bool:
     return changed
 
 
-def restore_spins(dock: Any, spins: Spins) -> None:
+def restore_spins(dock: SlicesDockView, spins: Spins) -> None:
     set_dz_floor(dock, spins.dz_min)
     set_cell_floor(dock, spins.cell_min)
     for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
@@ -474,7 +555,7 @@ def restore_spins(dock: Any, spins: Spins) -> None:
     set_spins_quietly(dock, cell=spins.cell, dz=spins.dz, z0=spins.z0, z1=spins.z1)
 
 
-def set_cell_floor(dock: Any, floor: float) -> None:
+def set_cell_floor(dock: SlicesDockView, floor: float) -> None:
     dock.cell_spin.blockSignals(True)
     try:
         dock.cell_spin.setMinimum(floor)
@@ -482,7 +563,7 @@ def set_cell_floor(dock: Any, floor: float) -> None:
         dock.cell_spin.blockSignals(False)
 
 
-def set_dz_floor(dock: Any, floor: float) -> None:
+def set_dz_floor(dock: SlicesDockView, floor: float) -> None:
     """Raise `dz_spin`'s minimum to the sample interval (#177). The box only: a
     remembered resolution or a cube record is never changed.
 
@@ -513,7 +594,7 @@ class SiteScope:
     `dock.normalisation_panel` and `dock.site_finish` are wired here.
     """
 
-    def __init__(self, dock: Any) -> None:
+    def __init__(self, dock: SlicesDockView) -> None:
         self.dock = dock
         #: The site slice last drawn, and its window on the site axis.
         self.slice: SiteSlice | None = None
@@ -546,13 +627,13 @@ class SiteScope:
         self.tick.setInterval(0)
         self.tick.timeout.connect(self._run_tick)
         #: An Interpolation edit's redraw waits out This grid's pause
-        #: (`dock._finish_debounce`): it re-plans every grid's weights and
+        #: (the dock's `finish_debounce_ms`): it re-plans every grid's weights and
         #: re-measures the shared stretch, so a keystroke or a held arrow must
         #: not pay that once a step. 0.2.0's site radius went through
-        #: `dock._debounce`, the same 120 ms.
+        #: the dock's own debounce, the same 120 ms.
         self.finish_debounce = QTimer(dock)
         self.finish_debounce.setSingleShot(True)
-        self.finish_debounce.setInterval(dock._finish_debounce.interval())
+        self.finish_debounce.setInterval(dock.finish_debounce_ms)
         self.finish_debounce.timeout.connect(self._on_finish_timeout)
         #: The site's side of the dock's refiner (plan calls 5 and 7): its
         #: rest, its preview, the running list's progress, and the shared
@@ -860,15 +941,13 @@ class SiteScope:
         bounds at both ends. The record is never written here: it stands, for
         a later crop that frees the range, until the user edits the other end
         against the range shown (Ruling 15, `SlicesDock._edited_fields`)."""
-        from nsgeo_qgis.ui.slices_dock import _snap_inside  # the dock imports this module
-
         dock = self.dock
         if not self.session.is_open:
             return False
         bounds = ready_z_bounds(self.engine)
         if bounds is not None:
-            low = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
-            high = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
+            low = snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
+            high = snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
         else:
             header = header_z_seed(self.session, included) if included else None
             if header is None:

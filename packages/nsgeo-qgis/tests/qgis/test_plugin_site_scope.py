@@ -1167,6 +1167,25 @@ def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_fac
     assert dock.cell_spin.value() == pytest.approx(0.35), "the remembered cell outlives the seed"
 
 
+def test_a_re_sent_included_set_never_seeds_the_resolution_again(site3_factory, open_plugin):
+    """#75: spec 4.4 seeds only when the included set changes. The same set sent again,
+    and a tick, seed nothing; a changed set seeds once."""
+    plugin = open_plugin(site3_factory())
+    dock = whole_site(plugin)
+    scope = dock._site
+    seeds: list[tuple[str, ...]] = []
+    real = scope.seed_resolution
+    scope.seed_resolution = lambda included: (seeds.append(included), real(included))[1]
+    current = scope.included()
+    dock.site_panel.included_changed.emit(current)  # the same set, sent again
+    scope.schedule_refresh()
+    settle(dock)
+    assert seeds == []
+    dock.site_panel.included_changed.emit(current[:-1])  # a changed set
+    settle(dock)
+    assert seeds == [current[:-1]]
+
+
 def test_a_remembered_site_cell_below_the_floor_is_clamped_up_to_it(site3_factory, open_plugin):
     """#71 (approved behaviour 4): a remembered cell still respects the size
     floor. A 40 m grid floors the cell above the box's own 0.01 m. Checked on
@@ -1196,13 +1215,13 @@ def _resolution_spins(dock) -> tuple[float, float, float, float]:
 
 def _snapped_ready_bounds(dock) -> tuple[float, float]:
     """The union of the ready grids' prepared bounds, as the z spins hold it."""
+    from nsgeo_qgis.slices_plan import snap_inside
     from nsgeo_qgis.ui.site_scope import ready_z_bounds
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
 
     low, high = ready_z_bounds(dock.site_engine)
     return (
-        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
-        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+        snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        snap_inside(high, dock.z1_spin.decimals(), upper=True),
     )
 
 
@@ -1762,6 +1781,45 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     assert dock.export_button.isEnabled()
 
 
+def test_site_export_refuses_while_a_grid_prepares(
+    plugin, drive_dialog, message_log, fake_iface, monkeypatch
+):
+    """#75: the button is disabled while a grid prepares, but `_export_site` is reachable
+    without it (a menu, a script) and then wrote a file missing the grid. Refused, and no
+    export dialog opens."""
+    from nsgeo.model.survey import Line
+
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    try:
+        # B is moved, so it prepares again behind the gate; A and C stay ready.
+        plugin.session.replace_grid(
+            dataclasses.replace(plugin.session.grid("B"), origin=(506.0, 690.0))
+        )
+        assert spin_until(lambda: site.is_running), "B never started preparing"
+        assert site.ready_grids, "the test needs ready grids, or it asks the wrong question"
+        plugin._export_site()
+    finally:
+        release.set()
+    assert any("wait until the site's grids finish preparing" in m for m in message_log), (
+        message_log
+    )
+    assert "wait until the site's grids finish preparing, then export." in (
+        fake_iface.messageBar().currentItem().text()
+    )
+    assert shown == [], "an export dialog opened while a grid was still preparing"
+    settle(dock)
+
+
 def test_the_export_message_names_a_grid_left_out(
     plugin, site3, drive_dialog, tmp_path, fake_iface
 ):
@@ -2270,7 +2328,7 @@ def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_d
     """#71, Review Focus 1, on #70's owed path: `prepare()` is a no-op (the
     engine still holds A), so `_run_pending_grid_prepare`'s own clamp is the
     one that meets A's remembered range lying wholly past A's data."""
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
+    from nsgeo_qgis.slices_plan import snap_inside
 
     dock, errors, _ = _in_wait_window(plugin, monkeypatch)
     assert dock.engine.choice.grid_id == "A"
@@ -2284,8 +2342,8 @@ def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_d
     dock.grid_scope_button.click()
     assert dock.engine.is_prepared and not dock.engine.is_running, "the no-op path"
     low, high = dock.engine.prepared_z_bounds()
-    assert dock.z0_spin.value() == _snap_inside(low, dock.z0_spin.decimals(), upper=False)
-    assert dock.z1_spin.value() == _snap_inside(high, dock.z1_spin.decimals(), upper=True)
+    assert dock.z0_spin.value() == snap_inside(low, dock.z0_spin.decimals(), upper=False)
+    assert dock.z1_spin.value() == snap_inside(high, dock.z1_spin.decimals(), upper=True)
     assert plugin.session.slice_resolution("A") == beyond
     _assert_a_slice_is_drawn_on_a(dock, errors)
 
