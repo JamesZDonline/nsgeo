@@ -60,6 +60,7 @@ from nsgeo_qgis.lookup import (
     rows_to_lines,
 )
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.preset_box import PRESET_GONE, PresetBox
 
 (
     COL_INCLUDE,
@@ -180,6 +181,10 @@ class ImportDialog(QDialog):
             label_row.addWidget(b)
         label_row.addStretch(1)
         form.addRow("Label from", label_row)
+        # #129: last, after the placement choices: what happens to the lines
+        # once they are in.
+        self.preset_box = PresetBox(session)
+        form.addRow("Processing preset", self.preset_box)
         layout.addLayout(form)
 
         buttons_row = QHBoxLayout()
@@ -269,6 +274,7 @@ class ImportDialog(QDialog):
         # on the Import button (see _refresh_table).
         gid = self.grid_combo.currentData()
         self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
+        self.preset_box.set_grid(gid or None)
         self._replan()
 
     def _follow_spacing(self, *_: Any) -> None:
@@ -583,10 +589,31 @@ class ImportDialog(QDialog):
         if not lines:
             self.status.setText("nothing to import: no included, placeable rows")
             return
+        chosen = self.preset_box.chosen()
+        if chosen is not None and chosen not in self.session.preset_names():
+            self.status.setText(PRESET_GONE.format(name=chosen))
+            return
+        new_keys = [self.session.line_key(ln) for ln in lines]
+        taken = set(self.session.keys())
+        clash = [k for k in new_keys if k in taken]
+        if clash:
+            self.status.setText(f"line {clash[0]!r} is already in the site")
+            return
+        # §2.4: the first import into an empty grid also sets its Slices
+        # preset, written before the lines so they are prepared once.
+        sets_slices = chosen is not None and self.session.import_sets_slice_preset(gid)
+        if sets_slices:
+            self.session.set_slice_preset(gid, chosen)
         try:
             self.session.add_lines(lines)
-        except ValueError as exc:  # a key already in the site -- add_lines' one failure mode
+        except ValueError as exc:  # add_lines' one failure mode
+            if sets_slices:
+                self.session.set_slice_preset(gid, None)
             self.status.setText(str(exc))
             return
-        self.imported_keys = [self.session.line_key(ln) for ln in lines]
+        if chosen is not None:
+            self.session.apply_preset_to(chosen, new_keys)
+        if self.preset_box.is_choice():
+            self.session.remember_import_preset(gid, chosen)
+        self.imported_keys = new_keys
         super().accept()

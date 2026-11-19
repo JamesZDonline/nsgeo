@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from nsgeo.model.survey import Grid
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
@@ -13,6 +14,11 @@ from test_plugin_session import Spy, _two_grids
 
 A = [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
 B = ["raw/FILE__004.DZT"]
+
+
+def _grid(gid):
+    return Grid(gid, (800.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5)
+
 MODEL = VelocityModel.constant(0.095)
 
 
@@ -133,3 +139,61 @@ def test_migration_note_reads_the_first_enabled_migration_step():
     disabled = [{"step": "migrate_fk", "params": {"velocity_m_ns": 0.1}, "enabled": False}]
     assert migration_note(disabled, saved=True) is None
     assert migration_note([], saved=False) is None
+
+
+# ---- #129: the preset an import starts on, and the grid's first Slices preset ----------
+
+
+def test_import_preset_starting_value_rule(session):
+    assert session.import_preset("A") is None
+    session.remember_import_preset(None, "Plain")
+    assert session.import_preset("A") == "Plain"
+    session.remember_import_preset("A", "Migrate")
+    assert session.import_preset("A") == "Migrate"
+    assert session.import_preset("B") == "Migrate"  # the site's last choice
+    assert session.import_preset(None) == "Migrate"
+    session.remember_import_preset("A", None)
+    assert session.import_preset("A") is None  # a remembered None stays None
+    assert session.import_preset("B") is None  # and is now the site's last
+    session.remember_import_preset(None, "Plain")
+    session.delete_preset("Plain")
+    assert session.import_preset("B") is None
+
+
+def test_remember_import_preset_is_dirty_only_when_it_changes(session):
+    session.remember_import_preset("A", "Plain")
+    session.save()
+    session.remember_import_preset("A", "Plain")
+    assert not session.dirty
+    session.remember_import_preset("A", "Migrate")
+    assert session.dirty
+
+
+def test_import_sets_slice_preset_only_for_no_lines_and_no_preset(session, tmp_path):
+    assert not session.import_sets_slice_preset("A")  # has lines
+    session.add_grid(_grid("C"))
+    assert session.import_sets_slice_preset("C")
+    session.set_slice_preset("C", "Plain")
+    assert not session.import_sets_slice_preset("C")
+
+
+def test_set_slice_preset_sets_and_undoes(session):
+    session.add_grid(_grid("C"))
+    spy = Spy(session.slice_sources_changed)
+    session.set_slice_preset("C", "Plain")
+    assert session.slice_source("C") == {"preset": "Plain"}
+    session.set_slice_preset("C", None)
+    assert session.slice_source("C") is None
+    assert [c[0] for c in spy.calls] == ["C", "C"]
+    session.remember_slice_source("C", preset="Plain", lines=None)
+    session.set_slice_preset("C", None)
+    assert "preset" not in session.slice_source("C")
+    assert session.slice_source("C") == {"lines": None}
+
+
+def test_remove_grid_drops_its_import_preset(session):
+    session.add_grid(_grid("C"))
+    session.remember_import_preset("C", "Plain")
+    session.remove_grid("C")
+    assert "C" not in session.site.import_presets.get("grids", {})
+    assert session.site.import_presets["site"] == "Plain"

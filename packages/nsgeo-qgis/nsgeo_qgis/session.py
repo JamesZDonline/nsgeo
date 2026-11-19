@@ -646,6 +646,11 @@ class SiteSession(QObject):
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
+        grids_chosen = site.import_presets.get("grids")
+        if grids_chosen is not None:
+            grids_chosen.pop(grid_id, None)
+            if not grids_chosen:
+                del site.import_presets["grids"]
         # A cut on a removed grid would make validate() refuse every save
         # (cut spec §4.2). Its picks stay: they are authored data.
         gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
@@ -1374,6 +1379,52 @@ class SiteSession(QObject):
         sources[grid_id] = new
         self._set_dirty(True)
         self.slice_sources_changed.emit(grid_id)
+
+    def set_slice_preset(self, grid_id: str, name: str | None) -> None:
+        """Set only the grid's remembered Slices preset; None removes it (and
+        an entry left empty), for undoing an import's first-lines write."""
+        if name is not None:
+            self._update_source(grid_id, preset=name)
+            return
+        sources = self._require_site().slice_sources
+        old = sources.get(grid_id)
+        if old is None or "preset" not in old:
+            return
+        new = {k: v for k, v in old.items() if k != "preset"}
+        if new:
+            sources[grid_id] = new
+        else:
+            del sources[grid_id]
+        self._set_dirty(True)
+        self.slice_sources_changed.emit(grid_id)
+
+    def import_preset(self, grid_id: str | None) -> str | None:
+        """The preset an import starts on: the grid's remembered choice (None
+        stays None), else the site's last, else None. A name that is no longer
+        a preset reads as None."""
+        site = self._require_site()
+        grids = site.import_presets.get("grids", {})
+        name = grids[grid_id] if grid_id is not None and grid_id in grids else (
+            site.import_presets.get("site")
+        )
+        return name if name in site.presets else None
+
+    def remember_import_preset(self, grid_id: str | None, name: str | None) -> None:
+        """Remember an import's choice for the site and, with a grid, that grid."""
+        site = self._require_site()
+        before = copy.deepcopy(site.import_presets)
+        site.import_presets["site"] = name
+        if grid_id is not None:
+            site.import_presets.setdefault("grids", {})[grid_id] = name
+        if site.import_presets != before:
+            self._set_dirty(True)
+
+    def import_sets_slice_preset(self, grid_id: str) -> bool:
+        """True when an import into this grid would also set its Slices preset:
+        the grid has no lines and its remembered slice source has no preset."""
+        if self.keys_on_grid(grid_id):
+            return False
+        return "preset" not in (self.slice_source(grid_id) or {})
 
     def remember_slice_source(
         self, grid_id: str, *, preset: str, lines: tuple[str, ...] | None

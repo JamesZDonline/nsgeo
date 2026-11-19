@@ -58,6 +58,7 @@ from nsgeo_qgis.gps_import import (
 )
 from nsgeo_qgis.lookup import sort_files
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.preset_box import PRESET_GONE, PresetBox
 
 COL_FILE, COL_TRACES, COL_FIXES, COL_GAP, COL_ENDS, COL_STATUS = range(6)
 HEADERS = ["File", "Traces", "RTK fixes", "Without RTK", "Ends", "Status"]
@@ -145,6 +146,8 @@ class GpsImportDialog(QDialog):
         shift_row.addWidget(self.shift)
         shift_row.addWidget(shift_note, 1)
         form.addRow("Destagger (m)", shift_row)
+        self.preset_box = PresetBox(session)  # #129: no grid until M17b, no Slices line
+        form.addRow("Processing preset", self.preset_box)
         self.crs_label = QLabel("")
         self.note_label = QLabel("")
         self.note_label.setStyleSheet("color: gray;")
@@ -336,6 +339,16 @@ class GpsImportDialog(QDialog):
         # Built from the planned rows, never re-read here: a file that went
         # unreadable since planning must not leave the site pinned with no lines.
         lines = shifted_lines(self.rows, self.shift.value())
+        chosen = self.preset_box.chosen()
+        if chosen is not None and chosen not in self.session.preset_names():
+            self.status.setText(PRESET_GONE.format(name=chosen))
+            return
+        new_keys = [self.session.line_key(ln) for ln in lines]
+        taken = set(self.session.keys())
+        clash = [k for k in new_keys if k in taken]
+        if clash:
+            self.status.setText(f"line {clash[0]!r} is already in the site")
+            return
         if in_force is None:
             self.session.set_site_crs(self._crs.authid())
         try:
@@ -343,6 +356,10 @@ class GpsImportDialog(QDialog):
         except ValueError as exc:  # a key already in the site, or a CRS mismatch
             self.status.setText(str(exc))
             return
-        self.imported_keys = [self.session.line_key(ln) for ln in lines]
+        if chosen is not None:
+            self.session.apply_preset_to(chosen, new_keys)
+        if self.preset_box.is_choice():
+            self.session.remember_import_preset(None, chosen)
+        self.imported_keys = new_keys
         self.messages = import_messages(self.rows, len(lines))
         super().accept()

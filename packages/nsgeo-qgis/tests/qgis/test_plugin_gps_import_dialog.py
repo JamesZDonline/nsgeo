@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
+from nsgeo.processing import build_step
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import (
     COL_ENDS,
@@ -13,10 +14,11 @@ from nsgeo_qgis.ui.gps_import_dialog import (
     GpsImportDialog,
 )
 from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
 from qgis.core import QgsCoordinateReferenceSystem, QgsProject
 from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QFormLayout, QMessageBox
 from tests.real_data import GPS_LINES
 
 LAT0, LON0 = 45.2, 10.5
@@ -486,3 +488,81 @@ def test_importing_the_first_gps_survey(plugin, project_degrees):
     assert 29.5 <= walked["FILE__011.DZT"] <= 31.0
     assert shown[0] == "imported 60 GPS line(s)"
     assert not any("without an RTK fix" in m for m in shown)
+
+
+# ---- #129: the Processing preset box -------------------------------------------------
+
+
+def _preset_from_a_line(session, tmp_path, name):
+    """Save `name` (a dewow) from a tape line on a side grid."""
+    from nsgeo.model.survey import Line
+
+    session.add_grid(Grid("S", (900.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32632", 0.5))
+    p = synthetic_dzt(tmp_path / "side", "SIDE__001.DZT", n_traces=60)
+    line = Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))
+    session.add_lines([line])
+    key = session.line_key(line)
+    session.append_step(key, build_step("dewow", window_ns=12.0))
+    session.save_preset(name, key)
+
+
+def test_the_preset_box_sits_under_the_destagger_row(session):
+    d = GpsImportDialog(session)
+    form = d.findChildren(QFormLayout)[0]
+    labels = [form.itemAt(r, QFormLayout.ItemRole.LabelRole).widget().text() for r in range(3)]
+    assert labels == ["Destagger (m)", "Processing preset", "Coordinates:"]
+    assert form.itemAt(1, QFormLayout.ItemRole.FieldRole).widget() is d.preset_box
+
+
+def test_gps_import_with_a_preset_changes_only_the_new_lines_and_remembers_the_sites_choice(
+    session, tmp_path
+):
+    _preset_from_a_line(session, tmp_path, "Plain")
+    first = GpsImportDialog(session)
+    first.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
+    first.accept()
+    before = session.stack_for(first.imported_keys[0]).to_dicts()
+    d = GpsImportDialog(session)
+    d.add_files([gps_file(tmp_path / "raw", "FILE__002.DZT", lon=LON0 + 0.00002)])
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
+    d.accept()
+    assert session.stack_for(first.imported_keys[0]).to_dicts() == before
+    assert session.stack_for(d.imported_keys[0]).to_dicts() == session.site.presets["Plain"]
+    assert session.site.import_presets == {"site": "Plain"}
+    assert "S" not in session.site.slice_sources  # no Slices step in the GPS dialog
+    assert GpsImportDialog(session).preset_box.chosen() == "Plain"
+
+
+def test_a_preset_deleted_under_the_gps_dialog_imports_nothing(session, tmp_path):
+    _preset_from_a_line(session, tmp_path, "Plain")
+    d = GpsImportDialog(session)
+    d.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
+    d.preset_box._on_presets_changed = lambda *a: None
+    del session.site.presets["Plain"]
+    d.accept()
+    assert d.status.text() == PRESET_GONE.format(name="Plain")
+    assert len(session.keys()) == 1  # only the side line
+
+
+@pytest.mark.skipif(len(GPS_LINES) < 4, reason="no GPS-recorded DZT files in tests/data/local")
+def test_real_gps_lines_import_with_a_preset(plugin, project_degrees):
+    session = plugin.session
+    first = GpsImportDialog(session)
+    first.add_files(list(GPS_LINES[:2]))
+    first.accept()
+    assert len(first.imported_keys) == 2
+    for k in first.imported_keys:
+        session.append_step(k, build_step("dewow", window_ns=12.0))
+    session.save_preset("Plain", first.imported_keys[0])
+    kept = {k: session.stack_for(k).to_dicts() for k in first.imported_keys}
+    d = GpsImportDialog(session)
+    d.add_files(list(GPS_LINES[2:4]))
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
+    d.accept()
+    assert len(d.imported_keys) == 2
+    for k in d.imported_keys:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+    for k, dicts in kept.items():
+        assert session.stack_for(k).to_dicts() == dicts
+    assert session.site.import_presets["site"] == "Plain"

@@ -195,6 +195,11 @@ class Site:
     #: Every key is optional; a missing key is the default (plugin colours).
     slice_colours: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    #: The preset each import last chose (#129): `{"grids": {grid_id: name |
+    #: None}, "site": name | None}`, both keys optional. Kept apart from
+    #: `slice_sources` so it never moves a surface's staleness.
+    import_presets: dict[str, Any] = field(default_factory=dict)
+
     #: What `load_site` changed so the project could open: one plain-language
     #: note per processing step it turned off, reset or removed. A fact about
     #: this load only, so it is never saved.
