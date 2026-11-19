@@ -28,7 +28,7 @@ import os
 import re
 import shutil
 import traceback
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +36,8 @@ from typing import Any
 
 import nsgeo
 import numpy as np
+from nsgeo.geometry import Grid
+from nsgeo.model import Cut, is_cut_key
 from nsgeo.processing import (
     TIME_BASE_TIME_ZERO,
     Radargram,
@@ -89,7 +91,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
-from nsgeo_qgis.surface_plan import feature_ids
+from nsgeo_qgis.surface_plan import cut_pick_base, feature_ids
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -224,30 +226,52 @@ def place_picks(
     prov: Any,
     frame: CubeFrame,
     velocity: Any,
+    *,
+    cuts: Mapping[str, Cut] | None = None,
+    grid: Grid | None = None,
 ) -> list[PlacedPick | None]:
-    """Each `(line_key, pick)` of `rows` on the cube's clock, in order. A pick whose line is not
-    among `lines`, or whose depth is not finite, is None."""
+    """Each `(key, pick)` of `rows` on the cube's clock, in order. A pick whose line is not
+    among `lines`, or whose depth is not finite, is None.
+
+    A cut pick (M16 D) is placed when its key is in `cuts`, `grid` is given and its time base
+    is the one the cube's clock uses: its distance along the cut becomes a point in the grid,
+    in the world and then in the frame. Its time is its own (never retimed) and its `trace` is
+    the stored section column. Any other cut pick is None."""
     on_zero = time_base_of(prov.steps) == TIME_BASE_TIME_ZERO
     by_key = {line.key: line for line in lines}
-    found: list[tuple[int, PreparedLine, int, float]] = []
+    found: list[tuple[int, tuple[float, float] | None, PreparedLine | None, int, float]] = []
     for i, (key, p) in enumerate(rows):
+        if is_cut_key(key):
+            cut = None if cuts is None else cuts.get(key)
+            if cut is None or grid is None or cut_pick_base(p) != time_base_of(prov.steps):
+                continue
+            if p.distance_m is None:
+                continue
+            world = grid.to_world(np.asarray([cut.point_at(float(p.distance_m))], dtype=float))
+            x, y = frame.to_local(world)[0]
+            found.append((i, (float(x), float(y)), None, max(int(p.trace), 0), float(p.time_ns)))
+            continue
         line = by_key.get(key)
         if line is None:
             continue
         target = line.zero_ns if on_zero else 0.0
         trace = min(max(int(p.trace), 0), line.coords.shape[0] - 1)
-        found.append((i, line, trace, float(retime_ns(p.time_ns, p.zero_ns or 0.0, target))))
+        found.append((i, None, line, trace, float(retime_ns(p.time_ns, p.zero_ns or 0.0, target))))
     out: list[PlacedPick | None] = [None] * len(rows)
     if not found:
         return out
     depth = np.asarray(
-        velocity.depth_at(np.asarray([f[3] for f in found], dtype=float)), dtype=float
+        velocity.depth_at(np.asarray([f[4] for f in found], dtype=float)), dtype=float
     )
-    for (i, line, trace, _), d in zip(found, depth):
+    for (i, spot, line, trace, _), d in zip(found, depth):
         if not math.isfinite(float(d)):
             continue
-        x, y = frame.to_local(line.coords[trace : trace + 1])[0]
-        out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
+        if spot is None:
+            assert line is not None
+            x, y = frame.to_local(line.coords[trace : trace + 1])[0]
+            out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
+        else:
+            out[i] = PlacedPick(rows[i][0], trace, spot[0], spot[1], float(d))
     return out
 
 

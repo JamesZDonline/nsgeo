@@ -261,7 +261,8 @@ def test_fewer_than_three_or_collinear_picks_are_refused(site):
     assert surfaces.check([]).refusal.startswith("Select picks")
 
 
-def test_picks_on_a_cut_are_refused(site):
+def test_picks_on_a_cut_that_is_gone_cannot_be_placed(site):
+    # a cut key with no cut in the site is a pick with no grid, not a cut refusal
     _, layers, surfaces, _ = site
     fids = _bowl_picks(layers, 4)
     cut = QgsFeature(layers.layers["picks"].fields())
@@ -272,9 +273,8 @@ def test_picks_on_a_cut_are_refused(site):
     assert layers.layers["picks"].dataProvider().addFeatures([cut])[0]
     on_cut = max(_fids(layers))
     found = surfaces.check([*fids, on_cut])
-    assert found.refusal.startswith("1 of these picks is on a cut")
-    with pytest.raises(ValueError, match="on a cut"):
-        surfaces.create("Cut", [*fids, on_cut])
+    assert "on a cut" not in found.refusal
+    assert found.refusal.startswith("1 of these picks is not on a line of a grid")
 
 
 def test_a_pick_with_no_line_or_no_position_is_refused_plainly(site):

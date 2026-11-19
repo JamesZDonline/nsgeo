@@ -10,6 +10,7 @@ from nsgeo_qgis.surface_plan import (
     also_note,
     built_message,
     clean_name,
+    cut_pick_base,
     delete_question,
     empty_message,
     feature_ids,
@@ -61,18 +62,14 @@ def test_names_are_trimmed_and_unique_case_folded():
 
 
 def test_selection_refusals_come_in_order():
-    ok = {"n": 5, "unsaved": 0, "on_cuts": 0, "grids": {"A"}, "spans_area": True}
+    ok = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
     assert selection_refusal(**ok) == ""
-    everything = {"n": 2, "unsaved": 2, "on_cuts": 5, "grids": {"A", "B"}, "spans_area": False}
+    everything = {"n": 2, "unsaved": 2, "grids": {"A", "B"}, "spans_area": False}
     assert selection_refusal(**{**everything, "n": 0}).startswith("Select picks")
     assert selection_refusal(**everything) == (
         "Save the picks layer's edits first; 2 of these picks are not saved yet."
     )
     everything["unsaved"] = 0
-    assert selection_refusal(**everything) == (
-        "5 of these picks are on a cut. Picks on cuts can join surfaces in a later version."
-    )
-    everything["on_cuts"] = 0
     assert selection_refusal(**everything) == (
         "These picks are on Grid A and Grid B. "
         "A surface comes from one grid; select picks on one grid only."
@@ -118,13 +115,12 @@ def test_remove_and_delete_wording():
 
 
 def test_unreadable_picks_have_their_own_wording_and_come_after_unsaved():
-    base = {"n": 5, "unsaved": 0, "on_cuts": 0, "grids": {"A"}, "spans_area": True}
+    base = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
     assert selection_refusal(**base, unreadable=1) == (
         "1 of these picks has no trace or time; edit or delete it in the picks layer."
     )
     assert "3 of these picks have no trace or time" in selection_refusal(**base, unreadable=3)
     assert selection_refusal(**{**base, "unsaved": 1}, unreadable=2).startswith("Save")
-    assert "cut" not in selection_refusal(**{**base, "on_cuts": 2}, unreadable=1)
 
 
 def test_stale_text_names_every_reason():
@@ -346,3 +342,25 @@ def test_remembered_step_is_the_export_dialogs_four_decimals():
     assert remembered_step(0.21653124690055847) == 0.2165
     assert remembered_step(0.00004) == 0.00004  # rounding to nothing keeps the step
     assert remembered_step(remembered_step(0.07812)) == 0.0781
+
+
+def test_cut_picks_are_no_longer_refused():
+    refusal = selection_refusal(n=5, unsaved=0, grids={"A"}, spans_area=True)
+    assert "cut" not in (refusal or "")
+    assert "cut" not in selection_refusal(
+        n=5, unsaved=0, grids={"A"}, spans_area=True, unreadable=1
+    )
+
+
+def _pick(**kw):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**kw)
+
+
+def test_a_cut_picks_time_base_comes_from_its_provenance():
+    assert cut_pick_base(_pick(stack_json='{"time_base": "time_zero"}')) == "time_zero"
+    assert cut_pick_base(_pick(stack_json="")) == "radar"
+    assert cut_pick_base(_pick(stack_json="not json")) == "radar"
+    assert cut_pick_base(_pick(stack_json='{"other": 1}')) == "radar"
+    assert cut_pick_base(_pick(stack_json="[1]")) == "radar"

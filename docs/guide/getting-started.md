@@ -803,7 +803,8 @@ by depth, goes into the next ParaView export (Step 9), and stays listed in the
 **Pick only where the reflection is clear, and the same part of the wave each
 time.** A surface is only as good as its picks: pick the same peak or trough on
 every line, and leave a line out where you cannot tell. Picks on one grid only.
-Picks on cuts cannot be used yet.
+Picks on cuts join surfaces like picks on lines, as long as they were made
+on the clock the grid's preset uses now.
 
 1. Make the **picks** layer current in QGIS and select picks with QGIS's own
    Select tool: a box, a polygon, or by expression. At least three, not all in a

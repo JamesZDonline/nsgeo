@@ -7,6 +7,7 @@ writes what it made."""
 from __future__ import annotations
 
 import json
+import math
 import types
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export
 from nsgeo_qgis.paraview_export import ParaViewExportCancelled, place_picks
 from nsgeo_qgis.session import Pick
-from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS
+from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS, WHY_NO_CUT, WHY_OTHER_CLOCK
 from nsgeo_qgis.surfaces import Surfaces
 from plugin_testing import STEPS_RADAR, STEPS_ZERO, synthetic_dzt
 
@@ -663,3 +664,153 @@ def test_a_changed_depth_step_marks_the_surface_stale(built_site):
     assert surfaces.state(record.feature_id).stale == ("resolution",)
     session.remember_volume(GRID, dz_ns=step)
     assert surfaces.state(record.feature_id).stale == ()
+
+
+# ---- picks on cuts (M16 D Task 1) --------------------------------------------------------
+
+
+def _cut_pick(
+    cut_key: str, distance_m: float, time_ns: float, base: str = "time_zero", column: int = 7
+) -> Pick:
+    return Pick(
+        line_key=cut_key,
+        trace=column,
+        time_ns=time_ns,
+        distance_m=distance_m,
+        depth_m=None,
+        velocity_m_ns=None,
+        stack_json=json.dumps({"time_base": base}),
+        note="",
+        created="2026-11-13T00:00:00+00:00",
+        zero_ns=None,
+    )
+
+
+def _write_cut_picks(layers, cut_key, specs, base="time_zero") -> list[int]:
+    """Write cut picks `(distance_m, time_ns)`; return their fids."""
+    before = set(_fids(layers))
+    for distance, time_ns in specs:
+        layers.write_pick(_cut_pick(cut_key, distance, time_ns, base))
+    return sorted(set(_fids(layers)) - before)
+
+
+def _cut_along_line_0(session) -> str:
+    # line 0 runs along x = 0.5
+    return session.add_cut(GRID, [(0.5, 0.5), (0.5, 11.5)])
+
+
+def test_a_cut_pick_lands_where_the_line_pick_under_it_lands(built_site):
+    session, _, export, _, _ = built_site
+    cut_key = _cut_along_line_0(session)
+    cut = session.cut_for_key(cut_key)
+    got = export.fill(GRID, export.defaults(GRID), progress=_noop)
+    line_key = session.keys()[0]
+    line_pick = _pick(line_key, 30, 10.0, zero_ns=0.0)
+    (a,) = place_picks([(line_key, line_pick)], got.lines, got.prov, got.frame, got.velocity)
+    assert a is not None
+    # the same spot, as a distance along the cut (the cut starts at y = 0.5)
+    spot = got.frame.cell  # tolerance below is half a cell
+    distance = a.y_m - 0.5
+    # the cut pick's time is already on the cube's clock (time zero): the same moment
+    cut_pick = _cut_pick(cut_key, distance, 10.0 - got.lines[0].zero_ns)
+    a, b = place_picks(
+        [(line_key, line_pick), (cut_key, cut_pick)],
+        got.lines,
+        got.prov,
+        got.frame,
+        got.velocity,
+        cuts={cut_key: cut},
+        grid=session.grid(GRID),
+    )
+    assert b is not None
+    assert b.depth_m == pytest.approx(a.depth_m)
+    assert math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) <= spot / 2
+    assert b.line_key == cut_key and b.trace == 7  # the stored column, for the record
+    del got
+
+
+def test_a_surface_builds_from_line_and_cut_picks_together(built_site):
+    session, _, _, layers, surfaces = built_site
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, [(0, 5, 10.0), (1, 5, 10.5), (1, 55, 11.5)])
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4), (8.0, 11.0)])
+    found = surfaces.check([*line_fids, *cut_fids])
+    assert found.refusal == ""
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["fit"]["picks"] == 5
+    assert made.report["skipped"] == []
+
+
+def test_a_cut_pick_on_another_clock_is_reported_not_placed(built_site):
+    session, _, export, layers, surfaces = built_site
+    session.site.presets["p"] = list(STEPS_ZERO)
+    cut_key = _cut_along_line_0(session)
+    got = export.fill(GRID, export.defaults(GRID), progress=_noop)
+    odd = _cut_pick(cut_key, 3.0, 10.0, base="radar")
+    assert place_picks(
+        [(cut_key, odd)],
+        got.lines,
+        got.prov,
+        got.frame,
+        got.velocity,
+        cuts={cut_key: session.cut_for_key(cut_key)},
+        grid=session.grid(GRID),
+    ) == [None]
+    del got
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.0)], base="radar")
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["fit"]["picks"] == 4
+    assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_OTHER_CLOCK}]
+
+
+def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
+    session, _, _, layers, surfaces = built_site
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["fit"]["picks"] == 5
+    assert surfaces.state(record.feature_id).stale == ()
+    session.remove_cut(cut_key)
+    assert "source" in surfaces.state(record.feature_id).stale
+    (again,) = surfaces.build([record.feature_id], progress=_noop)
+    assert again.report["fit"]["picks"] == 4
+    assert again.report["skipped"] == [{"line_key": cut_key, "why": WHY_NO_CUT}]
+
+
+def test_a_cut_pick_outside_the_frame_is_reported_on_a_hole(built_site):
+    session, _, _, layers, surfaces = built_site
+    # a cut that runs past the grid's 12 m end: its far part is outside the cube's frame
+    cut_key = session.add_cut(GRID, [(0.5, 0.5), (0.5, 20.0)])
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(18.0, 10.5)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    fit = made.report["fit"]
+    assert fit["picks"] == 5
+    assert fit["on_holes"] + fit["at_edge"] >= 1
+    assert made.report["skipped"] == []
+
+
+def test_a_cut_picks_distance_not_its_column_is_its_identity(built_site):
+    session, _, _, layers, surfaces = built_site
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    (cut_fid,) = _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    record = surfaces.create("Mixed", [*line_fids, cut_fid], SurfaceSettings(strength=0.0))
+    surfaces.build([record.feature_id], progress=_noop)
+    assert surfaces.state(record.feature_id).stale == ()
+
+    def edit(field: str, value) -> None:
+        layer = layers.layers["picks"]
+        index = layer.fields().indexOf(field)
+        assert layer.dataProvider().changeAttributeValues({cut_fid: {index: value}})
+
+    edit("trace", 99)  # the record-only column
+    assert surfaces.state(record.feature_id).stale == ()
+    edit("distance_m", 6.0)
+    assert surfaces.state(record.feature_id).stale == ("picks",)
