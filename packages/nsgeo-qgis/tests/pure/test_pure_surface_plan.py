@@ -11,6 +11,7 @@ from nsgeo_qgis.surface_plan import (
     built_message,
     clean_name,
     cut_pick_base,
+    cut_pick_on_clock,
     delete_question,
     empty_message,
     feature_ids,
@@ -372,3 +373,13 @@ def test_a_cut_picks_time_base_comes_from_its_provenance():
     assert cut_pick_base(_pick(stack_json="not json")) == "radar"
     assert cut_pick_base(_pick(stack_json='{"other": 1}')) == "radar"
     assert cut_pick_base(_pick(stack_json="[1]")) == "radar"
+
+
+def test_a_cut_pick_is_on_the_clock_when_it_has_a_distance_and_the_presets_base():
+    zero = [{"step": "time_zero"}]  # a preset that sets time zero
+    z = _pick(distance_m=3.0, stack_json='{"time_base": "time_zero"}')
+    r = _pick(distance_m=3.0, stack_json='{"time_base": "radar"}')
+    none = _pick(distance_m=None, stack_json='{"time_base": "time_zero"}')
+    none_r = _pick(distance_m=None, stack_json='{"time_base": "radar"}')
+    assert [cut_pick_on_clock(p, zero) for p in (z, r, none, none_r)] == [True, False, False, False]
+    assert [cut_pick_on_clock(p, []) for p in (z, r, none, none_r)] == [False, True, False, False]

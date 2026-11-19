@@ -1162,10 +1162,17 @@ def test_a_cut_pick_on_another_clock_is_left_out_of_the_export(built_site):
 
     session, _, export, layers, _ = built_site
     cut_key = _cut_along_line_0(session)
-    _write_cut_picks(layers, cut_key, [(3.0, 10.4)], base="radar")
+    _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    _write_cut_picks(layers, cut_key, [(8.0, 11.0)], base="radar")
+    # the dialog's count leaves the off-clock pick out too, as picks.vtp does
+    assert export.summary(GRID.id, export.defaults(GRID.id)).n_picks == 1
     folder = export.run(GRID.id, export.defaults(GRID.id), progress=_noop)
-    assert read_vtk_xml(folder / "picks.vtp")["NumberOfPoints"] == 0
-    assert json.loads((folder / "export.json").read_text())["n_picks"] == 0
+    doc = read_vtk_xml(folder / "picks.vtp")
+    cut_col = doc["point_data"]["cut"]
+    assert doc["NumberOfPoints"] == 1 and cut_col.tolist() == [0]
+    want = float(session.grid_depth_velocity(GRID.id).depth_at(np.asarray([10.4]))[0])
+    assert float(doc["point_data"]["true_depth_m"][0]) == pytest.approx(want, rel=1e-5)
+    assert json.loads((folder / "export.json").read_text())["n_picks"] == 1
 
 
 def test_pick_depths_answer_cut_keys_by_the_exports_rule(built_site):

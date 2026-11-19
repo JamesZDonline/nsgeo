@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any
 import nsgeo
 import numpy as np
 from nsgeo.model import is_cut_key
-from nsgeo.processing import time_base_of
 from nsgeo.slices import (
     SurfaceSettings,
     build_surface,
@@ -61,7 +60,7 @@ from nsgeo_qgis.surface_plan import (
     WHY_OTHER_CLOCK,
     FeatureRecord,
     clean_name,
-    cut_pick_base,
+    cut_pick_on_clock,
     feature_ids,
     grid_mismatch_refusal,
     input_hash,
@@ -622,7 +621,7 @@ class Surfaces:
                 if spot is None and is_cut_key(key):
                     if key not in cuts:
                         why = WHY_NO_CUT
-                    elif cut_pick_base(pick) != time_base_of(got.prov.steps):
+                    elif not cut_pick_on_clock(pick, got.prov.steps):
                         why = WHY_OTHER_CLOCK
                     else:
                         why = WHY_NO_DEPTH

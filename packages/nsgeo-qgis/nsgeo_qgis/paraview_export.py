@@ -91,7 +91,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
-from nsgeo_qgis.surface_plan import cut_pick_base, feature_ids
+from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -243,9 +243,7 @@ def place_picks(
     for i, (key, p) in enumerate(rows):
         if is_cut_key(key):
             cut = None if cuts is None else cuts.get(key)
-            if cut is None or grid is None or cut_pick_base(p) != time_base_of(prov.steps):
-                continue
-            if p.distance_m is None:
+            if cut is None or grid is None or not cut_pick_on_clock(p, prov.steps):
                 continue
             world = grid.to_world(np.asarray([cut.point_at(float(p.distance_m))], dtype=float))
             x, y = frame.to_local(world)[0]
@@ -385,9 +383,14 @@ class ParaViewExport:
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
         if grid_id not in self._pick_counts:
+            steps = list(self.session.site.presets.get(source.preset, []))
             self._pick_counts[grid_id] = sum(
-                len(self.session.picks_for(k))
-                for k in [*source.line_keys, *self.session.cut_keys_on_grid(grid_id)]
+                len(self.session.picks_for(k)) for k in source.line_keys
+            ) + sum(
+                1
+                for k in self.session.cut_keys_on_grid(grid_id)
+                for p in self.session.picks_for(k)
+                if cut_pick_on_clock(p, steps)
             )
         n_picks = self._pick_counts[grid_id]
         states = self._surface_states(grid_id)
@@ -520,13 +523,12 @@ class ParaViewExport:
         on_zero = time_base_of(steps) == TIME_BASE_TIME_ZERO
         keys = set(source.line_keys)
         cut_keys = set(self.session.cut_keys_on_grid(grid_id))
-        base = time_base_of(steps)
         zeros: dict[str, float | None] = {}
         found: list[tuple[int, float]] = []
         for i, (key, p) in enumerate(rows):
             if key in cut_keys:
                 # no file to read a zero from: the pick's time is already on the cube's clock
-                if cut_pick_base(p) == base and math.isfinite(float(p.time_ns)):
+                if cut_pick_on_clock(p, steps) and math.isfinite(float(p.time_ns)):
                     found.append((i, float(p.time_ns)))
                 continue
             if key not in keys:
@@ -736,6 +738,7 @@ class ParaViewExport:
             partial.mkdir(parents=True)
             amp_p99 = self._write_cube(partial, vol, frame, choice, spans, step)
             features = self._write_features(partial, grid_id, frame, choice)
+            cut_keys = self.session.cut_keys_on_grid(grid_id)
             n_picks = self._write_picks(
                 partial,
                 lines,
@@ -745,16 +748,28 @@ class ParaViewExport:
                 velocity,
                 {f["feature_id"]: f["index"] for f in features},
                 grid,
+                cut_keys,
             )
             features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
-            record = self._record(
-                grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks, features
-            )
-            record["cuts"] = [
+            cuts = [
                 {"index": i, "key": k, "name": self.session.cut_for_key(k).name}
-                for i, k in enumerate(self.session.cut_keys_on_grid(grid_id))
+                for i, k in enumerate(cut_keys)
             ]
+            record = self._record(
+                grid,
+                grid_id,
+                choice,
+                frame,
+                lines,
+                prov,
+                finish,
+                vol,
+                amp_p99,
+                n_picks,
+                features,
+                cuts,
+            )
             record["skipped_lines"] = list(self.skipped_lines)
             write_scene_files(partial, record, paraview_path)
             self._swap(partial, folder)
@@ -947,8 +962,9 @@ class ParaViewExport:
         frame: CubeFrame,
         choice: VolumeChoice,
         velocity: Any,
-        feature_index: dict[str, int] | None = None,
-        grid: Grid | None = None,
+        feature_index: dict[str, int] | None,
+        grid: Grid,
+        cut_keys: Sequence[str],
     ) -> int:
         """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity.
         `feature` is the index (in export.json's `features`) of the first built surface the
@@ -957,7 +973,6 @@ class ParaViewExport:
         `line` is -1 on a cut pick."""
         feature_index = feature_index or {}
         order = {line.key: i for i, line in enumerate(sorted(lines, key=lambda ln: ln.key))}
-        cut_keys = [] if grid is None else self.session.cut_keys_on_grid(grid.id)
         cuts = {k: self.session.cut_for_key(k) for k in cut_keys}
         rows = [(line.key, p) for line in lines for p in self.session.picks_for(line.key)]
         rows += [(k, p) for k in cut_keys for p in self.session.picks_for(k)]
@@ -974,7 +989,9 @@ class ParaViewExport:
         n_surfaces = np.asarray([len(b) for b in built], dtype=np.int32)
         depth = np.asarray([p.depth_m for p in placed], dtype=float)
         local = np.asarray([[p.x_m, p.y_m] for p in placed], dtype=float).reshape(-1, 2)
-        line_index = np.asarray([order.get(p.line_key, -1) for p in placed], dtype=np.int32)
+        line_index = np.asarray(
+            [-1 if p.line_key in cuts else order[p.line_key] for p in placed], dtype=np.int32
+        )
         cut_index = np.asarray(
             [cut_keys.index(p.line_key) if p.line_key in cuts else -1 for p in placed],
             dtype=np.int32,
@@ -1119,6 +1136,7 @@ class ParaViewExport:
         amp_p99: float,
         n_picks: int,
         features: list[dict[str, Any]],
+        cuts: list[dict[str, Any]],
     ) -> dict[str, Any]:
         depths = vol.depths_m
         local = [frame.to_local(line.coords) for line in lines]
@@ -1166,6 +1184,7 @@ class ParaViewExport:
             },
             n_picks=int(n_picks),
             features=features,
+            cuts=cuts,
             nsgeo_version=str(nsgeo.__version__),
             written_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )

@@ -171,6 +171,7 @@ class Scene3D:
             session.grids_changed,
             session.lines_changed,
             session.presets_changed,
+            session.cuts_changed,
         ]
         for signal in self._signals:
             signal.connect(self.request_refresh)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import types
 
+import numpy as np
 import pytest
 from nsgeo.geometry import Grid
 from nsgeo.geometry.placement import GridPlacement
@@ -767,3 +768,25 @@ def test_the_3d_view_shows_the_grids_cut_picks(scene):
     assert sorted(_z(scene)) == pytest.approx(
         sorted([f.geometry().constGet().z() for f in before] + [-cut_depth * 3.0])
     )
+    # and its x/y are the cut's point at the stored distance, through the grid
+    cut = session.cut_for_key(cut_key)
+    want = session.grid(A).to_world(np.asarray([cut.point_at(3.0)], dtype=float))[0]
+    (spot,) = [
+        f.geometry().constGet()
+        for f in s3d.picks_layer.getFeatures()
+        if abs(f.geometry().constGet().z() + cut_depth * 3.0) < 1e-6
+    ]
+    assert (spot.x(), spot.y()) == pytest.approx((float(want[0]), float(want[1])))
+
+
+def test_deleting_a_cut_takes_its_picks_out_of_the_3d_view(scene):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+
+    s3d, session, surfaces, _, _, _ = scene
+    s3d.open()
+    cut_key = _cut_along_line_0(session)
+    _write_cut_picks(surfaces.layers, cut_key, [(3.0, 10.4)])
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 5)
+    session.remove_cut(cut_key)  # emits cuts_changed only
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 4)

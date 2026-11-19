@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import time_base_of
 from nsgeo.slices import SurfaceSettings
 
 KIND_SURFACE = "surface"
@@ -252,6 +253,13 @@ def cut_pick_base(pick: Any) -> str:
     except (ValueError, KeyError, TypeError):
         return "radar"
     return base if isinstance(base, str) and base else "radar"
+
+
+def cut_pick_on_clock(pick: Any, steps: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether a cut pick can be placed on the cube's clock: it has a distance along its cut and
+    was made on the time base the preset's `steps` use now. The one rule `place_picks`,
+    `pick_depths`, the export's counts and the surface build share."""
+    return pick.distance_m is not None and cut_pick_base(pick) == time_base_of(steps)
 
 
 def skipped_text(skipped: Sequence[Mapping[str, Any]]) -> str:
