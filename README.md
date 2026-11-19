@@ -112,7 +112,8 @@ release's notes list everything in it.
   **Plan B, surfaces from picks** ([#202]) are merged (above). **Plan C, the
   QGIS 3-D view:** a 3D view button opens QGIS's own 3-D view of the grid the
   Slices panel shows, with its picks at depth and its surfaces, stretched and
-  saying so. Built and reviewed, awaiting its walkthrough. **Plan D, cuts in
+  saying so; its depth stretch is set per grid in the Surfaces panel. Walked
+  through, PR [#217] awaits merge. **Plan D, cuts in
   3-D:** picks on cuts join surfaces, and the ParaView export gains a wall for
   every line and cut. Planned; builds after C merges.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
@@ -275,6 +276,7 @@ Grouped by area. The order within a group is not a priority.
 [#214]: https://github.com/JamesZDonline/nsgeo/issues/214
 [#215]: https://github.com/JamesZDonline/nsgeo/issues/215
 [#216]: https://github.com/JamesZDonline/nsgeo/issues/216
+[#217]: https://github.com/JamesZDonline/nsgeo/pull/217
 
 ## Why
 
