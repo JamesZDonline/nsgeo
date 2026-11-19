@@ -146,6 +146,13 @@ than reworking M16–M17 afterwards.
    above the radargram on lines and cuts. Designed, in three parts; the first
    is ready to plan, now that [#180] has merged.
 
+Not yet placed in the order:
+
+- **M20: topography.** Profiles, slices, cuts and the 3-D view in elevation
+  rather than depth below a sloping surface, with each trace's ground
+  elevation from a DEM layer, the GPS altitude M17 already stores, or
+  surveyed points; and the mast-tilt correction M17 left for later ([#216]).
+
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too.
 
@@ -267,6 +274,7 @@ Grouped by area. The order within a group is not a priority.
 [#212]: https://github.com/JamesZDonline/nsgeo/issues/212
 [#214]: https://github.com/JamesZDonline/nsgeo/issues/214
 [#215]: https://github.com/JamesZDonline/nsgeo/issues/215
+[#216]: https://github.com/JamesZDonline/nsgeo/issues/216
 
 ## Why
 
