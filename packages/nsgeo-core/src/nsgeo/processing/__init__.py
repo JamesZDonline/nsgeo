@@ -35,7 +35,7 @@ from nsgeo.processing.base import (
     retime_ns,
     step_title,
 )
-from nsgeo.processing.stack import StepStack
+from nsgeo.processing.stack import StepRefused, StepStack
 from nsgeo.processing.timezero import (
     TIME_BASE_RADAR,
     TIME_BASE_TIME_ZERO,
@@ -50,6 +50,7 @@ __all__ = [
     "Radargram",
     "STEP_GROUPS",
     "Step",
+    "StepRefused",
     "StepStack",
     "TIME_BASE_RADAR",
     "TIME_BASE_TIME_ZERO",

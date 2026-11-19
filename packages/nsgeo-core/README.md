@@ -72,6 +72,7 @@ User-ordered processing steps. Nothing runs automatically.
 | `Radargram` | A radargram as the steps see it. |
 | `STEP_GROUPS` | The groups a step menu is laid out in, in processing order. |
 | `Step` | A pure function of (parameters, radargram). |
+| `StepRefused` | The `ValueError` a stack raises when a step refuses its input; names the step. |
 | `StepStack` | An ordered list of steps applied to a radargram. |
 | `TIME_BASE_RADAR` | `"radar"`: times are on the radar's own clock. |
 | `TIME_BASE_TIME_ZERO` | `"time_zero"`: times are measured from each line's first break. |
