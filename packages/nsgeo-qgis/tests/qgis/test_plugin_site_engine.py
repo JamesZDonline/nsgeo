@@ -7,6 +7,7 @@ import math
 import re
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -47,6 +48,7 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
 )
+from qgis.PyQt.QtCore import QCoreApplication, QEvent
 
 #: M11's test resolution, with the z range widened to hold the whole site.
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
@@ -1311,6 +1313,153 @@ def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
     assert text.startswith(f"3 grids · 12 lines held in memory, {format_bytes(held)} · ")
     assert re.fullmatch(r".* · slices redraw in \d+ ms", text), text
+
+
+# ---- the dispatch gate and its neighbours (#166, #75) -------------------------
+
+
+def test_a_peer_that_starts_during_the_preparing_notify_holds_the_dispatch(
+    site3, make_site, monkeypatch
+):
+    """The gate ran before the "preparing 0 of n" notify, and the notify is a
+    callback into the dock: a peer (the dock's This grid engine) that starts a
+    task in there was not seen, and the grid started beside it (trap 1). The
+    gate is run again after the notify; the dispatch is undone and the grid
+    waits, queued, at the head."""
+    session = site3.session
+    peer = SimpleNamespace(has_live_task=False)
+    site = make_site(session, exclusive_with=[peer])
+    started: list[str] = []
+    fired: list[bool] = []
+
+    def on_changed() -> None:
+        if fired or site._states.get("A") != "preparing":
+            return
+        fired.append(True)
+        peer.has_live_task = True  # the dock's engine starts, inside the notify
+        engine = site.engine_for("A")
+        real = engine.set_source
+
+        def counting(choice):
+            started.append(site.grid_state("A"))
+            return real(choice)
+
+        monkeypatch.setattr(engine, "set_source", counting)
+
+    site.on_changed = on_changed
+    site.set_source(site3.source())
+    assert fired, "A never read as preparing"
+    assert spin_until(lambda: False, 300) is False  # about 300 ms of pumping
+    assert started == [], "A's engine started while the peer's task was live"
+    assert site.grid_state("A") == "queued"
+    assert site.grid_progress("A") is None
+    assert site._preparing is None
+    assert site._queue[0] == "A"
+    assert not site.engine_for("A").is_running
+
+    peer.has_live_task = False
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("A", "B", "C")
+    assert len(started) == 1
+
+
+def test_a_grid_moved_during_the_preparing_notify_still_prepares(site3, make_site):
+    """A move that arrives inside the "preparing" notify reaches an engine that
+    has no choice yet, so it hands nothing over; the engine is then given the
+    source at the new place. The registration captured before the notify was
+    the old place, so the engine's `prepared` was ignored forever as "moved
+    under it" and the site never went idle."""
+    session = site3.session
+    site = make_site(session)
+    site.set_resolution(RES)
+    grid_a = session.grid("A")
+    new_origin = (grid_a.origin[0] + 1.0, grid_a.origin[1])
+    moved: list[bool] = []
+
+    def on_changed() -> None:
+        if moved or site._states.get("A") != "preparing":
+            return
+        moved.append(True)
+        session.replace_grid(dataclasses.replace(grid_a, origin=new_origin))
+
+    site.on_changed = on_changed
+    site.set_source(site3.source())
+    assert moved
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("A", "B", "C")
+    assert site.engine_for("A").frame.origin == new_origin
+
+
+def test_the_progress_total_never_shifts(site3, make_site):
+    """A choice that carries a key the engine skips (it sits on another grid
+    now) starts at "0 of 5" and the engine counts its four jobs: the total
+    must stay 5, a skipped key counting as done, and never go backwards."""
+    session = site3.session
+    choice_a = dataclasses.replace(
+        site3.choice("A"), line_keys=(*site3.keys("A"), site3.keys("B")[0])
+    )
+    source = SiteSource(transform="amp_envelope", grids=(choice_a,))
+    seen: list[tuple[int, int]] = []
+    site = make_site(session, on_error=lambda _m: None)
+    site.on_changed = lambda: (
+        seen.append(site.grid_progress("A")) if site.grid_progress("A") else None
+    )
+    site.set_source(source)
+    wait_for_site(site, 20_000)
+    assert len(seen) >= 3, seen
+    assert {total for _, total in seen} == {5}, seen
+    dones = [done for done, _ in seen]
+    assert dones == sorted(dones), seen
+    assert dones[0] == 0
+
+
+def test_a_retiring_engine_neither_reports_nor_waits_again(site3, make_site, monkeypatch):
+    """An engine parked as retiring has been dropped from the site: it is
+    detached from the session and silent, so the grid's removal costs one
+    bounded cancel wait and one message, not two waits and a "no longer
+    exists" report from the engine's own `grids_changed` slot."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    release = threading.Event()
+    held = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        held.set()
+        release.wait(30)  # ignores the cancel
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    errors: list[str] = []
+    site = make_site(site3.session, on_error=errors.append)
+    try:
+        site.set_source(site3.source())
+        assert spin_until(held.is_set), "A's first line was never read"
+        site3.session.remove_grid("A", with_lines=True)
+        stopped = [m for m in errors if "did not stop in time" in m]
+        assert len(stopped) == 1, errors
+        assert not [m for m in errors if "no longer exists" in m], errors
+        assert len(site._retiring) == 1
+    finally:
+        release.set()
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("B", "C")
+    assert spin_until(lambda: not site._retiring), "the retiring engine was never reaped"
+
+
+def test_disposed_engines_do_not_pile_up_as_children(site3, make_site):
+    """A grid toggled in and out of the source disposes its engine each time;
+    a disposed engine stays a child of the site until it is deleted."""
+    site = make_site(site3.session)
+    site.set_source(site3.source())
+    wait_for_site(site, 20_000)
+    for _ in range(10):
+        site.set_source(site3.source("AC"))
+        wait_for_site(site, 20_000)
+        site.set_source(site3.source())
+        wait_for_site(site, 20_000)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(site.findChildren(SliceEngine)) == 3
+    assert site.ready_grids == ("A", "B", "C")
 
 
 def test_a_timed_out_wait_names_what_holds_the_site(site3, make_site, monkeypatch):

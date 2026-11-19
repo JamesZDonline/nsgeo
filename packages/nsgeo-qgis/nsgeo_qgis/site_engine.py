@@ -140,10 +140,6 @@ from nsgeo_qgis.slices_plan import (
 _RETRY_MS = 50
 
 
-def _ignore() -> None:
-    """A retiring engine's `on_grid_moved`: its moves no longer matter."""
-
-
 #: How `_shown` draws one present grid: `(grid id, its window, binned
 #: values, coverage)` to its finished slice, grid-local, before the factors.
 _Draw = Callable[[str, SliceWindow, np.ndarray, np.ndarray], np.ndarray]
@@ -431,14 +427,24 @@ class SiteEngine(QObject):
         if engine.has_live_task:
             self._retire(engine)
         else:
-            engine.dispose()
+            self._release(engine)
+
+    @staticmethod
+    def _release(engine: SliceEngine) -> None:
+        """Dispose an engine and have Qt delete it, so it is not a child for ever.
+
+        Nothing may touch the engine after this call: `deleteLater` frees it
+        at the next pass of the event loop.
+        """
+        engine.dispose()
+        with contextlib.suppress(RuntimeError):
+            engine.deleteLater()
 
     def _retire(self, engine: SliceEngine) -> None:
-        # Nothing it does now is a result. The move hook becomes a no-op,
-        # not None: None would bring back M11's self-dispatch on a move.
-        engine.on_prepared = None
-        engine.on_progress = None
-        engine.on_grid_moved = _ignore
+        # Nothing it does now is a result.
+        # Detached too, so it neither waits again on the session's signals nor
+        # reports about a grid this site has already let go of.
+        engine.detach()
         self._retiring.append(engine)
         self._reaper.start()
 
@@ -450,7 +456,7 @@ class SiteEngine(QObject):
                 if engine.has_live_task:
                     alive.append(engine)
                 else:
-                    engine.dispose()
+                    self._release(engine)
             self._retiring = alive
             if alive and not self._disposed:
                 self._reaper.start()
@@ -556,6 +562,22 @@ class SiteEngine(QObject):
         if self._preparing != grid_id or not self._active or self._disposed:
             self._dispatch_again = True  # the callback changed the plan
             return
+        # The notify is a callback into the dock, which can start a peer's task
+        # or move this very grid. Neither is seen by what was read before it:
+        # the registration is captured again, and the gate is run again. The
+        # engine has not been given the source yet, so undoing is only this
+        # site's own bookkeeping: back to the head of the queue, not preparing.
+        self._preparing_fp = self._registration(grid_id)
+        if self._anything_live():
+            self._preparing = None
+            self._preparing_fp = None
+            self._progress.pop(grid_id, None)
+            self._states[grid_id] = "queued"
+            if grid_id not in self._queue:
+                self._queue.insert(0, grid_id)
+            self._notify_changed()
+            self._retry.start()
+            return
         try:
             engine.set_source(choice)
         except Exception as exc:  # noqa: BLE001 -- a refused preset fails this grid only
@@ -604,7 +626,11 @@ class SiteEngine(QObject):
         try:
             if self._disposed or grid_id != self._preparing:
                 return
-            self._progress[grid_id] = (int(done), int(total))
+            # The dispatch recorded the choice's key count as the total; an
+            # engine that skips a key (it left the grid) counts fewer jobs.
+            # A skipped key counts as done, so the total never shifts.
+            n_keys = max(self._progress.get(grid_id, (0, int(total)))[1], int(total))
+            self._progress[grid_id] = (int(done) + n_keys - int(total), n_keys)
             self._notify_changed()
         except Exception as exc:  # noqa: BLE001 -- reached from a task's signal
             self._report(f"could not report grid {grid_id!r}'s progress: {exc}")
@@ -1385,7 +1411,7 @@ class SiteEngine(QObject):
         self.clear()
         retiring, self._retiring = self._retiring, []
         for engine in retiring:
-            engine.dispose()
+            self._release(engine)
         self.on_error = None
 
     def busy_report(self) -> str:

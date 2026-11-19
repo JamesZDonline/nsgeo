@@ -204,6 +204,10 @@ _CANCEL_TIMEOUT_MS = 250
 _NOT_QUEUED = object()
 
 
+def _ignore() -> None:
+    """A detached engine's `on_grid_moved`: its moves no longer matter."""
+
+
 def solve_key(values: np.ndarray) -> bytes:
     """The solved-slice cache key of `values` (plan call 8): a BLAKE2b digest
     of their bytes, shape and dtype. The values themselves, never the window
@@ -1957,6 +1961,30 @@ class SliceEngine(QObject):
         self.on_error = None
         self.on_progress = None
         self.on_grid_moved = None
+
+    def detach(self) -> None:
+        """Cut this engine off from the session and from its owner, and nothing more.
+
+        For an owner that has dropped the engine while its task still runs
+        (`SiteEngine._retire`): the engine must neither answer the session's
+        signals (a second cancel wait, a "no longer exists" report) nor call
+        back into the owner. It does NOT cancel, clear or touch `_pending`: a
+        running task still ends, and `has_live_task` turns False when its
+        `finished` has run. `on_grid_moved` becomes a no-op, not None: None
+        would bring back this engine's own re-preparation on a move. Safe to
+        call twice; disconnecting a slot that is not connected is ignored.
+        """
+        for signal, slot in (
+            (self.session.site_closed, self.clear),
+            (self.session.grids_changed, self._on_grids_changed),
+            (self.session.lines_changed, self._on_lines_changed),
+        ):
+            with contextlib.suppress(TypeError, RuntimeError):
+                signal.disconnect(slot)
+        self.on_error = None
+        self.on_prepared = None
+        self.on_progress = None
+        self.on_grid_moved = _ignore
 
     def wait_for_preparation(
         self,
