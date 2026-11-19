@@ -52,6 +52,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.decimal_input import parse_decimal
 from nsgeo_qgis.lookup import (
     ImportOptions,
     ImportRow,
@@ -121,11 +122,11 @@ class ImportDialog(QDialog):
         self._opened_against = session.json_path
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
-        self._updating = False
+        self._updating = 0
         # #69: whether "First line at" holds a value the user gave it, and
         # so no longer follows the spacing (see _follow_spacing).
         self._first_offset_own = False
-        self._following = False
+        self._following = 0
         self.setWindowTitle("Import DZT files")
         self.resize(900, 520)
         layout = QVBoxLayout(self)
@@ -283,11 +284,11 @@ class ImportDialog(QDialog):
         user gives it a value of their own, which then stays put."""
         if self._first_offset_own:
             return
-        self._following = True
+        self._following += 1
         try:
             self.first_offset.setValue(self.spacing.value() / 2)
         finally:
-            self._following = False
+            self._following -= 1
 
     def _first_offset_changed(self, *_: Any) -> None:
         if not self._following:
@@ -432,7 +433,7 @@ class ImportDialog(QDialog):
 
     # ---- table ------------------------------------------------------------
     def _refresh_table(self) -> None:
-        self._updating = True
+        self._updating += 1
         try:
             self.table.setRowCount(len(self.rows))
             for r, row in enumerate(self.rows):
@@ -478,7 +479,7 @@ class ImportDialog(QDialog):
             )
             self.import_button.setEnabled(n > 0)
         finally:
-            self._updating = False
+            self._updating -= 1
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating:
@@ -497,7 +498,7 @@ class ImportDialog(QDialog):
             row.label_edited = True
         elif c == COL_OFFSET:
             try:
-                value = float(item.text().replace(",", "."))
+                value = parse_decimal(item.text())
             except ValueError:
                 # A hand-typed cell that is not a number must not raise out
                 # of a signal-connected slot (see the module docstring);

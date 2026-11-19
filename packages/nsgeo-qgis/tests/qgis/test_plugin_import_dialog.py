@@ -948,3 +948,80 @@ def test_real_grid2_lines_import_with_a_preset_only_the_new_ones_change(session,
     assert len(d2.imported_keys) == 3
     for k in d2.imported_keys:
         assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+
+
+# ---- #17 one rule for decimal input, #16 guards as depth counters -----------
+
+
+@pytest.mark.parametrize("typed", ["1,000", "1,5", "nan", "inf"])
+def test_an_offset_typed_with_a_comma_is_refused_like_paramform(session, tmp_path, typed):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    d.table.item(0, COL_OFFSET).setText(typed)
+    assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited
+    assert d.status.text() == f"{typed!r} is not a number; offset unchanged"
+    assert d.table.item(0, COL_OFFSET).text() == "0.25"
+
+
+def test_paramform_and_the_import_dialog_refuse_the_same_inputs(session, tmp_path, qgis_app):
+    from nsgeo_qgis.ui.param_form import ParamForm
+
+    f = ParamForm()
+    f.set_step("dewow")
+    errors: list[str] = []
+    f.error.connect(errors.append)
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    for typed in ["1,000", "1,5", "nan", "inf"]:
+        errors.clear()
+        f.set_value("window_ns", typed)
+        f.commit()
+        assert errors, typed
+        d.table.item(0, COL_OFFSET).setText(typed)
+        assert d.rows[0].offset == 0.25 and "not a number" in d.status.text(), typed
+
+
+def test_a_reentrant_refresh_does_not_clear_the_guard_early(session, tmp_path):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    seen: list[bool] = []
+    real = d.table.resizeColumnsToContents
+    state = {"first": True}
+
+    def nested() -> None:
+        if state["first"]:
+            state["first"] = False
+            d._refresh_table()  # the inner call returns while the outer is open
+            seen.append(bool(d._updating))
+            # an edit delivered now must still be ignored by the outer block
+            d._on_item_changed(d.table.item(0, COL_LABEL))
+        real()
+
+    d.table.resizeColumnsToContents = nested  # type: ignore[method-assign]
+    d.rows[0].label = "kept"
+    d._refresh_table()
+    assert seen == [True]
+    assert d.rows[0].label == "kept"
+    assert not d._updating
+
+
+def test_a_reentrant_follow_spacing_does_not_clear_its_guard_early(session):
+    d = ImportDialog(session, grid_id="A")
+    seen: list[bool] = []
+    real = d.first_offset.setValue
+    state = {"first": True}
+
+    def nested(v: float) -> None:
+        if state["first"]:
+            state["first"] = False
+            d._follow_spacing()
+            seen.append(bool(d._following))
+            d._first_offset_changed()  # must still read as our own write
+        real(v)
+
+    d.first_offset.setValue = nested  # type: ignore[method-assign]
+    d._first_offset_own = False
+    d._follow_spacing()
+    assert seen == [True]
+    assert not d._first_offset_own
+    assert not d._following
