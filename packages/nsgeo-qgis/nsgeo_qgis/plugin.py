@@ -89,7 +89,7 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
 )
 
-from nsgeo_qgis import build_label, own_colours, plugin_version
+from nsgeo_qgis import build_label, own_colours, plugin_version, step_inputs
 from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
 from nsgeo_qgis.export_style import write_style
@@ -1009,9 +1009,7 @@ class NsgeoPlugin:
                 self.profile_dock.show_gain_strip(None)
                 return
             stack = self.session.stack_for(key)
-            if stack.source is None and any(
-                st.name == "time_zero" and on for st, on in entries[:row]
-            ):
+            if step_inputs.clock_unknown(stack, row):
                 # The step's clock is not known yet (samples still loading
                 # behind an enabled Time zero): a strip drawn now would sit on
                 # the wrong clock. `_resync_gain_strip` shows it on

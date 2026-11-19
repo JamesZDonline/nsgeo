@@ -6,6 +6,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis import step_inputs
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import (
@@ -861,3 +862,24 @@ def test_a_line_name_is_escaped_and_never_widens_the_panel(qgis_app, tmp_path):
         dock.hide()
         dock.deleteLater()
         _events()
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("above", [False, True])
+def test_the_clock_rule_has_one_answer(qgis_app, tmp_path, loaded, enabled, above):
+    """Guard test (it passes today and pins the refactor): the dock's
+    `input_axis` and the gain strip's `step_inputs.clock_unknown` give the
+    same answer for every combination of samples loaded, Time zero enabled
+    and the row above or below the Time zero. It fails if `input_axis` keeps
+    a private copy of the rule that differs, for example one that ignores
+    `enabled`."""
+    session, dock, key, line = _unloaded(qgis_app, tmp_path)
+    session.set_step_enabled(key, 0, enabled)
+    if loaded:
+        session.set_profiles(key, line.load())
+    stack = session.stack_for(key)
+    row = 0 if above else 1
+    assert step_inputs.clock_unknown(stack, row) == (dock.input_axis(row) is None)
+    # Only an unloaded line behind an enabled Time zero has an unknown clock.
+    assert step_inputs.clock_unknown(stack, row) == (not loaded and enabled and not above)
