@@ -20,7 +20,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export
 from nsgeo_qgis.paraview_export import ParaViewExportCancelled, place_picks
 from nsgeo_qgis.session import Pick
-from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS, WHY_NO_CUT, WHY_OTHER_CLOCK
+from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS, WHY_NO_CUT, WHY_OTHER_CLOCK, input_hash
 from nsgeo_qgis.surfaces import Surfaces
 from plugin_testing import STEPS_RADAR, STEPS_ZERO, synthetic_dzt
 
@@ -783,17 +783,33 @@ def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
 
 
 def test_a_cut_pick_outside_the_frame_is_reported_on_a_hole(built_site):
-    session, _, _, layers, surfaces = built_site
+    session, _, export, layers, surfaces = built_site
     # a cut that runs past the grid's 12 m end: its far part is outside the cube's frame
     cut_key = session.add_cut(GRID, [(0.5, 0.5), (0.5, 20.0)])
     line_fids = _write(layers, session, PICKS)
     cut_fids = _write_cut_picks(layers, cut_key, [(18.0, 10.5)])
     record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
     (made,) = surfaces.build([record.feature_id], progress=_noop)
-    fit = made.report["fit"]
-    assert fit["picks"] == 5
-    assert fit["on_holes"] + fit["at_edge"] >= 1
+    assert made.report["fit"]["picks"] == 5
     assert made.report["skipped"] == []
+    # the cut pick itself is on a hole (the four line picks cannot be)
+    assert [(o["line_key"], o["reason"]) for o in made.report["outliers"]].count(
+        (cut_key, "hole")
+    ) == 1
+    # and is placed outside the frame, not clamped onto the grid
+    got = export.fill(GRID, export.defaults(GRID), progress=_noop)
+    far = _cut_pick(cut_key, 18.0, 10.5)
+    (spot,) = place_picks(
+        [(cut_key, far)],
+        got.lines,
+        got.prov,
+        got.frame,
+        got.velocity,
+        cuts={cut_key: session.cut_for_key(cut_key)},
+        grid=session.grid(GRID),
+    )
+    assert spot is not None and spot.y_m >= got.frame.ny * got.frame.cell
+    del got
 
 
 def test_a_cut_picks_distance_not_its_column_is_its_identity(built_site):
@@ -814,3 +830,67 @@ def test_a_cut_picks_distance_not_its_column_is_its_identity(built_site):
     assert surfaces.state(record.feature_id).stale == ()
     edit("distance_m", 6.0)
     assert surfaces.state(record.feature_id).stale == ("picks",)
+
+
+def test_a_line_only_surface_hashes_its_source_as_before_cut_picks_existed(built_site):
+    session, _, export, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    source = export.source_choice(GRID, export.defaults(GRID))
+    grid = session.grid(GRID)
+    before = input_hash(
+        {
+            "preset": source.preset,
+            "steps": list(session.site.presets.get(source.preset, [])),
+            "transform": source.transform,
+            "lines": [
+                [k, repr(session.line_for_key(k).placement)] for k in sorted(source.line_keys)
+            ],
+            "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
+        }
+    )
+    assert surfaces.inputs(record.feature_id)["source"] == before
+
+
+def test_a_cut_pick_is_placed_through_the_grids_world_frame():
+    from types import SimpleNamespace
+
+    from nsgeo.geometry import Grid
+    from nsgeo.model import Cut
+    from nsgeo.slices import CubeFrame
+
+    # an offset, turned grid: skipping Grid.to_world would put the pick hundreds of metres away
+    grid = Grid("G", (500.0, 700.0), 30.0, 3.0, 12.0, "EPSG:32616", 1.0)
+    frame = CubeFrame.for_grid(grid, 0.1)
+    cut = Cut.new("G", [(0.5, 0.5), (2.5, 9.5)], "Cut 1")
+    pick = _cut_pick(cut.key, 4.0, 10.0, base="radar")
+    prov = SimpleNamespace(steps=[])
+    velocity = VelocityModel(layers=((0.0, 0.1),))
+    (spot,) = place_picks(
+        [(cut.key, pick)], [], prov, frame, velocity, cuts={cut.key: cut}, grid=grid
+    )
+    assert spot is not None
+    want = cut.point_at(4.0)  # the frame is the grid's own: its local metres are the grid's
+    assert (spot.x_m, spot.y_m) == pytest.approx(want)
+
+
+def test_the_radar_clock_takes_radar_cut_picks_and_leaves_time_zero_ones(built_site):
+    session, _, export, layers, surfaces = built_site
+    session.site.presets["p"] = list(STEPS_RADAR)
+    cut_key = _cut_along_line_0(session)
+    got = export.fill(GRID, export.defaults(GRID), progress=_noop)
+    args = (got.lines, got.prov, got.frame, got.velocity)
+    kw = {"cuts": {cut_key: session.cut_for_key(cut_key)}, "grid": session.grid(GRID)}
+    radar = _cut_pick(cut_key, 3.0, 10.0, base="radar")
+    zero = _cut_pick(cut_key, 3.0, 10.0, base="time_zero")
+    a, b = place_picks([(cut_key, radar), (cut_key, zero)], *args, **kw)
+    assert a is not None and b is None
+    del got
+    line_fids = _write(layers, session, PICKS)
+    fids = [
+        *_write_cut_picks(layers, cut_key, [(3.0, 10.0)], base="radar"),
+        *_write_cut_picks(layers, cut_key, [(6.0, 10.5)], base="time_zero"),
+    ]
+    record = surfaces.create("Mixed", [*line_fids, *fids], SurfaceSettings(strength=0.0))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["fit"]["picks"] == 5
+    assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_OTHER_CLOCK}]

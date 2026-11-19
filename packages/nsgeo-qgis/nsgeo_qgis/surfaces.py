@@ -52,6 +52,7 @@ from nsgeo_qgis.surface_plan import (
     IN_TRANSACTION_REFUSAL,
     INPUTS,
     KIND_SURFACE,
+    LABEL_DELETED_CUT,
     MULTI_GRID_REFUSAL,
     WHY_NO_CUT,
     WHY_NO_DEPTH,
@@ -370,7 +371,9 @@ class Surfaces:
                     "transform": source.transform,
                     "lines": [[k, repr(session.line_for_key(k).placement)] for k in keys],
                     "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
-                    "cuts": cuts,
+                    # Only a surface with cut picks hashes them, so one built before cut picks
+                    # could join surfaces keeps the hash it was built with.
+                    **({"cuts": cuts} if cuts else {}),
                 }
             ),
             # What a rebuild would use, field by field: the grid's record, or the Slices panel's
@@ -661,7 +664,7 @@ class Surfaces:
             try:
                 return str(self.session.cut_for_key(key).name)
             except KeyError:
-                return "a deleted cut"
+                return LABEL_DELETED_CUT
         line = self.session.line_for_key(key)
         return str(getattr(line.placement, "label", None) or line.path.stem)
 

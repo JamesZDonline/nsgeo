@@ -200,6 +200,7 @@ class SurfacesDock(QgsDockWidget):
             session.slice_sources_changed,
             session.lines_changed,
             session.grids_changed,
+            session.cuts_changed,
             session.presets_changed,
             session.site_opened,
             session.site_closed,

@@ -47,6 +47,40 @@ def _made(plugin, name="Bowl", build=True, **settings):
     return record
 
 
+def test_deleting_a_cut_marks_its_surface_stale_in_the_panel(surface_plugin):
+    import json as _json
+
+    from nsgeo_qgis.session import Pick
+
+    plugin = surface_plugin
+    session = plugin.session
+    cut_key = session.add_cut("Grid A", [(0.5, 0.5), (0.5, 11.5)])
+    plugin.layers.write_pick(
+        Pick(
+            line_key=cut_key,
+            trace=3,
+            time_ns=10.4,
+            distance_m=3.0,
+            depth_m=None,
+            velocity_m_ns=None,
+            stack_json=_json.dumps({"time_base": "time_zero"}),
+            note="",
+            created="2026-11-13T00:00:00+00:00",
+            zero_ns=None,
+        )
+    )
+    fids = sorted(f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures())
+    record = plugin.surfaces.create("Mixed", fids, SurfaceSettings(strength=0.0))
+    plugin.build_surfaces([record.feature_id])
+    QCoreApplication.processEvents()
+    dock = plugin.surfaces_dock
+    dock.refresh()
+    assert _rows(dock)[0][4] == ""
+    session.remove_cut(cut_key)  # emits cuts_changed and nothing else the panel watches
+    QCoreApplication.processEvents()
+    assert _rows(dock)[0][4] == "stale"
+
+
 def test_the_panels_menu_lists_surfaces(surface_plugin):
     plugin = surface_plugin
     entries = [a.text() for a in plugin.panels_menu.actions() if a.text()]

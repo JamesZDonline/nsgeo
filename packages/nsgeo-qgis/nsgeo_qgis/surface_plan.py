@@ -241,6 +241,7 @@ WHY_NO_DEPTH = "their depth could not be found"
 WHY_NO_POSITION = "their position on the line could not be found"
 WHY_OTHER_CLOCK = "they were made on a cut on another clock"
 WHY_NO_CUT = "their cut has been deleted"
+LABEL_DELETED_CUT = "a deleted cut"
 
 
 def cut_pick_base(pick: Any) -> str:
@@ -479,19 +480,30 @@ def merge_range(shared: tuple[float, float] | None, low: float, high: float) -> 
 
 
 # ---- the New surface dialog and the Surfaces panel ---------------------------------------
-def selection_label(n: int, grid_id: str | None, labels: Sequence[str]) -> str:
-    """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033).`"""
+def selection_label(
+    n: int, grid_id: str | None, labels: Sequence[str], cuts: Sequence[str] = ()
+) -> str:
+    """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033; cut Cut 1).` `labels`
+    are line names, `cuts` cut names; each is named for what it is."""
     if n <= 0:
         return "No picks selected."
     text = f"{n} pick{'' if n == 1 else 's'} selected"
     if grid_id is None:
         return text + "."
     labels = sorted(set(labels))
+    cuts = sorted(set(cuts))
     where = f"on Grid {grid_id}" if n == 1 else f"all on Grid {grid_id}"
+    parts = []
     if len(labels) == 1:
-        return f"{text}, {where} (line {labels[0]})."
-    if len(labels) > 1:
-        return f"{text}, {where} (lines {labels[0]} to {labels[-1]})."
+        parts.append(f"line {labels[0]}")
+    elif len(labels) > 1:
+        parts.append(f"lines {labels[0]} to {labels[-1]}")
+    if len(cuts) == 1:
+        parts.append(f"cut {cuts[0]}")
+    elif len(cuts) > 1:
+        parts.append(f"cuts {', '.join(cuts)}")
+    if parts:
+        return f"{text}, {where} ({'; '.join(parts)})."
     return f"{text}, {where}."
 
 

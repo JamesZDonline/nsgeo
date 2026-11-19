@@ -259,6 +259,14 @@ def test_the_dialog_and_panel_wording():
         "88 picks selected, all on Grid 1 (lines F__020 to F__033)."
     )
     assert selection_label(5, None, []) == "5 picks selected."
+    # cuts are named as cuts, never in the line range
+    assert selection_label(4, "1", ["F__001"], ["Cut 1"]) == (
+        "4 picks selected, all on Grid 1 (line F__001; cut Cut 1)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"]) == "2 picks selected, all on Grid 1 (cut Cut 1)."
+    assert selection_label(3, "1", ["F__001", "F__003"], ["Cut 2", "Cut 1"]) == (
+        "3 picks selected, all on Grid 1 (lines F__001 to F__003; cuts Cut 1, Cut 2)."
+    )
     assert settings_summary(SurfaceSettings()) == (
         "smooth join · window ±2 cm · strength 1.0 × typical · no smoothing"
     )
