@@ -15,6 +15,7 @@ from nsgeo.model.survey import Line
 from nsgeo_qgis import paraview_export
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis.paraview_export import ParaViewExport, paraview_folder
+from nsgeo_qgis.slices_plan import format_bytes
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
 from plugin_testing import synthetic_dzt
 from qgis.core import QgsSettings
@@ -113,7 +114,13 @@ def test_the_dialog_lists_what_will_be_written(plugin):
     dialog = _make_dialog(plugin[0])
     assert "paraview" in dialog.folder_label.text() and "A" in dialog.folder_label.text()
     assert "cells" in dialog.volume_label.text() and "depths" in dialog.volume_label.text()
-    assert dialog.also_label.text() == "0 picks, 3 lines"
+    # three lines, no cuts: three walls, sized as the summary the dialog reads sizes them
+    export = ParaViewExport(plugin[0].session, plugin[0].slices_dock)
+    summary = export.summary("A", export.defaults("A"))
+    assert summary.n_walls == 3 and summary.walls_bytes > 0
+    assert dialog.also_label.text() == (
+        f"0 picks, 3 lines, 3 walls, about {format_bytes(summary.walls_bytes)}"
+    )
     assert dialog.surfaces_label.text() == "none"
     assert dialog.disk_label.text().endswith("free")
     assert dialog.trend_spin.value() > 0 and dialog.period_spin.value() > 0
