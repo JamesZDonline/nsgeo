@@ -1,8 +1,9 @@
 """The Processing preset box both import dialogs share (#129), and its helpers.
 
-`PresetBox` is a combo and a grey note under it, told only which grid it is
-for. Every slot guards its own body (an exception in a slot never reaches the
-emitter) and logs through `_log`. The dialogs are modeless, so the site can
+`PresetBox` is a combo and a note under it in ordinary text (the walkthrough
+found dimmed grey easy to miss), told only which grid it is for. Every slot
+guards its own body (an exception in a slot never reaches the emitter) and
+logs through `_log`. The dialogs are modeless, so the site can
 close or change under the box: it then shows None and no presets.
 """
 
@@ -55,7 +56,6 @@ class PresetBox(QWidget):
         self._deleted: str | None = None
         self.combo = QComboBox()
         self.note = QLabel("")
-        self.note.setEnabled(False)  # the palette's dimmed text
         self.note.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

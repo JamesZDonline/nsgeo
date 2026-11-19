@@ -73,6 +73,13 @@ def test_the_note_shows_the_migration_line_only_for_a_migration_preset(session):
     assert box.note.text() == ""
 
 
+def test_the_note_is_ordinary_text_not_dimmed(session):
+    """Walkthrough A3: the dimmed grey note was easy to miss."""
+    box = PresetBox(session)
+    assert box.note.isEnabled()
+    assert box.note.styleSheet() == ""
+
+
 def test_the_note_shows_the_slices_line_only_when_the_rule_holds(session):
     _save(session, "Plain", ("dewow", {}))
     session.add_grid(Grid("Empty", (900.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
