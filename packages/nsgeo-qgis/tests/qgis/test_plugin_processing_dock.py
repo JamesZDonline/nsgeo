@@ -883,3 +883,47 @@ def test_the_clock_rule_has_one_answer(qgis_app, tmp_path, loaded, enabled, abov
     assert step_inputs.clock_unknown(stack, row) == (dock.input_axis(row) is None)
     # Only an unloaded line behind an enabled Time zero has an unknown clock.
     assert step_inputs.clock_unknown(stack, row) == (not loaded and enabled and not above)
+
+
+def _refusing_bandpass():
+    return build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0)
+
+
+def test_difference_on_an_early_step_checks_only_the_chain_it_shows(opened):
+    """Final review: with Difference on row 0, a refusal at row 1 is not
+    noted (the profile does not run it); it is noted, naming step 2, when
+    Difference goes off. Fails if `_paint_refusal` runs `stack.result()`
+    while the Difference view is on."""
+    session, dock, key = opened
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, _refusing_bandpass())
+    dock.list.setCurrentRow(0)
+    dock.diff_button.setChecked(True)
+    assert dock.refusal() is None
+    assert dock.warnings.entries() == ()
+    dock.diff_button.setChecked(False)
+    assert dock.refusal().index == 1
+    assert dock.refusal().title == "Bandpass"
+    assert "(step 2)" in dock.warnings.entries()[0].text
+
+
+def test_difference_checks_the_chain_up_to_the_row_it_is_aimed_at(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, _refusing_bandpass())
+    session.append_step(key, build_step("dewow"))
+    dock.list.setCurrentRow(2)
+    dock.diff_button.setChecked(True)
+    assert dock.refusal().index == 1  # the chain shown runs through step 2
+    dock.list.setCurrentRow(0)
+    assert dock.refusal() is None  # aimed at row 0: nothing refuses above it
+
+
+def test_difference_on_a_row_below_a_refusal_names_that_step(opened):
+    session, dock, key = opened
+    session.append_step(key, _refusing_bandpass())
+    session.append_step(key, build_step("dewow"))
+    dock.list.setCurrentRow(1)
+    dock.diff_button.setChecked(True)
+    assert dock.refusal().index == 0
+    assert "(step 1)" in dock.warnings.entries()[0].text

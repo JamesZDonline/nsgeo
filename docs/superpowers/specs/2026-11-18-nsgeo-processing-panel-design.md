@@ -116,6 +116,8 @@ stack) and `title` (the step's title). `StepStack._ensure` and `result_bypassing
 A step that fails only on the uncropped record (after a cutoff, breaking only when the cutoff is
 bypassed) is a toast without a note. Not reachable by hand that anyone has found.
 
+While the Difference view is on, the panel checks the chain the profile shows (the stack up to the differenced step) rather than the whole stack, so an edit to an early step stays as quick as the view itself. A refusal below the differenced step is noted when the Difference view goes off.
+
 ### 3.4 What the note shows
 
 - **The row:** its text starts with "⛔ " and is dark red (#a3122c on the light palette; the

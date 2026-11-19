@@ -415,7 +415,14 @@ class ProcessingDock(QgsDockWidget):
             stack = self.session.stack_for(key)
             if stack.source is not None:
                 try:
-                    stack.result()
+                    row = self.list.currentRow()
+                    if self.diff_button.isChecked() and 0 <= row < len(stack.entries):
+                        # The Difference view shows the chain up to its step
+                        # only: check that chain, not the whole stack (a
+                        # refusal below it is noted when the view goes off).
+                        stack.intermediate(row)
+                    else:
+                        stack.result()
                 except StepRefused as exc:
                     refusal = exc
                 except Exception as exc:
@@ -513,6 +520,9 @@ class ProcessingDock(QgsDockWidget):
             # else in this dock relies on that being true.
             self.diff_button.setChecked(False)
             return
+        # The note follows the chain the view shows (Difference on or off,
+        # or aimed at another row).
+        self._check_refusal()
         self.difference_toggled.emit(row if checked else -1)
 
     # ---- presets ---------------------------------------------------------
