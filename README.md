@@ -113,8 +113,9 @@ release's notes list everything in it.
 - **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
   **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
   ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
-  surfaces, and the ParaView export gains a wall for every line and cut.
-  Planned; next to build.
+  surfaces, picks.vtp and the 3-D view, and the ParaView export gains a wall
+  for every line and cut, shaded like the slices. Built and reviewed, awaiting
+  its walkthrough.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
