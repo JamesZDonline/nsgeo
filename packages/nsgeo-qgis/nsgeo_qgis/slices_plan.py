@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -1019,3 +1020,26 @@ def too_fine_for_export(cell: float, grid_id: str, cells: int, safe: float) -> s
         f"a {cell:g} m cell over grid {grid_id!r} is {cells:,} cells, too fine "
         f"to export; use {safe:g} m or coarser"
     )
+
+
+def slice_dir_prefix(pid: int) -> str:
+    """The name a process's Slices preview folder starts with: the pid says who owns it."""
+    return f"nsgeo-slice-{pid}-"
+
+
+def slice_dir_pid(name: str) -> int | None:
+    """The pid a Slices preview folder was made for, or None when `name` is not one of ours
+    (`nsgeo-slice-<pid>-<random>`)."""
+    match = re.fullmatch(r"nsgeo-slice-(\d+)-[A-Za-z0-9_]+", name)
+    return int(match.group(1)) if match else None
+
+
+def stale_slice_dirs(names: Iterable[str], is_alive: Callable[[int], bool | None]) -> list[str]:
+    """The preview folders left by a process that is gone. `is_alive` says True, False or None
+    (cannot tell: the folder stays)."""
+    out: list[str] = []
+    for name in names:
+        pid = slice_dir_pid(name)
+        if pid is not None and is_alive(pid) is False:
+            out.append(name)
+    return out

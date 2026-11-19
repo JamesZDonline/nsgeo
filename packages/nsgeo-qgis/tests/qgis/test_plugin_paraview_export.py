@@ -4,6 +4,7 @@ clock, the fill cache, cancelling and the refusals. Real DZT lines, real files o
 from __future__ import annotations
 
 import json
+import math
 import re
 import types
 from pathlib import Path
@@ -16,7 +17,12 @@ from nsgeo.model.survey import Line
 from nsgeo.slices import CubeFrame, VolumeSettings, VolumeStopped
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export, slices_engine
-from nsgeo_qgis.paraview_export import ParaViewExport, ParaViewExportCancelled, paraview_folder
+from nsgeo_qgis.paraview_export import (
+    ParaViewExport,
+    ParaViewExportCancelled,
+    paraview_folder,
+    place_picks,
+)
 from nsgeo_qgis.paraview_scene import SCENE_FILES
 from nsgeo_qgis.session import Pick, SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
@@ -1049,3 +1055,47 @@ def test_depths_follow_the_grids_velocity_not_a_lines_override(synth_site):
     extent, _origin, _spacing, arrays = read_vti(folder / "cube.vti")
     assert extent[5] + 1 == summary.nd
     assert float(arrays["true_depth_m"][0, 0, 0]) == pytest.approx(summary.max_depth_m, rel=0.05)
+
+
+def _pick(key: str, trace: int, time_ns: float, zero_ns: float | None = None) -> Pick:
+    return Pick(
+        line_key=key,
+        trace=trace,
+        time_ns=time_ns,
+        distance_m=None,
+        depth_m=None,
+        velocity_m_ns=None,
+        stack_json="",
+        note="",
+        created="2026-11-13T00:00:00+00:00",
+        zero_ns=zero_ns,
+    )
+
+
+@needs_real_data
+@pytest.mark.parametrize("steps", [STEPS_ZERO, STEPS_RADAR], ids=["time_zero", "radar_clock"])
+def test_pick_depths_match_place_picks_without_preparing(site, steps, monkeypatch):
+    session, _, export = site
+    session.site.presets["p"] = list(steps)
+    key = session.keys()[1]
+    rows = [(key, _pick(key, 30, 12.0)), (key, _pick(key, 30, 9.0, zero_ns=3.0))]
+    got = export.fill(GRID.id, export.defaults(GRID.id), progress=_noop)
+    want = [p.depth_m for p in place_picks(rows, got.lines, got.prov, got.frame, got.velocity)]
+    del got
+    fresh = ParaViewExport(session, site[1])
+    monkeypatch.setattr(fresh, "_prepared", lambda *a, **k: pytest.fail("prepared a line"))
+    assert fresh.pick_depths(GRID.id, rows) == pytest.approx(want)
+
+
+def test_pick_depths_are_none_where_they_cannot_be_found(synth_site):
+    session, _, export = synth_site
+    key = session.keys()[0]
+    rows = [
+        ("raw/none.DZT", _pick(key, 5, 10.0)),
+        ("cut:abc", _pick(key, 5, 10.0)),
+        (key, _pick(key, 5, float("nan"))),
+        (key, _pick(key, 5, 10.0)),
+    ]
+    got = export.pick_depths(GRID.id, rows)
+    assert got[:3] == [None, None, None]
+    assert isinstance(got[3], float) and math.isfinite(got[3]) and got[3] > 0.0

@@ -69,6 +69,66 @@ class _FakeSignal:
             slot(*args)
 
 
+class _CameraRecorder:
+    """The 3-D view's camera controller: records where it was asked to look."""
+
+    def __init__(self) -> None:
+        self.poses: list = []
+
+    def setLookingAtMapPoint(self, *args) -> None:  # noqa: N802 -- QGIS's name
+        self.poses.append(args)
+
+
+class _LegacyCameraRecorder:
+    """QGIS 3.40's camera controller: no `setLookingAtMapPoint`, only `resetView(distance)`."""
+
+    def __init__(self) -> None:
+        self.resets: list = []
+
+    def resetView(self, distance) -> None:  # noqa: N802 -- QGIS's name
+        self.resets.append(distance)
+
+
+def _make_fake_canvas3d(legacy_camera=False):
+    """A `QObject` standing in for QGIS's `Qgs3DMapCanvas`, which hangs under offscreen.
+
+    As QGIS does, it copies the map's layers into its settings when made and whenever the
+    project gains or loses layers. The FakeIface's `QgsMapCanvas` has no layer-tree bridge (its
+    `layers()` is always empty), so the checked layers of the layer tree stand for them."""
+    from qgis._3d import Qgs3DMapSettings
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtCore import QObject
+
+    class FakeCanvas3D(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._settings = Qgs3DMapSettings()
+            self._camera = _LegacyCameraRecorder() if legacy_camera else _CameraRecorder()
+            self._project = QgsProject.instance()
+            self._copy_layers()
+            self._project.layersAdded.connect(self._copy_layers)
+            self._project.layersRemoved.connect(self._copy_layers)
+            self.destroyed.connect(self._unhook)
+
+        def _copy_layers(self, *_) -> None:
+            self._settings.setLayers(self._project.layerTreeRoot().checkedLayers())
+
+        def _unhook(self, *_) -> None:
+            try:
+                self._project.layersAdded.disconnect(self._copy_layers)
+                self._project.layersRemoved.disconnect(self._copy_layers)
+            except (TypeError, RuntimeError):
+                pass
+
+        def mapSettings(self):  # noqa: N802 -- QGIS's name
+            return self._settings
+
+        def cameraController(self):  # noqa: N802 -- QGIS's name
+            return self._camera
+
+    return FakeCanvas3D()
+
+
 class FakeIface:
     """The parts of QgisInterface the plugin touches."""
 
@@ -91,6 +151,73 @@ class FakeIface:
         self.menu_actions: list = []
         #: `(layer, page)` for each `showLayerProperties` call (#180).
         self.layer_properties: list = []
+        #: The fake 3-D views (M16 C), by name: what is open now, and every one ever made.
+        self.canvases3d: dict = {}
+        self.dialogs3d: dict = {}
+        self.created3d = 0
+        #: Host new views in a `QDockWidget`, not a `QDialog`; answer None to every create.
+        self.dock3d = False
+        self.refuse3d = False
+        #: Make new views' camera controllers QGIS 3.40's (no `setLookingAtMapPoint`).
+        self.legacy_camera3d = False
+
+    def _make_holder(self, name, title=None):
+        """The top-level window (a `QDialog`, or a `QDockWidget` when `dock3d` is set) that holds
+        a 3-D view; `title` carries a title across a swap, as QGIS's dock toggle does."""
+        from qgis.PyQt.QtWidgets import QDialog, QDockWidget
+
+        class _Dialog(QDialog):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        class _Dock(QDockWidget):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        holder = _Dock() if self.dock3d else _Dialog()
+        holder.setWindowTitle(title if title is not None else name)
+        return holder
+
+    def swap_holder3d(self, name):
+        """Dock (or undock) the view as the user does: a new holder, titled with the view's
+        ORIGINAL name, as QgsDockableWidgetHelper does (it re-applies the title it stored)."""
+        from qgis.PyQt import sip
+
+        old = self.dialogs3d[name]
+        self.dock3d = not self.dock3d
+        self.dialogs3d[name] = self._make_holder(name)
+        sip.delete(old)
+
+    def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """A fake canvas and its window titled `name`, as the real call makes; None, as QGIS
+        answers, when a view of that name is open (names are unique) or `refuse3d` is set."""
+        if self.refuse3d or name in self.canvases3d:
+            return None
+        canvas = _make_fake_canvas3d(self.legacy_camera3d)
+        self.canvases3d[name] = canvas
+        self.dialogs3d[name] = self._make_holder(name)
+        self.created3d += 1
+        return canvas
+
+    def closeMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """Delete both, so `destroyed` fires, as closing the real view does."""
+        from qgis.PyQt import sip
+
+        canvas = self.canvases3d.pop(name, None)
+        dialog = self.dialogs3d.pop(name, None)
+        if canvas is not None and not sip.isdeleted(canvas):
+            sip.delete(canvas)
+        if dialog is not None and not sip.isdeleted(dialog):
+            sip.delete(dialog)
+
+    def mapCanvases3D(self):  # noqa: N802 -- QGIS's name
+        return list(self.canvases3d.values())
 
     def mainWindow(self):
         return self._main
@@ -688,3 +815,12 @@ def _fold_settings(tmp_path, monkeypatch):
 
     store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
     monkeypatch.setattr(folds, "fold_settings", lambda: store)
+
+
+@pytest.fixture(autouse=True)
+def _slice_previews_in_tmp(tmp_path, monkeypatch):
+    """The Slices preview folders never reach the real cache folder (R19)."""
+    from nsgeo_qgis import slice_layer
+
+    monkeypatch.setattr(slice_layer, "cache_root", lambda: tmp_path / "cache" / "nsgeo")
+    monkeypatch.setattr(slice_layer, "_swept", False)

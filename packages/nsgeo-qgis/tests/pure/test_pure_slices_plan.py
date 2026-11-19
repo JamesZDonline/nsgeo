@@ -895,3 +895,19 @@ def test_the_wheel_hazard_dz_is_over_the_limit_and_too_many_levels_is_a_value_er
     res = Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=110.0)
     assert level_limit_problem(res, [512]) is not None
     assert issubclass(TooManyLevels, ValueError)
+
+
+def test_slice_dir_pid_reads_only_our_folders():
+    from nsgeo_qgis.slices_plan import slice_dir_pid, slice_dir_prefix
+
+    assert slice_dir_pid(slice_dir_prefix(1234) + "ab_c9x2") == 1234
+    for name in ("nsgeo-slice-ab_c9x2", "nsgeo-slice--x", "other-12-abc", "nsgeo-slice-12-"):
+        assert slice_dir_pid(name) is None
+
+
+def test_stale_slice_dirs_keeps_live_unknown_and_foreign_folders():
+    from nsgeo_qgis.slices_plan import stale_slice_dirs
+
+    names = ["nsgeo-slice-1-aa", "nsgeo-slice-2-bb", "nsgeo-slice-3-cc", "x", "nsgeo-slice-zz"]
+    state = {1: False, 2: True, 3: None}
+    assert stale_slice_dirs(names, lambda pid: state[pid]) == ["nsgeo-slice-1-aa"]

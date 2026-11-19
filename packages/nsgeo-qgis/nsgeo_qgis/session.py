@@ -51,6 +51,7 @@ from nsgeo_qgis.line_edit import (
     span_m,
     width_across,
 )
+from nsgeo_qgis.scene3d_plan import scene_stretch
 
 SURVEY_FILE = "survey.nsgeo.json"
 # Fixed, not derived from the folder name. Final review, I5: the survey
@@ -1290,6 +1291,21 @@ class SiteSession(QObject):
         when something changed; keeps the preset, lines, gain and resolution."""
         merged = {**self.volume_record(grid_id), **fields}
         self._update_source(grid_id, volume=merged)
+
+    def view_stretch(self, grid_id: str) -> float:
+        """The grid's QGIS 3-D view depth stretch: the stored value when it is a finite number
+        above 0, else the default. The ParaView export's stretch is separate (`volume_record`)."""
+        entry = self._require_site().slice_sources.get(grid_id) or {}
+        return scene_stretch(entry.get("view_stretch"))
+
+    def set_view_stretch(self, grid_id: str, value: float) -> None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not (math.isfinite(value) and value > 0)
+        ):
+            raise ValueError(f"the depth stretch must be a positive number, got {value!r}")
+        self._update_source(grid_id, view_stretch=float(value))
 
     def grid_gain(self, grid_id: str) -> float:
         entry = self._require_site().slice_sources.get(grid_id, {})

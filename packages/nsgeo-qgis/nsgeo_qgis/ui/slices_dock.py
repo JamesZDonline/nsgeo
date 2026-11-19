@@ -287,6 +287,8 @@ class SlicesDock(QgsDockWidget):
     #: same split `SurveyDock`/`ProfileDock` already use for grid/import.
     choose_lines_requested = pyqtSignal()
     error = pyqtSignal(str)
+    #: The scope changed ("grid" or "site"); emitted once per real change.
+    scope_changed = pyqtSignal(str)
     #: Emitted at the end of `refresh_slice()`, whenever `current_values()`
     #: /`current_frame()`/`display_limit()` are worth reading again --
     #: `plugin.py` connects this to redraw `SliceLayer` (Task 4).
@@ -3522,6 +3524,7 @@ class SlicesDock(QgsDockWidget):
             self._resume_grid(top)
         self.show_warnings()
         self.show_refine()
+        self.scope_changed.emit(scope)
 
     def _on_scope_clicked(self, scope: str) -> None:
         try:

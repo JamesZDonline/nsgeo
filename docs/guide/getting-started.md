@@ -111,10 +111,11 @@ stay exactly where they are.
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
+| **3D view** | Opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…**, **Cut** and **Surface from picks…**
-stay greyed out until a site is open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…**, **Cut**, **Surface from picks…** and
+**3D view** stay greyed out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -836,6 +837,33 @@ Picks on cuts cannot be used yet.
 **Select its picks**, **Add selected picks** and **Remove selected picks** change
 which picks a surface holds. **Rename…** and **Delete…** are beside the list;
 deleting a surface never deletes a pick.
+
+### The 3D view
+
+Click **3D view** to open QGIS's own 3-D view of one grid: its saved picks as
+spheres at their depths, and its surfaces. Nothing in it is saved, and opening or
+closing it never marks the site changed.
+
+- **Which grid.** The grid the Slices panel shows. In **This grid** the view follows
+  the panel's grid combo. In **Whole site** it keeps the last grid it showed.
+- **The stretch.** Depth is stretched so thin soil is easier to read. Set it in the
+  Surfaces panel (**3D view depth stretch**, one per grid, ×3 by default): choose a
+  grid in the panel's grid list and the box turns on (the list holds the grids that have a
+  surface; a grid with picks but no surface yet shows at its saved stretch, or ×3). It is saved
+  with the site. The
+  ParaView export has its own stretch in its dialog, and the two do not follow each
+  other. Each title states its own ("depth stretched ×3").
+- **It follows your work.** A new pick appears, and a rebuilt surface is replaced in
+  place. A **stale** surface is labelled in the Layers panel, and the title counts
+  the stale surfaces on the grid.
+- **Which picks.** Only picks on the grid's lines. Picks on cuts are not shown, and neither
+  are picks on lines you left out of the grid's slices (**Choose lines…**).
+- **What it leaves out.** It shows no slices and no walls. ParaView does those better
+  (see [Step 9](#step-9-export-for-paraview)).
+- **QGIS's own controls.** Rotating, zooming and **Save as image** are QGIS's, not
+  nsgeo's.
+- **The picks layer is temporary.** "Picks at depth (3D view)" is made for the view and
+  goes when the view closes, or when the site closes. Closing the site closes the view.
 
 ### Step 10: Save, and next time
 

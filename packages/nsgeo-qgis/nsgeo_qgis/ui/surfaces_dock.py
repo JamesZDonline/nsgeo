@@ -36,7 +36,16 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.scene3d_plan import (
+    STRETCH_ALL_TIP,
+    STRETCH_LABEL,
+    STRETCH_MAX,
+    STRETCH_MIN,
+    STRETCH_STEP,
+    STRETCH_TIP,
+)
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slices_plan import DEFAULT_STRETCH
 from nsgeo_qgis.surface_plan import (
     DELETE_BUTTON,
     DELETE_TITLE,
@@ -54,7 +63,7 @@ from nsgeo_qgis.surface_plan import (
     write_failure_text,
 )
 from nsgeo_qgis.surfaces import Surfaces
-from nsgeo_qgis.ui.surface_settings_form import SteadyComboBox, SurfaceSettingsForm
+from nsgeo_qgis.ui.surface_settings_form import SteadyComboBox, SteadySpinBox, SurfaceSettingsForm
 
 ALL_GRIDS = "All grids"
 COLUMNS = ("Name", "Grid", "Picks", "Fit", "State")
@@ -101,6 +110,15 @@ class SurfacesDock(QgsDockWidget):
         self.grid_combo = SteadyComboBox()
         self.grid_combo.addItem(ALL_GRIDS)
         top.addWidget(self.grid_combo, 0, 1)
+        top.addWidget(QLabel(STRETCH_LABEL), 1, 0)
+        self.stretch_spin = SteadySpinBox()
+        self.stretch_spin.setRange(STRETCH_MIN, STRETCH_MAX)
+        self.stretch_spin.setSingleStep(STRETCH_STEP)
+        self.stretch_spin.setDecimals(1)
+        self.stretch_spin.setValue(DEFAULT_STRETCH)
+        self.stretch_spin.setEnabled(False)
+        self.stretch_spin.setToolTip(STRETCH_ALL_TIP)
+        top.addWidget(self.stretch_spin, 1, 1)
         top.setColumnStretch(1, 1)
         layout.addLayout(top)
 
@@ -190,6 +208,7 @@ class SurfacesDock(QgsDockWidget):
             signal.connect(self.request_refresh)
 
         self.grid_combo.currentIndexChanged.connect(lambda _i: self._guarded(self.refresh))
+        self.stretch_spin.valueChanged.connect(lambda _v: self._guarded(self._save_stretch))
         self.table.itemSelectionChanged.connect(lambda: self._guarded(self._show_details))
         self.new_button.clicked.connect(lambda: self._guarded(self.new_requested.emit))
         self.rebuild_button.clicked.connect(lambda: self._guarded(self._rebuild))
@@ -279,6 +298,7 @@ class SurfacesDock(QgsDockWidget):
             self.grid_combo.setCurrentIndex(index if index >= 0 else 0)
             self.grid_combo.blockSignals(False)
             chosen = self.grid_combo.currentText()
+            self._show_stretch(chosen)
             shown = [r for r in records if chosen == ALL_GRIDS or r.grid_id == chosen]
             members = self.surfaces.layers.members_by_feature()  # once for the whole refresh
             self.table.blockSignals(True)
@@ -450,6 +470,31 @@ class SurfacesDock(QgsDockWidget):
             removed = self.surfaces.remove_picks(fid, self.surfaces.layers.selected_pick_ids())
             if not removed:
                 self.notice.emit(NOTHING_TO_REMOVE)
+        except (ValueError, RuntimeError) as exc:
+            self.problem.emit(write_failure_text(str(exc)))
+
+    def _show_stretch(self, chosen: str) -> None:
+        """The 3-D view's stretch of the chosen grid; the box is off for All grids. Never writes."""
+        was = self._loading
+        self._loading = True
+        try:
+            if chosen == ALL_GRIDS or not self.session.is_open:
+                self.stretch_spin.setValue(DEFAULT_STRETCH)
+                self.stretch_spin.setEnabled(False)
+                self.stretch_spin.setToolTip(STRETCH_ALL_TIP)
+            else:
+                self.stretch_spin.setEnabled(True)
+                self.stretch_spin.setToolTip(STRETCH_TIP)
+                self.stretch_spin.setValue(self.session.view_stretch(chosen))
+        finally:
+            self._loading = was
+
+    def _save_stretch(self) -> None:
+        chosen = self.grid_combo.currentText()
+        if self._loading or chosen == ALL_GRIDS or not self.session.is_open:
+            return
+        try:
+            self.session.set_view_stretch(chosen, self.stretch_spin.value())
         except (ValueError, RuntimeError) as exc:
             self.problem.emit(write_failure_text(str(exc)))
 
