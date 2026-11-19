@@ -130,7 +130,7 @@ release's notes list everything in it.
   [#17]). Choose a processing preset when importing lines; a selection of
   lines on the map selects them in the Survey panel; set a preset or a
   velocity on a selection of lines at once; removing lines says what goes
-  with them. Designing.
+  with them. Designed and planned (four tasks); building.
 - **The Processing panel: gain strip, Difference view and refusals** ([#197],
   [#49], [#8], [#9], [#13], [#48]). A step that can't run on the open line
   stays marked under the step list until it is fixed; the gain strip stops at
