@@ -86,6 +86,17 @@ amplitude axis is the strip's own and is unrelated to the curve's dB axis:
 zero amplitude is the strip's centre and the limits sit at 80 % of the way
 to either edge. The 0 dB line is blue so it reads as part of the curve
 rather than as part of that amplitude scale.
+
+A fifth thing the strip holds to, from #49: dB never passes `DB_LIMIT`, the
+core's own bound on a `gain_curve` point. `_db_range` stops at it, so the
+strip's right edge is exactly +120 and a drag to the edge lands there, and
+every value a move or a double-click writes is clamped to it as well. A point
+outside the record's time extent (before `transform.t0_ns` or after
+`transform.t_end`) cannot be drawn where its time says, because that is
+outside the strip's data area, so its handle is pinned to the nearest edge of
+the record (a triangle, up or down) at its own dB; `handle_at` finds it
+there, so it can be dragged back inside or right-clicked away. The curve
+polyline still uses the true positions, as the core applies it.
 """
 
 from __future__ import annotations
@@ -96,14 +107,17 @@ from typing import Any
 import numpy as np
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QPainter, QPen, QPolygonF
-from qgis.PyQt.QtWidgets import QWidget
+from qgis.PyQt.QtGui import QColor, QFontMetrics, QPainter, QPen, QPolygonF
+from qgis.PyQt.QtWidgets import QToolButton, QWidget
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.view_transform import ViewTransform
 
+# The core's own bound on a gain_curve point's dB (its `points` schema).
+DB_LIMIT = 120.0
 HANDLE_RADIUS = 5
+CAPTION_GAP = 4
 HIT_RADIUS = 8
 PAD_X = 10
 CURVE_COLOUR = QColor(48, 140, 198)
@@ -131,6 +145,7 @@ class Headroom:
 
 class GainStrip(QWidget):
     points_changed = pyqtSignal(list)
+    reset_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -148,6 +163,47 @@ class GainStrip(QWidget):
         self._owner: Any = None
         self._headroom: Headroom | None = None
         self._trace: np.ndarray | None = None
+        self.reset_button = QToolButton(self)
+        self.reset_button.setText("Reset")
+        self.reset_button.setToolTip("Reset the gain curve to a flat 0 dB")
+        # The bottom margin is only 28 px: a compact button fits it.
+        small = self.reset_button.font()
+        small.setPointSize(8)
+        self.reset_button.setFont(small)
+        self.reset_button.setStyleSheet("QToolButton { padding: 1px 6px; }")
+        self.reset_button.clicked.connect(self._on_reset_clicked)
+        self.reset_button.hide()
+
+    def _on_reset_clicked(self, _checked: bool = False) -> None:
+        try:
+            self.reset_requested.emit()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot: never raise into Qt
+            _log(f"gain strip Reset failed: {exc}", Qgis.MessageLevel.Warning)
+
+    def _place_reset_button(self) -> None:
+        """Centre the button in the band below the time axis, or hide it
+        when there is no transform or the band is too short for it."""
+        t = self._transform
+        if t is None:
+            self.reset_button.hide()
+            return
+        band_top = self._top + t.height
+        band = self.height() - band_top
+        hint = self.reset_button.sizeHint()
+        if band < hint.height():
+            self.reset_button.hide()
+            return
+        x = max(0, round((self.width() - hint.width()) / 2))
+        y = round(band_top + (band - hint.height()) / 2)
+        self.reset_button.setGeometry(x, y, hint.width(), hint.height())
+        self.reset_button.show()
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        try:
+            self._place_reset_button()
+        except Exception as exc:  # noqa: BLE001 -- a Qt override
+            _log(f"could not place the gain strip's Reset: {exc}", Qgis.MessageLevel.Warning)
 
     # ---- headroom -----------------------------------------------------------
     @property
@@ -203,6 +259,7 @@ class GainStrip(QWidget):
     def set_time_mapping(self, transform: ViewTransform, top_px: float) -> None:
         self._transform = transform
         self._top = float(top_px)
+        self._place_reset_button()
         self.update()
 
     def set_points(self, points: list[list[float]], owner: Any) -> None:
@@ -240,7 +297,14 @@ class GainStrip(QWidget):
         if self._drag_db_range is not None:
             return self._drag_db_range
         dbs = [p[1] for p in self._points] or [0.0]
-        return min(-6.0, min(dbs) - 6.0), max(24.0, max(dbs) + 6.0)
+        return (
+            max(-DB_LIMIT, min(-6.0, min(dbs) - 6.0)),
+            min(DB_LIMIT, max(24.0, max(dbs) + 6.0)),
+        )
+
+    @staticmethod
+    def _limited(db: float) -> float:
+        return min(max(db, -DB_LIMIT), DB_LIMIT)
 
     def _clamped(self, pos: Any) -> tuple[float, float]:
         """`(x, y)` of `pos`, clamped into the domain `x_of_db`/`y_of_time`
@@ -283,12 +347,42 @@ class GainStrip(QWidget):
         assert self._transform is not None
         return self._transform.time_of_y(y - self._top)
 
+    def _drawn(self, i: int) -> tuple[float, float, int]:
+        """Where point `i`'s handle is drawn: `(x, y, off)`. A point before
+        the record sits on its top edge (`off == -1`), one after it on its
+        bottom edge (`off == 1`), each at its own dB; any other is where
+        its time says (`off == 0`)."""
+        assert self._transform is not None
+        t, db = self._points[i]
+        off = -1 if t < self._transform.t0_ns else 1 if t > self._transform.t_end else 0
+        if off < 0:
+            t = self._transform.t0_ns
+        elif off > 0:
+            t = self._transform.t_end
+        return self.x_of_db(db), self.y_of_time(t), off
+
+    def caption_texts(self) -> tuple[str, str | None, str]:
+        """The (low, "dB" or None, high) texts the paint draws. The two
+        numbers are never cut; "dB" goes first when the three plus gaps do
+        not fit in the strip's width."""
+        lo, hi = self._db_range()
+        low, high = f"{lo:g}", f"{hi:g}"
+        fm = QFontMetrics(self.font())
+        need = (
+            fm.horizontalAdvance(low)
+            + fm.horizontalAdvance(high)
+            + fm.horizontalAdvance("dB")
+            + 2 * CAPTION_GAP
+        )
+        return low, ("dB" if need <= self.width() - 4 else None), high
+
     def handle_at(self, pos: Any) -> int | None:
         if self._transform is None:
             return None
         best, best_d = None, HIT_RADIUS + 1.0
-        for i, (t, db) in enumerate(self._points):
-            d = ((self.x_of_db(db) - pos.x()) ** 2 + (self.y_of_time(t) - pos.y()) ** 2) ** 0.5
+        for i in range(len(self._points)):
+            x, y, _off = self._drawn(i)
+            d = ((x - pos.x()) ** 2 + (y - pos.y()) ** 2) ** 0.5
             if d < best_d:
                 best, best_d = i, d
         return best
@@ -315,16 +409,38 @@ class GainStrip(QWidget):
             p.setPen(QPen(CURVE_COLOUR, 2))
             p.drawPolyline(*ext)
             p.setBrush(QColor(255, 255, 255))
-            for q in pts:
-                p.drawEllipse(q, HANDLE_RADIUS, HANDLE_RADIUS)
+            r = HANDLE_RADIUS
+            for i in range(len(pts)):
+                x, y, off = self._drawn(i)
+                if off == 0:
+                    p.drawEllipse(QPointF(x, y), r, r)
+                else:
+                    # A triangle on the record's edge: up at the top, down at the bottom.
+                    d = -1 if off < 0 else 1
+                    p.drawPolygon(
+                        QPolygonF(
+                            [
+                                QPointF(x, y + d * r),
+                                QPointF(x - r, y - d * r),
+                                QPointF(x + r, y - d * r),
+                            ]
+                        )
+                    )
             p.setPen(QColor(90, 90, 90))
-            lo, hi = self._db_range()
-            p.drawText(2, 12, f"{lo:g}")
-            p.drawText(self.width() - 26, 12, f"{hi:g} dB")
+            self._paint_caption(p)
         except Exception as exc:  # noqa: BLE001 -- see the comment above
             _log(f"could not paint the gain strip: {exc}", Qgis.MessageLevel.Warning)
         finally:
             p.end()
+
+    def _paint_caption(self, p: QPainter) -> None:
+        low, mid, high = self.caption_texts()
+        w = self.width()
+        flags = Qt.AlignmentFlag.AlignVCenter
+        p.drawText(QRectF(2, 0, w - 4, 14), flags | Qt.AlignmentFlag.AlignLeft, low)
+        p.drawText(QRectF(2, 0, w - 4, 14), flags | Qt.AlignmentFlag.AlignRight, high)
+        if mid is not None:
+            p.drawText(QRectF(2, 0, w - 4, 14), flags | Qt.AlignmentFlag.AlignHCenter, mid)
 
     def _paint_headroom(self, p: QPainter) -> None:
         """Band, trace and limits, each in its own colour inside the limits
@@ -414,7 +530,7 @@ class GainStrip(QWidget):
         if self.handle_at(pos) is not None:
             return
         x, y = self._clamped(pos)
-        self._points.append([self.time_of_y(y), self.db_of_x(x)])
+        self._points.append([self.time_of_y(y), self._limited(self.db_of_x(x))])
         self._points.sort(key=lambda q: q[0])
         self._drag = None
         self._drag_db_range = None
@@ -444,7 +560,7 @@ class GainStrip(QWidget):
             return
         pos = event_pos(event)
         x, y = self._clamped(pos)
-        self._points[self._drag] = [self.time_of_y(y), self.db_of_x(x)]
+        self._points[self._drag] = [self.time_of_y(y), self._limited(self.db_of_x(x))]
         self.update()
         self.points_changed.emit(self.points())  # live: one broadcast multiply per move
 

@@ -5,10 +5,10 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import build_step
+from nsgeo.processing import build_step, get_step
 from nsgeo.render import row_envelope
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
+from nsgeo_qgis.ui.gain_strip import DB_LIMIT, GainStrip, Headroom
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
@@ -16,6 +16,7 @@ from plugin_testing import send_double_click as _send_double_click
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
+from qgis.PyQt.QtGui import QFontMetrics
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -1228,3 +1229,126 @@ def test_leaving_a_preview_re_pushes_the_band_at_the_current_percentile(curve_do
     np.testing.assert_array_equal(
         dock.gain_strip.headroom.envelope, row_envelope(dock.image.rg.data, 95.0)
     )
+
+
+# ---- Task 2: limits, off-record handles, caption, Reset (#49, #8, #9) ----------
+
+
+def _press_drag_release(strip, start, end):
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    _send_move_while_pressed(strip, end)
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+
+
+def test_db_limit_matches_the_core():
+    (spec,) = get_step("gain_curve").schema()
+    assert spec.min == -DB_LIMIT and spec.max == DB_LIMIT == 120.0
+
+
+def test_the_range_never_passes_the_limit(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    assert strip._db_range()[1] == 120.0
+    strip.set_points([[0, 0], [50, -118]], "o")
+    assert strip._db_range()[0] == -120.0
+
+
+def test_a_drag_to_the_edge_stops_at_120_db(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    got = []
+    strip.points_changed.connect(got.append)
+    start = QPoint(int(strip.x_of_db(118.0)), int(strip.y_of_time(50.0)))
+    assert strip.handle_at(start) == 1
+    _press_drag_release(strip, start, QPoint(start.x() + 200, start.y()))
+    assert got[-1][1][1] == 120.0
+    assert strip.points()[1][1] == 120.0
+
+
+def test_a_double_click_at_the_edge_adds_at_most_120(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    got = []
+    strip.points_changed.connect(got.append)
+    _send_double_click(strip, QPoint(strip.width() - 1, int(strip.y_of_time(80.0))))
+    assert len(strip.points()) == 3
+    assert max(db for _t, db in got[-1]) == 120.0
+
+
+PINNED = [[-11.0, 0.0], [50.0, 12.0], [100.0, 0.0]]
+
+
+def test_a_point_before_the_record_is_pinned_and_reachable(strip):
+    strip.set_points(PINNED, "o")
+    top = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0)))
+    assert strip.handle_at(top) == 0
+    px = strip.time_of_y(strip.y_of_time(0.0) + 1) - strip.time_of_y(strip.y_of_time(0.0))
+    _press_drag_release(strip, top, QPoint(top.x(), int(strip.y_of_time(20.0))))
+    assert strip.points()[0][0] == pytest.approx(20.0, abs=px)
+
+
+def test_a_pinned_point_can_be_right_clicked_away(strip):
+    strip.set_points(PINNED, "o")
+    top = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0)))
+    QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, top)
+    assert len(strip.points()) == 2
+    assert all(t != -11.0 for t, _db in strip.points())
+
+
+def test_a_point_after_the_record_is_pinned_to_the_bottom(strip):
+    strip.set_points([[0, 0], [50, 6], [130, 0]], "o")
+    pos = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(100.0)))
+    assert strip.handle_at(pos) == 2
+
+
+def test_a_point_outside_a_zoomed_window_is_not_pinned(strip):
+    t = ViewTransform.fit(100, 200, 0.0, 0.5, 600, 300)
+    strip.set_time_mapping(t.with_window(0, 100, 20.0, 60.0), MARGIN_TOP)
+    strip.set_points([[0, 0], [40, 6], [80, 0]], "o")
+    pos = QPoint(int(strip.x_of_db(0.0)), int(MARGIN_TOP + strip._transform.height))
+    assert strip.handle_at(pos) is None
+
+
+def _caption_fits(strip):
+    low, mid, high = strip.caption_texts()
+    fm = QFontMetrics(strip.font())
+    used = fm.horizontalAdvance(low) + fm.horizontalAdvance(high)
+    if mid is not None:
+        used += fm.horizontalAdvance(mid)
+    assert used <= strip.width() - 4
+    assert low and high
+    return low, mid, high
+
+
+def test_the_caption_fits_at_the_test_font(strip):
+    _caption_fits(strip)
+
+
+def test_the_caption_fits_at_a_large_font(strip):
+    font = strip.font()
+    font.setPointSize(16)
+    strip.setFont(font)
+    strip.set_points([[0, -120], [100, 120]], "o")
+    fm = QFontMetrics(strip.font())
+    full = sum(fm.horizontalAdvance(x) for x in ("-120", "dB", "120"))
+    assert full > strip.width() - 4  # the precondition: all three cannot fit
+    low, mid, high = _caption_fits(strip)
+    assert (low, high) == ("-120", "120")
+    assert mid is None
+
+
+def test_reset_emits_reset_requested(strip):
+    got = []
+    strip.reset_requested.connect(lambda: got.append(1))
+    assert strip.reset_button.isVisible()
+    strip.reset_button.click()
+    assert got == [1]
+
+
+def test_profile_dock_relays_reset(qgis_app):
+    dock = ProfileDock(SiteSession())
+    try:
+        got = []
+        dock.gain_reset_requested.connect(lambda: got.append(1))
+        dock.gain_strip.reset_button.click()
+        assert got == [1]
+    finally:
+        dock.hide()
+        dock.deleteLater()

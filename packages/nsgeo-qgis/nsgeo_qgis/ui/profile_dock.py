@@ -264,6 +264,7 @@ class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
     gain_points_changed = pyqtSignal(list)
+    gain_reset_requested = pyqtSignal()
     difference_cleared = pyqtSignal()
     velocity_mode_requested = pyqtSignal()  # relayed from the view; wired in the plugin
 
@@ -453,6 +454,7 @@ class ProfileDock(QgsDockWidget):
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
+        self.gain_strip.reset_requested.connect(self.gain_reset_requested.emit)
 
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
@@ -2068,10 +2070,10 @@ class ProfileDock(QgsDockWidget):
         defaulted here, unlike on `set_points` itself, only so the three
         hide calls need not invent a token for a payload that is never
         delivered -- the `points is None` branch returns without reaching
-        `set_points` at all. A `None` owner alongside real points would
-        still be honoured, and ends any gesture in progress -- the safe
-        direction: the corrupting one is keeping a gesture alive across a
-        change of curve.
+        `set_points` at all. A `None` owner alongside real points is
+        honoured as a different owner only when the strip shows a real one
+        (it then ends any gesture in progress); callers always pass a real
+        token.
 
         While a preview is up this is deferred rather than acted on: the
         strip edits a step in the WORKING line's stack and writes on
