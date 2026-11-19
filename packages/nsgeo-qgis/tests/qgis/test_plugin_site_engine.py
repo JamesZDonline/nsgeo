@@ -1304,3 +1304,17 @@ def test_the_busy_report_never_raises_on_a_disposed_site(site3, make_site):
     site.dispose()
     report = site.busy_report()
     assert report.startswith("active: False · preparing: None · queue: []")
+
+
+def test_the_busy_report_reports_a_failing_probe_instead_of_raising(site3, make_site, monkeypatch):
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="A"))
+    wait_for_site(site)
+
+    def broken(self):
+        raise RuntimeError("probe broke")
+
+    monkeypatch.setattr(SliceEngine, "pending_tasks", property(broken))
+    report = site.busy_report()
+    assert isinstance(report, str)
+    assert report.startswith("could not describe the site: probe broke")

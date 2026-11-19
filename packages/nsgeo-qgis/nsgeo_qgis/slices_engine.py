@@ -447,8 +447,9 @@ class SliceEngine(QObject):
     def pending_tasks(self) -> int:
         """How many of this engine's tasks have not run `finished` yet.
 
-        What `has_live_task` is made of, as a count, for a report that
-        must name what keeps the engine busy.
+        Only the `_pending` half of `has_live_task` (which is `_running or
+        bool(_pending)`), as a count, for a report that must name what
+        keeps the engine busy.
         """
         return len(self._pending)
 
