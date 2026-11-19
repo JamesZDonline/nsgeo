@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 from nsgeo.geometry.grid import Grid
-from nsgeo.processing import build_step
-from nsgeo.model.survey import Line
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.preset_box import (
     DELETED_NOTE,
@@ -52,7 +52,11 @@ def test_the_list_is_none_then_the_presets_by_name(session):
 def test_with_no_presets_the_box_is_greyed_on_none_with_its_tooltip(session):
     box = PresetBox(session)
     assert not box.combo.isEnabled()
-    assert box.combo.toolTip() == NO_PRESETS_TOOLTIP == "Save a preset from the Processing panel first."
+    assert (
+        box.combo.toolTip()
+        == NO_PRESETS_TOOLTIP
+        == "Save a preset from the Processing panel first."
+    )
     assert box.chosen() is None
     assert not box.is_choice()
 
@@ -120,3 +124,28 @@ def test_the_box_survives_the_site_closing_under_it(session):
     assert box.chosen() is None
     box.set_grid("Grid3")
     assert box.chosen() is None
+
+
+def test_closing_the_site_greys_the_box_without_a_deleted_note(session):
+    _save(session, "Plain", ("dewow", {}))
+    box = PresetBox(session)
+    box.combo.setCurrentIndex(box.combo.findData("Plain"))
+    session.close_site()
+    assert box.chosen() is None
+    assert not box.is_choice()
+    assert "deleted" not in box.note.text()
+
+
+def test_opening_a_site_refills_the_box_and_moves_to_the_starting_value(session, tmp_path):
+    _save(session, "Plain", ("dewow", {}))
+    session.remember_import_preset("Grid3", "Plain")
+    session.save()
+    path = session.json_path
+    box = PresetBox(session)
+    box.set_grid("Grid3")
+    session.close_site()
+    assert not box.is_choice()
+    session.open_site(path)
+    assert box.is_choice()
+    assert box.chosen() == "Plain"
+    assert "deleted" not in box.note.text()

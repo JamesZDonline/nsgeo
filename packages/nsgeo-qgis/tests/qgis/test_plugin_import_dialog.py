@@ -21,9 +21,9 @@ from nsgeo_qgis.ui.import_dialog import (
 from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from tests.real_data import GRID2_LINES
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
+from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 GRID_B = Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -860,13 +860,18 @@ def test_the_first_import_into_an_empty_grid_sets_its_slices_preset_and_later_on
     _choose(d2, "Two")
     d2.accept()
     assert session.slice_source("A") == {"preset": "One"}  # later imports never touch it
-    # not for None
+    # not for None: an entry with other fields but no preset, where the rule would apply
     session.add_grid(GRID_B)
+    session.remember_slice_resolution("B", cell=0.4)
+    assert session.import_sets_slice_preset("B")
+    changed: list[str] = []
+    session.slice_sources_changed.connect(changed.append)
     d3 = ImportDialog(session, grid_id="B")
     d3.add_files(_files(tmp_path, (3,)))
     _choose(d3, None)  # the box started on the site's last; None is chosen by hand
     d3.accept()
-    assert session.slice_source("B") is None
+    assert "preset" not in (session.slice_source("B") or {})
+    assert "B" not in changed
     # not when a Slices preset already exists
     session.add_grid(GRID_C)
     session.set_slice_preset("C", "Two")
@@ -877,23 +882,42 @@ def test_the_first_import_into_an_empty_grid_sets_its_slices_preset_and_later_on
     assert session.slice_source("C") == {"preset": "Two"}
 
 
-def test_a_refused_import_puts_the_slices_preset_back(session, tmp_path):
+def test_a_refused_import_puts_the_slices_preset_back(session, tmp_path, monkeypatch):
+    _with_presets(session, tmp_path, "One")
+    session.remember_slice_resolution("A", cell=0.4)  # an entry with no preset
+    before = session.slice_source("A")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    seen: list[Any] = []
+
+    def refusing(lines):
+        seen.append(session.slice_source("A"))
+        raise ValueError("refused")
+
+    monkeypatch.setattr(session, "add_lines", refusing)
+    d.accept()
+    assert seen == [{**before, "preset": "One"}]  # written before add_lines
+    assert d.status.text() == "refused"
+    assert session.slice_source("A") == before  # and put back
+    assert session.keys_on_grid("A") == []
+    assert session.site.import_presets == {}
+
+
+def test_a_key_already_in_the_site_writes_nothing(session, tmp_path):
     _with_presets(session, tmp_path, "One")
     files = _files(tmp_path, (1,))
     d = ImportDialog(session, grid_id="A")
     d.add_files(files)
     d.accept()
     session.add_grid(GRID_B)
-    session.remember_slice_source("B", preset="One", lines=None)
-    session.set_slice_preset("B", None)  # B is empty, no preset, a lines entry
-    before = session.slice_source("B")
     d2 = ImportDialog(session, grid_id="B")
-    d2.add_files(files)  # the same key: already in the site
+    d2.add_files(files)
     _choose(d2, "One")
     d2.accept()
     assert "already in the site" in d2.status.text()
-    assert session.slice_source("B") == before
-    assert session.site.import_presets.get("grids", {}).get("B") is None  # nothing remembered
+    assert session.slice_source("B") is None
+    assert "B" not in session.site.import_presets.get("grids", {})
 
 
 def test_a_preset_deleted_under_the_dialog_imports_nothing(session, tmp_path):

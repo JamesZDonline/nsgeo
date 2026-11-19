@@ -1404,8 +1404,10 @@ class SiteSession(QObject):
         a preset reads as None."""
         site = self._require_site()
         grids = site.import_presets.get("grids", {})
-        name = grids[grid_id] if grid_id is not None and grid_id in grids else (
-            site.import_presets.get("site")
+        name = (
+            grids[grid_id]
+            if grid_id is not None and grid_id in grids
+            else (site.import_presets.get("site"))
         )
         return name if name in site.presets else None
 

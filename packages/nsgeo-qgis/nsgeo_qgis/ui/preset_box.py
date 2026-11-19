@@ -63,7 +63,8 @@ class PresetBox(QWidget):
         layout.addWidget(self.note)
         self.combo.currentIndexChanged.connect(self._on_choice)
         session.presets_changed.connect(self._on_presets_changed)
-        session.site_closed.connect(self._on_presets_changed)
+        session.site_closed.connect(self._on_site_closed)
+        session.site_opened.connect(self._on_site_opened)
         session.slice_sources_changed.connect(self._on_sources_changed)
         self.set_grid(None)
 
@@ -115,6 +116,22 @@ class PresetBox(QWidget):
             if before is not None and self.chosen() is None:
                 self._deleted = before
             self._refresh_note()
+        except Exception:  # noqa: BLE001
+            _log()
+
+    def _on_site_closed(self, *_: Any) -> None:
+        """A closing site is not a deleted preset: back to None, greyed, no note."""
+        try:
+            self._deleted = None
+            self._fill(None)
+            self._refresh_note()
+        except Exception:  # noqa: BLE001
+            _log()
+
+    def _on_site_opened(self, *_: Any) -> None:
+        """A site opening refills the list and moves to the starting value."""
+        try:
+            self.set_grid(self._grid_id)
         except Exception:  # noqa: BLE001
             _log()
 

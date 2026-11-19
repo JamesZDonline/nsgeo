@@ -19,6 +19,7 @@ B = ["raw/FILE__004.DZT"]
 def _grid(gid):
     return Grid(gid, (800.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
+
 MODEL = VelocityModel.constant(0.095)
 
 
@@ -197,3 +198,14 @@ def test_remove_grid_drops_its_import_preset(session):
     session.remove_grid("C")
     assert "C" not in session.site.import_presets.get("grids", {})
     assert session.site.import_presets["site"] == "Plain"
+
+
+def test_a_grids_own_choice_beats_the_sites_last(session):
+    session.add_grid(_grid("C"))
+    session.remember_import_preset("A", "Migrate")
+    session.remember_import_preset("B", "Plain")
+    assert session.import_preset("A") == "Migrate"
+    assert session.import_preset("C") == "Plain"
+    session.remember_import_preset("A", None)
+    session.remember_import_preset(None, "Plain")
+    assert session.import_preset("A") is None
