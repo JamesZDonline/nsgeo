@@ -190,7 +190,8 @@ Grouped by area. The order within a group is not a priority.
   grid's preset straight from the Whole site grid list ([#199]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
-  ([#171]).
+  ([#171]); cuts that show the wiggle, read from the lines they cross with
+  one smooth gain, instead of the slice's squared amplitudes ([#215]).
 - **3-D:** surfaces stay fresh after a reopen without Save site in the cases
   the walkthrough fix left open, such as a Slices transform other than the
   default ([#203]); an untouched ParaView export no longer marks surfaces stale
@@ -265,6 +266,7 @@ Grouped by area. The order within a group is not a priority.
 [#211]: https://github.com/JamesZDonline/nsgeo/issues/211
 [#212]: https://github.com/JamesZDonline/nsgeo/issues/212
 [#214]: https://github.com/JamesZDonline/nsgeo/issues/214
+[#215]: https://github.com/JamesZDonline/nsgeo/issues/215
 
 ## Why
 
