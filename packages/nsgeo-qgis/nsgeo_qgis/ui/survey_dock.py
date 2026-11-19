@@ -679,7 +679,7 @@ class SurveyDock(QgsDockWidget):
         if not keys:
             return False
         open_key = self.session.current_key
-        self._select_rows(keys, open_key if open_key in keys else keys[0])
+        self._select_rows(keys, open_key if open_key in keys else keys[0], unfold=False)
         return True
 
     def select_lines(self, keys: list[str]) -> None:
@@ -690,20 +690,20 @@ class SurveyDock(QgsDockWidget):
             self._selection_quiet += 1
             try:
                 present = [k for k in keys if self.key_of(self.item_for_key(k)) is not None]
-                self._select_rows(present, present[0] if present else None)
+                self._select_rows(present, present[0] if present else None, unfold=True)
             finally:
                 self._selection_quiet -= 1
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not select the lines in the tree: {exc}", Qgis.MessageLevel.Critical)
 
-    def _select_rows(self, keys: list[str], current: str | None) -> None:
+    def _select_rows(self, keys: list[str], current: str | None, *, unfold: bool) -> None:
         """Select exactly the rows of `keys`, with the current item (and so the
         Shift anchor) on `current`. The selection is set through the model with
         explicit flags, so a modifier key held down cannot toggle a row."""
         self._selection_quiet += 1
         try:
             items = [it for it in (self.item_for_key(k) for k in keys) if it is not None]
-            for item in items:
+            for item in items if unfold else []:  # only a selection from the map unfolds
                 parent = item.parent()
                 if parent is not None:
                     parent.setExpanded(True)

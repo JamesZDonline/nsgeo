@@ -2320,3 +2320,16 @@ def test_opening_a_cut_announces_an_empty_line_selection(dock):
 
     assert got[-1] == []
     assert _selected_keys(dock) == []
+
+
+def test_a_rebuild_keeps_a_grid_the_user_folded_and_its_selected_lines(dock):
+    session, dock = dock
+    dock.select_lines([KEYS[0], KEYS[1]])  # from the map: unfolds the grid
+    grid_item = _grid_item(dock, "A")
+    assert grid_item.isExpanded()
+    grid_item.setExpanded(False)  # folded by hand
+
+    session.set_lines_velocity([KEYS[0], KEYS[1]], VelocityModel.constant(0.1))
+
+    assert not _grid_item(dock, "A").isExpanded()
+    assert _selected_keys(dock) == [KEYS[0], KEYS[1]]

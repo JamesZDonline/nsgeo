@@ -212,3 +212,34 @@ def test_real_grid2_lines_select_from_the_map(fake_iface, tmp_path):
     finally:
         plugin.session.save()
         plugin.unload()
+
+
+@pytest.mark.parametrize("hazard", ["clears", "stale_ids"])
+def test_a_refill_that_changes_the_layers_selection_is_not_a_gesture(
+    wired, monkeypatch, message_log, hazard
+):
+    """Spec §3.4, whatever the QGIS version: should a refill emit `selectionChanged`
+    on the `lines` layer (emptied, or naming ids that no longer exist), neither
+    selection is lost and nothing is logged."""
+    plugin = wired
+    keys = _tape_keys(plugin)
+    _select_on_map(plugin, keys)
+    layer = plugin.layers.layers["lines"]
+    real = plugin.layers._refill_table
+
+    def refill(name, features):
+        real(name, features)
+        if name == "lines":
+            if hazard == "clears":
+                layer.removeSelection()
+            else:
+                layer.selectByIds([9000, 9001])
+
+    monkeypatch.setattr(plugin.layers, "_refill_table", refill)
+    message_log.clear()
+
+    plugin.session.set_lines_velocity(keys, VelocityModel.constant(0.1))
+
+    assert _panel_keys(plugin) == keys
+    assert _layer_keys(plugin) == sorted(keys)
+    assert not [m for m in message_log if "selec" in m or "KeyError" in m], message_log

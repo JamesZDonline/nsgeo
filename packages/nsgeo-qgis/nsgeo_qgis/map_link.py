@@ -711,8 +711,10 @@ class MapLink(QObject):
             layer = self._lines_layer()
             if layer is None or not self.session.is_open:
                 return
-            if self._applying_selection:
-                return  # the panel's own selection, being copied onto the map
+            if self._applying_selection or self.layers.refilling_lines:
+                # The panel's own selection being copied onto the map, or a refill
+                # of the layer: neither is the user's gesture.
+                return
             ids = layer.selectedFeatureIds()
             self._announce_selection(layer, ids)
             if len(ids) != 1:
@@ -729,8 +731,9 @@ class MapLink(QObject):
 
     def _announce_selection(self, layer: QgsVectorLayer, ids: list[int]) -> None:
         """Tell the Survey panel which lines the map now has selected (#57)."""
-        keys = [str(layer.getFeature(i)["line_key"]) for i in ids]
-        self.lines_selected.emit([k for k in keys if k in self.session.keys()])  # noqa: SIM118 -- SiteSession.keys()
+        features = [layer.getFeature(i) for i in ids]
+        keys = [str(f["line_key"]) for f in features if f.isValid()]  # a stale id has none
+        self.lines_selected.emit([k for k in keys if k in self.session.keys()])  # noqa: SIM118  # noqa: SIM118 -- SiteSession.keys()
 
     def select_lines(self, keys: list[str]) -> None:
         """Select exactly the features of `keys` on the `lines` layer, without
