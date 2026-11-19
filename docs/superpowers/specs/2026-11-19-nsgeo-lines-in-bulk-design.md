@@ -55,7 +55,9 @@ of the dialog around it beyond what it is told (§2.3).
 - **No presets saved:** the box shows None, greyed out, with the tooltip "Save a preset from the
   Processing panel first."
 - **Presets change while the dialog is open** (both dialogs are modeless): the list refills on
-  `session.presets_changed`, keeping the current choice if it still exists, else None.
+  `session.presets_changed`, keeping the current choice if it still exists. If the chosen preset
+  was deleted, the box drops to None and the note says so until another choice is made: "The
+  preset {name} was deleted; these lines will import with none." (My call.)
 - **The grey note** holds up to two lines, each shown only when true:
   - **Migration:** the chosen preset has an enabled Migration (Stolt f-k) step (`migrate_fk`).
     Text: "Its Migration (Stolt f-k) step uses 0.100 m/ns, the velocity it was saved with." (the
@@ -80,6 +82,9 @@ of the dialog around it beyond what it is told (§2.3).
 - **A remembered name that is no longer a preset** reads as None. (My call.)
 - **Remembered only at Import**, after the lines are added: the grid's entry (DZT) and the site's
   last choice (both dialogs) are set to the choice made, None included. Cancel remembers nothing.
+  **A greyed-out box is not a choice:** when the site had no presets at Import, nothing is
+  remembered, so a new site's first grids do not start on None for good once a preset exists.
+  (My call.)
 - **Stored in the site file**, as a new optional top-level field, kept apart from
   `slice_sources` so it never moves a surface's staleness (`slice_sources_changed`):
 
@@ -107,9 +112,24 @@ becomes the grid's Slices preset. After that only the Slices panel changes it, a
 never touch it. Reason: a grid already looked at in Slices without picking a preset "has none"
 too, and switching its slices because a few lines were added would surprise.
 
-- "Had no lines" is read before `add_lines`. The preset is written after the lines are added
-  (an `add_lines` that refuses leaves nothing behind), through the session's slice-source path
-  with only the preset set: the line choice, gain, resolution and the rest stay unset.
+- "Had no lines" is read before `add_lines`. The preset is written **before** the lines are
+  added, through the session's slice-source path with only the preset set (the line choice, gain,
+  resolution and the rest stay unset), so the lines are prepared once, with the right preset. If
+  `add_lines` then refuses, the grid's slice source is put back as it was.
+- **The Slices panel follows it** (the author's choice, after the builder check found the gap):
+  today `SlicesDock` reads a grid's remembered preset only when its grid combo moves to that grid
+  (`_sync_included` → `_restore_remembered_source`). So when the panel is already on the empty
+  grid (the only grid of a new site, say), it would prepare the new lines with the first preset
+  by name, This grid and Whole site would disagree (the #100/#106 kind of bug), and the panel's
+  next `_remember_source` would write the first preset back over the import's choice.
+  - Fix: one new slot in `ui/slices_dock.py`, connected to `session.slice_sources_changed`. When
+    the changed grid is the one This grid shows, and its remembered preset exists and differs
+    from the preset combo, the combo switches to it as a hand choice would (pending restore values
+    dropped, preparation re-run), without writing the record again. Every other case does nothing:
+    the panel's own `_remember_source` (the record already matches), a gain/resolution/volume
+    change (the preset is unchanged), another grid.
+  - Session H's plan also edits `slices_dock.py`, elsewhere (around `_snap_inside` and
+    `_step_levels`); this is a new function and one `connect` line.
 - The Slices panel showing that grid then shows the new preset (walkthrough check, §10).
 
 ### 2.5 Applying it
@@ -117,7 +137,8 @@ too, and switching its slices because a few lines were added would surprise.
 At Import, after `session.add_lines(lines)` succeeds, the chosen preset is applied to **each new
 line only**, through the bulk method of §4.4 (`apply_preset_to(name, keys)`), so lines already on
 the grid keep their stacks. A preset deleted between choosing and Import is reported in the
-dialog's status and nothing is imported (checked before `add_lines`, not after).
+dialog's status and nothing is imported (checked before `add_lines`, not after). In practice the
+box has already dropped to None by then (§2.1), so this check only guards a race.
 
 ## 3. #57: the map and the Survey panel share one line selection
 
@@ -145,6 +166,13 @@ the map always shows what Delete removes. It works both ways (the author's choic
     removes lines only.
 - **Folded grids:** a selection arriving from the map unfolds each grid that holds a selected
   line, so the panel shows what Delete would remove. (My proposal, shown in the mockup.)
+- **Opening a line by any other route** (a pick or mark selected on the map, a cut drawn, a line
+  opened from another panel) selects just that line, as the panel does today (`_follow_current`),
+  and the map follows: its `lines` selection becomes that one line. A cut opening leaves the
+  `lines` selection empty. (My call: one rule, "the open line is the selection after an open".)
+- **A map gesture replaces the panel's line selection** with the map's lines, as QGIS's own
+  selection does. Unplaced lines selected in the panel are dropped by it, even by a Shift-add on
+  the map, since they have no feature to be in the map's selection. (My call.)
 
 ### 3.2 What is covered
 
@@ -222,8 +250,9 @@ one item). New items in the dashed groups; existing items unchanged:
 | Selection | Menu |
 |---|---|
 | Tape lines on one grid | Edit N lines… · Move N lines to grid ▸ · ─ · **Apply preset to N lines ▸** · **Apply steps from {open} to M lines…** · ─ · **Set velocity for N lines…** · **Clear velocity override on N lines** · ─ · Remove N lines from site |
+| Tape lines across grids | Move N lines to grid ▸ (as today) · ─ · *the four new items* · ─ · Remove N lines from site |
 | GPS lines only | Set destagger for N GPS lines… · ─ · *the four new items* · ─ · Remove N lines from site |
-| Lines across grids, or tape and GPS mixed | *the four new items* · ─ · Remove N lines from site |
+| Tape and GPS mixed | *the four new items* · ─ · Remove N lines from site |
 | Holding a cut (lines-free) or a mag file | as today |
 
 - **Apply preset to N lines ▸** lists the site's presets in name order; greyed when there are none.
@@ -346,6 +375,8 @@ call site):
 - **Session E** (Processing panel) and **H** (Whole site engine) may run alongside. Nothing here
   edits `processing_dock.py`. The bulk actions are in the Survey panel, not the Processing
   panel's Presets menu.
+- **Session H** is building (`nsgeo-site-never-stuck`) and edits `slices_dock.py`; §2.4 adds one
+  new slot and one `connect` line there, nothing in H's regions.
 - **Session G** (later) edits `map_link.py` (orphaned cut picks) and `survey_dock.py` (a sweep
   action). #57's change to `_on_selection` is a few lines plus new methods.
 - **M19a** (`nsgeo-m19-mag`, built, not merged) edits `survey_dock.py` (+151), `plugin.py`,
@@ -371,6 +402,9 @@ far as it mirrors them.
     stays None; a deleted preset reads as None; Cancel remembers nothing.
   - The Slices preset is set on the first import into an empty grid with no Slices preset, and
     not on a second import, not for a grid with a Slices preset, not for None.
+  - With the Slices panel on that empty grid, it shows the import's preset and prepares the new
+    lines with it, once; a later choice in the panel keeps it rather than writing the first preset
+    back. An `add_lines` that refuses leaves the slice source as it was.
   - The note's two lines appear exactly when true.
   - Core: `import_presets` round-trips, is dropped tolerantly when malformed, loses a removed
     grid's entry, and does not change `schema_version`.
@@ -420,5 +454,11 @@ selection); the exact Shift-anchor handling in `select_lines`; the message-bar r
 - The Set velocity box starts at the shared override, else the first line's resolved velocity
   (§4.2).
 - "Apply steps" leaves a selected open line out of the count; greyed when nothing is left.
+- A preset deleted while an import dialog is open drops the box to None with a note (§2.1).
+- A greyed-out box (no presets yet) remembers nothing at Import (§2.3).
+- Opening a line by any route makes it the selection in both places; a map gesture drops unplaced
+  lines from the selection (§3.1).
+- Tape lines across grids keep **Move N lines to grid ▸**, as today; the mockup left it out by
+  mistake (§4.1).
 - `_following` in `import_dialog.py` is fixed with `_updating` (§6).
 - `ParamForm` switches to the shared `parse_decimal` (§6).
