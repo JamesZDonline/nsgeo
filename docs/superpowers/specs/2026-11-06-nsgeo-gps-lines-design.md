@@ -699,7 +699,8 @@ Made by Claude while planning M17b; each is open to veto at the walkthrough.
     reverse point the same way). Lines shorter than 1 m have none and do not vote.
   - The **main direction** is the length-weighted mean of those axes (on doubled angles). Lines
     within 20° of it (C8's angle) run **along** it. The lines share a main direction when the
-    along lines hold at least half of the summed first-to-last lengths; one line always does.
+    along lines hold more than half of the summed first-to-last lengths (so an evenly
+    cross-hatched survey has none); one line always does.
   - **Spacing** is the median gap between neighbouring along lines, each line taken at its mean
     position across the main direction. None with fewer than two along lines, or with no main
     direction: the dialog then waits for a typed one.

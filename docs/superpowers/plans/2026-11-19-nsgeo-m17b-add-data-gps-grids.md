@@ -133,7 +133,7 @@ Fill in the two elided bodies with assertions that pin the stated behaviour (eve
 - [ ] **Step 2: Run them to see them fail** (`ModuleNotFoundError: nsgeo.geometry.track_fit`).
 - [ ] **Step 3: Implement `track_fit.py`** to §16 of the spec.
   - Direction per track: last finite point minus first; tracks with a chord under `MIN_VOTE_M` do not vote. Axial mean: mean of `(cos 2θ, sin 2θ)` weighted by chord length, halved back; θ measured as azimuth (`atan2(dx, dy)`).
-  - Along: within `ALONG_DEG` of the mean. A main direction exists when the along chords sum to at least half of all chords (one voting track always does).
+  - Along: within `ALONG_DEG` of the mean. A main direction exists when the along chords sum to more than half of all chords (one voting track always does; an even 50/50 cross-hatch has none).
   - Spacing: each along track's mean position across the main direction, sorted; the median of consecutive differences.
   - Frame, lined up: rotate into (cross, along); along extent = every trace; cross extent = outer along means ∓ `spacing / 2`, widened to hold every trace of a track that is not along. Fold the azimuth so +Y follows the main direction with azimuth in `(-90, 90]`, stored `% 360`. Origin = the world position of local (0, 0).
   - Frame, no main direction: convex hull (monotone chain) of every trace, the minimum-area rectangle over hull-edge angles, grown by `spacing / 2` on all sides, +Y along the longer side, azimuth folded the same way.
