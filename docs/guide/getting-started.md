@@ -435,9 +435,9 @@ name (such as `gain_agc`), which is what the survey file stores.
 A setting that cannot work (for example a window shorter than two samples on
 this line) is refused with a message saying which setting to change. The reason
 stays in a Warnings box under the step list, with the step marked ⛔, until you
-fix the setting, remove the step, turn it off, or open another line. While a
-line's steps can't run, the Profile panel says so instead of showing the last
-picture. If a project you open holds a setting nsgeo no longer accepts at all,
+fix the setting, remove the step, turn it off, or open another line. When you
+open or hover over a line whose steps can't run, the Profile panel says so
+instead of showing the previous line's picture. If a project you open holds a setting nsgeo no longer accepts at all,
 such as an epsilon of 0 or a missing value, that step is turned off, reset or
 removed, and the nsgeo log says what changed.
 
