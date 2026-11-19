@@ -1429,12 +1429,25 @@ def test_a_retiring_engine_neither_reports_nor_waits_again(site3, make_site, mon
         return real_load(self)
 
     monkeypatch.setattr(Line, "load", held_load)
+    # Counted per engine: `detach` also silences `on_error`, so messages alone
+    # cannot show the retiring engine's own slot stayed disconnected.
+    waits: list[int] = []
+    real_wait = SliceEngine.wait_for_preparation
+
+    def counted_wait(self, *args, **kwargs):
+        waits.append(id(self))
+        return real_wait(self, *args, **kwargs)
+
+    monkeypatch.setattr(SliceEngine, "wait_for_preparation", counted_wait)
     errors: list[str] = []
     site = make_site(site3.session, on_error=errors.append)
     try:
         site.set_source(site3.source())
         assert spin_until(held.is_set), "A's first line was never read"
+        engine_a = site.engine_for("A")
         site3.session.remove_grid("A", with_lines=True)
+        assert waits.count(id(engine_a)) == 1, "the retiring engine waited again"
+        assert engine_a.choice is not None, "its own grids_changed slot still ran"
         stopped = [m for m in errors if "did not stop in time" in m]
         assert len(stopped) == 1, errors
         assert not [m for m in errors if "no longer exists" in m], errors
@@ -1444,6 +1457,9 @@ def test_a_retiring_engine_neither_reports_nor_waits_again(site3, make_site, mon
     wait_for_site(site, 20_000)
     assert site.ready_grids == ("B", "C")
     assert spin_until(lambda: not site._retiring), "the retiring engine was never reaped"
+    # The reaper deletes what it disposes, as `_drop_engine` does.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(site.findChildren(SliceEngine)) == 2
 
 
 def test_disposed_engines_do_not_pile_up_as_children(site3, make_site):

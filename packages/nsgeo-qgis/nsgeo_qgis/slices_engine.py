@@ -1973,6 +1973,9 @@ class SliceEngine(QObject):
         `finished` has run. `on_grid_moved` becomes a no-op, not None: None
         would bring back this engine's own re-preparation on a move. Safe to
         call twice; disconnecting a slot that is not connected is ignored.
+        Called from inside this engine's own `wait_for_preparation`, that wait
+        later puts its owner's `on_prepared` back; the owner must then ignore
+        a callback for a grid it no longer prepares (`SiteEngine` does).
         """
         for signal, slot in (
             (self.session.site_closed, self.clear),
