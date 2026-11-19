@@ -1,0 +1,6 @@
+# Task 5 report
+Moved input_axis, time_axis, probe_radargram, seed_params (bodies, logs, docstrings verbatim; self.session -> session param; time_axis calls module input_axis) to nsgeo_qgis/step_inputs.py; added clock_unknown(stack,row). Dock methods are one-line delegates (same names/signatures). plugin.py _sync_gain_strip uses step_inputs.clock_unknown; import added to the existing `from nsgeo_qgis import ...` line only.
+Net diff: processing_dock.py -113 lines; plugin.py 6 lines; step_inputs.py new; one new parametrized guard test (8 cases).
+Tests: processing_dock 61, param_form 55, gain_strip 77, profile_dock 124, difference_presets 16 all pass; real_data 46 pass; core+pure 1962 passed, 9 skipped, 19 xfailed; ruff check . clean, format clean on changed files.
+Guard mutation: in step_inputs.input_axis replaced clock_unknown(stack,row) with a copy ignoring `enabled`; test_the_clock_rule_has_one_answer[False-False-False] failed; reverted by hand (diff vs backup identical).
+Concerns: the guard test also asserts the expected truth table, not only agreement. Dock's time_axis no longer routes through the dock's input_axis method (a monkeypatch of it would not reach time_axis; none exists in tests).
