@@ -476,15 +476,22 @@ them in the usual processing order, in four groups:
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
 
+The panel names, at its top, the line its steps belong to, and the line a map
+hover is previewing when that is another one.
+
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
 
 A setting that cannot work (for example a window shorter than two samples on
-this line) is refused with a message saying which setting to change. If a
-project you open holds a setting nsgeo no longer accepts at all, such as an
-epsilon of 0 or a missing value, that step is turned off, reset or removed,
-and the nsgeo log says what changed.
+this line) is refused with a message saying which setting to change. The reason
+stays in a Warnings box under the step list, with the step marked ⛔, until you
+fix the setting, remove the step, turn it off, or open another line. When you
+open or hover over a line whose steps can't run, the Profile panel says so
+instead of showing the previous line's picture. If a project you open holds a
+setting nsgeo no longer accepts at all, such as an epsilon of 0 or a missing
+value, that step is turned off, reset or removed, and the nsgeo log says what
+changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
@@ -498,7 +505,9 @@ and the nsgeo log says what changed.
   loudest parts of the line are at each depth, and the black line is the trace
   under the cursor. The dotted lines are the limits of what the profile can
   show. Anything past them is drawn red, and is solid black or white on the
-  profile.
+  profile. The strip stops at 120 dB either way. A point outside the record
+  sits on the strip's edge, where you can drag it in or right-click it away.
+  **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

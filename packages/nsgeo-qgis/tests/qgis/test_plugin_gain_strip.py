@@ -5,17 +5,18 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import build_step
+from nsgeo.processing import build_step, get_step
 from nsgeo.render import row_envelope
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
+from nsgeo_qgis.ui.gain_strip import DB_LIMIT, HANDLE_RADIUS, GainStrip, Headroom
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from plugin_testing import send_double_click as _send_double_click
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
+from qgis.PyQt.QtGui import QFontMetrics
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -1015,6 +1016,8 @@ def test_gain_strip_slots_do_not_raise_after_unload(fake_iface, tmp_path):
 
     plugin._sync_gain_strip(0)  # must not raise
     plugin._on_gain_points([[0.0, 0.0], [1.0, 1.0]])  # must not raise
+    plugin._on_gain_reset()  # must not raise
+    plugin._resync_gain_strip("x")  # must not raise
 
 
 # ---- headroom under the curve (#10) --------------------------------------
@@ -1228,3 +1231,599 @@ def test_leaving_a_preview_re_pushes_the_band_at_the_current_percentile(curve_do
     np.testing.assert_array_equal(
         dock.gain_strip.headroom.envelope, row_envelope(dock.image.rg.data, 95.0)
     )
+
+
+# ---- Task 2: limits, off-record handles, caption, Reset (#49, #8, #9) ----------
+
+
+def _press_drag_release(strip, start, end):
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    _send_move_while_pressed(strip, end)
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+
+
+def test_db_limit_matches_the_core():
+    """Guard test: `DB_LIMIT` is a copy of the core's bound, so it must track
+    the `gain_curve` `points` schema. Fails if `DB_LIMIT` drifts from the
+    core's min/max (e.g. mutate `DB_LIMIT = 120.0` to `100.0`)."""
+    (spec,) = get_step("gain_curve").schema()
+    assert spec.min == -DB_LIMIT and spec.max == DB_LIMIT == 120.0
+
+
+def test_the_range_never_passes_the_limit(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    assert strip._db_range()[1] == 120.0
+    strip.set_points([[0, 0], [50, -118]], "o")
+    assert strip._db_range()[0] == -120.0
+
+
+def test_a_drag_to_the_edge_stops_at_120_db(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    got = []
+    strip.points_changed.connect(got.append)
+    start = QPoint(int(strip.x_of_db(118.0)), int(strip.y_of_time(50.0)))
+    assert strip.handle_at(start) == 1
+    _press_drag_release(strip, start, QPoint(start.x() + 200, start.y()))
+    assert got[-1][1][1] == 120.0
+    assert strip.points()[1][1] == 120.0
+
+
+def test_a_double_click_at_the_edge_adds_at_most_120(strip):
+    strip.set_points([[0, 0], [50, 118]], "o")
+    got = []
+    strip.points_changed.connect(got.append)
+    _send_double_click(strip, QPoint(strip.width() - 1, int(strip.y_of_time(80.0))))
+    assert len(strip.points()) == 3
+    assert max(db for _t, db in got[-1]) == 120.0
+
+
+PINNED = [[-11.0, 0.0], [50.0, 12.0], [100.0, 0.0]]
+
+
+def test_a_point_before_the_record_is_pinned_and_reachable(strip):
+    strip.set_points(PINNED, "o")
+    top = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0)))
+    assert strip.handle_at(top) == 0
+    px = strip.time_of_y(strip.y_of_time(0.0) + 1) - strip.time_of_y(strip.y_of_time(0.0))
+    _press_drag_release(strip, top, QPoint(top.x(), int(strip.y_of_time(20.0))))
+    assert strip.points()[0][0] == pytest.approx(20.0, abs=px)
+
+
+def test_a_pinned_point_can_be_right_clicked_away(strip):
+    strip.set_points(PINNED, "o")
+    top = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0)))
+    QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, top)
+    assert len(strip.points()) == 2
+    assert all(t != -11.0 for t, _db in strip.points())
+
+
+def test_a_point_after_the_record_is_pinned_to_the_bottom(strip):
+    strip.set_points([[0, 0], [50, 6], [130, 0]], "o")
+    pos = QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(100.0)))
+    assert strip.handle_at(pos) == 2
+
+
+def test_a_point_outside_a_zoomed_window_is_not_pinned(strip):
+    """Guard test: pinning is against the record (`t0_ns`/`t_end`), not the
+    zoomed window. Fails if `_drawn` compares a point's time with the
+    window's `time_lo`/`time_hi` instead (the point at 80 ns would then be
+    pinned to the window's bottom edge and found there)."""
+    t = ViewTransform.fit(100, 200, 0.0, 0.5, 600, 300)
+    strip.set_time_mapping(t.with_window(0, 100, 20.0, 60.0), MARGIN_TOP)
+    strip.set_points([[0, 0], [40, 6], [80, 0]], "o")
+    pos = QPoint(int(strip.x_of_db(0.0)), int(MARGIN_TOP + strip._transform.height))
+    assert strip.handle_at(pos) is None
+
+
+def _caption_fits(strip):
+    low, mid, high = strip.caption_texts()
+    fm = QFontMetrics(strip.caption_font())
+    used = fm.horizontalAdvance(low) + fm.horizontalAdvance(high)
+    if mid is not None:
+        used += fm.horizontalAdvance(mid)
+    assert used <= strip.width() - 4
+    assert low and high
+    return low, mid, high
+
+
+def test_the_caption_fits_at_the_test_font(strip):
+    _caption_fits(strip)
+
+
+def test_the_caption_fits_at_a_large_font(strip):
+    font = strip.font()
+    font.setPointSize(16)
+    strip.setFont(font)
+    strip.set_points([[0, -120], [100, 120]], "o")
+    fm = QFontMetrics(strip.font())
+    full = sum(fm.horizontalAdvance(x) for x in ("-120", "dB", "120"))
+    assert full > strip.width() - 4  # the precondition: all three cannot fit
+    low, mid, high = _caption_fits(strip)
+    assert (low, high) == ("-120", "120")
+    assert mid is None
+
+
+def _rects_ok(strip):
+    rects = [r for r in strip.caption_rects() if r is not None]
+    for a, b in zip(rects, rects[1:], strict=False):
+        assert a.right() <= b.left(), (a, b)
+    for r in rects:
+        assert r.left() >= 0 and r.right() <= strip.width(), r
+
+
+@pytest.mark.parametrize("pts", [[[0, -3.89], [50, 19.26]], [[0, -13.16], [50, 43.84]]])
+@pytest.mark.parametrize("size", [None, 16])
+def test_the_caption_never_overprints_on_ordinary_values(strip, pts, size):
+    """Any drag gives a float dB; the ends are whole numbers and the three
+    texts are laid out without overlap, inside the strip."""
+    if size is not None:
+        font = strip.font()
+        font.setPointSize(size)
+        strip.setFont(font)
+    strip.set_points(pts, "o")
+    low, mid, high = strip.caption_texts()
+    assert len(low) <= 4 and len(high) <= 4
+    _rects_ok(strip)
+    if size is not None:
+        fm = QFontMetrics(strip.font())
+        full = sum(fm.horizontalAdvance(x) for x in (low, "dB", high))
+        assert full + 8 > strip.width() - 4  # precondition: dB cannot fit at this font
+        assert mid is None
+
+
+def test_the_caption_shrinks_its_font_when_the_numbers_alone_do_not_fit(strip):
+    font = strip.font()
+    font.setPointSize(30)
+    strip.setFont(font)
+    strip.set_points([[0, -120], [100, 120]], "o")
+    fm = QFontMetrics(strip.font())
+    assert fm.horizontalAdvance("-120") + fm.horizontalAdvance("120") > strip.width() - 4
+    assert strip.caption_font().pointSizeF() < 30
+    low, _mid, high = strip.caption_texts()
+    assert (low, high) == ("-120", "120")
+    _rects_ok(strip)
+
+
+def test_dB_is_centred_in_the_gap_between_the_numbers(strip):
+    strip.set_points([[0, 0], [100, 20]], "o")
+    low_r, mid_r, high_r = strip.caption_rects()
+    assert mid_r is not None
+    gap_mid = (low_r.right() + high_r.left()) / 2
+    assert mid_r.center().x() == pytest.approx(gap_mid, abs=1.0)
+
+
+def test_the_round_values_are_whole_dB(strip):
+    strip.set_points([[0, -3.89], [50, 19.26]], "o")
+    assert strip._db_range() == (-10.0, 26.0)  # floor(-9.89), ceil(25.26)
+
+
+def test_reset_emits_reset_requested(strip):
+    got = []
+    strip.reset_requested.connect(lambda: got.append(1))
+    edge = MARGIN_TOP + strip._transform.height
+    # the precondition: the button has room, so a failure below names its cause
+    assert strip.height() - edge - (HANDLE_RADIUS + 2) >= 14
+    assert strip.reset_button.isVisible()
+    strip.reset_button.click()
+    assert got == [1]
+
+
+def test_profile_dock_relays_reset(qgis_app):
+    dock = ProfileDock(SiteSession())
+    try:
+        got = []
+        dock.gain_reset_requested.connect(lambda: got.append(1))
+        dock.gain_strip.reset_button.click()
+        assert got == [1]
+    finally:
+        dock.hide()
+        dock.deleteLater()
+
+
+def test_reset_starts_below_the_handles(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    assert strip.reset_button.geometry().top() >= edge + HANDLE_RADIUS + 2
+    assert strip.reset_button.geometry().bottom() <= strip.height()
+
+
+def test_a_press_just_below_the_last_samples_handle_grabs_the_handle(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    last = strip._transform.t_end - strip._transform.dt_ns
+    strip.set_points([[0.0, 0.0], [last, 12.0]], "o")
+    pos = QPoint(int(strip.x_of_db(12.0)), int(edge + 3))
+    assert strip.handle_at(pos) == 1
+    assert strip.childAt(pos) is not strip.reset_button
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+    assert strip._drag == 1
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_a_pinned_bottom_handle_lies_inside_the_record(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    strip.set_points([[0.0, 0.0], [50.0, 6.0], [130.0, 3.0]], "o")
+    x = int(strip.x_of_db(3.0))
+    body = QPoint(x, int(edge - 6))
+    assert strip.handle_at(body) == 2
+    assert strip.childAt(QPoint(x, int(edge - 1))) is not strip.reset_button
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, body)
+    assert strip._drag == 2
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, body)
+
+
+def test_a_failing_move_or_double_click_is_logged_not_raised(strip, monkeypatch):
+    import nsgeo_qgis.ui.gain_strip as gs
+
+    logged = []
+    monkeypatch.setattr(gs, "_log", lambda msg, *a, **k: logged.append(msg))
+    x0, y0 = strip.x_of_db(20.0), strip.y_of_time(100.0)
+    QTest.mousePress(
+        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0))
+    )
+    monkeypatch.setattr(strip, "db_of_x", lambda x: 1 / 0)
+    try:
+        _send_move_while_pressed(strip, QPoint(int(x0) - 10, int(y0)))
+        assert logged
+        n = len(logged)
+        _send_double_click(strip, QPoint(int(x0) - 10, int(strip.y_of_time(30.0))))
+        assert len(logged) > n
+    finally:
+        QTest.mouseRelease(
+            strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(0, 0)
+        )
+
+
+# ---- the gain slots: refusal, Reset, the strip's clock, failures (#49 #9 #15 #25) ----
+
+
+def _finish(plugin, answer_modal):
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def _toast(fake_iface):
+    item = fake_iface.messageBar().currentItem()
+    return "" if item is None else item.text()
+
+
+def test_a_refused_curve_snaps_back_with_a_toast(fake_iface, tmp_path, answer_modal):
+    """#49: a payload the core refuses (130 dB) used to stay drawn on the strip
+    while the step kept its old points."""
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        strip = plugin.profile_dock.gain_strip
+        before = s.stack_for(key).entries[0][0]
+        shown = plugin.profile_dock.shown_zero_ns()
+        zero = plugin.profile_dock.step_input_zero_ns(0)
+        strip.set_points([[0.0, 0.0], [50.0, 130.0]], plugin._gain_owner)
+        strip.points_changed.emit(strip.points())
+        assert s.stack_for(key).entries[0][0] is before
+        assert np.ravel(strip.points()) == pytest.approx(
+            np.ravel(plugin._points_on_clock(before.params["points"], zero, shown))
+        )
+        assert "120" in _toast(fake_iface)
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def _curve_row_ctx(plugin, s, key, row):
+    from nsgeo_qgis.lookup import identity_curve
+
+    return identity_curve(*plugin.processing_dock.input_axis(row))
+
+
+def test_reset_asks_and_writes_the_flat_curve(fake_iface, tmp_path, answer_modal):
+    from nsgeo_qgis import plugin as plugin_mod
+
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        n = len(_step_points(s, key, 0))
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert _step_points(s, key, 0) == _curve_row_ctx(plugin, s, key, 0)
+        assert len(asked) == 1
+        args = asked[0][0]
+        assert args[1] == plugin_mod.RESET_TITLE
+        assert args[2] == plugin_mod.RESET_QUESTION.format(n=n)
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_answered_no_changes_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        before = s.stack_for(key).entries[0][0]
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert len(asked) == 1  # it did ask: without the slot nothing is asked
+        assert s.stack_for(key).entries[0][0] is before
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_of_a_flat_curve_asks_nothing(fake_iface, tmp_path, answer_modal):
+    from nsgeo_qgis.lookup import identity_curve
+
+    plugin, s, key = _plugin_with_time_zero_after_curve(
+        fake_iface, tmp_path, points=[[0.0, 0.0], [20.0, 0.0], [40.0, 0.0]]
+    )
+    try:
+        # No answer_modal for the question: an unanswered modal fails the test.
+        plugin.profile_dock.gain_reset_requested.emit()
+        want = identity_curve(*plugin.processing_dock.input_axis(0))
+        assert _step_points(s, key, 0) == want
+        # Already the identity: nothing is written, the session stays clean.
+        before = s.stack_for(key).entries[0][0]
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert s.stack_for(key).entries[0][0] is before
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_behind_time_zero_is_on_the_time_zero_clock(fake_iface, tmp_path, answer_modal):
+    import nsgeo_qgis
+    from nsgeo_qgis.lookup import identity_curve
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("gain_curve", points=[[5.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        header_t0 = s.line_for_key(key).header.position_ns
+        t0, _dt, _n = plugin.processing_dock.input_axis(1)
+        assert t0 == 0.0 and header_t0 != 0.0  # the clocks differ
+        asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        plugin.profile_dock.gain_reset_requested.emit()
+        assert len(asked) == 1
+        # The whole curve, on the clock of what the step receives (Time zero's),
+        # not the header's position_ns.
+        assert _step_points(s, key, 1) == identity_curve(*plugin.processing_dock.input_axis(1))
+        assert _step_points(s, key, 1)[0][0] == t0
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_the_strip_waits_for_its_clock(fake_iface, tmp_path, answer_modal, monkeypatch):
+    import nsgeo_qgis
+    from nsgeo_qgis.loader import LineLoader
+
+    monkeypatch.setattr(LineLoader, "request", lambda self, k: None)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.open_line(key)  # no profiles yet
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        assert plugin.profile_dock.gain_strip.isHidden()
+        s.set_profiles(key, line.load())
+        strip = plugin.profile_dock.gain_strip
+        assert not strip.isHidden()
+        zero = plugin.profile_dock.shown_zero_ns()
+        input_zero = plugin.profile_dock.step_input_zero_ns(1)
+        want = plugin._points_on_clock(_step_points(s, key, 1), input_zero, zero)
+        assert np.ravel(strip.points()) == pytest.approx(np.ravel(want))
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_each_gain_slot_reports_an_exception(fake_iface, tmp_path, answer_modal, monkeypatch):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    try:
+        bar = fake_iface.messageBar()
+        cases = [
+            (plugin.profile_dock, "show_gain_strip", lambda: plugin._sync_gain_strip(0)),
+            (plugin.processing_dock, "current_row", lambda: plugin._resync_gain_strip(key)),
+            (
+                s,
+                "replace_step",
+                lambda: plugin._on_gain_points([[0.0, 0.0], [30.0, 5.0]]),
+            ),
+            (plugin.processing_dock, "input_axis", plugin._on_gain_reset),
+        ]
+        for obj, attr, call in cases:
+            if hasattr(bar, "clearWidgets"):
+                bar.clearWidgets()
+            with monkeypatch.context() as m:
+                m.setattr(obj, attr, boom)
+                call()
+            assert "boom" in _toast(fake_iface), attr
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_unload_forgets_the_gain_curve(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    assert plugin._gain_owner is not None and plugin._gain_step is not None
+    _finish(plugin, answer_modal)
+    assert plugin._gain_owner is None and plugin._gain_step is None
+
+
+@needs_real_data
+def test_the_real_strip_stops_at_120_and_resets(fake_iface, tmp_path, answer_modal):
+    """Guard test (real FILE__007): a real drag far past the strip's edge
+    writes exactly 120.0 dB, and Reset gives the identity on the file's
+    input axis. Fails under these mutations (checked): removing BOTH
+    `GainStrip._limited` and the `DB_LIMIT` cap in `GainStrip._db_range`
+    (the step then holds 118.0). `_limited` alone is a backstop no gesture
+    can reach (the `_db_range` cap and `_clamped` already bound every
+    write), so only removing both clamps fails this test; and
+    making `_on_gain_reset` return before `replace_step` (the Reset half).
+    """
+    import nsgeo_qgis
+    from nsgeo_qgis.lookup import identity_curve
+
+    path = next(p for p in REAL_DZT if p.name == "FILE__007.DZT")
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    line = Line.open(path, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 118.0]]))
+    plugin.processing_dock.list.setCurrentRow(0)
+    strip = plugin.profile_dock.gain_strip
+    dock = plugin.profile_dock
+    try:
+        dock.show()
+        strip.show()
+        pts = strip.points()
+        start = QPoint(int(strip.x_of_db(pts[1][1])), int(strip.y_of_time(pts[1][0])))
+        assert strip.handle_at(start) == 1
+        end = QPoint(strip.width() + 400, start.y())
+        QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        _send_move_while_pressed(strip, end)
+        QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        assert _step_points(s, key, 0)[1][1] == 120.0
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        dock.gain_reset_requested.emit()
+        assert _step_points(s, key, 0) == identity_curve(*plugin.processing_dock.input_axis(0))
+    finally:
+        dock.hide()
+        dock.deleteLater()
+        from qgis.PyQt.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        _finish(plugin, answer_modal)
+
+
+def test_a_refusing_step_above_the_curve_adds_no_log_noise_per_write(
+    fake_iface, tmp_path, answer_modal, message_log
+):
+    """Every drag move echoes through `_sync_gain_strip`; deciding "is the
+    clock known" by evaluating the stack logged "input_axis: stack does not
+    evaluate cleanly" on each one when a step above the curve refuses."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    # A step above the curve that cannot run on this line (past the record).
+    s.append_step(key, build_step("time_zero", mode="sample", sample=100000))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    plugin.processing_dock.list.setCurrentRow(1)
+    try:
+        message_log.clear()
+        for _ in range(5):
+            plugin._sync_gain_strip(1)
+        assert [m for m in message_log if "does not evaluate" in m] == []
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    return plugin, s, key
+
+
+def test_a_refusal_above_the_curve_hides_the_strip_until_it_is_fixed(
+    fake_iface, tmp_path, answer_modal
+):
+    """Final review, ruling 15: with a step above the curve refusing, the
+    strip is hidden (it would draw and write on the raw clock) and shows on
+    the Time zero clock once fixed. Fails if `_sync_gain_strip` stops
+    consulting `_refusal_above` (the strip then shows while the refusal stands)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        pd.list.setCurrentRow(2)
+        assert pd.refusal().index == 1
+        assert plugin.profile_dock.gain_strip.isHidden()
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=900.0))
+        assert pd.refusal() is None
+        strip = plugin.profile_dock.gain_strip
+        assert not strip.isHidden()
+        # Moved from the fixed chain's own input clock onto the shown clock.
+        shift = plugin.profile_dock.step_input_zero_ns(2) - plugin.profile_dock.shown_zero_ns()
+        assert np.ravel(strip.points()) == pytest.approx([shift, 0.0, 40.0 + shift, 12.0])
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_writes_nothing_while_a_refusal_sits_above_the_curve(
+    fake_iface, tmp_path, answer_modal
+):
+    """Fails if `_on_gain_reset` loses its `_refusal_above` return (it then
+    writes the raw-clock identity)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=900.0))
+        pd.list.setCurrentRow(2)
+        assert not plugin.profile_dock.gain_strip.isHidden()
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+        assert pd.refusal().index == 1
+        before = [list(p) for p in _step_points(s, key, 2)]
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        plugin._on_gain_reset()
+        assert [list(p) for p in _step_points(s, key, 2)] == before
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_selecting_a_curve_behind_a_refusal_with_difference_on_hides_the_strip(
+    fake_iface, tmp_path, answer_modal
+):
+    """Ruling 16: with Difference on, the refusal note depends on the selected
+    row, so `_on_current_row` must refresh it before `step_selected` reaches
+    `_sync_gain_strip`. Fails if the `_check_refusal()` ahead of the emit goes
+    (the strip then shows on the fallback clock, using the previous row's note)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.replace_step(key, 1, build_step("dewow"))
+        s.replace_step(key, 2, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+        s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+        pd.list.setCurrentRow(1)
+        pd.diff_button.setChecked(True)
+        pd.list.setCurrentRow(3)
+        assert plugin.profile_dock.gain_strip.isHidden()
+    finally:
+        _finish(plugin, answer_modal)

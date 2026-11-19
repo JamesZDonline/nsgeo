@@ -134,6 +134,10 @@ from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
+STEPS_REFUSED_TEXT = "This line's steps can't run. See the Processing panel."
+PREVIEW_STEPS_REFUSED_TEXT = (
+    "{name}'s steps can't run. Select it to see why in the Processing panel."
+)
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
 KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
@@ -260,6 +264,7 @@ class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
     gain_points_changed = pyqtSignal(list)
+    gain_reset_requested = pyqtSignal()
     difference_cleared = pyqtSignal()
     velocity_mode_requested = pyqtSignal()  # relayed from the view; wired in the plugin
 
@@ -272,6 +277,9 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
+        # The step object the Difference view is on (final review, #13): a
+        # move re-indexes it, and the view follows the object, not the row.
+        self._difference_step: Any = None
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
@@ -449,6 +457,7 @@ class ProfileDock(QgsDockWidget):
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
+        self.gain_strip.reset_requested.connect(self.gain_reset_requested.emit)
 
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
@@ -715,6 +724,7 @@ class ProfileDock(QgsDockWidget):
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         if was_diff:
             self.difference_cleared.emit()
@@ -818,6 +828,8 @@ class ProfileDock(QgsDockWidget):
         if profiles:
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None:
+                self._show_steps_refused(key, is_preview=is_preview)
         else:
             self.channel_combo.hide()
             # No `_render` on this branch, so nothing else would take down
@@ -826,20 +838,40 @@ class ProfileDock(QgsDockWidget):
             # load that fails stays here: left up, the line could be
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
-            self._cutoff_step = None
-            self._shown_radargram = None
-            self.view.set_cutoff(None)
-            self._set_axes_holding(
-                key,
-                line.n_traces,
-                line.header.n_samples,
-                line.header.position_ns,
-                line.header.dt_ns,
-                self._safe_distance(line),
-            )
-            self.view.set_image(None)
+            self._take_down_picture(key, line)
             self._refresh_picks()  # no `_render` on this branch to do it
         self._refresh_velocity()
+
+    def _take_down_picture(self, key: str, line: Any) -> None:
+        """Take down what the last line left: its cutoff, its radargram and
+        its picture, with the axes set for `line`'s own record."""
+        self._cutoff_step = None
+        self._shown_radargram = None
+        self.view.set_cutoff(None)
+        self._set_axes_holding(
+            key,
+            line.n_traces,
+            line.header.n_samples,
+            line.header.position_ns,
+            line.header.dt_ns,
+            self._safe_distance(line),
+        )
+        self.view.set_image(None)
+
+    def _show_steps_refused(self, key: str, *, is_preview: bool) -> None:
+        """The line's samples are here but its steps cannot run: say so
+        instead of leaving the last line's picture up. Called when a line is
+        shown or its samples arrive, never on a stack edit, where the last
+        picture of the same line staying up is the point (#197)."""
+        line = self.session.line_for_key(key)
+        self._take_down_picture(key, line)
+        # After the axes: `set_axes` resets the message to "loading…".
+        self.view.set_message(
+            PREVIEW_STEPS_REFUSED_TEXT.format(name=line_label(line))
+            if is_preview
+            else STEPS_REFUSED_TEXT
+        )
+        self._refresh_picks()
 
     # ---- cuts (cut spec §4.3, §4.4) ---------------------------------------
     def _set_cut_chrome(self, on: bool) -> None:
@@ -950,6 +982,8 @@ class ProfileDock(QgsDockWidget):
             profiles = self.session.profiles_for(key) or []
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None and not is_cut_key(key):
+                self._show_steps_refused(key, is_preview=key == self._preview_key)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not render line {key!r} once it loaded: {exc}", Qgis.MessageLevel.Critical)
 
@@ -1076,6 +1110,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip = None
         was_diff = self._difference_index >= 0
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         try:
             self._clear_view_only()
@@ -1729,6 +1764,7 @@ class ProfileDock(QgsDockWidget):
         if index == self._difference_index:
             return
         self._difference_index = index
+        self._difference_step = None
         try:
             self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -1795,6 +1831,7 @@ class ProfileDock(QgsDockWidget):
             return None
         declined: str | None = None
         if self._effective_difference_index >= 0:
+            self._follow_differenced_step(stack)
             # Its own `try`, and a declined difference falls through to the
             # ordinary view below rather than returning None. Returning None
             # left whatever was on screen: another step's difference, with
@@ -1839,6 +1876,24 @@ class ProfileDock(QgsDockWidget):
                 self.error.emit(str(exc))
             return None
 
+    def _follow_differenced_step(self, stack: StepStack) -> None:
+        """Keep the Difference view on the step object it was set on when a
+        move re-indexes it. Found elsewhere by identity: the index follows.
+        Not found (edited in place, or removed): the index stands, and the
+        object tracked becomes whatever sits there now (None when out of
+        range), so today's decline paths are unchanged."""
+        entries = stack.entries
+        idx = self._difference_index
+        tracked = self._difference_step
+        if tracked is None or (idx < len(entries) and entries[idx][0] is tracked):
+            self._difference_step = entries[idx][0] if idx < len(entries) else None
+            return
+        for j, (step, _on) in enumerate(entries):
+            if step is tracked:
+                self._difference_index = j
+                return
+        self._difference_step = entries[idx][0] if idx < len(entries) else None
+
     def _decline_difference(self, message: str) -> None:
         """Report `message` and revert an active difference view: shared
         by both except branches of `current_radargram`'s difference `try`
@@ -1848,6 +1903,7 @@ class ProfileDock(QgsDockWidget):
         self.error.emit(message)
         if self._difference_index >= 0:
             self._difference_index = -1
+            self._difference_step = None
             self.difference_label.setText("")
             self.difference_cleared.emit()
 
@@ -2040,10 +2096,10 @@ class ProfileDock(QgsDockWidget):
         defaulted here, unlike on `set_points` itself, only so the three
         hide calls need not invent a token for a payload that is never
         delivered -- the `points is None` branch returns without reaching
-        `set_points` at all. A `None` owner alongside real points would
-        still be honoured, and ends any gesture in progress -- the safe
-        direction: the corrupting one is keeping a gesture alive across a
-        change of curve.
+        `set_points` at all. A `None` owner alongside real points is
+        honoured as a different owner only when the strip shows a real one
+        (it then ends any gesture in progress); callers always pass a real
+        token.
 
         While a preview is up this is deferred rather than acted on: the
         strip edits a step in the WORKING line's stack and writes on

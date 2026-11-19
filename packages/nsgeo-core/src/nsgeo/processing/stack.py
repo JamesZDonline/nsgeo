@@ -17,6 +17,31 @@ from nsgeo.processing.base import Radargram, build_step, is_unipolar
 _BYPASS_MEMO_SIZE = 2
 
 
+class StepRefused(ValueError):
+    """A step in the stack refused its input; says which one.
+
+    `index` is 0-based, `title` the step's own title. It is a ValueError, so
+    callers that catch ValueError keep working.
+    """
+
+    def __init__(self, message: str, index: int, title: str) -> None:
+        super().__init__(message)
+        self.index = index
+        self.title = title
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (str(self), self.index, self.title))
+
+
+def _apply(step: Any, previous: Radargram, index: int) -> Radargram:
+    try:
+        return step.apply(previous)
+    except StepRefused:
+        raise
+    except ValueError as exc:
+        raise StepRefused(str(exc), index, step.title) from exc
+
+
 class StepStack:
     def __init__(self) -> None:
         self._entries: list[tuple[Any, bool]] = []
@@ -122,7 +147,7 @@ class StepStack:
             i = len(self._cache)
             previous = self._cache[i - 1] if i else self._source
             step, enabled = self._entries[i]
-            self._cache.append(step.apply(previous) if enabled else previous)
+            self._cache.append(_apply(step, previous, i) if enabled else previous)
 
     def _time_zero_indices(self) -> list[int]:
         return [i for i, (step, on) in enumerate(self._entries) if on and step.name == "time_zero"]
@@ -195,7 +220,7 @@ class StepStack:
         for i in range(first, n):
             step, enabled = self._entries[i]
             if enabled and i not in key:
-                current = step.apply(current)
+                current = _apply(step, current, i)
         self._bypassed[key] = current
         while len(self._bypassed) > _BYPASS_MEMO_SIZE:
             del self._bypassed[next(iter(self._bypassed))]
