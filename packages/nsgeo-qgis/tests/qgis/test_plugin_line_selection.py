@@ -15,7 +15,7 @@ from nsgeo.velocity import VelocityModel
 from plugin_testing import CRS, gps_line, synthetic_dzt
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QApplication
+from qgis.PyQt.QtWidgets import QApplication, QWidget
 from tests.real_data import GRID2_LINES
 
 CTRL = Qt.KeyboardModifier.ControlModifier
@@ -31,6 +31,19 @@ def _tape(tmp_path, n=6):
         p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
         lines.append(Line.open(p, GridPlacement("A", "y", 0.25 + i * 0.5, 0.0, 1, p.stem)))
     return lines
+
+
+@pytest.fixture(autouse=True)
+def _release_ctrl_after_each_test():
+    """Qt keeps the last input event's modifiers application-wide, so a Ctrl-click
+    here leaves Ctrl "held" for later tests in the process (their plain clicks
+    then extend the selection). One event with no modifiers clears it."""
+    yield
+    probe = QWidget()
+    probe.show()
+    QTest.keyRelease(probe, Qt.Key.Key_Control, Qt.KeyboardModifier.NoModifier)
+    probe.deleteLater()
+    assert QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier
 
 
 @pytest.fixture
