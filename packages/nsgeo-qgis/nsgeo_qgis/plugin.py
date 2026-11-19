@@ -83,6 +83,7 @@ from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
     QFileDialog,
+    QInputDialog,
     QMenu,
     QMessageBox,
     QProgressDialog,
@@ -152,6 +153,7 @@ from nsgeo_qgis.surfaces import Surfaces
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
+from nsgeo_qgis.ui.gps_import_dialog import GpsImportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
@@ -166,6 +168,7 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
+IMPORT_GPS_TIP = "Imports DZT files with a DZG beside them, each placed along its RTK GPS track."
 VELOCITY_TIP = (
     "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
     "or drag a box around it to trace it. Right-click a point to remove it. "
@@ -305,6 +308,7 @@ class NsgeoPlugin:
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
+        self.act_import_gps: QAction | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
@@ -323,6 +327,7 @@ class NsgeoPlugin:
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
+        self._gps_import_dialog: GpsImportDialog | None = None
         self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -388,6 +393,8 @@ class NsgeoPlugin:
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
         self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
+        self.act_import_gps = self._toolbar_action("Import GPS lines…", self.open_gps_import_dialog)
+        self.act_import_gps.setToolTip(IMPORT_GPS_TIP)
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -420,6 +427,7 @@ class NsgeoPlugin:
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
+        self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -774,6 +782,9 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # And the GPS import, for the same reason.
+        if self._gps_import_dialog is not None:
+            self._gps_import_dialog.reject()
         # Same reasoning again: Edit lines tables are modeless too, one per
         # grid, and reject() (not close()) runs each one's finished-signal
         # cleanup instead of leaving it dangling with a reference to a
@@ -863,6 +874,7 @@ class NsgeoPlugin:
         self.act_save = None
         self.act_add_grid = None
         self.act_import = None
+        self.act_import_gps = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
@@ -945,6 +957,7 @@ class NsgeoPlugin:
                 self.act_save,
                 self.act_add_grid,
                 self.act_import,
+                self.act_import_gps,
                 self.act_surface,
                 self.act_view3d,
             ):
@@ -3092,6 +3105,53 @@ class NsgeoPlugin:
         dock = self.survey_dock
         self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
 
+    def open_gps_import_dialog(self, *_: Any) -> None:
+        """Import GPS lines…: modeless and single-instance, open_import_dialog()'s
+        shape. It needs an open site and no grid."""
+        try:
+            assert self.session is not None
+            if not self.session.is_open:
+                return
+            if self._gps_import_dialog is not None:
+                self._gps_import_dialog.show()
+                self._gps_import_dialog.raise_()
+                self._gps_import_dialog.activateWindow()
+                return
+            dialog = GpsImportDialog(self.session, parent=self.iface.mainWindow())
+
+            def finished(result: int) -> None:
+                # A slot on dialog.finished: see the module docstring.
+                # GpsImportDialog.accept() already wrote the site, and left
+                # the words to say in dialog.messages.
+                try:
+                    if result == QDialog.DialogCode.Accepted:
+                        # The count is plain news; everything after it
+                        # (a bridge, a long end run, a refusal) is a warning.
+                        for i, text in enumerate(dialog.messages):
+                            self.message(
+                                text,
+                                Qgis.MessageLevel.Info if i == 0 else Qgis.MessageLevel.Warning,
+                            )
+                except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                    self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
+                finally:
+                    dialog.deleteLater()
+                    self._gps_import_dialog = None
+
+            def clear_if_current() -> None:
+                # See open_grid_dialog()'s clear_if_current.
+                if self._gps_import_dialog is dialog:
+                    self._gps_import_dialog = None
+
+            dialog.finished.connect(finished)
+            dialog.destroyed.connect(clear_if_current)
+            self._gps_import_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as exc:  # noqa: BLE001 -- a slot (triggered): see the module docstring
+            self.message(f"could not open the GPS import: {exc}", Qgis.MessageLevel.Warning)
+
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,
         # whose shape this copies: single-instance tracking on
@@ -3235,6 +3295,43 @@ class NsgeoPlugin:
                 edited, velocity=now.velocity, velocity_source=now.velocity_source
             )
         return dataclasses.replace(edited, velocity_source=None)
+
+    def open_destagger_dialog(self, keys: list[str]) -> None:
+        """Ask for one destagger and set it on every GPS line in `keys`
+        (Survey panel, Set destagger…). A slot: it never raises, and reports on
+        the message bar. The box starts at the lines' shared value, or at 0 when
+        they differ."""
+        try:
+            assert self.session is not None
+            shifts = {
+                self.session.line_for_key(k).placement.travel_shift  # type: ignore[union-attr]
+                for k in keys
+                if self.session.is_gps_line(k)
+            }
+            start = shifts.pop() if len(shifts) == 1 else 0.0
+            value, accepted = QInputDialog.getDouble(
+                self.iface.mainWindow(),
+                "Destagger",
+                "Move every trace forward along the way its line was walked, "
+                f"for {len(keys)} GPS line(s), by (m):",
+                start,
+                -2.0,
+                2.0,
+                2,
+                Qt.WindowType(0),  # no flags: the step comes after them in the overload
+                0.01,  # a wheel notch is 0.01 m, as in the import dialog's Destagger box
+            )
+            if not accepted:
+                return
+            self.session.set_travel_shift(keys, value)
+        except (KeyError, ValueError) as exc:
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"could not set the destagger: {what}", Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not set the destagger: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self.message(f"destagger set to {value:+.2f} m on {len(keys)} GPS line(s)")
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a

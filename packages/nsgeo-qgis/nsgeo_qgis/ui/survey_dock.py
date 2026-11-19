@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from nsgeo.geometry import TrackPlacement
 from nsgeo.model import is_cut_key
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
@@ -92,6 +93,8 @@ class SurveyDock(QgsDockWidget):
     edit_lines_requested = pyqtSignal(str, list)
     # (line keys, target grid id) (line editing spec §3 call 7).
     move_lines_requested = pyqtSignal(list, str)
+    # GPS line keys whose destagger is to be set (M17a P13).
+    destagger_requested = pyqtSignal(list)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
@@ -235,18 +238,21 @@ class SurveyDock(QgsDockWidget):
 
     def _line_item(self, key: str, line: Any) -> QTreeWidgetItem:
         p = line.placement
-        arrow = "↑" if getattr(p, "direction", 1) == 1 else "↓"
-        cross = "x" if getattr(p, "axis", "y") == "y" else "y"
-        text = f"{line_label(line)} · {cross} {p.offset:.2f} · {arrow}"
-        try:
-            line.distance_along()
-        except ValueError:
-            # A time-triggered acquisition (traces_per_metre <= 0): the
-            # placement has no geometry to offer. SiteLayers already leaves
-            # a line like this off the map for the same reason; this tree
-            # is the one place it must still show up, clearly marked, since
-            # a user has no other way to discover it is even in the site.
-            text += " · ⚠ unplaced (time-triggered)"
+        if isinstance(p, TrackPlacement):
+            text = self._gps_row_text(line)
+        else:
+            arrow = "↑" if getattr(p, "direction", 1) == 1 else "↓"
+            cross = "x" if getattr(p, "axis", "y") == "y" else "y"
+            text = f"{line_label(line)} · {cross} {p.offset:.2f} · {arrow}"
+            try:
+                line.distance_along()
+            except ValueError:
+                # A time-triggered acquisition (traces_per_metre <= 0): the
+                # placement has no geometry to offer. SiteLayers already leaves
+                # a line like this off the map for the same reason; this tree
+                # is the one place it must still show up, clearly marked, since
+                # a user has no other way to discover it is even in the site.
+                text += " · ⚠ unplaced (time-triggered)"
         scale = getattr(p, "scale", 1.0)
         shift = getattr(p, "travel_shift", 0.0)
         if abs(scale - 1) > SAME_M:
@@ -274,6 +280,17 @@ class SurveyDock(QgsDockWidget):
         item.setData(0, ROLE_ID, key)
         item.setToolTip(0, tip)
         return item
+
+    @staticmethod
+    def _gps_row_text(line: Any) -> str:
+        """`{label} · GPS · {walked} m`, plus the metres without RTK when there are any."""
+        distance = line.distance_along()
+        walked = float(distance[-1] - distance[0]) if len(distance) else 0.0
+        text = f"{line_label(line)} · GPS · {walked:.1f} m"
+        gap = sum(b.metres for b in line.placement.bridges())
+        if gap > 0:
+            text += f" · {gap:.1f} m without RTK"
+        return text
 
     def _cut_item(self, key: str) -> QTreeWidgetItem:
         cut = self.session.cut_for_key(key)
@@ -469,7 +486,14 @@ class SurveyDock(QgsDockWidget):
                 # Qt before this runs: the press selects just that item.
                 # Editing and moving are for recorded lines; a selection that
                 # holds a cut offers removal only.
-                if keys and not any(is_cut_key(k) for k in keys):
+                gps = [k for k in keys if self._is_gps(k)]
+                if keys and gps and len(gps) == len(keys):
+                    # Only GPS lines: destagger is all they have until GPS areas (M17c).
+                    menu.addAction(
+                        f"Set destagger for {len(keys)} GPS lines…",
+                        lambda: self._request_destagger(keys),
+                    )
+                elif keys and not gps and not any(is_cut_key(k) for k in keys):
                     grids = {self._grid_of_key(k) for k in keys}
                     if len(grids) == 1:
                         grid = grids.pop()
@@ -505,13 +529,20 @@ class SurveyDock(QgsDockWidget):
             elif kind == "line":
                 key = self.key_of(item) or ""
                 menu.addAction("Open", lambda: self._open_line(key))
-                # Worked out here, inside the guard, not when the action fires.
-                grid = self._grid_of_key(key)
-                menu.addAction("Edit line…", lambda: self._request_edit(grid, [key]))
-                menu.addAction(
-                    "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
-                )
-                self._add_move_menu(menu, [key], "Move to grid")
+                if self._is_gps(key):
+                    # Edit line… and Move to grid are tape-only until M17c.
+                    menu.addAction(
+                        "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
+                    )
+                    menu.addAction("Set destagger…", lambda: self._request_destagger([key]))
+                else:
+                    # Worked out here, inside the guard, not when the action fires.
+                    grid = self._grid_of_key(key)
+                    menu.addAction("Edit line…", lambda: self._request_edit(grid, [key]))
+                    menu.addAction(
+                        "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
+                    )
+                    self._add_move_menu(menu, [key], "Move to grid")
                 menu.addSeparator()
                 menu.addAction("Remove line from site", lambda: self.remove_line_action(key))
             menu.exec(self.tree.viewport().mapToGlobal(pos))
@@ -520,6 +551,16 @@ class SurveyDock(QgsDockWidget):
 
     def _grid_of_key(self, key: str) -> str:
         return str(getattr(self.session.line_for_key(key).placement, "grid_id", ""))
+
+    def _is_gps(self, key: str) -> bool:
+        return not is_cut_key(key) and self.session.is_gps_line(key)
+
+    def _request_destagger(self, keys: list[str]) -> None:
+        # A menu action's slot: guarded, as _on_context_menu's comment asks.
+        try:
+            self.destagger_requested.emit(list(keys))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the destagger dialog: {exc}", Qgis.MessageLevel.Critical)
 
     def _request_edit(self, grid_id: str, keys: list[str]) -> None:
         # A menu action's slot: guarded, as _on_context_menu's comment asks.
