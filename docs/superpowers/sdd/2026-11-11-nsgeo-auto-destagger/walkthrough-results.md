@@ -1,6 +1,6 @@
 # #159 Measure walkthrough results
 
-Run by the author on 2026-11-12, on a copy of the Nashville City Cemetery site
+Run by the author on 2026-11-12, on a copy of the GPS survey site
 (profile `ns_geo_destagger`, branch at 24a94b9). The results come from the
 walkthrough page's database; the notes are the author's own.
 

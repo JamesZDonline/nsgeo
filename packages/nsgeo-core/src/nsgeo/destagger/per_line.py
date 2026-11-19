@@ -37,7 +37,7 @@ import numpy as np
 
 from nsgeo.destagger.profiles import STEP_M, PairCurves, is_clear, peak
 
-# Thresholds, tuned on Nashville 2023 Grids 1 and 2, unfitted and fitted, with injected
+# Thresholds, tuned on GPS survey Grids 1 and 2, unfitted and fitted, with injected
 # moves of +0.30 and -0.50 m, two adjacent +0.30 m moves and a 0.02 m/line skew
 # (2026-11-11). Each was varied alone with the rest held; the range given is where every
 # real-data test still passes.
@@ -64,7 +64,7 @@ DECISIVE_RATIO = 0.6
 #: An own value must raise its run's summed correlation by at least this; it breaks ties
 #: towards fewer own values. Works from 0 to 0.05.
 OWN_GAIN = 0.02
-#: Passes of solving and re-reading at most; the Nashville grids settle in 1 to 3.
+#: Passes of solving and re-reading at most; the GPS survey grids settle in 1 to 3.
 MAX_PASSES = 8
 
 _HALVES = (("shallow", "deep"), ("first", "second"))
@@ -132,7 +132,7 @@ class _Solver:
 
         Evidence is each bin's correlation between neighbours at the grid value, averaged
         over the pairs (negative counts as none). This adapts to the antenna and record,
-        where a fixed time would not; on Nashville it falls at 36 ns on Grid 1 and at 24 and
+        where a fixed time would not; on the GPS survey it falls at 36 ns on Grid 1 and at 24 and
         28 ns on Grid 2 unfitted and fitted.
         """
         p = self.pairs
