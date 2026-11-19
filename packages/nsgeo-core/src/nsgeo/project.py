@@ -374,6 +374,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         doc["site_view"] = site.site_view
     if site.slice_colours:
         doc["slice_colours"] = site.slice_colours
+    if site.import_presets:
+        doc["import_presets"] = site.import_presets
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -495,6 +497,29 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     resolution = _clean_resolution(view.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    return out
+
+
+def _clean_import_presets(value: object, known_grid_ids: set[str]) -> dict[str, Any]:
+    """The remembered import presets (#129), each field kept only if usable.
+
+    A non-object reads as empty; a grid the site does not have, or a value
+    that is neither a string nor null, is dropped.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    grids = value.get("grids")
+    if isinstance(grids, dict):
+        kept = {
+            gid: name
+            for gid, name in grids.items()
+            if gid in known_grid_ids and (name is None or isinstance(name, str))
+        }
+        if kept:
+            out["grids"] = kept
+    if "site" in value and (value["site"] is None or isinstance(value["site"], str)):
+        out["site"] = value["site"]
     return out
 
 
@@ -782,6 +807,7 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(f"{path}: 'site_view' must be an object, got {type(site_view).__name__}")
     site.site_view = _clean_site_view(site_view, known)
     site.slice_colours = _clean_slice_colours(doc.get("slice_colours", {}))
+    site.import_presets = _clean_import_presets(doc.get("import_presets", {}), known)
 
     site.validate()
     return site

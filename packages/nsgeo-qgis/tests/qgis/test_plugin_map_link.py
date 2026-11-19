@@ -6,6 +6,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
@@ -1027,3 +1028,94 @@ def test_selecting_a_real_files_mark_jumps_to_its_own_scan(qgis_app, tmp_path):
     link.dispose()
     layers.detach()
     project.clear()
+
+
+def test_a_refill_keeps_or_clears_the_lines_selection_as_measured(linked):
+    """MEASURED (QGIS 3.44, real SiteLayers + MapLink): a refill (provider
+    truncate + addFeatures, run by `lines_changed`) emits NO `selectionChanged`
+    on the `lines` layer and leaves `selectedFeatureIds()` as it was: the old,
+    now stale, feature ids, while every feature has a new id. So the refill
+    cannot reach `_on_selection` and needs no guard; what it leaves behind is a
+    selection that names features that no longer exist, which is why the map is
+    re-selected by `line_key` after every rebuild."""
+    link, session, layers, _canvas, keys = linked
+    layer = layers.layers["lines"]
+    old_ids = sorted(_feature_id(layers, k) for k in keys)
+    layer.selectByIds(old_ids)
+    fired = []
+    layer.selectionChanged.connect(lambda *_: fired.append(1))
+
+    session.set_line_velocity(keys[0], VelocityModel([(0.0, 0.2)]))
+
+    new_ids = sorted(_feature_id(layers, k) for k in keys)
+    assert new_ids != old_ids
+    assert fired == []
+    assert sorted(layer.selectedFeatureIds()) == old_ids
+
+
+# ---- one selection with the Survey panel (#57, spec §3) -----------------------
+
+
+def _record(signal):
+    got = []
+    signal.connect(got.append)
+    return got
+
+
+def test_selecting_several_lines_announces_them_and_opens_nothing(linked):
+    link, session, layers, _canvas, keys = linked
+    got = _record(link.lines_selected)
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, k) for k in (keys[1], keys[0])])
+
+    assert len(got) == 1
+    assert sorted(got[0]) == sorted(keys)
+    assert session.current_key == keys[0]
+
+
+def test_selecting_one_line_announces_it_and_opens_it(linked):
+    link, session, layers, _canvas, keys = linked
+    got = _record(link.lines_selected)
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert got == [[keys[1]]]
+    assert session.current_key == keys[1]
+
+
+def test_deselecting_everything_announces_an_empty_selection_and_keeps_the_line_open(linked):
+    link, session, layers, _canvas, keys = linked
+    layer = layers.layers["lines"]
+    layer.selectByIds([_feature_id(layers, keys[1])])
+    got = _record(link.lines_selected)
+
+    layer.removeSelection()
+
+    assert got == [[]]
+    assert session.current_key == keys[1]
+
+
+def test_select_lines_selects_those_features_and_neither_announces_nor_opens(linked):
+    link, session, layers, _canvas, keys = linked
+    got = _record(link.lines_selected)
+    layer = layers.layers["lines"]
+
+    link.select_lines(keys)
+    assert sorted(layer.selectedFeatureIds()) == sorted(_feature_id(layers, k) for k in keys)
+
+    link.select_lines([keys[1]])
+    assert layer.selectedFeatureIds() == [_feature_id(layers, keys[1])]
+
+    assert got == []
+    assert session.current_key == keys[0]
+
+
+def test_select_lines_ignores_keys_with_no_feature(linked):
+    link, session, layers, _canvas, keys = linked
+    layer = layers.layers["lines"]
+
+    link.select_lines([keys[0], "raw/UNPLACED.DZT"])
+
+    assert layer.selectedFeatureIds() == [_feature_id(layers, keys[0])]
+    link.select_lines([])
+    assert layer.selectedFeatureIds() == []

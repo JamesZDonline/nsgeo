@@ -6,6 +6,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.import_dialog import (
@@ -17,10 +18,12 @@ from nsgeo_qgis.ui.import_dialog import (
     COL_START,
     ImportDialog,
 )
+from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
+from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 GRID_B = Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -762,3 +765,283 @@ def test_ticking_fit_greys_out_start_along_and_fits_the_rows(session, tmp_path):
     assert d.start_along.isEnabled()
     assert all("fitted" not in d.table.item(r, COL_NOTE).text() for r in (0, 1))
     assert all(r.scale == 1.0 for r in d.rows)
+
+
+# ---- #129: the Processing preset box -------------------------------------------------
+
+
+def _with_presets(session, tmp_path, *names):
+    """Save each named preset (a dewow of a different window) from a line on a side grid."""
+    session.add_grid(Grid("S", (900.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp_path / "side", "SIDE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))])
+    key = "side/SIDE__001.DZT"
+    for i, name in enumerate(names):
+        session.append_step(key, build_step("dewow", window_ns=10.0 + i))
+        session.save_preset(name, key)
+        session.remove_step(key, 0)
+
+
+def _files(tmp_path, numbers):
+    return [synthetic_dzt(tmp_path / "raw", f"FILE__{i:03d}.DZT", n_traces=60) for i in numbers]
+
+
+def _choose(d, name):
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData(name))
+
+
+def test_the_preset_box_is_the_last_form_row(session):
+    d = ImportDialog(session, grid_id="A")
+    form = d.findChildren(QFormLayout)[0]
+    assert form.itemAt(form.rowCount() - 1, QFormLayout.ItemRole.FieldRole).widget() is d.preset_box
+    assert form.labelForField(d.preset_box).text() == "Processing preset"
+
+
+def test_import_with_a_preset_changes_only_the_new_lines(session, tmp_path):
+    _with_presets(session, tmp_path, "Plain")
+    d1 = ImportDialog(session, grid_id="A")
+    d1.add_files(_files(tmp_path, (1, 2)))
+    d1.accept()
+    for k in d1.imported_keys:
+        session.append_step(k, build_step("dewow", window_ns=33.0))
+    before = {k: session.stack_for(k).to_dicts() for k in d1.imported_keys}
+    d2 = ImportDialog(session, grid_id="A")
+    d2.add_files(_files(tmp_path, (3, 4)))
+    _choose(d2, "Plain")
+    d2.accept()
+    for k in d1.imported_keys:
+        assert session.stack_for(k).to_dicts() == before[k]
+    assert len(d2.imported_keys) == 2
+    for k in d2.imported_keys:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+
+
+def test_the_box_starts_on_the_grid_choice_then_the_sites_and_cancel_remembers_nothing(
+    session, tmp_path
+):
+    _with_presets(session, tmp_path, "One", "Two")
+    session.add_grid(GRID_B)
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d.reject()
+    assert session.import_preset("A") is None  # cancel remembered nothing
+    d.accept()
+    assert session.import_preset("A") == "One"
+    d2 = ImportDialog(session, grid_id="A")
+    assert d2.preset_box.chosen() == "One"  # the grid's choice
+    d2.grid_combo.setCurrentIndex(d2.grid_combo.findData("B"))
+    assert d2.preset_box.chosen() == "One"  # B has none: the site's last
+    _choose(d2, "Two")
+    d2.add_files(_files(tmp_path, (2,)))
+    d2.grid_combo.setCurrentIndex(d2.grid_combo.findData("A"))
+    assert d2.preset_box.chosen() == "One"  # back to A's own
+
+
+def test_a_greyed_box_remembers_nothing(session, tmp_path):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    assert not d.preset_box.is_choice()
+    d.accept()
+    assert session.site.import_presets == {}
+
+
+def test_the_first_import_into_an_empty_grid_sets_its_slices_preset_and_later_ones_do_not(
+    session, tmp_path
+):
+    _with_presets(session, tmp_path, "One", "Two")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d.accept()
+    assert session.slice_source("A") == {"preset": "One"}
+    d2 = ImportDialog(session, grid_id="A")
+    d2.add_files(_files(tmp_path, (2,)))
+    _choose(d2, "Two")
+    d2.accept()
+    assert session.slice_source("A") == {"preset": "One"}  # later imports never touch it
+    # not for None: an entry with other fields but no preset, where the rule would apply
+    session.add_grid(GRID_B)
+    session.remember_slice_resolution("B", cell=0.4)
+    assert session.import_sets_slice_preset("B")
+    changed: list[str] = []
+    session.slice_sources_changed.connect(changed.append)
+    d3 = ImportDialog(session, grid_id="B")
+    d3.add_files(_files(tmp_path, (3,)))
+    _choose(d3, None)  # the box started on the site's last; None is chosen by hand
+    d3.accept()
+    assert "preset" not in (session.slice_source("B") or {})
+    assert "B" not in changed
+    # not when a Slices preset already exists
+    session.add_grid(GRID_C)
+    session.set_slice_preset("C", "Two")
+    d4 = ImportDialog(session, grid_id="C")
+    d4.add_files(_files(tmp_path, (4,)))
+    _choose(d4, "One")
+    d4.accept()
+    assert session.slice_source("C") == {"preset": "Two"}
+
+
+def test_a_refused_import_puts_the_slices_preset_back(session, tmp_path, monkeypatch):
+    _with_presets(session, tmp_path, "One")
+    session.remember_slice_resolution("A", cell=0.4)  # an entry with no preset
+    before = session.slice_source("A")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    seen: list[Any] = []
+
+    def refusing(lines):
+        seen.append(session.slice_source("A"))
+        raise ValueError("refused")
+
+    monkeypatch.setattr(session, "add_lines", refusing)
+    d.accept()
+    assert seen == [{**before, "preset": "One"}]  # written before add_lines
+    assert d.status.text() == "refused"
+    assert session.slice_source("A") == before  # and put back
+    assert session.keys_on_grid("A") == []
+    assert session.site.import_presets == {}
+
+
+def test_a_key_already_in_the_site_writes_nothing(session, tmp_path):
+    _with_presets(session, tmp_path, "One")
+    files = _files(tmp_path, (1,))
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(files)
+    d.accept()
+    session.add_grid(GRID_B)
+    d2 = ImportDialog(session, grid_id="B")
+    d2.add_files(files)
+    _choose(d2, "One")
+    d2.accept()
+    assert "already in the site" in d2.status.text()
+    assert session.slice_source("B") is None
+    assert "B" not in session.site.import_presets.get("grids", {})
+
+
+def test_a_preset_deleted_under_the_dialog_imports_nothing(session, tmp_path):
+    _with_presets(session, tmp_path, "One")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d.preset_box._on_presets_changed = lambda *a: None  # the race: the box missed the news
+    del session.site.presets["One"]
+    d.accept()
+    assert d.status.text() == PRESET_GONE.format(name="One")
+    assert session.keys_on_grid("A") == []
+
+
+@pytest.mark.skipif(len(GRID2_LINES) < 6, reason="needs Grid 2 in tests/data/local/grid2")
+def test_real_grid2_lines_import_with_a_preset_only_the_new_ones_change(session, tmp_path):
+    _with_presets(session, tmp_path, "Plain")
+    d1 = ImportDialog(session, grid_id="A")
+    d1.add_files(list(GRID2_LINES[:3]))
+    d1.accept()
+    assert len(d1.imported_keys) == 3
+    d2 = ImportDialog(session, grid_id="A")
+    d2.add_files(list(GRID2_LINES[3:6]))
+    _choose(d2, "Plain")
+    d2.accept()
+    for k in d1.imported_keys:
+        assert session.stack_for(k).to_dicts() == []
+    assert len(d2.imported_keys) == 3
+    for k in d2.imported_keys:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+
+
+# ---- #17 one rule for decimal input, #16 guards as depth counters -----------
+
+
+@pytest.mark.parametrize("typed", ["1,000", "1,5", "nan", "inf"])
+def test_an_offset_typed_with_a_comma_is_refused_like_paramform(session, tmp_path, typed):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    d.table.item(0, COL_OFFSET).setText(typed)
+    assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited
+    assert d.status.text() == f"{typed!r} is not a number; offset unchanged"
+    assert d.table.item(0, COL_OFFSET).text() == "0.25"
+
+
+def test_paramform_and_the_import_dialog_refuse_the_same_inputs(session, tmp_path, qgis_app):
+    from nsgeo_qgis.ui.param_form import ParamForm
+
+    f = ParamForm()
+    f.set_step("dewow")
+    errors: list[str] = []
+    f.error.connect(errors.append)
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    for typed in ["1,000", "1,5", "nan", "inf"]:
+        errors.clear()
+        f.set_value("window_ns", typed)
+        f.commit()
+        assert errors, typed
+        d.table.item(0, COL_OFFSET).setText(typed)
+        assert d.rows[0].offset == 0.25 and "not a number" in d.status.text(), typed
+
+
+def test_a_reentrant_refresh_does_not_clear_the_guard_early(session, tmp_path):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    seen: list[bool] = []
+    real = d.table.resizeColumnsToContents
+    state = {"first": True}
+
+    def nested() -> None:
+        if state["first"]:
+            state["first"] = False
+            d._refresh_table()  # the inner call returns while the outer is open
+            seen.append(bool(d._updating))
+            # an edit delivered now must still be ignored by the outer block
+            d._on_item_changed(d.table.item(0, COL_LABEL))
+        real()
+
+    d.table.resizeColumnsToContents = nested  # type: ignore[method-assign]
+    d.rows[0].label = "kept"
+    d._refresh_table()
+    assert seen == [True]
+    assert d.rows[0].label == "kept"
+    assert not d._updating
+
+
+def test_a_reentrant_follow_spacing_does_not_clear_its_guard_early(session):
+    d = ImportDialog(session, grid_id="A")
+    seen: list[bool] = []
+    real = d.first_offset.setValue
+    state = {"first": True}
+
+    def nested(v: float) -> None:
+        if state["first"]:
+            state["first"] = False
+            d._follow_spacing()
+            seen.append(bool(d._following))
+            d._first_offset_changed()  # must still read as our own write
+        real(v)
+
+    d.first_offset.setValue = nested  # type: ignore[method-assign]
+    d._first_offset_own = False
+    d._follow_spacing()
+    assert seen == [True]
+    assert not d._first_offset_own
+    assert not d._following
+
+
+def test_a_preset_that_cannot_be_applied_is_reported_and_the_import_stands(
+    session, tmp_path, monkeypatch
+):
+    _with_presets(session, tmp_path, "One")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+
+    def boom(*a, **k):
+        raise RuntimeError("no disk")
+
+    monkeypatch.setattr(session, "apply_preset_to", boom)
+    d.accept()
+    assert d.result() == d.DialogCode.Accepted
+    assert len(session.keys_on_grid("A")) == 1
+    assert d.imported_keys == session.keys_on_grid("A")
+    assert "could not be applied" in d.status.text()
+    assert "no disk" in d.status.text()

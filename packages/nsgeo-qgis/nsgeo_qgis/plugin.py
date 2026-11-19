@@ -65,6 +65,7 @@ from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_windows
+from nsgeo.velocity import VelocityModel
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
@@ -428,6 +429,11 @@ class NsgeoPlugin:
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
         self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
+        self.survey_dock.bulk_velocity_requested.connect(self.open_bulk_velocity_dialog)
+        self.survey_dock.report.connect(self.message)
+        # One line selection, both ways (#57); the map link exists already (above).
+        self.map_link.lines_selected.connect(self.survey_dock.select_lines)
+        self.survey_dock.line_selection_changed.connect(self.map_link.select_lines)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -3183,6 +3189,8 @@ class NsgeoPlugin:
             try:
                 if result == QDialog.DialogCode.Accepted:
                     self.message(f"imported {len(dialog.imported_keys)} line(s)")
+                    if dialog.preset_notice:
+                        self.message(dialog.preset_notice, Qgis.MessageLevel.Warning)
             finally:
                 dialog.deleteLater()
                 self._import_dialog = None
@@ -3332,6 +3340,54 @@ class NsgeoPlugin:
             self.message(f"could not set the destagger: {exc}", Qgis.MessageLevel.Critical)
             return
         self.message(f"destagger set to {value:+.2f} m on {len(keys)} GPS line(s)")
+
+    def open_bulk_velocity_dialog(self, keys: list[str]) -> None:
+        """Ask for one velocity and set it as the override of every line in `keys`
+        (Survey panel, Set velocity for N lines…). OK is the confirmation. A slot:
+        it never raises, and reports on the message bar. The box starts at the lines'
+        shared override, else at the velocity the first line resolves to. A velocity
+        from a line's saved fits is replaced (the fits stay), and the label says so."""
+        try:
+            assert self.session is not None
+            session = self.session
+            models = {session.line_for_key(k).velocity for k in keys}
+            start_model = (
+                models.pop()
+                if len(models) == 1 and None not in models
+                else session.resolved_velocity(keys[0])
+            )
+            n_src = sum(1 for k in keys if session.line_for_key(k).velocity_source is not None)
+            label = [f"Velocity for {len(keys)} line{'s' if len(keys) != 1 else ''} (m/ns):"]
+            if n_src:
+                label.append(
+                    f"{n_src} of these lines "
+                    + ("has" if n_src == 1 else "have")
+                    + " a velocity from "
+                    + ("its" if n_src == 1 else "their")
+                    + " saved fits; it will be replaced. The fits stay saved on the lines."
+                )
+            label.append("Migration steps keep their own velocity.")
+            value, accepted = QInputDialog.getDouble(
+                self.iface.mainWindow(),
+                "Velocity",
+                "\n".join(label),
+                start_model.surface_velocity,
+                0.0,
+                0.3,
+                4,
+                Qt.WindowType(0),  # no flags: the step comes after them in the overload
+                0.001,
+            )
+            if not accepted:
+                return
+            session.set_lines_velocity(keys, VelocityModel.constant(value))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"could not set the velocity: {what}", Qgis.MessageLevel.Critical)
+            return
+        self.message(
+            f"velocity {value:.3f} m/ns set on {len(keys)} line{'s' if len(keys) != 1 else ''}"
+        )
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a

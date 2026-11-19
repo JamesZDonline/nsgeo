@@ -426,6 +426,9 @@ class SiteLayers(QObject):
         # that may report what following changed (line editing spec §4.4).
         self._report_follow = False
         self.layers: dict[str, QgsVectorLayer] = {}
+        # Depth counter: >0 while the `lines` table is being refilled, so MapLink
+        # can tell a refill's selection change from the user's gesture (#57).
+        self._refilling_lines = 0
         self._group: Any = None
         self._group_token = ""
         # Finding A: which `picks` QgsVectorLayer object `_on_picks_edited`
@@ -1553,7 +1556,22 @@ class SiteLayers(QObject):
             return None
         return self._points(xy, crs)
 
+    @property
+    def refilling_lines(self) -> int:
+        """Truthy while the `lines` layer is being refilled (read-only, for MapLink)."""
+        return self._refilling_lines
+
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
+        if name != "lines":
+            self._refill_table(name, features)
+            return
+        self._refilling_lines += 1
+        try:
+            self._refill_table(name, features)
+        finally:
+            self._refilling_lines -= 1
+
+    def _refill_table(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
         target = self.crs()
         # A table whose own prep failed this cycle (ensure_tables()

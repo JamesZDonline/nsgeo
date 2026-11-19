@@ -52,6 +52,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.decimal_input import parse_decimal
 from nsgeo_qgis.lookup import (
     ImportOptions,
     ImportRow,
@@ -60,6 +61,7 @@ from nsgeo_qgis.lookup import (
     rows_to_lines,
 )
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.preset_box import PRESET_GONE, PresetBox
 
 (
     COL_INCLUDE,
@@ -120,11 +122,12 @@ class ImportDialog(QDialog):
         self._opened_against = session.json_path
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
-        self._updating = False
+        self.preset_notice = ""  # set when the import stood but its preset did not apply
+        self._updating = 0
         # #69: whether "First line at" holds a value the user gave it, and
         # so no longer follows the spacing (see _follow_spacing).
         self._first_offset_own = False
-        self._following = False
+        self._following = 0
         self.setWindowTitle("Import DZT files")
         self.resize(900, 520)
         layout = QVBoxLayout(self)
@@ -180,6 +183,10 @@ class ImportDialog(QDialog):
             label_row.addWidget(b)
         label_row.addStretch(1)
         form.addRow("Label from", label_row)
+        # #129: last, after the placement choices: what happens to the lines
+        # once they are in.
+        self.preset_box = PresetBox(session)
+        form.addRow("Processing preset", self.preset_box)
         layout.addLayout(form)
 
         buttons_row = QHBoxLayout()
@@ -269,6 +276,7 @@ class ImportDialog(QDialog):
         # on the Import button (see _refresh_table).
         gid = self.grid_combo.currentData()
         self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
+        self.preset_box.set_grid(gid or None)
         self._replan()
 
     def _follow_spacing(self, *_: Any) -> None:
@@ -277,11 +285,11 @@ class ImportDialog(QDialog):
         user gives it a value of their own, which then stays put."""
         if self._first_offset_own:
             return
-        self._following = True
+        self._following += 1
         try:
             self.first_offset.setValue(self.spacing.value() / 2)
         finally:
-            self._following = False
+            self._following -= 1
 
     def _first_offset_changed(self, *_: Any) -> None:
         if not self._following:
@@ -426,7 +434,7 @@ class ImportDialog(QDialog):
 
     # ---- table ------------------------------------------------------------
     def _refresh_table(self) -> None:
-        self._updating = True
+        self._updating += 1
         try:
             self.table.setRowCount(len(self.rows))
             for r, row in enumerate(self.rows):
@@ -472,7 +480,7 @@ class ImportDialog(QDialog):
             )
             self.import_button.setEnabled(n > 0)
         finally:
-            self._updating = False
+            self._updating -= 1
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating:
@@ -491,7 +499,7 @@ class ImportDialog(QDialog):
             row.label_edited = True
         elif c == COL_OFFSET:
             try:
-                value = float(item.text().replace(",", "."))
+                value = parse_decimal(item.text())
             except ValueError:
                 # A hand-typed cell that is not a number must not raise out
                 # of a signal-connected slot (see the module docstring);
@@ -583,10 +591,37 @@ class ImportDialog(QDialog):
         if not lines:
             self.status.setText("nothing to import: no included, placeable rows")
             return
+        chosen = self.preset_box.chosen()
+        if chosen is not None and chosen not in self.session.preset_names():
+            self.status.setText(PRESET_GONE.format(name=chosen))
+            return
+        new_keys = [self.session.line_key(ln) for ln in lines]
+        taken = set(self.session.keys())
+        clash = [k for k in new_keys if k in taken]
+        if clash:
+            self.status.setText(f"line {clash[0]!r} is already in the site")
+            return
+        # §2.4: the first import into an empty grid also sets its Slices
+        # preset, written before the lines so they are prepared once.
+        sets_slices = chosen is not None and self.session.import_sets_slice_preset(gid)
+        if sets_slices:
+            self.session.set_slice_preset(gid, chosen)
         try:
             self.session.add_lines(lines)
-        except ValueError as exc:  # a key already in the site -- add_lines' one failure mode
+        except ValueError as exc:  # add_lines' one failure mode
+            if sets_slices:
+                self.session.set_slice_preset(gid, None)
             self.status.setText(str(exc))
             return
-        self.imported_keys = [self.session.line_key(ln) for ln in lines]
+        self.imported_keys = new_keys  # the lines are in the site whatever follows
+        try:
+            if chosen is not None:
+                self.session.apply_preset_to(chosen, new_keys)
+            if self.preset_box.is_choice():
+                self.session.remember_import_preset(gid, chosen)
+        except Exception as exc:  # noqa: BLE001 -- the import happened; say what did not
+            self.preset_notice = (
+                f"the lines were imported, but the preset could not be applied: {exc}"
+            )
+            self.status.setText(self.preset_notice)
         super().accept()
