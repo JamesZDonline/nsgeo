@@ -985,12 +985,15 @@ def test_a_mixed_crs_site_gathers_the_same_after_the_move(site3_factory, make_si
 
 
 def test_a_preparation_that_reads_no_line_fails_with_the_first_error(site3, make_site, monkeypatch):
-    """The asynchronous failure path: B's lines cannot be read at all."""
+    """The asynchronous failure path: B's lines cannot be read at all. Each line
+    fails with its own message, so the state can show it kept the first."""
     real_load = Line.load
+    tried: list[str] = []
 
     def load(self):
         if self.placement.grid_id == "B":
-            raise OSError("disk gone")
+            tried.append(self.path.name)
+            raise OSError(f"disk gone at {self.path.name}")
         return real_load(self)
 
     monkeypatch.setattr(Line, "load", load)
@@ -998,8 +1001,11 @@ def test_a_preparation_that_reads_no_line_fails_with_the_first_error(site3, make
     site = make_site(site3.session, on_error=errors.append)
     site.set_source(site3.source())
     wait_for_site(site, 60_000)
-    assert site.grid_state("B").startswith("failed: ")
-    assert "disk gone" in site.grid_state("B")
+    state = site.grid_state("B")
+    assert state.startswith("failed: ")
+    assert len(set(tried)) > 1, "the test needs B's lines to fail with different messages"
+    assert f"disk gone at {tried[0]}" in state, (tried, state)
+    assert f"disk gone at {tried[-1]}" not in state, (tried, state)
     assert site.ready_grids == ("A", "C")
 
 

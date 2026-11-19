@@ -44,17 +44,25 @@ def transform_points(
     """(n, 2) points from `source` to `target` in one C++ call; a missing transform raises.
 
     The points travel as one WKB LineString, transformed together and read back
-    (200 k points: 0.10 s, against 0.92 s a point at a time, identical results).
-    An invalid `QgsCoordinateTransform` returns its input unchanged while
-    reporting success (`layers._require_transform`), which would draw a grid in
-    the wrong place without a word, so it raises.
+    (200 k points: 0.10 s, against 0.92 s a point at a time, identical results
+    for every point both can move). An invalid `QgsCoordinateTransform` returns
+    its input unchanged while reporting success (`layers._require_transform`),
+    which would draw a grid in the wrong place without a word, so it raises.
+
+    A point outside where `target` is defined raised a point at a time; moved
+    together, it comes back as inf with no error (QGIS checks only a lone
+    point, and a lone point is sent as two). So a finite point that comes back
+    non-finite raises here too, naming what to check. A NaN or inf point passes
+    through, as it did before.
     """
     transform = QgsCoordinateTransform(
         QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target), context
     )
     if not transform.isValid():
         raise RuntimeError(f"no coordinate transform from {source} to {target}")
-    pts = np.ascontiguousarray(points, dtype="<f8").reshape(-1, 2)
+    pts = np.ascontiguousarray(points, dtype="<f8")
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError(f"points must be an (n, 2) array, not shape {pts.shape}")
     n = len(pts)
     if n == 0:
         return np.empty((0, 2), dtype=float)
@@ -74,8 +82,14 @@ def transform_points(
         raise RuntimeError(
             f"unexpected geometry back from the coordinate transform: header {(order, kind, count)}"
         )
-    moved = np.frombuffer(wkb, dtype="<f8", offset=_WKB_HEADER).reshape(-1, 2)
-    return moved[:n].astype(float)
+    moved = np.frombuffer(wkb, dtype="<f8", offset=_WKB_HEADER).reshape(-1, 2)[:n].astype(float)
+    lost = np.isfinite(pts).all(axis=1) & ~np.isfinite(moved).all(axis=1)
+    if lost.any():
+        raise RuntimeError(
+            f"{int(lost.sum())} of {n} points lie outside where {target} is defined; "
+            f"check each grid's coordinate system ({source})"
+        )
+    return moved
 
 
 def extent_in(

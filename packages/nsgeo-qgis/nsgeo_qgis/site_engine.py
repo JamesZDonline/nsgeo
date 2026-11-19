@@ -45,14 +45,18 @@ ignored, because whoever cancelled already set the state.
 per-grid engine exists, so `_on_grids_changed` runs BEFORE each engine's
 own handler. Inside that call the engines have not reacted yet: a moved
 grid's engine still holds lines binned at the old registration. So it
-reads no engine state. It drops the caches the edit made stale and
-handles grids that no longer exist (those engines are disposed, not
+never reads a moved grid's engine. It drops the caches the edit made stale
+and handles grids that no longer exist (those engines are disposed, not
 consulted). A moved grid is driven by `_on_grid_moved`, which runs after
-its engine has cleared, and the geometry is rebuilt there -- never in the
-synchronous slot. A preparation whose grid moved under it is not marked
-ready or failed: its callback arrives from inside the engine's `clear()`,
-before `_on_grid_moved`, and `_on_engine_prepared` recognises it by the
-grid's registration no longer matching the one it was dispatched against.
+its engine has cleared, and the geometry is rebuilt there. The one rebuild
+inside the synchronous slot is after a removal, and it is safe because
+every `grids_changed` emitter (`add_grid`, `replace_grid`, `remove_grid`)
+changes exactly one grid: a removal never arrives together with a move,
+so the engines it reads all still hold their grids' places. A
+preparation whose grid moved under it is not marked ready or failed: its
+callback arrives from inside the engine's `clear()`, before
+`_on_grid_moved`, and `_on_engine_prepared` recognises it by the grid's
+registration no longer matching the one it was dispatched against.
 
 **Caches**: the gathers (each grid's `Footprint` on the lattice, once per
 grid per lattice, spec 4.7) and the seams (once per geometry, from each
@@ -641,9 +645,11 @@ class SiteEngine(QObject):
 
         When a grid has left, the geometry is rebuilt right here, inside the
         emission (#75). That is deliberate and safe: the rebuild reads the
-        session's grids and the frames and axes of the engines still ready,
-        and a grid that only moved reaches `_on_grid_moved` afterwards, which
-        rebuilds again once its engine has cleared. A rebuild that fails is
+        session's grids and the frames and axes of the engines still ready
+        (and pushes the site resolution to them), and one emission changes
+        one grid, so none of them has moved; a grid that only moved reaches
+        `_on_grid_moved` afterwards, which rebuilds again once its engine has
+        cleared. A rebuild that fails is
         kept in `geometry_problem` for the next tick, never raised. It is not
         deferred with a timer: the dock reads the geometry straight after
         `remove_grid` returns, and a deferral would leave it stale for a tick.
