@@ -108,6 +108,7 @@ release's notes list everything in it.
 | | QGIS's own 3-D view, M16's third plan: a 3D view button shows a grid's picks at their depths and its surfaces, depth stretched per grid from the Surfaces panel and saying so, keeping up as you pick and rebuild; QGIS no longer warns that the Slices layer is a temporary layer ([#217]) | next release |
 | M17a | GPS lines, M17's first plan: lines placed along the RTK track they were walked, with no grid; stretches without an RTK fix marked on the map; a destagger you can type. A site with GPS lines saves as schema 4, which 0.4.0 cannot open ([#208]) | next release |
 | | The Processing panel: a step that can't run stays marked under the step list until it is fixed, and opening a line whose steps can't run says so instead of showing the last picture; the gain strip stops at ±120 dB, reaches every point, fits its caption and gets a Reset; the Difference view follows a dragged step; the panel names its line ([#197], [#49], [#8], [#9], [#13], [#48], [#33], [#224]) | next release |
+| | Lines in bulk and at import: choose a processing preset when importing lines (remembered per grid; the first import into an empty grid sets its Slices preset too); a selection of lines on the map selects them in the Survey panel and back; apply a preset, the open line's steps or a velocity to a selection at once; removing lines says what processing, velocity and saved fits go with them; a comma in a number box is refused, not read as a decimal point ([#129], [#57], [#58], [#221], [#16], [#17], [#225]) | next release |
 
 ### In progress
 
@@ -128,11 +129,6 @@ release's notes list everything in it.
   progress and a Cancel. Also the site engine's review follow-ups. In two
   plans: Plan A, the engine, is being built; Plan B, the background fill,
   follows it.
-- **Lines in bulk and at import** ([#129], [#57], [#58], [#221], [#16],
-  [#17]). Choose a processing preset when importing lines; a selection of
-  lines on the map selects them in the Survey panel; set a preset or a
-  velocity on a selection of lines at once; removing lines says what goes
-  with them. Built and walked through; awaiting merge.
 
 ### Next, in order
 
@@ -174,9 +170,7 @@ Grouped by area. The order within a group is not a priority.
   ([#130]; the outline and its slice mask come with M17d); a site of GPS
   lines alone hides its lines when you zoom out, as a tape site does
   ([#222]); balancing
-  lines walked in different directions (the second half of [#47]); a preset or
-  velocity override for a selection of lines at once ([#58], in progress
-  above; editing their placement together is done).
+  lines walked in different directions (the second half of [#47]).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
   ([#187]); exports record where the grid's velocity came from ([#188]); show
@@ -184,16 +178,14 @@ Grouped by area. The order within a group is not a priority.
   ([#195]); warn when a grid's velocity from fits is on another clock than its
   slices ([#201]); the hyperbola tracer's known limits on layered ground and
   on very wide boxes ([#209]) and its review follow-ups ([#212]).
-- **Processing and the profile:** choose a preset when importing ([#129], in progress above); hide
-  the slice band ([#131]); set time zero by eye, dragging it on the profile
+- **Processing and the profile:** hide the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
   clock share one rule ([#210]); the profile no longer jumps when the velocity
   strip appears ([#211]); a frequency profile
   ([#34]); configurable axes ([#11]); deconvolution,
   with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
-  ([#205]); removing a line says that its processing, velocity and saved fits
-  go with it ([#221], in progress above); more than one site in a QGIS project
+  ([#205]); more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
@@ -310,6 +302,7 @@ Grouped by area. The order within a group is not a priority.
 [#221]: https://github.com/JamesZDonline/nsgeo/issues/221
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
 [#224]: https://github.com/JamesZDonline/nsgeo/pull/224
+[#225]: https://github.com/JamesZDonline/nsgeo/pull/225
 
 ## Why
 
