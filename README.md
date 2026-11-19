@@ -171,7 +171,8 @@ Grouped by area. The order within a group is not a priority.
   clock share one rule ([#210]); the profile no longer jumps when the velocity
   strip appears ([#211]); a frequency profile
   ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
-  until it is fixed, instead of a six-second toast ([#197]).
+  until it is fixed, instead of a six-second toast ([#197]); deconvolution,
+  with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
@@ -263,6 +264,7 @@ Grouped by area. The order within a group is not a priority.
 [#210]: https://github.com/JamesZDonline/nsgeo/issues/210
 [#211]: https://github.com/JamesZDonline/nsgeo/issues/211
 [#212]: https://github.com/JamesZDonline/nsgeo/issues/212
+[#214]: https://github.com/JamesZDonline/nsgeo/issues/214
 
 ## Why
 
