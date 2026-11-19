@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
 from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
@@ -543,6 +543,21 @@ class SiteSession(QObject):
         grid_id = getattr(line.placement, "grid_id", None)
         return self._require_site().frames.get(grid_id) if grid_id is not None else None
 
+    # ---- the site's CRS ---------------------------------------------------
+    def site_crs(self) -> str | None:
+        """The CRS the site is in: its own, else the first grid's, else None (P9)."""
+        site = self._site
+        return None if site is None else site.effective_crs()
+
+    def set_site_crs(self, crs: str) -> None:
+        """Give a site with no CRS one. It is never changed once set."""
+        site = self._require_site()
+        current = self.site_crs()
+        if current is not None:
+            raise ValueError(f"the site already uses {current}")
+        site.crs = crs
+        self._set_dirty(True)
+
     # ---- grids ------------------------------------------------------------
     def add_grid(self, grid: Grid) -> None:
         site = self._require_site()
@@ -679,6 +694,23 @@ class SiteSession(QObject):
                 raise ValueError(f"line {key!r} is already in the site")
             existing.add(key)
             keyed.append((key, line))
+        gps = [ln for ln in lines if isinstance(ln.placement, TrackPlacement)]
+        if gps:
+            # The first GPS line pins the CRS the site is in right now, so a
+            # later edit of the first grid cannot move it (R9).
+            in_force = self.site_crs()
+            if in_force is None:
+                raise ValueError("GPS lines need the site's CRS, but the site has none")
+            # A line placed in any other CRS fails now, not later at
+            # validate or save (R10).
+            for ln in gps:
+                placed = ln.placement.crs  # type: ignore[union-attr]
+                if placed != in_force:
+                    raise ValueError(
+                        f"line {ln.path.name} is placed in {placed}, but the site is in {in_force}"
+                    )
+            if site.crs is None:
+                site.crs = in_force
         site.lines.extend(lines)
         self._lines_by_key.update(keyed)
         self._set_dirty(True)
@@ -704,6 +736,41 @@ class SiteSession(QObject):
         dropped = self._drop_lines(unique)
         self._set_dirty(True)
         self._announce_dropped(*dropped)
+        self.lines_changed.emit()
+
+    def is_gps_line(self, key: str) -> bool:
+        """Whether the line under `key` is placed along its GPS track (`KeyError` if unknown)."""
+        return isinstance(self.line_for_key(key).placement, TrackPlacement)
+
+    def set_travel_shift(self, keys: Iterable[str], metres: float) -> None:
+        """Set the destagger of every GPS line in `keys` to `metres`, as one change:
+        one dirty mark and one `lines_changed`, and nothing at all when no line
+        would change.
+
+        All or nothing: every key is checked first, so an unknown key raises
+        `KeyError`, a tape line `ValueError("{name} is not a GPS line")`, and a
+        non-finite `metres` `ValueError`, each with the site untouched. A line
+        keeps its key, so its stack, profile and picks stay attached.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        lines = [self.line_for_key(key) for key in unique]
+        for line in lines:
+            if not isinstance(line.placement, TrackPlacement):
+                raise ValueError(f"{line.path.stem} is not a GPS line")
+        if not math.isfinite(metres):
+            raise ValueError(f"travel_shift must be finite, got {metres!r}")
+        changing = [
+            (key, line)
+            for key, line in zip(unique, lines)
+            if line.placement.travel_shift != metres  # type: ignore[union-attr]
+        ]
+        if not changing:
+            return
+        for key, line in changing:
+            placement = dataclasses.replace(line.placement, travel_shift=metres)  # type: ignore[type-var]
+            self._replace_line(key, dataclasses.replace(line, placement=placement))
+        self._set_dirty(True)
         self.lines_changed.emit()
 
     def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
