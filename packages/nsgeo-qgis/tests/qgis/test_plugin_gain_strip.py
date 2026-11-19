@@ -1806,3 +1806,24 @@ def test_reset_writes_nothing_while_a_refusal_sits_above_the_curve(
         assert [list(p) for p in _step_points(s, key, 2)] == before
     finally:
         _finish(plugin, answer_modal)
+
+
+def test_selecting_a_curve_behind_a_refusal_with_difference_on_hides_the_strip(
+    fake_iface, tmp_path, answer_modal
+):
+    """Ruling 16: with Difference on, the refusal note depends on the selected
+    row, so `_on_current_row` must refresh it before `step_selected` reaches
+    `_sync_gain_strip`. Fails if the `_check_refusal()` ahead of the emit goes
+    (the strip then shows on the fallback clock, using the previous row's note)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.replace_step(key, 1, build_step("dewow"))
+        s.replace_step(key, 2, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+        s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+        pd.list.setCurrentRow(1)
+        pd.diff_button.setChecked(True)
+        pd.list.setCurrentRow(3)
+        assert plugin.profile_dock.gain_strip.isHidden()
+    finally:
+        _finish(plugin, answer_modal)

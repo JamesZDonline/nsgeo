@@ -656,11 +656,19 @@ class ProcessingDock(QgsDockWidget):
             self.session.set_step_enabled(key, row, flag)
 
     def _on_current_row(self, row: int) -> None:
-        if not self._updating:
-            self._update_row_buttons()
-            self.step_selected.emit(row)
-            if self.diff_button.isChecked():
-                self._emit_difference(True)
+        try:
+            if not self._updating:
+                self._update_row_buttons()
+                if self.diff_button.isChecked():
+                    # The note follows the selected row's chain while the
+                    # Difference view is on: refresh it before `step_selected`
+                    # reaches listeners that read `refusal()`.
+                    self._check_refusal()
+                self.step_selected.emit(row)
+                if self.diff_button.isChecked():
+                    self._emit_difference(True)
+        except Exception as exc:
+            _log(f"_on_current_row: {exc}")
 
     def _on_rows_moved(self, _parent: Any, start: int, _end: int, _dest: Any, row: int) -> None:
         try:
