@@ -125,7 +125,8 @@ too, and switching its slices because a few lines were added would surprise.
   - Fix: one new slot in `ui/slices_dock.py`, connected to `session.slice_sources_changed`. When
     the changed grid is the one This grid shows, and its remembered preset exists and differs
     from the preset combo, the combo switches to it as a hand choice would (pending restore values
-    dropped, preparation re-run), without writing the record again. Every other case does nothing:
+    dropped, preparation re-run). The hand-choice path may write the same preset back; the slot
+    then finds nothing to change. Every other case does nothing:
     the panel's own `_remember_source` (the record already matches), a gain/resolution/volume
     change (the preset is unchanged), another grid.
   - Session H's plan also edits `slices_dock.py`, elsewhere (around `_snap_inside` and
