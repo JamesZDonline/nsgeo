@@ -175,6 +175,7 @@ several grids' slices into one site view.
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
 | `load_cube` | Read a cube written by `save_cube`. |
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
+| `north_up_plans_nbytes` | Bytes the cached north-up plans hold, for the status line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
 | `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
@@ -185,9 +186,10 @@ several grids' slices into one site view.
 | `plan_windows` | Every window of a thickness, at a step. |
 | `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
-| `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
+| `sample_counts` | The largest corner count at each tap (the nearest cell's, for exact taps), so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
+| `clear_north_up_plans` | Drop every cached north-up plan. |
 | `column_distances` | Distances of a section's columns along a path: 0, step, ... and the length. |
 | `section_columns` | Columns half a cell apart along a path, with the pixel rule's taps. |
 | `section_crops` | Boxes round a cut, each serving at most a piece of it. |

@@ -2060,3 +2060,28 @@ def test_set_resolution_refuses_before_storing(sourced):
         engine.set_resolution(Resolution(cell=0.25, dz_ns=0.001, t0_ns=2.0, t1_ns=30.0))
     assert engine.z is z and engine.frame is frame
     assert errors == []
+
+
+def test_this_grids_status_counts_the_cached_north_up_plans(sourced):
+    import numpy as np
+    from nsgeo.slices import CubeFrame, north_up_plans_nbytes, to_north_up
+    from nsgeo_qgis.slices_plan import format_status
+
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    from nsgeo.slices import clear_north_up_plans
+
+    clear_north_up_plans()
+    before = engine.status_text()
+    # Rotated and large enough that its plan shows in the status line's MB figure.
+    frame = CubeFrame((0.0, 0.0), 10.0, 0.1, 600, 600, "EPSG:32616")
+    to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert north_up_plans_nbytes() > 5 * 2**20
+    assert engine.status_text() != before
+    assert engine.status_text() == format_status(
+        engine.mode,
+        engine.line_count,
+        engine.estimate,
+        engine._redraw_ms,
+        extra_bytes=north_up_plans_nbytes(),
+    )

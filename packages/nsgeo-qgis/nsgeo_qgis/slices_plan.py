@@ -835,6 +835,8 @@ def format_status(
     n_lines: int,
     estimate: MemoryEstimate,
     redraw_ms: float | None,
+    *,
+    extra_bytes: int = 0,
 ) -> str:
     """Spec 9.2's status line: what is held, and how fast slices redraw.
 
@@ -844,7 +846,8 @@ def format_status(
     length) and still quadruples the fill weights.
     """
     # The interpolation weights are held in either mode (interpolation spec §7).
-    held = estimate.lines_bytes + estimate.weights_bytes
+    # `extra_bytes`: held beside the estimate, e.g. the cached north-up plans.
+    held = estimate.lines_bytes + estimate.weights_bytes + extra_bytes
     noun = "line" if n_lines == 1 else "lines"
     if mode == "resident":
         held += estimate.cube_bytes

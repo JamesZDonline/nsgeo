@@ -150,6 +150,7 @@ from nsgeo.slices import (
     covered_cells,
     finish_slice,
     limit_over_slices,
+    north_up_plans_nbytes,
     plan_fill,
     plan_line,
     plan_windows,
@@ -1846,7 +1847,13 @@ class SliceEngine(QObject):
         )
 
     def status_text(self) -> str:
-        return format_status(self._mode, len(self._lines), self.estimate, self._redraw_ms)
+        return format_status(
+            self._mode,
+            len(self._lines),
+            self.estimate,
+            self._redraw_ms,
+            extra_bytes=north_up_plans_nbytes(),
+        )
 
     # ---- lifecycle --------------------------------------------------------
     def clear(self) -> None:

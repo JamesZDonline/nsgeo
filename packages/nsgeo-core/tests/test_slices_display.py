@@ -10,8 +10,11 @@ from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices.cube import Provenance, SliceCube
 from nsgeo.slices.display import (
     SliceWindow,
+    _north_up_plan,
+    clear_north_up_plans,
     frame_lattice,
     limit_over_slices,
+    north_up_plans_nbytes,
     plan_windows,
     shared_limit,
     to_north_up,
@@ -389,7 +392,7 @@ def test_the_north_up_gather_is_planned_once_per_frame(monkeypatch):
     shares the plan; another frame gets its own."""
     from nsgeo.slices import display
 
-    display._north_up_plan.cache_clear()
+    display.clear_north_up_plans()
     built = []
     real = display._build_north_up_plan
     monkeypatch.setattr(display, "_build_north_up_plan", lambda f: built.append(f) or real(f))
@@ -405,4 +408,25 @@ def test_the_north_up_gather_is_planned_once_per_frame(monkeypatch):
     _, gt_other = to_north_up(values, other)
     assert len(built) == 2 and built[-1] == other
     assert gt_other != gt
-    display._north_up_plan.cache_clear()
+    display.clear_north_up_plans()
+
+
+def test_the_north_up_cache_reports_what_it_holds():
+    clear_north_up_plans()
+    assert north_up_plans_nbytes() == 0
+    f1, f2, f3 = _frame(10.0), _frame(0.0), _frame(0.0, nx=41)
+    for f in (f1, f2):
+        to_north_up(np.zeros((f.ny, f.nx)), f)
+    one, two = _north_up_plan(f1)[0], _north_up_plan(f2)[0]
+    assert north_up_plans_nbytes() == one.nbytes + two.nbytes
+    assert two.ids.size == 0
+    to_north_up(np.zeros((f3.ny, f3.nx)), f3)  # evicts f1, the least recently used
+    assert north_up_plans_nbytes() == two.nbytes + _north_up_plan(f3)[0].nbytes
+
+
+def test_an_exact_north_up_plan_holds_no_ids_or_weights():
+    clear_north_up_plans()
+    f = _frame(0.0, nx=1000, ny=800, cell=0.05)
+    taps = _north_up_plan(f)[0]
+    assert taps.exact and taps.ids.size == 0 and taps.weights.size == 0
+    assert taps.nbytes < 4_000_000

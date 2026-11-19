@@ -18,8 +18,9 @@ Pure numpy, like the rest of the core.
 
 from __future__ import annotations
 
-import functools
 import math
+import threading
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -260,19 +261,46 @@ def to_north_up(
 
 
 #: Frames whose north-up plan is kept. The preview and an export of it share
-#: one; the second slot keeps the grid just left. A plan is the frame's
-#: bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated 50 m
-#: grid at 0.05 m is tens of MB and a very large rotated frame of a few
-#: million pixels hundreds each, two plans together: hence two, not more.
+#: one; the second slot keeps the grid just left. A rotated frame's plan is
+#: its bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated
+#: 50 m grid at 0.05 m is tens of MB and a very large rotated frame of a few
+#: million pixels hundreds each, two plans together: hence two, not more. An
+#: exact plan (an axis-aligned frame) is `lean()` and holds 4 bytes a point.
 _NORTH_UP_PLANS = 2
 _NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
+_plans: OrderedDict[CubeFrame, _NorthUpPlan] = OrderedDict()
+# An export calls `to_north_up` on a worker thread beside the GUI's preview.
+_plans_lock = threading.Lock()
 
 
-@functools.lru_cache(maxsize=_NORTH_UP_PLANS)
 def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
-    """`_build_north_up_plan(frame)`, kept for the last few frames. A
-    `CubeFrame` is frozen, so equal frames share a plan."""
-    return _build_north_up_plan(frame)
+    """`_build_north_up_plan(frame)`, kept for the last two frames. A
+    `CubeFrame` is frozen, so equal frames share a plan. A plan built twice
+    by two threads at once is harmless: the second replaces the first."""
+    with _plans_lock:
+        plan = _plans.get(frame)
+        if plan is not None:
+            _plans.move_to_end(frame)
+            return plan
+    plan = _build_north_up_plan(frame)
+    with _plans_lock:
+        _plans[frame] = plan
+        _plans.move_to_end(frame)
+        while len(_plans) > _NORTH_UP_PLANS:
+            _plans.popitem(last=False)
+    return plan
+
+
+def north_up_plans_nbytes() -> int:
+    """Bytes the cached north-up plans hold, for the status line."""
+    with _plans_lock:
+        return sum(plan[0].nbytes for plan in _plans.values())
+
+
+def clear_north_up_plans() -> None:
+    """Drop every cached north-up plan."""
+    with _plans_lock:
+        _plans.clear()
 
 
 def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
@@ -327,4 +355,4 @@ def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     # reads -- the same reason `cell_index` has its own edge tolerance.
     taps = bilinear_taps(frame, lattice.pixel_centres())
     shape = (lattice.height, lattice.width)
-    return taps, shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)
+    return taps.lean(), shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)

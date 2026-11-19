@@ -206,6 +206,16 @@ def test_the_status_line_says_what_is_held_and_how_fast_it_redraws():
     assert "redraw in —" in format_status("streaming", 24, est, redraw_ms=None)
 
 
+def test_format_status_counts_extra_bytes():
+    est = MemoryEstimate(lines_bytes=28_000_000, cube_bytes=83_000_000)
+    extra = 50 * 2**20
+    base = format_status("streaming", 24, est, 3.6)
+    more = format_status("streaming", 24, est, 3.6, extra_bytes=extra)
+    assert format_bytes(est.lines_bytes + est.weights_bytes) in base
+    assert format_bytes(est.lines_bytes + est.weights_bytes + extra) in more
+    assert more != base
+
+
 def test_the_status_line_counts_the_interpolation_weights_as_held():
     """`total_bytes` counts the weights, so the readout does too: in both modes."""
     est = MemoryEstimate(lines_bytes=28_000_000, cube_bytes=83_000_000, weights_bytes=40_000_000)

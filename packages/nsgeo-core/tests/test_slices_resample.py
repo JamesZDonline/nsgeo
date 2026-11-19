@@ -150,3 +150,39 @@ def test_a_plateau_at_the_maximum_never_blends_above_it():
     values = values.astype(np.float32)
     got = sample(values, bilinear_taps(f, centres(f, f.cell)))
     assert np.nanmax(got) <= values.max() and np.nanmin(got) >= values.min()
+
+
+def test_lean_taps_drop_ids_and_weights_and_sample_the_same():
+    f = frame(cell=0.05)
+    x_hat, y_hat = f.axes()
+    i, j = np.meshgrid(np.arange(f.nx), np.arange(f.ny))
+    local = np.column_stack([(i.ravel() + 0.5) * f.cell, (j.ravel() + 0.5) * f.cell])
+    world = np.asarray(f.origin) + local[:, :1] * x_hat + local[:, 1:] * y_hat
+    # a few points outside the frame too
+    world = np.vstack([world, world[:3] + 1000.0])
+    taps = bilinear_taps(f, world)
+    assert taps.exact
+    lean = taps.lean()
+    assert lean.ids.size == 0 and lean.weights.size == 0
+    assert lean.exact and lean.nbytes < taps.nbytes
+    values = np.arange(f.n_cells, dtype=float).reshape(f.ny, f.nx)
+    values[0, 1] = np.nan
+    values[2, 3] = np.inf
+    np.testing.assert_array_equal(sample(values, lean), sample(values, taps))
+    counts = np.arange(f.n_cells, dtype=np.float32).reshape(f.ny, f.nx) % 4
+    counts[1, 1] = np.nan
+    np.testing.assert_array_equal(sample_counts(counts, lean), sample_counts(counts, taps))
+    index = np.array([5, 0, 7, taps.n - 1])
+    taken = lean.take(index)
+    assert taken.exact and taken.ids.size == 0 and taken.weights.size == 0
+    np.testing.assert_array_equal(sample(values, taken), sample(values, taps.take(index)))
+    np.testing.assert_array_equal(
+        sample_counts(counts, taken), sample_counts(counts, taps.take(index))
+    )
+
+
+def test_lean_on_inexact_taps_is_the_same_object():
+    f = frame(azimuth=17.0)
+    taps = bilinear_taps(f, centres(f, 0.3))
+    assert not taps.exact
+    assert taps.lean() is taps
