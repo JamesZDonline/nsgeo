@@ -39,6 +39,11 @@ def read_vtk_xml(path: Path) -> dict:
         doc["Origin"] = _floats(image.get("Origin"))
         doc["Spacing"] = _floats(image.get("Spacing"))
         doc["Scalars"] = piece.find("PointData").get("Scalars")
+    elif root.find("StructuredGrid") is not None:
+        doc["WholeExtent"] = tuple(
+            int(v) for v in root.find("StructuredGrid").get("WholeExtent").split()
+        )
+        doc["points"] = array(piece.find("Points/DataArray"))
     else:
         doc["NumberOfPoints"] = int(piece.get("NumberOfPoints"))
         doc["points"] = array(piece.find("Points/DataArray"))

@@ -1,4 +1,4 @@
-"""Streaming VTK XML writers: ImageData (.vti) and PolyData (.vtp), numpy only.
+"""Streaming VTK XML writers: ImageData (.vti), PolyData (.vtp), StructuredGrid (.vts), numpy only.
 
 Both write the appended-raw layout (little endian, UInt64 length headers) that
 ParaView and VTK read directly. `write_image_data` takes each array as a
@@ -15,7 +15,13 @@ from typing import Callable
 
 import numpy as np
 
-__all__ = ["image_data_bytes", "write_image_data", "write_poly_data"]
+__all__ = [
+    "image_data_bytes",
+    "structured_grid_bytes",
+    "write_image_data",
+    "write_poly_data",
+    "write_structured_grid",
+]
 
 _HEADER_ALLOWANCE = 4096
 _TYPES = {
@@ -155,6 +161,65 @@ def write_poly_data(
         f"<Polys>\n{_tag('connectivity', 'Int64', rest[4])}\n"
         f"{_tag('offsets', 'Int64', rest[5])}\n</Polys>\n"
         "</Piece>\n</PolyData>\n"
+        '<AppendedData encoding="raw">\n_'
+    )
+    part = path.with_name(path.name + ".part")
+    try:
+        with open(part, "wb") as f:
+            f.write(xml.encode())
+            for b in blobs:
+                f.write(struct.pack("<Q", b.nbytes))
+                f.write(b.tobytes())
+            f.write(b"\n</AppendedData>\n</VTKFile>\n")
+            size = f.tell()
+        os.replace(part, path)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return size
+
+
+def structured_grid_bytes(n_points: int, n_arrays: int) -> int:
+    """The exact payload of `write_structured_grid` plus a fixed header allowance (4096)."""
+    return (8 + 12 * n_points) + n_arrays * (8 + 4 * n_points) + _HEADER_ALLOWANCE
+
+
+def write_structured_grid(
+    path: Path, points: np.ndarray, point_data: Mapping[str, np.ndarray]
+) -> int:
+    """Write a one-layer structured grid (a curtain) with float32 arrays; returns bytes written.
+
+    `points` is (nj, ni, 3), i fastest; each array is (nj, ni). The file goes to
+    `path` + ".part" and is then renamed.
+    """
+    path = Path(path)
+    pts = np.asarray(points)
+    if pts.ndim != 3 or pts.shape[2] != 3:
+        raise ValueError(f"points must be (nj, ni, 3), got {pts.shape}")
+    nj, ni = pts.shape[:2]
+    names = list(point_data)
+    arrays = []
+    for name in names:
+        a = np.asarray(point_data[name])
+        if a.shape != (nj, ni):
+            raise ValueError(f"array {name!r} has shape {a.shape}, expected {(nj, ni)}")
+        arrays.append(np.ascontiguousarray(a, dtype="<f4").ravel())
+    blobs = [np.ascontiguousarray(pts, dtype="<f4").ravel(), *arrays]
+    offsets, pos = [], 0
+    for b in blobs:
+        offsets.append(pos)
+        pos += 8 + b.nbytes
+    ext = f"0 {ni - 1} 0 {nj - 1} 0 0"
+    tags = "\n".join(_tag(n, "Float32", offsets[1 + i]) for i, n in enumerate(names))
+    scalars = f' Scalars="{names[0]}"' if names else ""
+    xml = (
+        '<?xml version="1.0"?>\n'
+        '<VTKFile type="StructuredGrid" version="1.0" byte_order="LittleEndian" '
+        'header_type="UInt64">\n'
+        f'<StructuredGrid WholeExtent="{ext}">\n<Piece Extent="{ext}">\n'
+        f"<PointData{scalars}>\n{tags}\n</PointData>\n<CellData/>\n"
+        f"<Points>\n{_tag(None, 'Float32', offsets[0], 3)}\n</Points>\n"
+        "</Piece>\n</StructuredGrid>\n"
         '<AppendedData encoding="raw">\n_'
     )
     part = path.with_name(path.name + ".part")

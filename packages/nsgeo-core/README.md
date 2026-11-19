@@ -311,3 +311,5 @@ Streaming VTK XML writers, numpy only, for files ParaView opens directly.
 | `write_image_data` | Writes float32 point arrays on a regular grid (`.vti`), each array fed as chunks so a volume never sits in memory whole. Written to a `.part` file and renamed; an array of the wrong length raises `ValueError` and leaves no file. Returns the bytes written. |
 | `write_poly_data` | Writes points, point arrays and vertex, line and polygon cells (`.vtp`). An empty point set is a valid file. Returns the bytes written. |
 | `image_data_bytes` | The exact payload `write_image_data` will write for a shape and array count, plus a fixed 4096-byte header allowance. |
+| `write_structured_grid` | Writes a one-layer curtain of points `(nj, ni, 3)` with float32 point arrays `(nj, ni)` (`.vts`). Returns the bytes written. |
+| `structured_grid_bytes` | The exact payload `write_structured_grid` will write for a point and array count, plus a fixed 4096-byte header allowance. |
