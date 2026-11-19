@@ -428,6 +428,9 @@ them in the usual processing order, in four groups:
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
 
+The panel names, at its top, the line its steps belong to, and the line a map
+hover is previewing when that is another one.
+
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.

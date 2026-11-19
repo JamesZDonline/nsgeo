@@ -7,6 +7,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtWidgets import QInputDialog, QMenu, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -69,6 +70,78 @@ def test_difference_view_declines_sample_count_changing_steps(plugin):
     assert messages and "sample count" in messages[0]
     assert not pd.diff_button.isChecked()
     assert prd.difference_label.text() == ""
+
+
+def test_a_drag_reorder_reaims_the_difference_view(plugin):
+    """#13: with Difference on, dragging the selected step to a new row leaves
+    the view on the step that is selected there, not on the old row's step."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    for name in ("dewow", "background_mean", "gain_agc"):
+        pd.add_step(name)
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    pd.list.model().moveRow(QModelIndex(), 1, QModelIndex(), 3)
+    assert pd.list.currentRow() == 2
+    assert prd.difference_label.text() == "Difference: Background removal (mean)"
+    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).difference(2).data)
+
+
+def test_selecting_time_zero_with_difference_on_shows_the_result(plugin):
+    """#48, the issue's exact repro. A guard test: it passes on main (ruling
+    R7). It fails if `ProfileDock.current_radargram`'s `except ValueError`
+    branch returns None after `_decline_difference` instead of falling
+    through to the ordinary view."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    s.append_step(key, build_step("time_zero", mode="sample", sample=40))
+    pd.add_step("dewow")
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    pd.list.setCurrentRow(0)
+    assert not pd.diff_button.isChecked()
+    assert prd.difference_label.text() == ""
+    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).result().data)
+
+
+def test_closing_the_site_with_difference_on_unchecks_it(plugin):
+    """The outcome of #20 item 4: a real close leaves the button off and the
+    label empty. A guard test: it fails if `_open("")` stops resetting the
+    difference view (and `_clear` does not do it either)."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("dewow")
+    pd.list.setCurrentRow(0)
+    pd.diff_button.setChecked(True)
+    s.close_site()
+    assert not pd.diff_button.isChecked()
+    assert prd.difference_label.text() == ""
+
+
+def _feature_id(layers, key):
+    layer = layers.layers["lines"]
+    for f in layer.getFeatures():
+        if str(f["line_key"]) == key:
+            return f.id()
+    raise AssertionError(f"no feature for {key!r}")
+
+
+def test_steps_added_during_a_multi_selection_land_on_the_open_line(plugin):
+    """#33: with two lines selected on the map none is promoted, so a step
+    goes on the line already open; the panel's label names that line
+    throughout, and the step is still there once the other line is selected."""
+    plugin, s, key = plugin
+    pd = plugin.processing_dock
+    keys = s.keys()
+    layer = plugin.layers.layers["lines"]
+    layer.selectByIds([_feature_id(plugin.layers, k) for k in keys])
+    pd.add_step("dewow")
+    assert [st.name for st, _ in s.stack_for(keys[0]).entries] == ["dewow"]
+    assert "FILE__001" in pd.line_label.text()
+    layer.selectByIds([_feature_id(plugin.layers, keys[1])])
+    assert pd.list.count() == 0
+    assert "FILE__002" in pd.line_label.text()
+    assert [st.name for st, _ in s.stack_for(keys[0]).entries] == ["dewow"]
 
 
 def _menu_action(menu, text):

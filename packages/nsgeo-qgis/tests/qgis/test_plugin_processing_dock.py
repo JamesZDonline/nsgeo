@@ -8,6 +8,7 @@ from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import (
+    PREVIEW_SUFFIX,
     REFUSAL_COLOUR,
     REFUSAL_TEXT,
     ProcessingDock,
@@ -782,3 +783,49 @@ def test_the_real_one_sample_dewow_is_noted(qgis_app, tmp_path):
         "this line's 0.217 ns sampling; use 0.33 ns or more. The profile won't update "
         "until this is fixed."
     )
+
+
+def test_the_panel_names_its_line(opened):
+    session, dock, key = opened
+    text = dock.line_label.text()
+    assert "<b>FILE__001</b>" in text
+    assert "· grid A" in text
+    session.close_site()
+    assert dock.line_label.text() == ""
+
+
+def test_the_panel_names_the_previewed_line_too(opened):
+    session, dock, key = opened
+    keys = session.keys()
+    session.set_preview(keys[1], 3)
+    assert dock.line_label.text().endswith(PREVIEW_SUFFIX.format(name="FILE__002"))
+    session.set_preview(None)
+    assert "previewing" not in dock.line_label.text()
+    assert "<b>FILE__001</b>" in dock.line_label.text()
+
+
+def test_a_line_name_is_escaped_and_never_widens_the_panel(qgis_app, tmp_path):
+    """Fails if the name is not html-escaped, and if the label loses the
+    Ignored horizontal policy or word wrap (a long unbroken name then sets
+    the minimum). Shown and measured like the note's width test, and hidden
+    and deleted at the end."""
+    session = SiteSession()
+    dock = ProcessingDock(session)
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0, 0.0, -1, "<b>" + "x" * 300))
+    session.add_lines([line])
+    try:
+        dock.show()
+        _events()
+        width = dock.minimumSizeHint().width()
+        session.open_line(session.keys()[0])
+        _events()
+        assert "&lt;b&gt;" in dock.line_label.text()
+        assert dock.line_label.isVisibleTo(dock.widget())
+        assert dock.minimumSizeHint().width() == width
+    finally:
+        dock.hide()
+        dock.deleteLater()
+        _events()

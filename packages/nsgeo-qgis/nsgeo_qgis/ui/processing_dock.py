@@ -7,6 +7,7 @@ view updates. Nothing here computes anything.
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 from nsgeo.model import is_cut_key
@@ -34,6 +35,7 @@ from qgis.PyQt.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -46,6 +48,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
+from nsgeo_qgis.velocity_records import line_label
 
 #: How far a step's own velocity may sit from the open line's resolved
 #: velocity before the step's row says so, as a fraction of the line's.
@@ -64,6 +67,8 @@ REFUSAL_TEXT = (
     "The profile won't update until this is fixed."
 )
 REFUSAL_COLOUR = QColor(163, 18, 44)
+LINE_LABEL_TEXT = "<b>{name}</b>{grid}"
+PREVIEW_SUFFIX = " · the profile is previewing {name}"
 
 
 def dest_index(start: int, row: int) -> int:
@@ -188,6 +193,14 @@ class ProcessingDock(QgsDockWidget):
         body = QWidget(self)
         layout = QVBoxLayout(body)
         layout.setContentsMargins(4, 4, 4, 4)
+        # Names the line the steps below belong to (#33), and the line a map
+        # hover is previewing. Ignored width: a long name wraps, it never
+        # raises the dock's minimum width.
+        self.line_label = QLabel("")
+        self.line_label.setTextFormat(Qt.TextFormat.RichText)
+        self.line_label.setWordWrap(True)
+        self.line_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        layout.addWidget(self.line_label)
         row = QHBoxLayout()
         self.add_button = QToolButton()
         self.add_button.setText("Add step")
@@ -294,6 +307,7 @@ class ProcessingDock(QgsDockWidget):
         self.list.model().rowsMoved.connect(self._on_rows_moved)
 
         session.line_opened.connect(self.rebuild)
+        session.preview_changed.connect(self._on_preview_changed)
         session.stack_changed.connect(self._on_stack_changed)
         session.line_loaded.connect(self._on_line_loaded)
         session.site_closed.connect(self.rebuild)
@@ -347,7 +361,34 @@ class ProcessingDock(QgsDockWidget):
             w.setEnabled(has_line)
         self._update_row_buttons()
         self._check_refusal()
+        self._update_line_label()
         self.step_selected.emit(self.list.currentRow())
+
+    def _on_preview_changed(self, _key: str, _trace: int) -> None:
+        self._update_line_label()
+
+    def _update_line_label(self) -> None:
+        """Name the working line, and the previewed one when it differs.
+        Empty with no line open or on a cut. Guarded: it is a slot, and
+        `rebuild` must still reach its `step_selected` emit."""
+        try:
+            key = self.key()
+            if key is None or is_cut_key(key):
+                self.line_label.setText("")
+                return
+            line = self.session.line_for_key(key)
+            grid = self.session.grid_for_line(line)
+            text = LINE_LABEL_TEXT.format(
+                name=escape(line_label(line)),
+                grid=f" · grid {escape(str(grid.id))}" if grid is not None else "",
+            )
+            preview = self.session.preview_key
+            if preview and preview != key and not is_cut_key(preview):
+                other = self.session.line_for_key(preview)
+                text += PREVIEW_SUFFIX.format(name=escape(line_label(other)))
+            self.line_label.setText(text)
+        except Exception as exc:
+            _log(f"_update_line_label: {exc}")
 
     def refusal(self) -> StepRefused | None:
         """The step the open line's stack refuses to run, or None."""
@@ -617,6 +658,10 @@ class ProcessingDock(QgsDockWidget):
         dst = dest_index(start, row)
         if dst != start:
             self.session.move_step(key, start, dst)
+            # The view always shows the selected step (#13): the selection
+            # followed the drag, so the Difference view follows it too.
+            if self.diff_button.isChecked():
+                self._emit_difference(True)
 
     # ---- actions ----------------------------------------------------------
     def add_step(self, name: str) -> None:
