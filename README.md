@@ -123,7 +123,9 @@ release's notes list everything in it.
   and [#157]). Whole site no longer sits at "preparing" now and then, and a
   fine cell no longer freezes QGIS while its fill is worked out, in Whole
   site or This grid: the fill is worked out in the background, with its
-  progress and a Cancel. Also the site engine's review follow-ups. Designing.
+  progress and a Cancel. Also the site engine's review follow-ups. In two
+  plans: Plan A, the engine, is being built; Plan B, the background fill,
+  follows it.
 - **Lines in bulk and at import** ([#129], [#57], [#58], [#221], [#16],
   [#17]). Choose a processing preset when importing lines; a selection of
   lines on the map selects them in the Survey panel; set a preset or a
