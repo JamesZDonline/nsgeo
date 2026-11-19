@@ -857,8 +857,9 @@ closing it never marks the site changed.
 - **It follows your work.** A new pick appears, and a rebuilt surface is replaced in
   place. A **stale** surface is labelled in the Layers panel, and the title counts
   the stale surfaces on the grid.
-- **Which picks.** Only picks on the grid's lines. Picks on cuts are not shown, and neither
-  are picks on lines you left out of the grid's slices (**Choose lines…**).
+- **Which picks.** The grid's picks on its lines, and its picks on cuts as long as they
+  were made on the clock the grid's preset uses now. Picks on lines you left out of the
+  grid's slices (**Choose lines…**) are not shown.
 - **What it leaves out.** It shows no slices and no walls. ParaView does those better
   (see [Step 9](#step-9-export-for-paraview)).
 - **QGIS's own controls.** Rotating, zooming and **Save as image** are QGIS's, not

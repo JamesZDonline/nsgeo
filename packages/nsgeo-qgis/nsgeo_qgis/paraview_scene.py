@@ -25,6 +25,7 @@ _DEFAULTS = {
     "strength_range": [0.0, 5.0],
     "paraview_checked": "6.2.1",
     "skipped_lines": [],
+    "cuts": [],
 }
 _REQUIRED = (
     "grid",
@@ -48,6 +49,7 @@ _REQUIRED = (
     "written_utc",
 )
 _SLICE_KEYS = {"depth_m", "x_m", "y_m", "lines_along"}
+_CUT_KEYS = {"index", "key", "name"}
 _FEATURE_KEYS = {"index", "name", "stale", "picks", "within_2cm", "on_holes"}
 
 
@@ -58,11 +60,11 @@ def feature_label(name: str, stale: bool) -> str:
 
 
 def scene_record(**fields: object) -> dict:
-    """The content of export.json. Every key must be given except the five with defaults.
+    """The content of export.json. Every key must be given except the six with defaults.
 
     Raises TypeError for an unknown or missing key and ValueError for a bad `slices` or a bad
     `features` (a list of `{index, name, stale, picks, within_2cm, on_holes}`, `index` counting
-    from 0 in order).
+    from 0 in order) or a bad `cuts` (a list of `{index, key, name}`, numbered the same way).
     """
     known = set(_REQUIRED) | set(_DEFAULTS)
     unknown = sorted(set(fields) - known)
@@ -84,6 +86,13 @@ def scene_record(**fields: object) -> dict:
         raise ValueError(f"features must be a list of dicts with exactly {sorted(_FEATURE_KEYS)}")
     if [f["index"] for f in features] != list(range(len(features))):
         raise ValueError("features must be numbered 0, 1, 2, ... in order")
+    cuts = record["cuts"]
+    if not isinstance(cuts, list) or any(
+        not isinstance(c, dict) or set(c) != _CUT_KEYS for c in cuts
+    ):
+        raise ValueError(f"cuts must be a list of dicts with exactly {sorted(_CUT_KEYS)}")
+    if [c["index"] for c in cuts] != list(range(len(cuts))):
+        raise ValueError("cuts must be numbered 0, 1, 2, ... in order")
     return record
 
 

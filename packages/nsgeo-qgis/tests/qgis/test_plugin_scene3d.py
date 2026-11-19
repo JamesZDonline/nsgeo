@@ -743,3 +743,27 @@ def test_unload_closes_the_view(surface_plugin):
     assert VIEW_NAME not in iface.canvases3d
     assert not _scene_layers_in_project()
     assert plugin.scene3d is None
+
+
+def test_the_3d_view_shows_the_grids_cut_picks(scene):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+
+    s3d, session, surfaces, _, _, export = scene
+    s3d.open()
+    before = list(s3d.picks_layer.getFeatures())
+    assert len(before) == 4
+    cut_key = _cut_along_line_0(session)
+    _write_cut_picks(surfaces.layers, cut_key, [(3.0, 10.4)])
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 5)
+    (cut_depth,) = [
+        d
+        for r in _all_rows(surfaces.layers)
+        for d in export.pick_depths(A, [(r.pick.line_key, r.pick)])
+        if d is not None and r.pick.line_key == cut_key
+    ]
+    # the point sits at -depth * stretch (3.0), exactly one more than before
+    assert cut_depth > 0.0
+    assert sorted(_z(scene)) == pytest.approx(
+        sorted([f.geometry().constGet().z() for f in before] + [-cut_depth * 3.0])
+    )
