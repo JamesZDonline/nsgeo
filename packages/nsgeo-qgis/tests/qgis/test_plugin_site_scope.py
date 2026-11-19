@@ -1805,7 +1805,7 @@ def test_site_export_refuses_while_a_grid_prepares(
         plugin.session.replace_grid(
             dataclasses.replace(plugin.session.grid("B"), origin=(506.0, 690.0))
         )
-        assert spin_until(lambda: site.is_running), "B never started preparing"
+        assert spin_until(dock.site_export_busy), "B never started preparing"
         assert site.ready_grids, "the test needs ready grids, or it asks the wrong question"
         plugin._export_site()
     finally:
@@ -1817,6 +1817,42 @@ def test_site_export_refuses_while_a_grid_prepares(
         fake_iface.messageBar().currentItem().text()
     )
     assert shown == [], "an export dialog opened while a grid was still preparing"
+    settle(dock)
+
+
+def test_site_export_waits_only_for_the_included_grids(
+    plugin, drive_dialog, message_log, fake_iface, monkeypatch
+):
+    """Task 4 review: the refusal follows the button's rule (T4-a), not `is_running`.
+    A grid unticked while it prepares retires with its read still running; every
+    included grid is ready, so the button is enabled and Export opens its dialog. A
+    refusal here would outlast the button for as long as that read runs, or forever."""
+    from nsgeo.model.survey import Line
+
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    try:
+        grid = plugin.session.grid("C")
+        moved = (grid.origin[0] + 1.0, grid.origin[1])
+        plugin.session.replace_grid(dataclasses.replace(grid, origin=moved))
+        assert spin_until(lambda: site.grid_state("C").startswith("preparing"))
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
+        assert spin_until(lambda: dock.export_button.isEnabled())
+        assert site.is_running, "C's cancelled read still runs: the case this test is about"
+        plugin._export_site()
+    finally:
+        release.set()
+    assert not any("wait until the site's grids" in m for m in message_log), message_log
+    assert len(shown) == 1, "Export did not open its dialog though the button was enabled"
     settle(dock)
 
 

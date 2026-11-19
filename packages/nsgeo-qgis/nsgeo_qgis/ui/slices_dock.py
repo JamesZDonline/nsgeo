@@ -3837,6 +3837,10 @@ class SlicesDock(QgsDockWidget):
         """Each ready grid's velocity, resolved as the This-grid readout does."""
         return self._site.velocities()
 
+    def site_export_busy(self) -> bool:
+        """Whether an included grid is queued or preparing: the export button's rule (T4-a)."""
+        return self._site.export_busy() if self.session.is_open else False
+
     def site_left_out(self) -> list[str]:
         """Included grids no site file will hold: failed, or no lines (T4-a)."""
         return self._site.left_out() if self.session.is_open else []

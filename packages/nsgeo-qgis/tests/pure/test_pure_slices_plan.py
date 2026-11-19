@@ -959,3 +959,5 @@ def test_snap_inside_lands_on_the_legal_side_at_the_boundary():
 def test_window_levels_rounds_and_floors_at_one():
     assert window_levels(1.0, 0.25, 0.5) == (2, 1)
     assert window_levels(0.1, 0.1, 0.5) == (1, 1)
+    # Rounds: floor would give 2 levels for 2.8, ceil 2 for 1.4.
+    assert window_levels(1.4, 0.7, 0.5) == (3, 1)

@@ -1678,7 +1678,10 @@ class NsgeoPlugin:
         assert self.session is not None and self.slices_dock is not None
         dock = self.slices_dock
         site = dock.site_engine
-        if site.is_running:  # the button is disabled too, but this is reachable without it
+        # The button's own rule (T4-a), which this is reachable without: an included
+        # grid still queued or preparing. Not `is_running`, which a grid left out whose
+        # cancelled read runs on also holds, while the button is enabled.
+        if dock.site_export_busy():
             self.message(
                 "wait until the site's grids finish preparing, then export.",
                 Qgis.MessageLevel.Warning,

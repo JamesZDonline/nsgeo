@@ -812,10 +812,16 @@ class SiteScope:
             max_distance_tooltip(self.session, included, dock.site_finish.max_distance_spin.value())
         )
 
+    def export_busy(self) -> bool:
+        """Ruling T4-a: an included grid is queued or preparing. The button and the
+        export's own refusal both ask this, so they never disagree: a grid left out
+        whose cancelled read still runs does not hold the export back."""
+        return busy(self.engine, self.included())
+
     def update_export_button(self) -> None:
         """Ruling T4-a: no export while an included grid is queued or preparing."""
         ready = bool(self.engine.ready_grids) and self.engine.lattice is not None
-        self.dock.export_button.setEnabled(ready and not busy(self.engine, self.included()))
+        self.dock.export_button.setEnabled(ready and not self.export_busy())
 
     def on_changed(self) -> None:
         """`SiteEngine.on_changed`, kept cheap: the rows, the export button, and
