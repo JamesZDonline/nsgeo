@@ -137,7 +137,7 @@ release's notes list everything in it.
   stays marked under the step list until it is fixed; the gain strip stops at
   ±120 dB, reaches every point, fits its caption and gets a Reset; the
   Difference view follows a dragged step; the panel names its line.
-  Designed; planning.
+  Built and walked through; awaiting merge.
 
 ### Next, in order
 
