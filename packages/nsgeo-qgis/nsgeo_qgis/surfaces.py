@@ -51,7 +51,6 @@ from nsgeo_qgis.surface_plan import (
     IN_TRANSACTION_REFUSAL,
     INPUTS,
     KIND_SURFACE,
-    LABEL_DELETED_CUT,
     MULTI_GRID_REFUSAL,
     WHY_NO_CUT,
     WHY_NO_DEPTH,
@@ -197,11 +196,15 @@ class Surfaces:
         unreadable = self.layers.unreadable_pick_ids(saved)
         unsaved = len(fids) - len(rows) - len(unreadable)
         no_grid = 0
+        deleted_cut = 0
         grids: set[str] = set()
         placed: list[tuple[float, float]] = []
         for row in rows:
             key = row.pick.line_key
             grid_id = self._grid_of(key)
+            if is_cut_key(key) and grid_id is None:
+                deleted_cut += 1
+                continue
             if grid_id is None or row.point is None:
                 no_grid += 1
                 continue
@@ -215,6 +218,7 @@ class Surfaces:
             n=len(fids),
             unsaved=unsaved,
             no_grid=no_grid,
+            deleted_cut=deleted_cut,
             unreadable=len(unreadable),
             grids=grids,
             spans_area=spans,
@@ -361,7 +365,10 @@ class Surfaces:
         cut_keys = {r.pick.line_key for r in held if is_cut_key(r.pick.line_key)}
         cuts = sorted([k, _vertices_of(session, k)] for k in cut_keys)
         return {
-            "picks": input_hash(picks),
+            # A cut pick's cut is part of what its pick means, so a deleted or redrawn cut reads
+            # "its picks changed". Only a surface with cut picks hashes the cuts, so one built
+            # before cut picks could join surfaces keeps the hashes it was built with (R7, R18).
+            "picks": input_hash(picks) if not cuts else input_hash({"picks": picks, "cuts": cuts}),
             "settings": input_hash(record.settings.to_dict()),
             "source": input_hash(
                 {
@@ -370,9 +377,6 @@ class Surfaces:
                     "transform": source.transform,
                     "lines": [[k, repr(session.line_for_key(k).placement)] for k in keys],
                     "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
-                    # Only a surface with cut picks hashes them, so one built before cut picks
-                    # could join surfaces keeps the hash it was built with.
-                    **({"cuts": cuts} if cuts else {}),
                 }
             ),
             # What a rebuild would use, field by field: the grid's record, or the Slices panel's
@@ -605,7 +609,10 @@ class Surfaces:
             for key, _ in rows:
                 if is_cut_key(key) and key not in cuts:
                     with contextlib.suppress(KeyError):
-                        cuts[key] = self.session.cut_for_key(key)
+                        cut = self.session.cut_for_key(key)
+                        # Only a cut on this grid, as the export and `pick_depths` take.
+                        if cut.grid_id == grid_id:
+                            cuts[key] = cut
             placed = place_picks(
                 rows,
                 got.lines,
@@ -660,10 +667,7 @@ class Surfaces:
 
     def line_label(self, key: str) -> str:
         if is_cut_key(key):
-            try:
-                return str(self.session.cut_for_key(key).name)
-            except KeyError:
-                return LABEL_DELETED_CUT
+            return str(self.session.cut_for_key(key).name)
         line = self.session.line_for_key(key)
         return str(getattr(line.placement, "label", None) or line.path.stem)
 

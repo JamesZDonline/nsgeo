@@ -199,6 +199,27 @@ def _spans(n: int, step: int) -> list[tuple[int, int]]:
     return [(j, min(j + step, n)) for j in range(0, n, step)]
 
 
+def _total_bytes(frame: CubeFrame, nd: int, walls_bytes: int) -> int:
+    """`cube.vti` and the walls: the one sum the dialog's figure and the run's refusal share."""
+    return export_size_bytes(frame.nx, frame.ny, nd) + walls_bytes
+
+
+@dataclass(frozen=True)
+class _Sizes:
+    """What `estimate` and `summary` both work from."""
+
+    frame: CubeFrame
+    source: SourceChoice
+    nd: int
+    t1: float
+    n_walls: int
+    walls_bytes: int
+
+    @property
+    def total_bytes(self) -> int:
+        return _total_bytes(self.frame, self.nd, self.walls_bytes)
+
+
 @dataclass(frozen=True)
 class FilledGrid:
     """A grid's prepared lines and its kept, filled cube (M16 B): what `ParaViewExport.fill` hands
@@ -353,12 +374,16 @@ class ParaViewExport:
         prepares nothing: it reads the panel's engine when that matches, else the first line's
         header and, for a preset that sets time zero, a probe of where that first line's zero
         falls."""
+        return self._sizes(grid_id, choice).total_bytes
+
+    def _sizes(self, grid_id: str, choice: VolumeChoice) -> _Sizes:
+        """The one computation of the size, which `estimate` and `summary` both read."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
         t0, t1 = self._time_range(source, choice)
-        z, nd = _levels(t0, t1, choice)
-        _n, walls = self._walls_size(grid_id, frame, nd, source.line_keys)
-        return export_size_bytes(frame.nx, frame.ny, nd) + walls
+        _z, nd = _levels(t0, t1, choice)
+        n_walls, walls_bytes = self._walls_size(grid_id, frame, nd, source.line_keys)
+        return _Sizes(frame, source, nd, t1, n_walls, walls_bytes)
 
     def _cut_paths(self, grid_id: str, frame: CubeFrame) -> list[np.ndarray]:
         """Each cut of the grid as a path in the frame's metres, in the cuts' order."""
@@ -399,11 +424,9 @@ class ParaViewExport:
         `estimate` and `cache_bytes`, which it uses) and prepares nothing, so a dialog can
         call it on every edit. Raises the same ValueError as `estimate` for a cell that is
         too fine, or a grid that cannot be exported."""
-        frame = self._frame(grid_id, choice)
-        source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source, choice)
-        _z, nd = _levels(t0, t1, choice)
-        n_walls, walls_bytes = self._walls_size(grid_id, frame, nd, source.line_keys)
+        sizes = self._sizes(grid_id, choice)
+        frame, source, nd, t1 = sizes.frame, sizes.source, sizes.nd, sizes.t1
+        n_walls, walls_bytes = sizes.n_walls, sizes.walls_bytes
         velocity = self.session.grid_depth_velocity(grid_id)
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
@@ -431,7 +454,7 @@ class ParaViewExport:
             n_lines=len(source.line_keys),
             n_surfaces=len(states),
             n_stale_surfaces=sum(1 for st in states if st.stale),
-            export_bytes=export_size_bytes(frame.nx, frame.ny, nd) + walls_bytes,
+            export_bytes=sizes.total_bytes,
             cache_bytes=self.cache_bytes(grid_id, choice),
             free_bytes=int(shutil.disk_usage(Path(self.session.root)).free),
             n_walls=n_walls,
@@ -760,7 +783,7 @@ class ParaViewExport:
             )
             _n, walls_bytes = self._walls_size(grid_id, frame, nd, [ln.key for ln in lines])
             reason = export_refusal(
-                export_size_bytes(frame.nx, frame.ny, nd) + walls_bytes,
+                _total_bytes(frame, nd, walls_bytes),
                 shutil.disk_usage(cache_dir).free,
             )
             if reason:
@@ -784,7 +807,7 @@ class ParaViewExport:
             )
             features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
-            walls = self._write_walls(partial, got, cut_keys, grid, choice, window, step)
+            walls = self._write_walls(partial, got, grid_id, cut_keys, choice, window, step)
             cuts = [
                 {"index": i, "key": k, "name": self.session.cut_for_key(k).name}
                 for i, k in enumerate(cut_keys)
@@ -1161,8 +1184,8 @@ class ParaViewExport:
         self,
         folder: Path,
         got: FilledGrid,
+        grid_id: str,
         cut_keys: Sequence[str],
-        grid: Grid,
         choice: VolumeChoice,
         window: int,
         step: Callable[[int], None],
@@ -1182,13 +1205,14 @@ class ParaViewExport:
         stretch = choice.stretch
         made: list[dict[str, Any]] = []
 
-        def one(name: str, kind: str, make: Callable[[], Any]) -> None:
+        def one(name: str, kind: str, make: Callable[[], Any], scale: Callable[[Any], Any]) -> None:
             step(1)
             try:
-                wall = make()
+                bare = make()
             except (ValueError, OverflowError) as exc:
                 _log(f"ParaView export: no wall for {kind} {name!r}: {exc}")
                 return
+            wall = scale(bare)  # outside the try: a bug here fails the export
             index = len(made)
             file = f"walls/{index}.vts"
             write_structured_grid(
@@ -1202,19 +1226,15 @@ class ParaViewExport:
             one(
                 Path(line.key).stem,
                 "line",
-                lambda line=line: wall_amplitude(
-                    line_wall(line, got.frame, got.z), window, squared=squared, first=first
-                ),
+                lambda line=line: line_wall(line, got.frame, got.z),
+                lambda w: wall_amplitude(w, window, squared=squared, first=first),
             )
-        for key in cut_keys:
-            cut = self.session.cut_for_key(key)
-            path = got.frame.to_local(grid.to_world(np.asarray(cut.vertices, dtype=float)))
+        for key, path in zip(cut_keys, self._cut_paths(grid_id, got.frame)):
             one(
-                cut.name,
+                self.session.cut_for_key(key).name,
                 "cut",
-                lambda path=path: wall_amplitude(
-                    cut_wall(got.filled, got.frame, path), window, squared=True, first=first
-                ),
+                lambda path=path: cut_wall(got.filled, got.frame, path),
+                lambda w: wall_amplitude(w, window, squared=True, first=first),
             )
         return made
 

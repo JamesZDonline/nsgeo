@@ -1537,11 +1537,15 @@ class NsgeoPlugin:
             check = self.surfaces.check(fids)
             labels = []
             cut_names = []
+            deleted_cuts = set()
             for row in self.layers.pick_rows(fids):
                 # A pick on a line no longer in the site has no label: the check says why it
                 # cannot be used. A cut is named as a cut, apart from the lines.
+                key = row.pick.line_key
+                if is_cut_key(key) and key not in self.session.cut_keys():
+                    deleted_cuts.add(key)
+                    continue
                 with contextlib.suppress(KeyError):
-                    key = row.pick.line_key
                     (cut_names if is_cut_key(key) else labels).append(self.surfaces.line_label(key))
             hint = resolution_hint(None)
             if check.grid_id is not None:
@@ -1552,7 +1556,7 @@ class NsgeoPlugin:
                     pass  # the generic line; the build will say what is wrong
             dialog = NewSurfaceDialog(
                 check,
-                selection_label(check.n, check.grid_id, labels, cut_names),
+                selection_label(check.n, check.grid_id, labels, cut_names, len(deleted_cuts)),
                 self.iface.mainWindow(),
                 taken=[r.name for r in self.surfaces.records()],
                 hint=hint,

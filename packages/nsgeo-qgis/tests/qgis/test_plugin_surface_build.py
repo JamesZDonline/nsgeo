@@ -6,6 +6,7 @@ writes what it made."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import types
@@ -776,10 +777,39 @@ def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
     assert made.report["fit"]["picks"] == 5
     assert surfaces.state(record.feature_id).stale == ()
     session.remove_cut(cut_key)
-    assert "source" in surfaces.state(record.feature_id).stale
+    # the panel's reason is the picks, not the grid's processing (R18)
+    assert surfaces.state(record.feature_id).stale == ("picks",)
     (again,) = surfaces.build([record.feature_id], progress=_noop)
     assert again.report["fit"]["picks"] == 4
     assert again.report["skipped"] == [{"line_key": cut_key, "why": WHY_NO_CUT}]
+
+
+def test_adding_a_cut_pick_to_a_surface_reads_as_its_picks_changing(built_site):
+    session, _, _, layers, surfaces = built_site
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    record = surfaces.create("Mixed", line_fids, SurfaceSettings(strength=0.0))
+    surfaces.build([record.feature_id], progress=_noop)
+    assert surfaces.state(record.feature_id).stale == ()
+    # a cut pick joining a line-only surface changes its picks and nothing else
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    surfaces.add_picks(record.feature_id, cut_fids)
+    assert surfaces.state(record.feature_id).stale == ("picks",)
+    surfaces.build([record.feature_id], progress=_noop)
+    assert surfaces.state(record.feature_id).stale == ()
+
+
+def test_a_cut_pick_whose_cut_is_on_another_grid_is_reported_not_placed(built_site):
+    session, _, _, layers, surfaces = built_site
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    # a hand edit moved the cut to another grid
+    session.site.cuts[:] = [dataclasses.replace(c, grid_id="Grid Z") for c in session.site.cuts]
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["fit"]["picks"] == 4
+    assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_NO_CUT}]
 
 
 def test_a_cut_pick_outside_the_frame_is_reported_on_a_hole(built_site):
@@ -849,6 +879,18 @@ def test_a_line_only_surface_hashes_its_source_as_before_cut_picks_existed(built
         }
     )
     assert surfaces.inputs(record.feature_id)["source"] == before
+
+
+def test_a_line_only_surface_hashes_its_picks_as_before_cut_picks_existed(built_site):
+    session, _, _, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    before = input_hash(
+        sorted(
+            [r.pick.line_key, r.pick.trace, round(r.pick.radar_ns, 6)]
+            for r in surfaces.members(record.feature_id)
+        )
+    )
+    assert surfaces.inputs(record.feature_id)["picks"] == before
 
 
 def test_a_cut_pick_is_placed_through_the_grids_world_frame():

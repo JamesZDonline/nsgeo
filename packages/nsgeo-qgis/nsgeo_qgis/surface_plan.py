@@ -120,6 +120,7 @@ def selection_refusal(
     grids: Collection[str],
     spans_area: bool,
     no_grid: int = 0,
+    deleted_cut: int = 0,
     unreadable: int = 0,
     minimum: int = MIN_PICKS,
 ) -> str:
@@ -141,6 +142,11 @@ def selection_refusal(
         return (
             f"{_count(unreadable, 'has', 'have')} no trace or time; edit or delete "
             f"{'it' if unreadable == 1 else 'them'} in the picks layer."
+        )
+    if deleted_cut:
+        return (
+            f"{_count(deleted_cut, 'is', 'are')} on a cut that has been deleted, so "
+            f"{'it' if deleted_cut == 1 else 'they'} cannot be placed."
         )
     if no_grid:
         return (
@@ -242,7 +248,6 @@ WHY_NO_DEPTH = "their depth could not be found"
 WHY_NO_POSITION = "their position on the line could not be found"
 WHY_OTHER_CLOCK = "they were made on a cut on another clock"
 WHY_NO_CUT = "their cut has been deleted"
-LABEL_DELETED_CUT = "a deleted cut"
 
 
 def cut_pick_base(pick: Any) -> str:
@@ -489,10 +494,15 @@ def merge_range(shared: tuple[float, float] | None, low: float, high: float) -> 
 
 # ---- the New surface dialog and the Surfaces panel ---------------------------------------
 def selection_label(
-    n: int, grid_id: str | None, labels: Sequence[str], cuts: Sequence[str] = ()
+    n: int,
+    grid_id: str | None,
+    labels: Sequence[str],
+    cuts: Sequence[str] = (),
+    deleted_cuts: int = 0,
 ) -> str:
     """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033; cut Cut 1).` `labels`
-    are line names, `cuts` cut names; each is named for what it is."""
+    are line names, `cuts` cut names; each is named for what it is. `deleted_cuts` counts the cuts
+    the picks name that no longer exist."""
     if n <= 0:
         return "No picks selected."
     text = f"{n} pick{'' if n == 1 else 's'} selected"
@@ -510,6 +520,8 @@ def selection_label(
         parts.append(f"cut {cuts[0]}")
     elif len(cuts) > 1:
         parts.append(f"cuts {', '.join(cuts)}")
+    if deleted_cuts:
+        parts.append("a deleted cut" if deleted_cuts == 1 else f"{deleted_cuts} deleted cuts")
     if parts:
         return f"{text}, {where} ({'; '.join(parts)})."
     return f"{text}, {where}."

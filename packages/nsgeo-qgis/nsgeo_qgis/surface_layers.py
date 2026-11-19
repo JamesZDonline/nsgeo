@@ -121,6 +121,7 @@ class SurfaceLayers:
         session.picks_changed.connect(self.request_sync)
         session.slice_sources_changed.connect(self.request_sync)
         session.lines_changed.connect(self.request_sync)
+        session.cuts_changed.connect(self.request_sync)
         session.grids_changed.connect(self.request_sync)
         session.presets_changed.connect(self.request_sync)
         session.site_opened.connect(self.request_sync)
@@ -186,6 +187,7 @@ class SurfaceLayers:
             self.session.picks_changed,
             self.session.slice_sources_changed,
             self.session.lines_changed,
+            self.session.cuts_changed,
             self.session.grids_changed,
             self.session.presets_changed,
             self.session.site_opened,

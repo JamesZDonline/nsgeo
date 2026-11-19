@@ -1450,6 +1450,10 @@ def test_walls_stand_on_the_levels_the_cube_has_with_no_time_zero(site):
     folder = export.run("Grid A", choice, progress=_noop)
     ext, origin, spacing, _ = read_vti(folder / "cube.vti")
     nd = ext[5] + 1
+    got = export.fill("Grid A", choice, progress=_noop)
+    # the precondition: the fill really has levels before time zero, which the cube drops
+    assert got.z.nz > nd
+    del got
     cube_top = origin[2] + spacing[2] * (nd - 1)  # the shallowest level
     cube_bottom = origin[2]
     walls = json.loads((folder / "export.json").read_text())["walls"]

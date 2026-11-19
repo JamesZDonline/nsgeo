@@ -83,6 +83,12 @@ def test_selection_refusals_come_in_order():
     assert "straight line" in selection_refusal(**{**ok, "n": 2})
     # a pick that cannot be placed comes before the grids check
     assert "not on a line of a grid" in selection_refusal(**{**everything, "no_grid": 1})
+    # picks on a deleted cut are told so, ahead of the generic no-grid wording
+    gone = selection_refusal(**{**everything, "deleted_cut": 1, "no_grid": 1})
+    assert gone == "1 of these picks is on a cut that has been deleted, so it cannot be placed."
+    assert "2 of these picks are on a cut that has been deleted, so they" in selection_refusal(
+        **{**everything, "deleted_cut": 2}
+    )
     # adding to a surface needs no area of its own
     assert selection_refusal(**{**ok, "n": 1, "spans_area": True, "minimum": 1}) == ""
 
@@ -263,6 +269,12 @@ def test_the_dialog_and_panel_wording():
     # cuts are named as cuts, never in the line range
     assert selection_label(4, "1", ["F__001"], ["Cut 1"]) == (
         "4 picks selected, all on Grid 1 (line F__001; cut Cut 1)."
+    )
+    assert selection_label(4, "1", ["F__001"], [], 1) == (
+        "4 picks selected, all on Grid 1 (line F__001; a deleted cut)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"], 2) == (
+        "2 picks selected, all on Grid 1 (cut Cut 1; 2 deleted cuts)."
     )
     assert selection_label(2, "1", [], ["Cut 1"]) == "2 picks selected, all on Grid 1 (cut Cut 1)."
     assert selection_label(3, "1", ["F__001", "F__003"], ["Cut 2", "Cut 1"]) == (

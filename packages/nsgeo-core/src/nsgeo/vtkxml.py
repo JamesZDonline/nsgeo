@@ -1,6 +1,6 @@
 """Streaming VTK XML writers: ImageData (.vti), PolyData (.vtp), StructuredGrid (.vts), numpy only.
 
-Both write the appended-raw layout (little endian, UInt64 length headers) that
+All three write the appended-raw layout (little endian, UInt64 length headers) that
 ParaView and VTK read directly. `write_image_data` takes each array as a
 callable that yields chunks, so a volume never has to sit in memory whole.
 """

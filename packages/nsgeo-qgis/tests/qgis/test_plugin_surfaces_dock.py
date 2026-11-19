@@ -47,14 +47,12 @@ def _made(plugin, name="Bowl", build=True, **settings):
     return record
 
 
-def test_deleting_a_cut_marks_its_surface_stale_in_the_panel(surface_plugin):
+def _surface_with_a_cut_pick(plugin, **settings):
     import json as _json
 
     from nsgeo_qgis.session import Pick
 
-    plugin = surface_plugin
-    session = plugin.session
-    cut_key = session.add_cut("Grid A", [(0.5, 0.5), (0.5, 11.5)])
+    cut_key = plugin.session.add_cut("Grid A", [(0.5, 0.5), (0.5, 11.5)])
     plugin.layers.write_pick(
         Pick(
             line_key=cut_key,
@@ -70,15 +68,45 @@ def test_deleting_a_cut_marks_its_surface_stale_in_the_panel(surface_plugin):
         )
     )
     fids = sorted(f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures())
-    record = plugin.surfaces.create("Mixed", fids, SurfaceSettings(strength=0.0))
+    settings.setdefault("strength", 0.0)
+    record = plugin.surfaces.create("Mixed", fids, SurfaceSettings(**settings))
     plugin.build_surfaces([record.feature_id])
     QCoreApplication.processEvents()
+    plugin.surfaces_dock.refresh()
+    return cut_key, record
+
+
+def test_deleting_a_cut_marks_its_surface_stale_in_the_panel(surface_plugin):
+    plugin = surface_plugin
+    session = plugin.session
+    cut_key, record = _surface_with_a_cut_pick(plugin)
     dock = plugin.surfaces_dock
-    dock.refresh()
     assert _rows(dock)[0][4] == ""
     session.remove_cut(cut_key)  # emits cuts_changed and nothing else the panel watches
     QCoreApplication.processEvents()
     assert _rows(dock)[0][4] == "stale"
+    assert plugin.surfaces.state(record.feature_id).stale == ("picks",)
+
+
+def test_clicking_a_cut_pick_outlier_opens_its_cut(surface_plugin, monkeypatch):
+    plugin = surface_plugin
+    monkeypatch.setattr(plugin.layers, "select_picks", lambda ids: None)
+    session = plugin.session
+    cut_key, record = _surface_with_a_cut_pick(plugin, strength=1e9)  # every pick is an outlier
+    dock = plugin.surfaces_dock
+    dock.table.selectRow(0)
+    index = next(i for i, o in enumerate(dock._outliers) if o["line_key"] == cut_key)
+    session.open_line(session.keys()[0])
+    assert session.current_key != cut_key
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
+    assert session.current_key == cut_key
+    # a cut that has been deleted is only selected
+    other = session.keys()[0]
+    session.open_line(other)
+    session.remove_cut(cut_key)
+    QCoreApplication.processEvents()
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
+    assert session.current_key == other
 
 
 def test_the_panels_menu_lists_surfaces(surface_plugin):

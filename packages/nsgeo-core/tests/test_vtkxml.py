@@ -94,7 +94,7 @@ def test_image_data_bytes_is_within_the_header_allowance_of_the_file(tmp_path):
     assert bound - 4096 <= size <= bound
 
 
-def test_structured_grid_round_trips_and_its_size_is_exact(tmp_path):
+def test_structured_grid_round_trips_and_its_size_estimate_is_a_tight_upper_bound(tmp_path):
     pts = np.random.default_rng(0).random((4, 5, 3))
     amp = np.arange(20.0).reshape(4, 5)
     n = write_structured_grid(tmp_path / "w.vts", pts, {"amplitude": amp})
