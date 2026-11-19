@@ -5,10 +5,12 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+import threading
 import time
 
 import numpy as np
 import pytest
+from nsgeo.model.survey import Line
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     NORMALISATION_METHODS,
@@ -38,7 +40,7 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
 )
-from plugin_testing import LoadCounter, spin_until
+from plugin_testing import LoadCounter, spin_until, wait_for_site
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -78,7 +80,7 @@ def prepared(make_site, site3, source=None, resolution=RES, **kwargs):
     errors: list[str] = []
     site = make_site(site3.session, on_error=errors.append, **kwargs)
     site.set_source(source if source is not None else site3.source())
-    assert site.wait_until_idle(60_000), "the site did not finish preparing"
+    wait_for_site(site, 60_000)
     site.set_resolution(resolution)
     return site, errors
 
@@ -168,7 +170,7 @@ def test_two_engines_never_prepare_at_once(site3, make_site, monkeypatch):
         site = make_site(session, on_error=errors.append, exclusive_with=[peer])
         peer.set_source(site3.choice("A"))
         site.set_source(site3.source())  # the same moment
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
         assert peer.wait_for_preparation(20_000)
         assert counter.calls == 16
         assert [site.grid_state(g) for g in "ABC"] == ["ready"] * 3
@@ -181,7 +183,7 @@ def test_two_engines_never_prepare_at_once(site3, make_site, monkeypatch):
         assert not site.is_running
         assert site.grid_state("A") == "ready"
         site.set_source(site3.source(transform="amp_abs"))
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
 
         assert counter.max_concurrent == 1, (
             f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
@@ -215,7 +217,7 @@ def test_a_preparation_that_outlives_its_cancel_wait_holds_back_every_other(
     assert site.has_live_task and site.engine_for("A").has_live_task
 
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.max_concurrent == 1, (
         f"a grid started while a cancelled task still ran (max={counter.max_concurrent})"
     )
@@ -242,7 +244,7 @@ def test_a_dropped_grid_whose_preparation_outlives_its_cancel_wait_holds_back_ev
     site.set_source(site3.source("BC"))  # A dropped mid-preparation
     assert site.engine_for("A") is None
     assert site.has_live_task, "A's abandoned task is still reading a line"
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"a grid started beside a dropped grid's task (max={counter.max_concurrent})"
@@ -282,7 +284,7 @@ def test_a_retry_inside_a_dropped_grids_cancel_wait_does_not_re_dispatch_it(
 
     monkeypatch.setattr(engine_a, "cancel_preparation", cancel_then_retry)
     site.set_source(site3.source("BC"))  # A dropped
-    assert site.wait_until_idle(10_000), "the queue stalled behind the dropped grid"
+    wait_for_site(site, 10_000)
     assert site.ready_grids == ("B", "C")
     assert site.engine_for("A") is None and not site.has_live_task
     assert counter.max_concurrent == 1
@@ -305,7 +307,7 @@ def test_a_moved_grid_whose_preparation_outlives_its_cancel_wait_is_held_back(
     assert spin_until(lambda: counter.calls >= 1), "A's first line was never read"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"the moved grid re-prepared beside its own old task (max={counter.max_concurrent})"
@@ -330,7 +332,7 @@ def test_a_moved_grid_re_prepares_through_the_queue_never_alongside_another(
     assert site.grid_state("A") == "ready"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"the moved grid re-prepared beside another (max_concurrent={counter.max_concurrent})"
@@ -358,7 +360,7 @@ def test_a_grid_moved_while_it_prepares_is_re_queued_not_failed(site3, make_site
     assert site.grid_state("A") == "preparing"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert not any(s.startswith("failed") for s in states), states
     assert site.grid_state("A") == "ready"
@@ -394,7 +396,7 @@ def test_closing_the_site_mid_preparation_clears_without_overlap(site3, make_sit
     session.open_site(site3.json_path)
     site.set_resolution(RES)
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.max_concurrent == 1
     assert site.ready_grids == ("A", "B", "C")
 
@@ -412,7 +414,7 @@ def test_grids_prepare_in_order_and_each_is_drawn_as_soon_as_ready(site3, make_s
     site.set_resolution(RES)
     seen.clear()
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     # (`on_changed` also fires as grids are queued and start: ready is still ().)
     assert list(dict.fromkeys(r for r in seen if r)) == [("A",), ("A", "B"), ("A", "B", "C")]
@@ -434,7 +436,7 @@ def test_changing_one_grids_preset_re_prepares_only_that_grid(site3, make_site, 
             grids=(site3.choice("A"), site3.choice("B", preset="raw"), site3.choice("C")),
         )
     )
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 16, f"{counter.calls - 12} lines read again, not B's four"
     assert site.engine_for("A").prepared_lines()[0] is a_line
     assert site.engine_for("B").choice.preset == "raw"
@@ -448,7 +450,7 @@ def test_dropping_a_grid_from_the_source_releases_it_and_keeps_the_rest(
     counter = LoadCounter(monkeypatch)
     site, _ = prepared(make_site, site3)
     site.set_source(site3.source("AB"))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 12
     assert site.ready_grids == ("A", "B")
     assert site.engine_for("C") is None
@@ -465,7 +467,7 @@ def test_each_grid_reports_its_progress_while_it_prepares(site3, make_site, monk
     site.set_source(site3.source())
     assert site.grid_progress("A") == (0, 4)
     assert site.grid_progress("B") is None  # queued
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     preparing = [progress for state, progress in seen if state == "preparing"]
     assert preparing and preparing[0] == (0, 4), seen
@@ -495,7 +497,7 @@ def test_dropping_a_grid_or_emptying_its_lines_is_announced_even_before_it_is_re
     site.set_source(SiteSource(transform="amp_envelope", grids=(site3.choice("A"), no_lines)))
     assert changes, "dropping queued C and emptying queued B announced nothing"
     assert changes[-1].get("B") == "no lines" and "C" not in changes[-1]
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.ready_grids == ("A",)
 
 
@@ -507,7 +509,7 @@ def test_a_grid_with_no_lines_is_listed_and_skipped(site3, make_site, monkeypatc
         SiteSource(transform="amp_envelope", grids=(site3.choice("A"), site3.choice("B"), no_lines))
     )
     assert site.grid_state("C") == "no lines"
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 8
     assert site.grid_state("C") == "no lines"
     assert site.ready_grids == ("A", "B")
@@ -530,7 +532,7 @@ def test_a_grid_that_cannot_be_prepared_is_failed_and_the_rest_continue(site3, m
             grids=(site3.choice("A"), site3.choice("B", preset="bad"), site3.choice("C")),
         )
     )
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.grid_state("B").startswith("failed: ")
     assert "Absolute value" in site.grid_state("B")  # by title, as the Processing list shows it
     assert site.ready_grids == ("A", "C")
@@ -1036,7 +1038,7 @@ def far_site(site3, make_site, max_pixels):
     site.max_pixels = max_pixels
     site.max_covered = 10**9
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     return site, errors
 
 
@@ -1117,7 +1119,7 @@ def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):
     site.set_resolution(RES)
     assert site.is_preview
     site.set_source(site3.source("AB"))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     site.set_resolution(RES)
     assert not site.is_preview
     assert site.lattice.pixel == RES.cell
@@ -1160,7 +1162,7 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     assert before.lattice.x0 == 500.0
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(490.0, 700.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.grid_state("A") == "ready"
     assert site.engine_for("A").frame.origin == (490.0, 700.0)
 
@@ -1178,7 +1180,7 @@ def test_removing_a_grid_drops_it_from_the_site(site3, make_site):
     changes: list[tuple[str, ...]] = []
     site = make_site(session, on_changed=lambda: changes.append(site.ready_grids))
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     site.set_resolution(RES)
     changes.clear()
 
@@ -1202,7 +1204,7 @@ def test_a_velocity_edit_does_not_re_prepare_or_change_the_slice(site3, make_sit
     calls = counter.calls
 
     site3.session.set_grid_velocity("B", VelocityModel.constant(0.09))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert counter.calls == calls
     assert site.ready_grids == ("A", "B", "C")
     np.testing.assert_array_equal(site.slice_at(20.0, 5.0, **TICK).array, before.array)
@@ -1230,7 +1232,7 @@ def test_a_velocity_edit_keeps_every_other_grids_cube_and_every_cache(
     calls = counter.calls
 
     site3.session.set_grid_velocity("B", VelocityModel.constant(0.09))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert counter.calls == calls, "a velocity edit re-prepared"
     assert site.engine_for("A").has_cube and site.engine_for("C").has_cube
     assert not site.engine_for("B").has_cube, "Ruling Q: B's cube froze B's old velocity"
@@ -1250,7 +1252,7 @@ def test_a_spacing_edit_drops_the_seams_but_no_gather(site3, make_site):
     site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     gathers, seams = dict(site._gathers), site._seams
     session.replace_grid(dataclasses.replace(session.grid("C"), default_spacing=2.0))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert site._seams is None
     assert all(site._gathers.get(g) is gathers[g] for g in "ABC")
     site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
@@ -1268,3 +1270,37 @@ def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
     assert text.startswith(f"3 grids · 12 lines held in memory, {format_bytes(held)} · ")
     assert re.fullmatch(r".* · slices redraw in \d+ ms", text), text
+
+
+def test_a_timed_out_wait_names_what_holds_the_site(site3, make_site, monkeypatch):
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="AB"))
+    try:
+        with pytest.raises(AssertionError) as caught:
+            wait_for_site(site, 300)
+    finally:
+        release.set()
+    message = str(caught.value)
+    assert "the site did not finish preparing in 300 ms" in message
+    assert "active: True · preparing: 'A' · queue: ['B']" in message
+    assert "engine A: running True · live task True" in message
+    assert "grid A: preparing (0 of 4)" in message
+    assert "grid B: queued" in message
+    wait_for_site(site)  # released: it finishes
+
+
+def test_the_busy_report_never_raises_on_a_disposed_site(site3, make_site):
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="A"))
+    wait_for_site(site)
+    site.dispose()
+    report = site.busy_report()
+    assert report.startswith("active: False · preparing: None · queue: []")

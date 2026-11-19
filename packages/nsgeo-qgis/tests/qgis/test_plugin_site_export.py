@@ -32,6 +32,7 @@ from nsgeo_qgis.slice_export import (
 )
 from nsgeo_qgis.slices_plan import Resolution, SiteSource, SliceFinish
 from osgeo import gdal
+from plugin_testing import wait_for_site
 from qgis.core import QgsRasterLayer
 
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
@@ -54,7 +55,7 @@ def make_site():
         site = SiteEngine(site3.session)
         made.append(site)
         site.set_source(site3.source())
-        assert site.wait_until_idle(60_000), "the site did not finish preparing"
+        wait_for_site(site, 60_000)
         site.set_resolution(RES)
         return site
 
@@ -414,7 +415,7 @@ def test_a_ready_grid_with_no_site_axis_exports_as_absent(
     site = SiteEngine(site3.session)
     try:
         site.set_source(site3.source())
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
         site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=18.5, t1_ns=60.0))
         assert site.engine_for("C").z is None
         path = tmp_path / "r.tif"
@@ -634,7 +635,7 @@ def test_a_mixed_site_records_each_grids_time_base_and_its_own(site3, tmp_path, 
                 grids=(site3.choice("A", "p"), site3.choice("B", "raw")),
             )
         )
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
         site.set_resolution(RES)
         path = tmp_path / "mixed.tif"
         coverage = tmp_path / "mixed_coverage.tif"

@@ -55,6 +55,7 @@ from plugin_testing import (
     slow_jobs,
     spin_until,
     wait_for_export,
+    wait_for_site,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtTest import QTest
@@ -115,7 +116,7 @@ def _events(n: int = 5) -> None:
 
 def settle(dock) -> None:
     """Wait for the site to finish preparing, then let its coalesced tick run."""
-    assert dock.site_engine.wait_until_idle(60_000), "the site did not finish preparing"
+    wait_for_site(dock.site_engine, 60_000)
     _events()
 
 

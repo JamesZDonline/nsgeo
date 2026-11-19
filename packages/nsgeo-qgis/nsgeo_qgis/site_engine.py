@@ -1446,6 +1446,50 @@ class SiteEngine(QObject):
             engine.dispose()
         self.on_error = None
 
+    def busy_report(self) -> str:
+        """Plain text on what keeps the site engine running, for a hang's message.
+
+        Never raises: a report that fails while a test is already failing
+        would hide the cause it exists to show.
+        """
+        try:
+            moved = ""
+            if self._preparing is not None and (
+                self._registration(self._preparing) != self._preparing_fp
+            ):
+                moved = " (moved since dispatch)"
+            lines = [
+                f"active: {self._active} · preparing: {self._preparing!r}{moved}"
+                f" · queue: {self._queue!r}",
+                f"retry timer: {'on' if self._retry.isActive() else 'off'}"
+                f" · reaper timer: {'on' if self._reaper.isActive() else 'off'}"
+                f" · in dispatch: {self._in_dispatch}",
+            ]
+
+            def engine_line(label: str, e: SliceEngine) -> str:
+                return (
+                    f"{label}: running {e.is_running} · live task {e.has_live_task}"
+                    f" · pending tasks {e.pending_tasks}"
+                )
+
+            for grid_id, engine in self._engines.items():
+                lines.append(engine_line(f"engine {grid_id}", engine))
+            for n, engine in enumerate(self._retiring, 1):
+                lines.append(engine_line(f"retiring engine {n}", engine))
+            for n, peer in enumerate(self._exclusive_with, 1):
+                lines.append(f"exclusive peer {n}: live task {peer.has_live_task}")
+            order = [c.grid_id for c in self._source.grids] if self._source else []
+            order += [g for g in self._states if g not in order]
+            for grid_id in order:
+                text = self._states.get(grid_id, "unknown")
+                if grid_id in self._progress:
+                    done, total = self._progress[grid_id]
+                    text += f" ({done} of {total})"
+                lines.append(f"grid {grid_id}: {text}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 -- the report must not raise
+            return f"could not describe the site: {exc}"
+
     def wait_until_idle(self, timeout_ms: int = 60_000) -> bool:
         """Spin the event loop until nothing is preparing or queued. For tests."""
         if not self.is_running:
