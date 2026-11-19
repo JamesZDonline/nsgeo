@@ -18,10 +18,16 @@ from nsgeo.geometry.grid import Grid
 
 ALONG_DEG = 20.0
 MIN_VOTE_M = 1.0
-# "More than half" is judged with this much relative slack, so that an even
-# cross-hatch whose chords differ by metre-fractions of rounding does not
-# tip into having a main direction.
+# "More than half" is judged with this much relative slack: a cross-hatch whose two
+# halves differ in summed length by less than this (floating-point rounding, a
+# millimetre of wobble) is still an even cross-hatch and has no main direction.
 _HALF_SLACK = 1e-6
+
+
+def _mod(value: float, modulus: float) -> float:
+    """`value % modulus` in [0, modulus): Python's float % rounds a tiny negative up to modulus."""
+    r = value % modulus
+    return 0.0 if r >= modulus else r
 
 
 def _finite(track: np.ndarray) -> np.ndarray:
@@ -31,7 +37,7 @@ def _finite(track: np.ndarray) -> np.ndarray:
 
 def _fold(azimuth: float) -> float:
     """Azimuth folded into (-90, 90]: +Y follows the axis, whichever way it was walked."""
-    a = azimuth % 180.0
+    a = _mod(azimuth, 180.0)
     return a - 180.0 if a > 90.0 else a
 
 
@@ -46,7 +52,7 @@ def _votes(tracks: Sequence[np.ndarray]) -> list[tuple[int, float, float]]:
         chord = float(math.hypot(d[0], d[1]))
         if chord < MIN_VOTE_M:
             continue
-        out.append((i, math.degrees(math.atan2(d[0], d[1])) % 180.0, chord))
+        out.append((i, _mod(math.degrees(math.atan2(d[0], d[1])), 180.0), chord))
     return out
 
 
@@ -66,7 +72,7 @@ def _along(tracks: Sequence[np.ndarray]) -> tuple[float, list[int]] | None:
     total = float(w.sum())
     if math.hypot(c, s) <= 1e-9 * total:
         return None
-    main = (math.degrees(math.atan2(s, c)) / 2.0) % 180.0
+    main = _mod(math.degrees(math.atan2(s, c)) / 2.0, 180.0)
     along = [(i, ch) for i, az, ch in votes if _axial_diff(az, main) <= ALONG_DEG]
     if sum(ch for _, ch in along) <= 0.5 * total * (1.0 + _HALF_SLACK):
         return None
@@ -90,7 +96,8 @@ def measure_spacing(tracks: Sequence[np.ndarray]) -> float | None:
     if found is None or len(found[1]) < 2:
         return None
     means = np.sort(_cross_means(tracks, found[1], found[0]))
-    return float(np.median(np.diff(means)))
+    gap = float(np.median(np.diff(means)))
+    return gap if gap > 0.0 else None
 
 
 @dataclass(frozen=True)
@@ -117,7 +124,7 @@ def _build(
     x_hat, y_hat = Grid("", (0.0, 0.0), azimuth, 1.0, 1.0, "", 1.0).axes()
     origin = cmin * x_hat + smin * y_hat
     return TrackFrame(
-        (float(origin[0]), float(origin[1])), azimuth % 360.0, cmax - cmin, smax - smin, lined
+        (float(origin[0]), float(origin[1])), _mod(azimuth, 360.0), cmax - cmin, smax - smin, lined
     )
 
 
@@ -126,10 +133,11 @@ def _hull(pts: np.ndarray) -> np.ndarray:
     p = np.unique(pts, axis=0)
     if len(p) < 3:
         return p
+    seq = p.tolist()  # Python floats: the loop below is far slower over numpy scalars
 
-    def half(seq: np.ndarray) -> list[np.ndarray]:
-        out: list[np.ndarray] = []
-        for q in seq:
+    def half(points: list[list[float]]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for q in points:
             while len(out) >= 2:
                 a, b = out[-2], out[-1]
                 if (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]) <= 0.0:
@@ -139,7 +147,7 @@ def _hull(pts: np.ndarray) -> np.ndarray:
             out.append(q)
         return out
 
-    lower, upper = half(p), half(p[::-1])
+    lower, upper = half(seq), half(seq[::-1])
     return np.array(lower[:-1] + upper[:-1])
 
 

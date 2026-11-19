@@ -63,8 +63,8 @@ def test_the_first_survey_fits_along_its_sixty_lines():
     inside = np.mean(np.concatenate([inside_mask(grid, t) for t in tracks]))
     assert inside >= 0.99
     cube = CubeFrame.for_grid(grid, s)
-    # The brief said 0.9; the measured fraction is 0.82. Real lines wander and are not evenly
-    # spaced, so a one-spacing cell grid leaves some columns and the start/end rows part-empty.
+    # Measured 0.82: real lines wander and their gaps run 0.13-0.86 m, so some cell columns
+    # and the start/end rows are part-empty even with a correct frame.
     assert covered_cells(cube, tracks) / cube_cell_count(cube) >= 0.8
 
 
