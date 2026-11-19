@@ -479,6 +479,24 @@ def test_a_declined_difference_falls_back_to_the_ordinary_result(opened):
     assert cleared == [1]
 
 
+def test_clear_resets_the_difference_view(opened):
+    """#20 item 4. No real path reaches `_clear` with a Difference view
+    showing today (`close_site` goes through `_open("")` first, which resets
+    it), so this calls it directly: a guard for the day one does. It fails
+    without the `_difference_index = -1` / label reset in `_clear`."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("background_mean"))
+    dock.set_difference_index(1)
+    cleared = []
+    dock.difference_cleared.connect(lambda: cleared.append(1))
+    dock._clear()
+    assert dock._difference_index == -1
+    assert dock.difference_label.text() == ""
+    assert cleared == [1]
+
+
 def test_a_step_failing_under_the_difference_view_is_reported_once(opened):
     """A difference reads the stack's intermediates, so a step that fails
     upstream of it fails the difference and the ordinary result alike, with
