@@ -6,6 +6,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import (
     PREVIEW_SUFFIX,
@@ -765,6 +766,37 @@ def test_the_note_never_widens_the_panel(opened):
         _events()
 
 
+def test_the_line_label_wraps(opened):
+    """Spec 7: the label wraps. Fails if `setWordWrap(True)` goes: at a
+    narrow width a long name of words then needs no more than one line."""
+    session, dock, key = opened
+    try:
+        dock.show()
+        _events()
+        one_line = dock.line_label.fontMetrics().height()
+        dock.line_label.setText("<b>" + " ".join(["word"] * 80) + "</b>")
+        assert dock.line_label.wordWrap()
+        assert dock.line_label.heightForWidth(120) > 2 * one_line
+    finally:
+        dock.hide()
+        dock.deleteLater()
+        _events()
+
+
+def test_the_label_follows_the_open_line_to_another_grid(opened):
+    session, dock, key = opened
+    session.add_grid(Grid("B", (900.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.move_lines([key], "B")
+    assert "· grid B" in dock.line_label.text()
+    assert "· grid A" not in dock.line_label.text()
+
+
+def test_the_label_follows_a_rename_of_the_open_line(opened):
+    session, dock, key = opened
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, label="RENAMED")])
+    assert "<b>RENAMED</b>" in dock.line_label.text()
+
+
 @needs_real_data
 def test_the_real_one_sample_dewow_is_noted(qgis_app, tmp_path):
     session = SiteSession()
@@ -805,10 +837,10 @@ def test_the_panel_names_the_previewed_line_too(opened):
 
 
 def test_a_line_name_is_escaped_and_never_widens_the_panel(qgis_app, tmp_path):
-    """Fails if the name is not html-escaped, and if the label loses the
-    Ignored horizontal policy or word wrap (a long unbroken name then sets
-    the minimum). Shown and measured like the note's width test, and hidden
-    and deleted at the end."""
+    """Fails if the name is not html-escaped, if the label loses the Ignored
+    horizontal policy (a long unbroken name then sets the minimum). Word wrap
+    is pinned by `test_the_line_label_wraps`, not here. Shown and measured
+    like the note's width test, and hidden and deleted at the end."""
     session = SiteSession()
     dock = ProcessingDock(session)
     session.new_site(tmp_path)

@@ -308,6 +308,8 @@ class ProcessingDock(QgsDockWidget):
 
         session.line_opened.connect(self.rebuild)
         session.preview_changed.connect(self._on_preview_changed)
+        # A move to another grid or a rename changes the name or grid shown.
+        session.lines_changed.connect(self._update_line_label)
         session.stack_changed.connect(self._on_stack_changed)
         session.line_loaded.connect(self._on_line_loaded)
         session.site_closed.connect(self.rebuild)
@@ -650,18 +652,21 @@ class ProcessingDock(QgsDockWidget):
                 self._emit_difference(True)
 
     def _on_rows_moved(self, _parent: Any, start: int, _end: int, _dest: Any, row: int) -> None:
-        if self._updating:
-            return
-        key = self.key()
-        if key is None:
-            return
-        dst = dest_index(start, row)
-        if dst != start:
-            self.session.move_step(key, start, dst)
-            # The view always shows the selected step (#13): the selection
-            # followed the drag, so the Difference view follows it too.
-            if self.diff_button.isChecked():
-                self._emit_difference(True)
+        try:
+            if self._updating:
+                return
+            key = self.key()
+            if key is None:
+                return
+            dst = dest_index(start, row)
+            if dst != start:
+                self.session.move_step(key, start, dst)
+                # The view always shows the selected step (#13): the selection
+                # followed the drag, so the Difference view follows it too.
+                if self.diff_button.isChecked():
+                    self._emit_difference(True)
+        except Exception as exc:
+            _log(f"_on_rows_moved: {exc}")
 
     # ---- actions ----------------------------------------------------------
     def add_step(self, name: str) -> None:
