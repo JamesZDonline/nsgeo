@@ -437,9 +437,10 @@ this line) is refused with a message saying which setting to change. The reason
 stays in a Warnings box under the step list, with the step marked ⛔, until you
 fix the setting, remove the step, turn it off, or open another line. When you
 open or hover over a line whose steps can't run, the Profile panel says so
-instead of showing the previous line's picture. If a project you open holds a setting nsgeo no longer accepts at all,
-such as an epsilon of 0 or a missing value, that step is turned off, reset or
-removed, and the nsgeo log says what changed.
+instead of showing the previous line's picture. If a project you open holds a
+setting nsgeo no longer accepts at all, such as an epsilon of 0 or a missing
+value, that step is turned off, reset or removed, and the nsgeo log says what
+changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
