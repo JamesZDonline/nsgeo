@@ -743,18 +743,25 @@ def test_a_preset_that_refuses_is_noted(opened):
 
 
 def test_the_note_never_widens_the_panel(opened):
-    """Fails if WarningsPanel's labels lose setWordWrap(True) or the Ignored
-    horizontal policy. The dock is shown and its events processed before both
-    measurements: an unshown dock keeps a cached minimum and hides the mutant."""
+    """Fails if WarningsPanel's labels lose the Ignored horizontal policy (an
+    unbroken token wider than the panel then sets the minimum), and fails if
+    they lose both it and setWordWrap(True). The dock is shown and its events
+    processed before both measurements: an unshown dock keeps a cached minimum
+    and hides the mutant. It is hidden and deleted at the end."""
     _, dock, _ = opened
-    dock.show()
-    _events()
-    width = dock.minimumSizeHint().width()
-    long = "x" * 40 + " " + " ".join(["words"] * 80)
-    dock.warnings.set_entries([Entry(REFUSAL, long[:400])])
-    _events()
-    assert dock.warnings.isVisibleTo(dock.widget())
-    assert dock.minimumSizeHint().width() == width
+    try:
+        dock.show()
+        _events()
+        width = dock.minimumSizeHint().width()
+        long = "x" * 120 + " " + " ".join(["words"] * 80)
+        dock.warnings.set_entries([Entry(REFUSAL, long[:400])])
+        _events()
+        assert dock.warnings.isVisibleTo(dock.widget())
+        assert dock.minimumSizeHint().width() == width
+    finally:
+        dock.hide()
+        dock.deleteLater()
+        _events()
 
 
 @needs_real_data
