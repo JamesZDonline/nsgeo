@@ -106,6 +106,7 @@ from nsgeo.slices.volume import (
     fill_levels,
     prepare_volume,
 )
+from nsgeo.slices.walls import cut_wall, line_wall, wall_columns, wall_points
 
 __all__ = [
     "BACKGROUND_FRACTION",
@@ -162,6 +163,7 @@ __all__ = [
     "covered_cells",
     "covered_pixels",
     "curvature_margin_cells",
+    "cut_wall",
     "depth_axis",
     "edge_match_solve",
     "fill_levels",
@@ -174,6 +176,7 @@ __all__ = [
     "frame_lattice",
     "grid_axis",
     "limit_over_slices",
+    "line_wall",
     "load_cube",
     "max_pool_counts",
     "normalise",
@@ -204,6 +207,8 @@ __all__ = [
     "surface_volume",
     "to_north_up",
     "uses_crops",
+    "wall_columns",
+    "wall_points",
     "window_depths_m",
     "window_label",
     "window_on",

@@ -772,6 +772,7 @@ The folder is `paraview/<grid>/` in the site folder. It holds:
 | `cube.vti` | The block: strength, amplitude and true depth. |
 | `picks.vtp` | Your picks, in 3-D. |
 | `lines.vtp` | The recorded lines at ground level, and the grid's outline. |
+| `walls/` | Walls: every line and every cut, as a curtain coloured like the slices (black is strong), one item each, hidden at first. |
 | `export.json` | Every number the scene needs. |
 | `open_scene.py`, `open.sh`, `open.bat`, `README.md` | The scene, its launchers, and notes. |
 

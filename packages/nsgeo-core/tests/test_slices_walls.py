@@ -149,3 +149,11 @@ def test_wall_points_stand_at_stretched_depth():
     assert np.allclose(pts[0, :, 2], -1.0) and np.allclose(pts[1, :, 2], -3.0)
     with pytest.raises(ValueError):
         wall_points(wall, np.array([0.5]), 1.0)
+
+
+def test_a_long_cut_wall_is_capped_at_300_columns():
+    frame = CubeFrame((0.0, 0.0), 0.0, 0.05, 2000, 4, "EPSG:32633")
+    filled = _ramp_cube(2, 4, 2000)
+    # 100 m on a 0.05 m cell would be 4001 columns uncapped
+    wall = cut_wall(filled, frame, np.array([[0.5, 0.1], [100.5, 0.1]]))
+    assert wall.values.shape[1] == 300 and wall.local.shape == (300, 2)

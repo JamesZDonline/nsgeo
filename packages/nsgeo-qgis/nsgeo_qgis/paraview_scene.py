@@ -26,6 +26,7 @@ _DEFAULTS = {
     "paraview_checked": "6.2.1",
     "skipped_lines": [],
     "cuts": [],
+    "walls": [],
 }
 _REQUIRED = (
     "grid",
@@ -50,6 +51,7 @@ _REQUIRED = (
 )
 _SLICE_KEYS = {"depth_m", "x_m", "y_m", "lines_along"}
 _CUT_KEYS = {"index", "key", "name"}
+_WALL_KEYS = {"index", "name", "kind", "file"}
 _FEATURE_KEYS = {"index", "name", "stale", "picks", "within_2cm", "on_holes"}
 
 
@@ -60,11 +62,13 @@ def feature_label(name: str, stale: bool) -> str:
 
 
 def scene_record(**fields: object) -> dict:
-    """The content of export.json. Every key must be given except the six with defaults.
+    """The content of export.json. Every key must be given except the seven with defaults.
 
     Raises TypeError for an unknown or missing key and ValueError for a bad `slices` or a bad
     `features` (a list of `{index, name, stale, picks, within_2cm, on_holes}`, `index` counting
-    from 0 in order) or a bad `cuts` (a list of `{index, key, name}`, numbered the same way).
+    from 0 in order) or a bad `cuts` (a list of `{index, key, name}`, numbered the same way)
+    or a bad `walls` (a list of `{index, name, kind, file}`, numbered the same way, `kind`
+    "line" or "cut" and `file` "walls/<index>.vts").
     """
     known = set(_REQUIRED) | set(_DEFAULTS)
     unknown = sorted(set(fields) - known)
@@ -93,6 +97,17 @@ def scene_record(**fields: object) -> dict:
         raise ValueError(f"cuts must be a list of dicts with exactly {sorted(_CUT_KEYS)}")
     if [c["index"] for c in cuts] != list(range(len(cuts))):
         raise ValueError("cuts must be numbered 0, 1, 2, ... in order")
+    walls = record["walls"]
+    if not isinstance(walls, list) or any(
+        not isinstance(w, dict) or set(w) != _WALL_KEYS for w in walls
+    ):
+        raise ValueError(f"walls must be a list of dicts with exactly {sorted(_WALL_KEYS)}")
+    if [w["index"] for w in walls] != list(range(len(walls))):
+        raise ValueError("walls must be numbered 0, 1, 2, ... in order")
+    if any(w["kind"] not in ("line", "cut") for w in walls):
+        raise ValueError("a wall's kind must be 'line' or 'cut'")
+    if any(w["file"] != f"walls/{w['index']}.vts" for w in walls):
+        raise ValueError("a wall's file must be walls/<index>.vts")
     return record
 
 
@@ -142,6 +157,10 @@ class ExportSummary:
     export_bytes: int
     cache_bytes: int
     free_bytes: int
+    #: The walls (a curtain for each line and cut that can have one) and the bytes they take,
+    #: which `export_bytes` already includes.
+    n_walls: int = 0
+    walls_bytes: int = 0
 
 
 def fill_margin_bytes(cache_bytes: int) -> int:
@@ -229,6 +248,14 @@ def surfaces_text(n_surfaces: int, n_stale: int) -> str:
     return f"{n_surfaces} ({n_stale} stale)" if n_stale else str(n_surfaces)
 
 
+def also_text(summary: ExportSummary) -> str:
+    """ "1 pick, 4 lines", and ", 34 walls, about 76 MB" after them when there are walls."""
+    text = f"{_count(summary.n_picks, 'pick')}, {_count(summary.n_lines, 'line')}"
+    if summary.n_walls > 0:
+        text += f", {_count(summary.n_walls, 'wall')}, about {format_bytes(summary.walls_bytes)}"
+    return text
+
+
 def summary_rows(summary: ExportSummary) -> list[tuple[str, str]]:
     """The dialog's read-only rows, label and text, in order."""
     folder = f"{summary.folder}{os.sep}"
@@ -242,7 +269,7 @@ def summary_rows(summary: ExportSummary) -> list[tuple[str, str]]:
             f"0 \u2013 {summary.max_depth_m:.2f} m",
         ),
         ("Fill", METHOD_LABELS.get(summary.fill_method, summary.fill_method)),
-        ("Also", f"{_count(summary.n_picks, 'pick')}, {_count(summary.n_lines, 'line')}"),
+        ("Also", also_text(summary)),
         ("Surfaces", surfaces_text(summary.n_surfaces, summary.n_stale_surfaces)),
         ("Size", size_text(summary)),
         ("Disk", disk_text(summary)),

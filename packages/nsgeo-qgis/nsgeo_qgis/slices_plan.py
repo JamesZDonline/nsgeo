@@ -40,8 +40,9 @@ from nsgeo.slices import (
     VolumeSettings,
     ZAxis,
     plan_windows,
+    wall_columns,
 )
-from nsgeo.vtkxml import image_data_bytes
+from nsgeo.vtkxml import image_data_bytes, structured_grid_bytes
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -1012,6 +1013,25 @@ def export_size_bytes(nx: int, ny: int, nd: int) -> int:
     """What `cube.vti` takes on disk: three float32 arrays. Picks and lines are small
     enough to ignore."""
     return image_data_bytes((nx, ny, nd), 3)
+
+
+def walls_size(
+    nz: int, line_traces: Iterable[int], cut_lengths: Iterable[float], cell: float
+) -> tuple[int, int]:
+    """`(how many walls, bytes they take)` for the export: one wall per line, from its trace
+    count, and one per cut, from its length in metres at about two columns a cell (the rule
+    of `nsgeo.slices.cut_wall`), each on `nz` levels with one `amplitude` array. A wall that
+    cannot be made (under 2 columns, or a length that is not finite) is not counted."""
+    counts: list[int] = []
+    for n in line_traces:
+        counts.append(int(n))
+    for length in cut_lengths:
+        try:
+            counts.append(math.ceil(float(length) / (cell / 2.0)) + 1)
+        except (ValueError, OverflowError):
+            continue
+    made = [wall_columns(n) for n in counts if n >= 2]
+    return len(made), sum(structured_grid_bytes(n * nz, 1) for n in made)
 
 
 def too_fine_for_export(cell: float, grid_id: str, cells: int, safe: float) -> str:

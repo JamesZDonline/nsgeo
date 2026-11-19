@@ -149,6 +149,7 @@ several grids' slices into one site view.
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
+| `cut_wall` | The filled cube sampled along a cut's path: a wall of amplitude, about two columns a cell, at most 300. |
 | `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
@@ -161,6 +162,7 @@ several grids' slices into one site view.
 | `frame_lattice` | The north-up lattice over a frame's own extent at any pixel; at the cell it reproduces an axis-aligned grid exactly. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
+| `line_wall` | A line's prepared data at the cube's levels on up to 300 evenly spaced traces: a wall of amplitude. |
 | `load_cube` | Read a cube written by `save_cube`. |
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
@@ -192,6 +194,8 @@ several grids' slices into one site view.
 | `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
+| `wall_columns` | How many columns a wall of that many candidates keeps (at most 300; under 2 is an error). |
+| `wall_points` | A wall's (levels, columns, 3) points, z at true depth times the stretch. |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |
