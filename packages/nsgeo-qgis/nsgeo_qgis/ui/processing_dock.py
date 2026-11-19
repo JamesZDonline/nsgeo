@@ -355,7 +355,16 @@ class ProcessingDock(QgsDockWidget):
 
     def _check_refusal(self) -> None:
         """Run the open line's stack and keep what it refuses: a note under
-        the list and a mark on the refusing row, for as long as it is so."""
+        the list and a mark on the refusing row, for as long as it is so.
+
+        Guarded as a whole: `rebuild` is a slot and must still reach its
+        `step_selected` emit whatever goes wrong here."""
+        try:
+            self._paint_refusal()
+        except Exception as exc:
+            _log(f"_check_refusal: {exc}")
+
+    def _paint_refusal(self) -> None:
         refusal: StepRefused | None = None
         key = self.key()
         if key is not None and not is_cut_key(key):
