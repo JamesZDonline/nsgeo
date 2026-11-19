@@ -124,6 +124,11 @@ release's notes list everything in it.
   fix marked), the Survey panel, and a destagger you can type. Walked
   through; PR [#208](https://github.com/JamesZDonline/nsgeo/pull/208) awaits
   merge.
+- **Whole site: never stuck, never frozen** ([#166], [#193], parts of [#75]
+  and [#157]). Whole site no longer sits at "preparing" now and then, and a
+  fine cell no longer freezes QGIS while its fill is worked out, in Whole
+  site or This grid: the fill is worked out in the background, with its
+  progress and a Cancel. Also the site engine's review follow-ups. Designing.
 
 ### Next, in order
 
@@ -187,12 +192,13 @@ Grouped by area. The order within a group is not a priority.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]); lines processed differently in
   one cube, such as migration at each line's own velocity ([#178]); whole site
-  at fine cells, the follow-ups: coverage edge lines on coarse previews,
-  averaged previews and a memory estimate for This grid ([#157]); exports of
+  at fine cells, the follow-ups: averaged previews ([#157]; its edge lines and
+  memory estimate are in progress above); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
   ([#167]); move the colour ramp's stops and watch the slice recolour as you
   drag ([#183]); a fine cell no longer freezes QGIS while its fill is worked
-  out, about 105 s for Whole site at 0.02 m on ten grids ([#193]); choose a
+  out, about 105 s for Whole site at 0.02 m on ten grids ([#193], in progress
+  above); choose a
   grid's preset straight from the Whole site grid list ([#199]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
@@ -220,6 +226,7 @@ Grouped by area. The order within a group is not a priority.
 [#46]: https://github.com/JamesZDonline/nsgeo/issues/46
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
+[#75]: https://github.com/JamesZDonline/nsgeo/issues/75
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
 [#88]: https://github.com/JamesZDonline/nsgeo/issues/88
@@ -246,6 +253,7 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#166]: https://github.com/JamesZDonline/nsgeo/issues/166
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
