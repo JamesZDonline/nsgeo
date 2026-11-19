@@ -2441,8 +2441,25 @@ def test_moving_this_grids_grid_while_a_site_task_outlives_its_cancel_never_over
     assert spin_until(lambda: counter.concurrent == 1)  # the site reads A's first line
     dock.grid_scope_button.click()
     assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    # The window is wall-clock time, and `replace_grid` runs the whole grid
+    # change on this thread: under load it can outlast the task's 0.8 s line,
+    # and This grid then starts, rightly, once the site's task has ended. So
+    # the hazard is asserted at the one place a preparation starts: This grid's
+    # `set_source` is never called while a site task is live (#166 loop, 6 of
+    # 36 copies failed a plain `not is_running` here).
+    started_beside_site_task: list[object] = []
+    real_set_source = dock.engine.set_source
+
+    def watched_set_source(choice):
+        if dock.site_engine.has_live_task:
+            started_beside_site_task.append(choice)
+        return real_set_source(choice)
+
+    monkeypatch.setattr(dock.engine, "set_source", watched_set_source)
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert not dock.engine.is_running, "This grid waits for the site's task"
+    assert not started_beside_site_task, "This grid started beside the site's task"
+    if dock.site_engine.has_live_task:  # nothing ran since the move: still the window
+        assert not dock.engine.is_running, "This grid waits for the site's task"
     assert spin_until(lambda: dock.engine.is_prepared, 30_000)
     assert counter.max_concurrent == 1, (
         f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
