@@ -93,7 +93,7 @@ profile meets. The note is additional.
 
 `nsgeo.processing.stack` gains `StepRefused(ValueError)` with `index` (0-based position in the
 stack) and `title` (the step's title). `StepStack._ensure` and `result_bypassing` catch a
-`ValueError` from `step.apply` and raise `StepRefused(index, title, str(exc)) from exc`.
+`ValueError` from `step.apply` and raise `StepRefused(str(exc), index, title) from exc`.
 
 - `str(exc)` is exactly the step's own message, so every existing `except ValueError` and every
   message assertion keeps working.
