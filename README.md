@@ -134,7 +134,7 @@ release's notes list everything in it.
   new one fitted around their tracks, previewed on the map; files GPS cannot
   place are handed on to Grid mode with their offsets guessed; GPS lines in
   Edit lines, Move to grid and Fit to these tracks. Mock-up agreed, planned
-  in six tasks; being built.
+  in six tasks; the plan awaits review.
 
 ### Next, in order
 
