@@ -7,8 +7,15 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index, needs_dialog
-from plugin_testing import synthetic_dzt
+from nsgeo_qgis.ui.processing_dock import (
+    REFUSAL_COLOUR,
+    REFUSAL_TEXT,
+    ProcessingDock,
+    dest_index,
+    needs_dialog,
+)
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
 from qgis.PyQt.QtGui import QPalette
 from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox, QWidgetAction
@@ -560,13 +567,16 @@ def test_a_line_whose_velocity_cannot_be_resolved_still_lists_its_steps(opened, 
     row buttons are updated. An exception there is swallowed to stderr and
     leaves the panel showing no steps for a line that has them."""
     session, dock, key = opened
+    # The synthetic record starts before time zero, which migration refuses
+    # (and the list now marks): a Time zero step ahead keeps this row plain.
+    session.append_step(key, build_step("time_zero"))
     session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
     _unresolvable(session, monkeypatch)
 
     dock.rebuild()
 
-    assert dock.list.count() == 1
-    assert dock.list.item(0).text() == "Migration (Stolt f-k)"
+    assert dock.list.count() == 2
+    assert dock.list.item(1).text() == "Migration (Stolt f-k)"
 
 
 def test_a_line_whose_velocity_cannot_be_resolved_still_opens_the_add_dialog(opened, monkeypatch):
@@ -598,3 +608,159 @@ def test_a_cut_shows_that_processing_does_not_apply(opened):
     assert dock.list.isEnabled()
     assert dock.status.text() == ""
     assert dock.add_button.isEnabled()
+
+
+# ---- a refusal that stays (#197) ------------------------------------------
+
+
+def _refusing_dewow():
+    # One sample at the synthetic lines' 0.2165 ns sampling.
+    return build_step("dewow", window_ns=0.2)
+
+
+def _reason(session, key):
+    try:
+        session.stack_for(key).result()
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError("the stack did not refuse")
+
+
+def _refused_dock(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("dewow"))
+    session.replace_step(key, 0, _refusing_dewow())
+    return session, dock, key
+
+
+def test_a_refused_step_is_noted_under_the_list_and_marked(opened):
+    session, dock, key = _refused_dock(opened)
+    reason = _reason(session, key)
+    assert dock.warnings.isVisibleTo(dock.widget())
+    assert dock.warnings.entries() == (
+        Entry(REFUSAL, REFUSAL_TEXT.format(title="Dewow", n=1, reason=reason)),
+    )
+    item = dock.list.item(0)
+    assert item.text().startswith("⛔ ")
+    assert item.foreground().color() == REFUSAL_COLOUR
+    assert "dewow" in item.toolTip()
+    assert reason in item.toolTip()
+    assert dock.refusal().index == 0
+
+
+def test_the_note_is_visible_whichever_row_is_selected(opened):
+    session, dock, key = _refused_dock(opened)
+    session.append_step(key, build_step("background_mean"))
+    dock.list.setCurrentRow(1)
+    assert dock.warnings.isVisibleTo(dock.widget())
+    dock.list.setCurrentRow(0)
+    assert dock.warnings.isVisibleTo(dock.widget())
+
+
+def test_the_note_clears_when_the_setting_is_fixed(opened):
+    session, dock, key = _refused_dock(opened)
+    session.replace_step(key, 0, build_step("dewow", window_ns=4.0))
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    assert dock.refusal() is None
+    assert not dock.list.item(0).text().startswith("⛔")
+    assert dock.list.item(0).foreground().color() != REFUSAL_COLOUR
+    assert dock.list.item(0).toolTip() == "dewow"
+
+
+def test_the_note_clears_when_the_step_is_removed(opened):
+    session, dock, key = _refused_dock(opened)
+    session.remove_step(key, 0)
+    assert not dock.warnings.isVisibleTo(dock.widget())
+
+
+def test_the_note_clears_when_the_step_is_turned_off(opened):
+    session, dock, key = _refused_dock(opened)
+    session.set_step_enabled(key, 0, False)
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    assert not dock.list.item(0).text().startswith("⛔")
+
+
+def test_the_note_clears_when_another_line_opens(opened):
+    session, dock, _ = _refused_dock(opened)
+    session.open_line(session.keys()[1])
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    assert dock.refusal() is None
+
+
+def test_the_note_clears_when_the_site_closes(opened):
+    session, dock, _ = _refused_dock(opened)
+    session.close_site()
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    assert dock.refusal() is None
+
+
+def test_an_edit_to_another_step_leaves_the_note(opened):
+    session, dock, key = _refused_dock(opened)
+    session.append_step(key, build_step("background_mean"))
+    assert dock.refusal().index == 0
+    session.set_step_enabled(key, 1, False)
+    assert dock.warnings.isVisibleTo(dock.widget())
+    assert dock.list.item(0).text().startswith("⛔ ")
+
+
+def test_the_note_appears_when_the_samples_arrive(opened):
+    session, dock, _ = opened
+    other = session.keys()[1]
+    session.append_step(other, _refusing_dewow())
+    session.open_line(other)
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    line = session._lines_by_key[other]
+    session.set_profiles(other, line.load())
+    assert dock.warnings.isVisibleTo(dock.widget())
+    assert dock.refusal().index == 0
+
+
+def test_two_refusals_note_the_first_then_the_second(opened):
+    session, dock, key = opened
+    session.append_step(key, _refusing_dewow())
+    session.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+    assert dock.refusal().index == 0
+    assert "(step 1)" in dock.warnings.entries()[0].text
+    session.replace_step(key, 0, build_step("dewow", window_ns=4.0))
+    assert dock.refusal().index == 1
+    assert "Bandpass (step 2)" in dock.warnings.entries()[0].text
+
+
+def test_a_preset_that_refuses_is_noted(opened):
+    session, dock, _ = opened
+    other = session.keys()[1]
+    session.append_step(other, _refusing_dewow())
+    session.save_preset("one sample", other)
+    assert not dock.warnings.isVisibleTo(dock.widget())
+    dock.apply_preset_named("one sample")
+    assert dock.warnings.isVisibleTo(dock.widget())
+    assert dock.refusal().title == "Dewow"
+
+
+def test_the_note_never_widens_the_panel(opened):
+    _, dock, _ = opened
+    width = dock.minimumSizeHint().width()
+    long = "x" * 40 + " " + " ".join(["words"] * 80)
+    dock.warnings.set_entries([Entry(REFUSAL, long[:400])])
+    assert dock.warnings.isVisibleTo(dock.widget())
+    assert dock.minimumSizeHint().width() == width
+
+
+@needs_real_data
+def test_the_real_one_sample_dewow_is_noted(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = ProcessingDock(session)
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = next(p for p in REAL_DZT if p.name == "FILE__007.DZT")
+    line = Line.open(path, GridPlacement("A", "y", 0.0))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    session.append_step(key, build_step("dewow", window_ns=0.2))
+    assert dock.warnings.entries()[0].text == (
+        "Dewow (step 1) can't run on this line: Dewow window 0.2 ns is one sample at "
+        "this line's 0.217 ns sampling; use 0.33 ns or more. The profile won't update "
+        "until this is fixed."
+    )

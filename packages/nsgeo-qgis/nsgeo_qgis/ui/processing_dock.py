@@ -12,6 +12,7 @@ from typing import Any
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     Radargram,
+    StepRefused,
     build_step,
     default_params,
     get_step,
@@ -21,7 +22,7 @@ from nsgeo.processing import (
 )
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QPalette
+from qgis.PyQt.QtGui import QBrush, QColor, QPalette
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -44,6 +45,7 @@ from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
 
 #: How far a step's own velocity may sit from the open line's resolved
 #: velocity before the step's row says so, as a fraction of the line's.
@@ -57,6 +59,11 @@ from nsgeo_qgis.ui.param_form import ParamForm
 #: nothing.
 _VELOCITY_MISMATCH_FRACTION = 0.02
 PROCESSING_ON_CUT_TEXT = "Processing does not apply to a cut."
+REFUSAL_TEXT = (
+    "{title} (step {n}) can't run on this line: {reason} "
+    "The profile won't update until this is fixed."
+)
+REFUSAL_COLOUR = QColor(163, 18, 44)
 
 
 def dest_index(start: int, row: int) -> int:
@@ -145,6 +152,8 @@ class ProcessingDock(QgsDockWidget):
         # guard while the outer frame is still mid-rebuild; a counter
         # only reaches zero when the outermost call finishes.
         self._updating = 0
+        # The step the open line's stack refuses to run, or None.
+        self._refusal: StepRefused | None = None
         # `_show_form` last actually displayed: the (key, row) it was shown
         # at, AND the step object identity found there. `rebuild()` emits
         # `step_selected` unconditionally every time it runs, including the
@@ -227,6 +236,9 @@ class ProcessingDock(QgsDockWidget):
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         layout.addWidget(self.list)
+
+        self.warnings = WarningsPanel(body)
+        layout.addWidget(self.warnings)
 
         self.form_area = QVBoxLayout()
         layout.addLayout(self.form_area)
@@ -334,7 +346,48 @@ class ProcessingDock(QgsDockWidget):
         for w in (self.add_button, self.apply_button, self.presets_button, self.diff_button):
             w.setEnabled(has_line)
         self._update_row_buttons()
+        self._check_refusal()
         self.step_selected.emit(self.list.currentRow())
+
+    def refusal(self) -> StepRefused | None:
+        """The step the open line's stack refuses to run, or None."""
+        return self._refusal
+
+    def _check_refusal(self) -> None:
+        """Run the open line's stack and keep what it refuses: a note under
+        the list and a mark on the refusing row, for as long as it is so."""
+        refusal: StepRefused | None = None
+        key = self.key()
+        if key is not None and not is_cut_key(key):
+            stack = self.session.stack_for(key)
+            if stack.source is not None:
+                try:
+                    stack.result()
+                except StepRefused as exc:
+                    refusal = exc
+                except Exception as exc:
+                    _log(f"_check_refusal: {exc}")
+        self._refusal = refusal
+        note = ""
+        if refusal is not None:
+            reason = str(refusal)
+            if not reason.endswith("."):
+                reason += "."
+            note = REFUSAL_TEXT.format(title=refusal.title, n=refusal.index + 1, reason=reason)
+        self._updating += 1
+        try:
+            if key is not None and not is_cut_key(key):
+                entries = self.session.stack_for(key).entries
+                for i in range(min(self.list.count(), len(entries))):
+                    step = entries[i][0]
+                    item = self.list.item(i)
+                    refused = refusal is not None and refusal.index == i
+                    item.setText(("⛔ " if refused else "") + self.row_label(step, key))
+                    item.setForeground(QBrush(REFUSAL_COLOUR) if refused else QBrush())
+                    item.setToolTip(f"{step.name}\n\n{note}" if refused else step.name)
+        finally:
+            self._updating -= 1
+        self.warnings.set_entries([Entry(REFUSAL, note)] if note else [])
 
     def row_label(self, step: Any, key: str) -> str:
         """A step's row text: its title, plus its velocity when it carries
@@ -490,6 +543,7 @@ class ProcessingDock(QgsDockWidget):
         try:
             if key != self.key():
                 return
+            self._check_refusal()
             row = self.list.currentRow()
             if row < 0 or self._form_axis_unknown != (key, row):
                 return
