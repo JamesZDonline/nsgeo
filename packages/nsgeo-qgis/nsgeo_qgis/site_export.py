@@ -149,6 +149,10 @@ def plan_site_export(
     the file will not hold to its state (Ruling F-2); the caller knows what was
     included, the engine only what it was sent. GUI thread: it reads the live
     engines and the session.
+
+    The transform recorded is the one the ready grids were prepared with (no
+    transform as "none"), never the panel's: a RuntimeError names each grid's
+    if they differ.
     """
     site_z = site_engine.site_z
     ready = site_engine.ready_grids
@@ -161,7 +165,9 @@ def plan_site_export(
         engine = site_engine.engine_for(grid_id)
         if engine is None or engine.choice is None:
             raise RuntimeError(f"grid {grid_id} is not prepared")
-        transforms[grid_id] = engine.choice.transform
+        # Records spell `NO_TRANSFORM` ("") as "none", as slice_export does; GDAL
+        # would drop an empty metadata item, and the key names are the format.
+        transforms[grid_id] = engine.choice.transform or "none"
         axes[grid_id] = engine.z
         grid = site_engine.session.grid(grid_id)
         velocity = velocities.get(grid_id)

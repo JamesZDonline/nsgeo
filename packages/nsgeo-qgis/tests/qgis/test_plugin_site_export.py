@@ -18,7 +18,6 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled, run_export
-from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
     apply_site_temporal_properties,
@@ -31,7 +30,7 @@ from nsgeo_qgis.slice_export import (
     discard_partial,
     partial_path,
 )
-from nsgeo_qgis.slices_plan import Resolution, SiteSource, SliceFinish
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SiteSource, SliceFinish
 from osgeo import gdal
 from plugin_testing import wait_for_site
 from qgis.core import QgsCoordinateReferenceSystem, QgsRasterLayer
@@ -210,8 +209,19 @@ def test_the_file_records_the_transform_the_grids_were_prepared_with(
     assert open_tif(path).GetMetadata()["NSGEO_SITE_TRANSFORM"] == "amp_abs"
 
 
+def test_a_site_with_no_transform_records_none(site3, make_site, tmp_path, open_tif):
+    """The engines hold `NO_TRANSFORM` (""), and GDAL drops an empty item: the
+    file must spell it "none", as every other record does (slice_export)."""
+    site = prepared_site(make_site, site3, site3.source(transform=NO_TRANSFORM))
+    path = tmp_path / "site.tif"
+    export_site(site, path, 8, 24)
+    assert open_tif(path).GetMetadata().get("NSGEO_SITE_TRANSFORM") == "none"
+
+
 def test_grids_prepared_with_different_transforms_refuse_to_plan(site3, make_site):
     site = prepared_site(make_site, site3)
+    # One `SiteSource` carries one transform, and a change re-queues every grid,
+    # so no public path reaches this guard: the test sets one engine's choice.
     engine = site.engine_for("B")
     engine._choice = replace(engine.choice, transform="amp_abs")
     with pytest.raises(RuntimeError, match="different transforms") as info:
@@ -643,25 +653,19 @@ def test_the_site_writer_reports_each_band_and_refuses_a_wrong_count(site3, make
         )
 
 
-def test_a_mixed_site_records_each_grids_time_base_and_its_own(site3, tmp_path, open_tif):
+def test_a_mixed_site_records_each_grids_time_base_and_its_own(
+    site3, make_site, tmp_path, open_tif
+):
     site3.session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
-    site = SiteEngine(site3.session)
-    try:
-        site.set_source(
-            SiteSource(
-                transform="amp_envelope",
-                grids=(site3.choice("A", "p"), site3.choice("B", "raw")),
-            )
-        )
-        wait_for_site(site, 60_000)
-        site.set_resolution(RES)
-        path = tmp_path / "mixed.tif"
-        coverage = tmp_path / "mixed_coverage.tif"
-        plan = export_site(site, path, 8, 24, coverage_to=coverage)
-        companion = open_tif(coverage).GetMetadata()
-    finally:
-        site.wait_until_idle(20_000)
-        site.dispose()
+    source = SiteSource(
+        transform="amp_envelope",
+        grids=(site3.choice("A", "p"), site3.choice("B", "raw")),
+    )
+    site = prepared_site(make_site, site3, source)
+    path = tmp_path / "mixed.tif"
+    coverage = tmp_path / "mixed_coverage.tif"
+    plan = export_site(site, path, 8, 24, coverage_to=coverage)
+    companion = open_tif(coverage).GetMetadata()
     assert {g.grid_id: g.time_base for g in plan.grids} == {"A": "time_zero", "B": "radar"}
     assert companion["NSGEO_SITE_TIME_BASE"] == "mixed"
     ds = open_tif(path)
