@@ -121,3 +121,5 @@ Deployed: profile ns_geo_processing (copy of ns_geo) → dev_link to this worktr
 Walkthrough: https://claude.ai/artifact/KD1UtkmHy21zKRNuWVi41W (db collection `results`, W1–W12). Awaiting the user.
 Walkthrough results (2026-11-19, on fb93c64): W1–W12 all pass, no notes; W11 confirms the #33 cue (multi-select opens nothing, the step lands on the named line). Record: walkthrough-results.md. CI fb93c64 success.
 Ledger retired to docs/superpowers/sdd/2026-11-18-nsgeo-processing-panel (review diffs and plan-path left out).
+PR #224 opened (2026-11-19); roadmap f1bbe6a on main (walked through, awaiting merge). Awaiting the user's merge go.
+Merged PR #224 → main 2f4d16a (2026-11-19, the user's go). Closed by the PR: #197 #49 #8 #9 #13 #48. Closed by hand: #33 (reproduced in W11; the line-name cue), #21 (narrow split into step_inputs.py). Commented: #15 (gain slots done, sweep to do), #20 (item 4), #25 (items 3, 4), #197 (open-project summary as a follow-up).

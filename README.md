@@ -107,6 +107,7 @@ release's notes list everything in it.
 | | Trace a hyperbola from a box: in velocity mode, drag a box around a diffraction hyperbola and nsgeo marks about ten dots on the leading edge of its band, ready to edit and save like clicked ones, or says why it can't; Ctrl+click (Cmd+click on a Mac) places velocity dots without switching velocity mode on first ([#140], [#88]) | next release |
 | | QGIS's own 3-D view, M16's third plan: a 3D view button shows a grid's picks at their depths and its surfaces, depth stretched per grid from the Surfaces panel and saying so, keeping up as you pick and rebuild; QGIS no longer warns that the Slices layer is a temporary layer ([#217]) | next release |
 | M17a | GPS lines, M17's first plan: lines placed along the RTK track they were walked, with no grid; stretches without an RTK fix marked on the map; a destagger you can type. A site with GPS lines saves as schema 4, which 0.4.0 cannot open ([#208]) | next release |
+| | The Processing panel: a step that can't run stays marked under the step list until it is fixed, and opening a line whose steps can't run says so instead of showing the last picture; the gain strip stops at ±120 dB, reaches every point, fits its caption and gets a Reset; the Difference view follows a dragged step; the panel names its line ([#197], [#49], [#8], [#9], [#13], [#48], [#33], [#224]) | next release |
 
 ### In progress
 
@@ -132,12 +133,6 @@ release's notes list everything in it.
   lines on the map selects them in the Survey panel; set a preset or a
   velocity on a selection of lines at once; removing lines says what goes
   with them. Built and walked through; awaiting merge.
-- **The Processing panel: gain strip, Difference view and refusals** ([#197],
-  [#49], [#8], [#9], [#13], [#48]). A step that can't run on the open line
-  stays marked under the step list until it is fixed; the gain strip stops at
-  ±120 dB, reaches every point, fits its caption and gets a Reset; the
-  Difference view follows a dragged step; the panel names its line.
-  Built and walked through; awaiting merge.
 
 ### Next, in order
 
@@ -194,8 +189,7 @@ Grouped by area. The order within a group is not a priority.
   ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
   clock share one rule ([#210]); the profile no longer jumps when the velocity
   strip appears ([#211]); a frequency profile
-  ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
-  until it is fixed, instead of a six-second toast ([#197], in progress above); deconvolution,
+  ([#34]); configurable axes ([#11]); deconvolution,
   with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); removing a line says that its processing, velocity and saved fits
@@ -236,6 +230,7 @@ Grouped by area. The order within a group is not a priority.
 [#13]: https://github.com/JamesZDonline/nsgeo/issues/13
 [#16]: https://github.com/JamesZDonline/nsgeo/issues/16
 [#17]: https://github.com/JamesZDonline/nsgeo/issues/17
+[#33]: https://github.com/JamesZDonline/nsgeo/issues/33
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
 [#36]: https://github.com/JamesZDonline/nsgeo/issues/36
 [#40]: https://github.com/JamesZDonline/nsgeo/issues/40
@@ -314,6 +309,7 @@ Grouped by area. The order within a group is not a priority.
 [#208]: https://github.com/JamesZDonline/nsgeo/pull/208
 [#221]: https://github.com/JamesZDonline/nsgeo/issues/221
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
+[#224]: https://github.com/JamesZDonline/nsgeo/pull/224
 
 ## Why
 
