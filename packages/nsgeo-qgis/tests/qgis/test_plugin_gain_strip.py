@@ -8,7 +8,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step, get_step
 from nsgeo.render import row_envelope
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import DB_LIMIT, GainStrip, Headroom
+from nsgeo_qgis.ui.gain_strip import DB_LIMIT, HANDLE_RADIUS, GainStrip, Headroom
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
@@ -1241,6 +1241,9 @@ def _press_drag_release(strip, start, end):
 
 
 def test_db_limit_matches_the_core():
+    """Guard test: `DB_LIMIT` is a copy of the core's bound, so it must track
+    the `gain_curve` `points` schema. Fails if `DB_LIMIT` drifts from the
+    core's min/max (e.g. mutate `DB_LIMIT = 120.0` to `100.0`)."""
     (spec,) = get_step("gain_curve").schema()
     assert spec.min == -DB_LIMIT and spec.max == DB_LIMIT == 120.0
 
@@ -1299,6 +1302,10 @@ def test_a_point_after_the_record_is_pinned_to_the_bottom(strip):
 
 
 def test_a_point_outside_a_zoomed_window_is_not_pinned(strip):
+    """Guard test: pinning is against the record (`t0_ns`/`t_end`), not the
+    zoomed window. Fails if `_drawn` compares a point's time with the
+    window's `time_lo`/`time_hi` instead (the point at 80 ns would then be
+    pinned to the window's bottom edge and found there)."""
     t = ViewTransform.fit(100, 200, 0.0, 0.5, 600, 300)
     strip.set_time_mapping(t.with_window(0, 100, 20.0, 60.0), MARGIN_TOP)
     strip.set_points([[0, 0], [40, 6], [80, 0]], "o")
@@ -1308,7 +1315,7 @@ def test_a_point_outside_a_zoomed_window_is_not_pinned(strip):
 
 def _caption_fits(strip):
     low, mid, high = strip.caption_texts()
-    fm = QFontMetrics(strip.font())
+    fm = QFontMetrics(strip.caption_font())
     used = fm.horizontalAdvance(low) + fm.horizontalAdvance(high)
     if mid is not None:
         used += fm.horizontalAdvance(mid)
@@ -1334,9 +1341,66 @@ def test_the_caption_fits_at_a_large_font(strip):
     assert mid is None
 
 
+def _rects_ok(strip):
+    rects = [r for r in strip.caption_rects() if r is not None]
+    for a, b in zip(rects, rects[1:], strict=False):
+        assert a.right() <= b.left(), (a, b)
+    for r in rects:
+        assert r.left() >= 0 and r.right() <= strip.width(), r
+
+
+@pytest.mark.parametrize("pts", [[[0, -3.89], [50, 19.26]], [[0, -13.16], [50, 43.84]]])
+@pytest.mark.parametrize("size", [None, 16])
+def test_the_caption_never_overprints_on_ordinary_values(strip, pts, size):
+    """Any drag gives a float dB; the ends are whole numbers and the three
+    texts are laid out without overlap, inside the strip."""
+    if size is not None:
+        font = strip.font()
+        font.setPointSize(size)
+        strip.setFont(font)
+    strip.set_points(pts, "o")
+    low, mid, high = strip.caption_texts()
+    assert len(low) <= 4 and len(high) <= 4
+    _rects_ok(strip)
+    if size is not None:
+        fm = QFontMetrics(strip.font())
+        full = sum(fm.horizontalAdvance(x) for x in (low, "dB", high))
+        assert full + 8 > strip.width() - 4  # precondition: dB cannot fit at this font
+        assert mid is None
+
+
+def test_the_caption_shrinks_its_font_when_the_numbers_alone_do_not_fit(strip):
+    font = strip.font()
+    font.setPointSize(30)
+    strip.setFont(font)
+    strip.set_points([[0, -120], [100, 120]], "o")
+    fm = QFontMetrics(strip.font())
+    assert fm.horizontalAdvance("-120") + fm.horizontalAdvance("120") > strip.width() - 4
+    assert strip.caption_font().pointSizeF() < 30
+    low, _mid, high = strip.caption_texts()
+    assert (low, high) == ("-120", "120")
+    _rects_ok(strip)
+
+
+def test_dB_is_centred_in_the_gap_between_the_numbers(strip):
+    strip.set_points([[0, 0], [100, 20]], "o")
+    low_r, mid_r, high_r = strip.caption_rects()
+    assert mid_r is not None
+    gap_mid = (low_r.right() + high_r.left()) / 2
+    assert mid_r.center().x() == pytest.approx(gap_mid, abs=1.0)
+
+
+def test_the_round_values_are_whole_dB(strip):
+    strip.set_points([[0, -3.89], [50, 19.26]], "o")
+    assert strip._db_range() == (-10.0, 26.0)  # floor(-9.89), ceil(25.26)
+
+
 def test_reset_emits_reset_requested(strip):
     got = []
     strip.reset_requested.connect(lambda: got.append(1))
+    edge = MARGIN_TOP + strip._transform.height
+    # the precondition: the button has room, so a failure below names its cause
+    assert strip.height() - edge - (HANDLE_RADIUS + 2) >= 14
     assert strip.reset_button.isVisible()
     strip.reset_button.click()
     assert got == [1]
@@ -1352,3 +1416,55 @@ def test_profile_dock_relays_reset(qgis_app):
     finally:
         dock.hide()
         dock.deleteLater()
+
+
+def test_reset_starts_below_the_handles(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    assert strip.reset_button.geometry().top() >= edge + HANDLE_RADIUS + 2
+    assert strip.reset_button.geometry().bottom() <= strip.height()
+
+
+def test_a_press_just_below_the_last_samples_handle_grabs_the_handle(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    last = strip._transform.t_end - strip._transform.dt_ns
+    strip.set_points([[0.0, 0.0], [last, 12.0]], "o")
+    pos = QPoint(int(strip.x_of_db(12.0)), int(edge + 3))
+    assert strip.handle_at(pos) == 1
+    assert strip.childAt(pos) is not strip.reset_button
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+    assert strip._drag == 1
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_a_pinned_bottom_handle_lies_inside_the_record(strip):
+    edge = MARGIN_TOP + strip._transform.height
+    strip.set_points([[0.0, 0.0], [50.0, 6.0], [130.0, 3.0]], "o")
+    x = int(strip.x_of_db(3.0))
+    body = QPoint(x, int(edge - 6))
+    assert strip.handle_at(body) == 2
+    assert strip.childAt(QPoint(x, int(edge - 1))) is not strip.reset_button
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, body)
+    assert strip._drag == 2
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, body)
+
+
+def test_a_failing_move_or_double_click_is_logged_not_raised(strip, monkeypatch):
+    import nsgeo_qgis.ui.gain_strip as gs
+
+    logged = []
+    monkeypatch.setattr(gs, "_log", lambda msg, *a, **k: logged.append(msg))
+    x0, y0 = strip.x_of_db(20.0), strip.y_of_time(100.0)
+    QTest.mousePress(
+        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0))
+    )
+    monkeypatch.setattr(strip, "db_of_x", lambda x: 1 / 0)
+    try:
+        _send_move_while_pressed(strip, QPoint(int(x0) - 10, int(y0)))
+        assert logged
+        n = len(logged)
+        _send_double_click(strip, QPoint(int(x0) - 10, int(strip.y_of_time(30.0))))
+        assert len(logged) > n
+    finally:
+        QTest.mouseRelease(
+            strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(0, 0)
+        )
