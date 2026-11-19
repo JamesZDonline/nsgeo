@@ -134,6 +134,10 @@ from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
+STEPS_REFUSED_TEXT = "This line's steps can't run. See the Processing panel."
+PREVIEW_STEPS_REFUSED_TEXT = (
+    "{name}'s steps can't run. Select it to see why in the Processing panel."
+)
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
 KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
@@ -818,6 +822,8 @@ class ProfileDock(QgsDockWidget):
         if profiles:
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None:
+                self._show_steps_refused(key, is_preview=is_preview)
         else:
             self.channel_combo.hide()
             # No `_render` on this branch, so nothing else would take down
@@ -826,20 +832,40 @@ class ProfileDock(QgsDockWidget):
             # load that fails stays here: left up, the line could be
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
-            self._cutoff_step = None
-            self._shown_radargram = None
-            self.view.set_cutoff(None)
-            self._set_axes_holding(
-                key,
-                line.n_traces,
-                line.header.n_samples,
-                line.header.position_ns,
-                line.header.dt_ns,
-                self._safe_distance(line),
-            )
-            self.view.set_image(None)
+            self._take_down_picture(key, line)
             self._refresh_picks()  # no `_render` on this branch to do it
         self._refresh_velocity()
+
+    def _take_down_picture(self, key: str, line: Any) -> None:
+        """Take down what the last line left: its cutoff, its radargram and
+        its picture, with the axes set for `line`'s own record."""
+        self._cutoff_step = None
+        self._shown_radargram = None
+        self.view.set_cutoff(None)
+        self._set_axes_holding(
+            key,
+            line.n_traces,
+            line.header.n_samples,
+            line.header.position_ns,
+            line.header.dt_ns,
+            self._safe_distance(line),
+        )
+        self.view.set_image(None)
+
+    def _show_steps_refused(self, key: str, *, is_preview: bool) -> None:
+        """The line's samples are here but its steps cannot run: say so
+        instead of leaving the last line's picture up. Called when a line is
+        shown or its samples arrive, never on a stack edit, where the last
+        picture of the same line staying up is the point (#197)."""
+        line = self.session.line_for_key(key)
+        self._take_down_picture(key, line)
+        # After the axes: `set_axes` resets the message to "loading…".
+        self.view.set_message(
+            PREVIEW_STEPS_REFUSED_TEXT.format(name=line_label(line))
+            if is_preview
+            else STEPS_REFUSED_TEXT
+        )
+        self._refresh_picks()
 
     # ---- cuts (cut spec §4.3, §4.4) ---------------------------------------
     def _set_cut_chrome(self, on: bool) -> None:
@@ -950,6 +976,8 @@ class ProfileDock(QgsDockWidget):
             profiles = self.session.profiles_for(key) or []
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None and not is_cut_key(key):
+                self._show_steps_refused(key, is_preview=key == self._preview_key)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not render line {key!r} once it loaded: {exc}", Qgis.MessageLevel.Critical)
 
