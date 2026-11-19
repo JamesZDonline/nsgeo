@@ -105,17 +105,15 @@ release's notes list everything in it.
 | | Surfaces from picks, M16's second plan: select picks on the map and nsgeo builds the surface they name, leaving holes where the radar saw nothing; it shows on the map coloured by depth, goes into the ParaView export, and is listed in a Surfaces panel with its fit and whether it needs a rebuild; a pick can belong to several surfaces ([#202]) | next release |
 | | A restored cube comes back on the clock it was saved on, even if its preset has since gained or lost Time zero or you edit while it prepares, and says how it moved in Warnings; a quick switch of survey or grid carries nothing over, a new survey opens at its first slice, and a grid the panel falls back to opens on the preset Whole site draws it with ([#162], [#102], [#152], [#200]) | next release |
 | | Trace a hyperbola from a box: in velocity mode, drag a box around a diffraction hyperbola and nsgeo marks about ten dots on the leading edge of its band, ready to edit and save like clicked ones, or says why it can't; Ctrl+click (Cmd+click on a Mac) places velocity dots without switching velocity mode on first ([#140], [#88]) | next release |
+| | QGIS's own 3-D view, M16's third plan: a 3D view button shows a grid's picks at their depths and its surfaces, depth stretched per grid from the Surfaces panel and saying so, keeping up as you pick and rebuild; QGIS no longer warns that the Slices layer is a temporary layer ([#217]) | next release |
 
 ### In progress
 
-- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]) and
-  **Plan B, surfaces from picks** ([#202]) are merged (above). **Plan C, the
-  QGIS 3-D view:** a 3D view button opens QGIS's own 3-D view of the grid the
-  Slices panel shows, with its picks at depth and its surfaces, stretched and
-  saying so; its depth stretch is set per grid in the Surfaces panel. Walked
-  through, PR [#217] awaits merge. **Plan D, cuts in
-  3-D:** picks on cuts join surfaces, and the ParaView export gains a wall for
-  every line and cut. Planned; builds after C merges.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
+  **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
+  ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
+  surfaces, and the ParaView export gains a wall for every line and cut.
+  Planned; next to build.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -203,7 +201,10 @@ Grouped by area. The order within a group is not a priority.
 - **3-D:** surfaces stay fresh after a reopen without Save site in the cases
   the walkthrough fix left open, such as a Slices transform other than the
   default ([#203]); an untouched ParaView export no longer marks surfaces stale
-  when the cell is not a 3-decimal number ([#204]).
+  when the cell is not a 3-decimal number ([#204]); on a multi-channel line,
+  read time zero from the same channel the volume is built from ([#218]); a
+  line whose time zero can't be read is not re-read on every 3-D view refresh
+  ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -277,6 +278,9 @@ Grouped by area. The order within a group is not a priority.
 [#215]: https://github.com/JamesZDonline/nsgeo/issues/215
 [#216]: https://github.com/JamesZDonline/nsgeo/issues/216
 [#217]: https://github.com/JamesZDonline/nsgeo/pull/217
+[#218]: https://github.com/JamesZDonline/nsgeo/issues/218
+[#219]: https://github.com/JamesZDonline/nsgeo/issues/219
+[#220]: https://github.com/JamesZDonline/nsgeo/issues/220
 
 ## Why
 
