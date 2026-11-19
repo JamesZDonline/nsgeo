@@ -1741,3 +1741,68 @@ def test_a_refusing_step_above_the_curve_adds_no_log_noise_per_write(
         assert [m for m in message_log if "does not evaluate" in m] == []
     finally:
         _finish(plugin, answer_modal)
+
+
+def _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    return plugin, s, key
+
+
+def test_a_refusal_above_the_curve_hides_the_strip_until_it_is_fixed(
+    fake_iface, tmp_path, answer_modal
+):
+    """Final review, ruling 15: with a step above the curve refusing, the
+    strip is hidden (it would draw and write on the raw clock) and shows on
+    the Time zero clock once fixed. Fails if `_sync_gain_strip` stops
+    consulting `_refusal_above` (the strip then shows while the refusal stands)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        pd.list.setCurrentRow(2)
+        assert pd.refusal().index == 1
+        assert plugin.profile_dock.gain_strip.isHidden()
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=900.0))
+        assert pd.refusal() is None
+        strip = plugin.profile_dock.gain_strip
+        assert not strip.isHidden()
+        # Moved from the fixed chain's own input clock onto the shown clock.
+        shift = plugin.profile_dock.step_input_zero_ns(2) - plugin.profile_dock.shown_zero_ns()
+        assert np.ravel(strip.points()) == pytest.approx([shift, 0.0, 40.0 + shift, 12.0])
+    finally:
+        _finish(plugin, answer_modal)
+
+
+def test_reset_writes_nothing_while_a_refusal_sits_above_the_curve(
+    fake_iface, tmp_path, answer_modal
+):
+    """Fails if `_on_gain_reset` loses its `_refusal_above` return (it then
+    writes the raw-clock identity)."""
+    plugin, s, key = _plugin_with_refusing_step_above_a_curve(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=900.0))
+        pd.list.setCurrentRow(2)
+        assert not plugin.profile_dock.gain_strip.isHidden()
+        s.replace_step(key, 1, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+        assert pd.refusal().index == 1
+        before = [list(p) for p in _step_points(s, key, 2)]
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+        plugin._on_gain_reset()
+        assert [list(p) for p in _step_points(s, key, 2)] == before
+    finally:
+        _finish(plugin, answer_modal)

@@ -1009,6 +1009,14 @@ class NsgeoPlugin:
                 self.profile_dock.show_gain_strip(None)
                 return
             stack = self.session.stack_for(key)
+            if self._refusal_above(row):
+                # A step above the curve refuses, so the curve's input clock
+                # is unknown (the zero falls back to 0.0): a strip drawn now
+                # would draw and write on the wrong clock. Shown again once
+                # the refusal is fixed (the rebuild re-selects the row).
+                # Decided from the panel's note, no stack evaluation.
+                self.profile_dock.show_gain_strip(None)
+                return
             if step_inputs.clock_unknown(stack, row):
                 # The step's clock is not known yet (samples still loading
                 # behind an enabled Time zero): a strip drawn now would sit on
@@ -1041,6 +1049,12 @@ class NsgeoPlugin:
             )
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             self.message(f"could not show the gain curve: {exc}", Qgis.MessageLevel.Warning)
+
+    def _refusal_above(self, row: int) -> bool:
+        """True when the Processing panel notes a refusal at a row above
+        `row` (so the step at `row` has no known input clock)."""
+        refusal = self.processing_dock.refusal() if self.processing_dock is not None else None
+        return refusal is not None and refusal.index < row
 
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
@@ -1170,6 +1184,8 @@ class NsgeoPlugin:
             key = self.session.current_key
             row = self.processing_dock.current_row()
             if key is None or row < 0:
+                return
+            if self._refusal_above(row):  # the strip is hidden on a refusal above
                 return
             step = self.session.stack_for(key).entries[row][0]
             if step is not self._gain_step:  # same barrier as _on_gain_points
