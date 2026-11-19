@@ -129,6 +129,12 @@ release's notes list everything in it.
   lines on the map selects them in the Survey panel; set a preset or a
   velocity on a selection of lines at once; removing lines says what goes
   with them. Designing.
+- **The Processing panel: gain strip, Difference view and refusals** ([#197],
+  [#49], [#8], [#9], [#13], [#48]). A step that can't run on the open line
+  stays marked under the step list until it is fixed; the gain strip stops at
+  ±120 dB, reaches every point, fits its caption and gets a Reset; the
+  Difference view follows a dragged step; the panel names its line.
+  Designed; planning.
 
 ### Next, in order
 
@@ -186,7 +192,7 @@ Grouped by area. The order within a group is not a priority.
   clock share one rule ([#210]); the profile no longer jumps when the velocity
   strip appears ([#211]); a frequency profile
   ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
-  until it is fixed, instead of a six-second toast ([#197]); deconvolution,
+  until it is fixed, instead of a six-second toast ([#197], in progress above); deconvolution,
   with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); removing a line says that its processing, velocity and saved fits
@@ -221,7 +227,10 @@ Grouped by area. The order within a group is not a priority.
   page for each processing step (the first page is built and waiting for a
   walkthrough).
 
+[#8]: https://github.com/JamesZDonline/nsgeo/issues/8
+[#9]: https://github.com/JamesZDonline/nsgeo/issues/9
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
+[#13]: https://github.com/JamesZDonline/nsgeo/issues/13
 [#16]: https://github.com/JamesZDonline/nsgeo/issues/16
 [#17]: https://github.com/JamesZDonline/nsgeo/issues/17
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
@@ -232,6 +241,8 @@ Grouped by area. The order within a group is not a priority.
 [#44]: https://github.com/JamesZDonline/nsgeo/issues/44
 [#46]: https://github.com/JamesZDonline/nsgeo/issues/46
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
+[#48]: https://github.com/JamesZDonline/nsgeo/issues/48
+[#49]: https://github.com/JamesZDonline/nsgeo/issues/49
 [#57]: https://github.com/JamesZDonline/nsgeo/issues/57
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
 [#75]: https://github.com/JamesZDonline/nsgeo/issues/75
