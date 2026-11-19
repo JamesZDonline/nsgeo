@@ -157,6 +157,7 @@ several grids' slices into one site view.
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
 | `build_surface` | Follow the reflection a set of picks names, leave holes where it fades, and report the fit. |
+| `clear_north_up_plans` | Drop every cached north-up plan. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
@@ -175,8 +176,8 @@ several grids' slices into one site view.
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
 | `load_cube` | Read a cube written by `save_cube`. |
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
-| `north_up_plans_nbytes` | Bytes the cached north-up plans hold, for the status line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
+| `north_up_plans_nbytes` | Bytes the cached north-up plans hold, for the status line. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
 | `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
@@ -189,7 +190,6 @@ several grids' slices into one site view.
 | `sample_counts` | The largest corner count at each tap (the nearest cell's, for exact taps), so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
-| `clear_north_up_plans` | Drop every cached north-up plan. |
 | `column_distances` | Distances of a section's columns along a path: 0, step, ... and the length. |
 | `section_columns` | Columns half a cell apart along a path, with the pixel rule's taps. |
 | `section_crops` | Boxes round a cut, each serving at most a piece of it. |

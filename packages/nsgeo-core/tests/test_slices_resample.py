@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.slices import CubeFrame, bilinear_taps, sample, sample_counts
@@ -170,8 +172,14 @@ def test_lean_taps_drop_ids_and_weights_and_sample_the_same():
     values[2, 3] = np.inf
     np.testing.assert_array_equal(sample(values, lean), sample(values, taps))
     counts = np.arange(f.n_cells, dtype=np.float32).reshape(f.ny, f.nx) % 4
+    counts[0, 0] = 3.0  # outside points must not read cell 0
     counts[1, 1] = np.nan
-    np.testing.assert_array_equal(sample_counts(counts, lean), sample_counts(counts, taps))
+    counts[2, 3] = np.inf
+    assert (counts == 0).any()
+    # The reference is the corner rule every inexact plan uses, not the exact path itself.
+    slow = dataclasses.replace(taps, exact=False)
+    np.testing.assert_array_equal(sample_counts(counts, lean), sample_counts(counts, slow))
+    np.testing.assert_array_equal(sample_counts(counts, taps), sample_counts(counts, slow))
     index = np.array([5, 0, 7, taps.n - 1])
     taken = lean.take(index)
     assert taken.exact and taken.ids.size == 0 and taken.weights.size == 0

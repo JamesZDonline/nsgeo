@@ -2072,16 +2072,21 @@ def test_this_grids_status_counts_the_cached_north_up_plans(sourced):
     from nsgeo.slices import clear_north_up_plans
 
     clear_north_up_plans()
-    before = engine.status_text()
-    # Rotated and large enough that its plan shows in the status line's MB figure.
-    frame = CubeFrame((0.0, 0.0), 10.0, 0.1, 600, 600, "EPSG:32616")
-    to_north_up(np.zeros((frame.ny, frame.nx)), frame)
-    assert north_up_plans_nbytes() > 5 * 2**20
-    assert engine.status_text() != before
-    assert engine.status_text() == format_status(
-        engine.mode,
-        engine.line_count,
-        engine.estimate,
-        engine._redraw_ms,
-        extra_bytes=north_up_plans_nbytes(),
-    )
+    try:
+        before = engine.status_text()
+        # Rotated and large enough that its plan shows in the status line's MB figure.
+        frame = CubeFrame((0.0, 0.0), 10.0, 0.1, 600, 600, "EPSG:32616")
+        to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+        assert north_up_plans_nbytes() > 5 * 2**20
+        assert engine.status_text() != before
+        assert engine.status_text() == format_status(
+            engine.mode,
+            engine.line_count,
+            engine.estimate,
+            engine._redraw_ms,
+            extra_bytes=north_up_plans_nbytes(),
+        )
+    finally:
+        # The cache is process-wide and status_text() reads it: a ~25 MB plan left
+        # behind would change every later test's status string.
+        clear_north_up_plans()

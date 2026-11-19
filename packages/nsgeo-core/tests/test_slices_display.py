@@ -420,8 +420,10 @@ def test_the_north_up_cache_reports_what_it_holds():
     one, two = _north_up_plan(f1)[0], _north_up_plan(f2)[0]
     assert north_up_plans_nbytes() == one.nbytes + two.nbytes
     assert two.ids.size == 0
-    to_north_up(np.zeros((f3.ny, f3.nx)), f3)  # evicts f1, the least recently used
-    assert north_up_plans_nbytes() == two.nbytes + _north_up_plan(f3)[0].nbytes
+    to_north_up(np.zeros((f1.ny, f1.nx)), f1)  # f1 read again: f2 is now least recently used
+    to_north_up(np.zeros((f3.ny, f3.nx)), f3)  # evicts f2, not f1, the older insert
+    assert north_up_plans_nbytes() == one.nbytes + _north_up_plan(f3)[0].nbytes
+    assert _north_up_plan(f1)[0] is one
 
 
 def test_an_exact_north_up_plan_holds_no_ids_or_weights():
