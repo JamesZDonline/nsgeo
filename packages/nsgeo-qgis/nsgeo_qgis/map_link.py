@@ -50,7 +50,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas, QgsRubberBand, QgsVertexMarker
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QEvent, QObject, QTimer
+from qgis.PyQt.QtCore import QEvent, QObject, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
 from .layers import SiteLayers
@@ -109,6 +109,11 @@ def crs_transform(
 
 
 class MapLink(QObject):
+    #: The line keys the `lines` layer's selection became, for any change the
+    #: user made (QGIS's Select tool), of any size (#57). Not emitted for one
+    #: `select_lines` made.
+    lines_selected = pyqtSignal(list)
+
     HOVER_DWELL_MS = HOVER_DWELL_MS
     HOVER_TOLERANCE_PX = HOVER_TOLERANCE_PX
 
@@ -156,6 +161,8 @@ class MapLink(QObject):
         self._columns_canvas: dict[str, tuple[Any, list[QgsPointXY]]] = {}
         self._cut_mode = False
         self._sections: CutSections | None = None
+        # Depth counter: >0 while `select_lines` changes the layer's selection.
+        self._applying_selection = 0
 
         self._last_point: QgsPointXY | None = None
         self._dwell = QTimer(self)
@@ -704,7 +711,10 @@ class MapLink(QObject):
             layer = self._lines_layer()
             if layer is None or not self.session.is_open:
                 return
+            if self._applying_selection:
+                return  # the panel's own selection, being copied onto the map
             ids = layer.selectedFeatureIds()
+            self._announce_selection(layer, ids)
             if len(ids) != 1:
                 # A multi-selection has no single answer, and guessing one
                 # is worse than doing nothing (spec §3.4). An empty
@@ -716,6 +726,33 @@ class MapLink(QObject):
                 self.session.open_line(key)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
+
+    def _announce_selection(self, layer: QgsVectorLayer, ids: list[int]) -> None:
+        """Tell the Survey panel which lines the map now has selected (#57)."""
+        keys = [str(layer.getFeature(i)["line_key"]) for i in ids]
+        self.lines_selected.emit([k for k in keys if k in self.session.keys()])  # noqa: SIM118 -- SiteSession.keys()
+
+    def select_lines(self, keys: list[str]) -> None:
+        """Select exactly the features of `keys` on the `lines` layer, without
+        announcing it or opening anything (#57). Keys with no feature (an
+        unplaced line) are ignored. Features are looked up by `line_key` now:
+        their ids change on every refill. Does nothing when the selection
+        already is those features."""
+        try:
+            layer = self._lines_layer()
+            if layer is None:
+                return
+            wanted = set(keys)
+            ids = sorted(f.id() for f in layer.getFeatures() if str(f["line_key"]) in wanted)
+            if sorted(layer.selectedFeatureIds()) == ids:
+                return
+            self._applying_selection += 1
+            try:
+                layer.selectByIds(ids)
+            finally:
+                self._applying_selection -= 1
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not select the lines on the map: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_cut_selection(self, *_: Any) -> None:
         """Selecting a cut's feature opens it, as selecting a line opens the line."""

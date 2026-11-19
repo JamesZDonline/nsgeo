@@ -2197,3 +2197,126 @@ def test_bulk_velocity_dialog_sets_the_number_and_warns_about_fits(
     finally:
         plugin.session.save()  # unload would ask about unsaved changes
         plugin.unload()
+
+
+# --- #57: one line selection with the map -----------------------------------
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+
+
+def _selected_keys(dock):
+    return dock.selected_line_keys()
+
+
+def _recorded(dock):
+    got = []
+    dock.line_selection_changed.connect(got.append)
+    return got
+
+
+def test_select_lines_selects_exactly_those_rows_unfolds_their_grids_and_opens_nothing(dock):
+    session, dock = dock
+    session.open_line(KEYS[0])
+    grid_item = _grid_item(dock, "A")
+    grid_item.setExpanded(False)
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    dock.select_lines([KEYS[2], KEYS[1]])
+
+    assert _selected_keys(dock) == [KEYS[1], KEYS[2]]  # tree order
+    assert [it for it in dock.tree.selectedItems() if dock.key_of(it) is None] == []
+    assert grid_item.isExpanded()
+    assert opened == [] and session.current_key == KEYS[0]
+
+
+def test_select_lines_does_not_announce_back(dock):
+    session, dock = dock
+    got = _recorded(dock)
+
+    dock.select_lines(KEYS)
+    dock.select_lines([KEYS[0]])
+    dock.select_lines([])
+
+    assert got == []
+    assert _selected_keys(dock) == []
+
+
+def test_a_shift_click_after_select_lines_ranges_from_the_selected_row(dock):
+    session, dock = dock
+    dock.select_lines([KEYS[1]])
+
+    _click(dock, dock.item_for_key(KEYS[2]), Qt.KeyboardModifier.ShiftModifier)
+
+    assert _selected_keys(dock) == [KEYS[1], KEYS[2]]
+
+
+def test_a_ctrl_click_announces_the_new_line_selection(dock):
+    session, dock = dock
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    _click(dock, dock.item_for_key(KEYS[1]), CTRL)
+    assert got[-1] == [KEYS[0], KEYS[2]]
+    _click(dock, dock.item_for_key(KEYS[0]), CTRL)
+    assert got[-1] == [KEYS[2]]  # one line left: still nothing opens
+    assert opened == [] and session.current_key is None
+
+
+def test_a_grid_or_cut_selection_announces_no_lines(dock):
+    session, dock = dock
+    cut = session.add_cut("A", _CUT)
+    dock.select_lines([KEYS[0]])
+    got = _recorded(dock)
+
+    _click(dock, _grid_item(dock, "A"))
+    assert got[-1] == []
+    dock.select_lines([KEYS[0]])
+    _click(dock, dock.item_for_key(cut))
+    assert got[-1] == []
+
+
+def test_the_line_selection_survives_a_rebuild(dock):
+    session, dock = dock
+    session.open_line(KEYS[1])
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.set_lines_velocity(KEYS, VelocityModel.constant(0.1))
+
+    assert _selected_keys(dock) == KEYS
+    assert dock.tree.currentItem() is dock.item_for_key(KEYS[1])
+    assert got[-1] == KEYS  # announced once the rebuild is done, for the map
+
+
+def test_a_rebuild_with_no_line_selected_follows_the_open_line(dock):
+    session, dock = dock
+    session.open_line(KEYS[1])
+    dock.select_lines([])
+    session.set_lines_velocity([KEYS[0]], VelocityModel.constant(0.1))
+    assert _selected_keys(dock) == [KEYS[1]]
+
+
+def test_opening_a_line_makes_it_the_selection_and_announces_it(dock):
+    session, dock = dock
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.open_line(KEYS[2])
+
+    assert _selected_keys(dock) == [KEYS[2]]
+    assert got[-1] == [KEYS[2]]
+
+
+def test_opening_a_cut_announces_an_empty_line_selection(dock):
+    session, dock = dock
+    cut = session.add_cut("A", _CUT)
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.open_line(cut)
+
+    assert got[-1] == []
+    assert _selected_keys(dock) == []

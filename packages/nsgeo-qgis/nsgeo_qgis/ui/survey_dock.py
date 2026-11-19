@@ -29,7 +29,7 @@ from nsgeo.geometry import TrackPlacement
 from nsgeo.model import is_cut_key
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QObject, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QItemSelection, QItemSelectionModel, QObject, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -123,6 +123,9 @@ class SurveyDock(QgsDockWidget):
     bulk_velocity_requested = pyqtSignal(list)
     # One message-bar line, answered by the plugin (#58).
     report = pyqtSignal(str)
+    #: The selected line keys, tree order, whenever the selection changed by the
+    #: user's hand, an open, or a finished rebuild; never for `select_lines` (#57).
+    line_selection_changed = pyqtSignal(list)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
@@ -131,6 +134,10 @@ class SurveyDock(QgsDockWidget):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self.session = session
+        # Depth counter: >0 while the tree's selection is being changed by us
+        # (`select_lines`, a rebuild, an open), so it is not announced half-done.
+        self._selection_quiet = 0
+        self._captured_line_keys: list[str] = []
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -140,6 +147,7 @@ class SurveyDock(QgsDockWidget):
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         self.tree.installEventFilter(self)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         # One menu, repopulated per right-click, rather than a fresh
@@ -180,7 +188,7 @@ class SurveyDock(QgsDockWidget):
     # ---- building ---------------------------------------------------------
     def rebuild(self) -> None:
         try:
-            self._rebuild()
+            self._rebuild_announcing()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring:
             # a slot's exception never reaches whatever emitted the signal,
             # so this is the only chance to tell the user the tree could not
@@ -357,6 +365,7 @@ class SurveyDock(QgsDockWidget):
                     grid_id = self.grid_id_of(child)
                     if grid_id is not None:
                         known_grids[grid_id] = child.isExpanded()
+        self._capture_line_keys()
         return root_expanded, known_grids, self._identity(self.tree.currentItem())
 
     def _identity(self, item: QTreeWidgetItem | None) -> tuple[str, str | None] | None:
@@ -390,6 +399,8 @@ class SurveyDock(QgsDockWidget):
         # The session's current line always wins: whatever the user last
         # clicked in the tree before an unrelated rebuild is a weaker claim
         # than "this is the line open in the profile view right now".
+        if self._restore_line_selection():
+            return
         key = self.session.current_key
         if key:
             self.tree.setCurrentItem(self.item_for_key(key), 0, _SELECT_ONLY)
@@ -485,8 +496,7 @@ class SurveyDock(QgsDockWidget):
             # Qt's Shift anchor (a later Shift-click must range from this
             # line); the explicit command then undoes the toggle a held
             # Ctrl would have made of it (see _SELECT_ONLY).
-            self.tree.setCurrentItem(item)
-            self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
+            self._select_only_announcing(item)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
                 f"could not follow the current line in the tree: {exc}", Qgis.MessageLevel.Critical
@@ -621,6 +631,96 @@ class SurveyDock(QgsDockWidget):
             action = sub.addAction(grid.id, lambda g=grid.id: self._request_move(keys, g))
             action.setEnabled(any(g != grid.id for g in on.values()))
         menu.addMenu(sub)
+
+    # ---- one line selection with the map (#57) -----------------------------------
+    def _on_selection_changed(self) -> None:
+        try:
+            if not self._selection_quiet:
+                self.line_selection_changed.emit(self.selected_line_keys())
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not announce the line selection: {exc}", Qgis.MessageLevel.Critical)
+
+    def _announce_line_selection(self) -> None:
+        self.line_selection_changed.emit(self.selected_line_keys())
+
+    def _rebuild_announcing(self) -> None:
+        """`_rebuild` with the tree's selection quiet, then one announcement of
+        the selection it ended with, for the map to follow."""
+        self._selection_quiet += 1
+        try:
+            self._rebuild()
+        finally:
+            self._selection_quiet -= 1
+        self._announce_line_selection()
+
+    def _select_only_announcing(self, item: QTreeWidgetItem | None) -> None:
+        """Make `item` the current item and the only selected one (an open),
+        announcing the result once."""
+        self._selection_quiet += 1
+        try:
+            # Twice on purpose. The bare call is the only one that moves
+            # Qt's Shift anchor (a later Shift-click must range from this
+            # line); the explicit command then undoes the toggle a held
+            # Ctrl would have made of it (see _SELECT_ONLY).
+            self.tree.setCurrentItem(item)
+            self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
+        finally:
+            self._selection_quiet -= 1
+        self._announce_line_selection()
+
+    def _capture_line_keys(self) -> None:
+        self._captured_line_keys = self.selected_line_keys()
+
+    def _restore_line_selection(self) -> bool:
+        """Re-select the lines that were selected before a rebuild and are still
+        in the site; False (nothing done) when there were none."""
+        keys = [k for k in self._captured_line_keys if self.item_for_key(k) is not None]
+        self._captured_line_keys = []
+        if not keys:
+            return False
+        open_key = self.session.current_key
+        self._select_rows(keys, open_key if open_key in keys else keys[0])
+        return True
+
+    def select_lines(self, keys: list[str]) -> None:
+        """Make exactly the line rows in `keys` the selection, as the map's
+        selection arrives (#57). Opens nothing, announces nothing, and unfolds
+        the grids that hold them. Keys that are not line rows are ignored."""
+        try:
+            self._selection_quiet += 1
+            try:
+                present = [k for k in keys if self.key_of(self.item_for_key(k)) is not None]
+                self._select_rows(present, present[0] if present else None)
+            finally:
+                self._selection_quiet -= 1
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not select the lines in the tree: {exc}", Qgis.MessageLevel.Critical)
+
+    def _select_rows(self, keys: list[str], current: str | None) -> None:
+        """Select exactly the rows of `keys`, with the current item (and so the
+        Shift anchor) on `current`. The selection is set through the model with
+        explicit flags, so a modifier key held down cannot toggle a row."""
+        self._selection_quiet += 1
+        try:
+            items = [it for it in (self.item_for_key(k) for k in keys) if it is not None]
+            for item in items:
+                parent = item.parent()
+                if parent is not None:
+                    parent.setExpanded(True)
+            cur = self.item_for_key(current) if current else None
+            if cur is not None:
+                self.tree.setCurrentItem(cur)  # moves the anchor; may toggle: fixed below
+            chosen = QItemSelection()
+            for item in items:
+                index = self.tree.indexFromItem(item)
+                chosen.select(index, index)
+            self.tree.selectionModel().select(
+                chosen,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        finally:
+            self._selection_quiet -= 1
 
     # ---- bulk actions on a selection of lines (#58) ----------------------------
     def selected_line_keys(self) -> list[str]:

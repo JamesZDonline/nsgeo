@@ -427,6 +427,9 @@ class NsgeoPlugin:
         self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
         self.survey_dock.bulk_velocity_requested.connect(self.open_bulk_velocity_dialog)
         self.survey_dock.report.connect(self.message)
+        # One line selection, both ways (#57); the map link exists already (above).
+        self.map_link.lines_selected.connect(self.survey_dock.select_lines)
+        self.survey_dock.line_selection_changed.connect(self.map_link.select_lines)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
