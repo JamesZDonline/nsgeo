@@ -129,6 +129,12 @@ release's notes list everything in it.
   progress and a Cancel. Also the site engine's review follow-ups. In two
   plans: Plan A, the engine, is being built; Plan B, the background fill,
   follows it.
+- **M17b: Add data and GPS grids** ([#134]). One **Add data ▾ ▸ GPR…**
+  dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
+  new one fitted around their tracks, previewed on the map; files GPS cannot
+  place are handed on to Grid mode with their offsets guessed; GPS lines in
+  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed, planned
+  in six tasks; being built.
 
 ### Next, in order
 
@@ -141,8 +147,7 @@ than reworking M16–M17 afterwards.
    along their track (M17a, merged above); **M17b**, one **Add data** menu,
    with GPS lines going into an existing grid or a new one fitted around them;
    **M17c**, profiles at true distance; and **M17d**, outlines with holes,
-   Place by GPS and the rest of the GPS areas. M17b comes next within M17,
-   starting from a mock-up of the dialog.
+   Place by GPS and the rest of the GPS areas. M17b is in progress (above).
 3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 4. **M19: magnetometer data.** The first instrument other than GPR:
