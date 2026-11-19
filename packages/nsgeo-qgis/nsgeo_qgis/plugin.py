@@ -103,6 +103,7 @@ from nsgeo_qgis.export_task import (
 )
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import CORNER_ROLES
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
@@ -114,6 +115,8 @@ from nsgeo_qgis.paraview_scene import (
     how_to_open_message,
     launch_failed_message,
 )
+from nsgeo_qgis.scene3d import Scene3D
+from nsgeo_qgis.scene3d_plan import BUTTON_TIP, VIEW_FAILED
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
@@ -167,8 +170,9 @@ from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 MENU = "&nsgeo"
 IMPORT_GPS_TIP = "Imports DZT files with a DZG beside them, each placed along its RTK GPS track."
 VELOCITY_TIP = (
-    "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
-    "Right-click a point to remove it."
+    "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
+    "or drag a box around it to trace it. Right-click a point to remove it. "
+    "Ctrl+click (Cmd+click on a Mac) works with this off."
 )
 VELOCITY_ON_CUT_TIP = (
     "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
@@ -305,6 +309,9 @@ class NsgeoPlugin:
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
         self.act_surface: QAction | None = None
+        self.act_view3d: QAction | None = None
+        #: QGIS's 3-D view of the Slices panel's grid (M16 C).
+        self.scene3d: Scene3D | None = None
         #: The Cut map tool while the toggle is on (cut spec §4.1).
         self._cut_tool: CutTool | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
@@ -400,6 +407,8 @@ class NsgeoPlugin:
         self.act_surface.setToolTip(
             "Make a surface from the picks selected on the map (the picks layer current)."
         )
+        self.act_view3d = self._toolbar_action("3D view", self.open_view3d)
+        self.act_view3d.setToolTip(BUTTON_TIP)
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -421,6 +430,7 @@ class NsgeoPlugin:
         self.profile_dock = ProfileDock(self.session, main)
         self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
         self.profile_dock.pick_requested.connect(self._on_pick_requested)
+        self.profile_dock.velocity_mode_requested.connect(self._on_velocity_mode_requested)
         self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.docks.append(self.profile_dock)
 
@@ -434,6 +444,18 @@ class NsgeoPlugin:
         self.slices_dock.save_cube_requested.connect(self.save_cube)
         self.slices_dock.export_requested.connect(self.export_geotiff)
         self.slices_dock.paraview_requested.connect(self.export_paraview)
+        self.scene3d = Scene3D(
+            self.session,
+            self.layers,
+            self.surfaces,
+            self.surface_layers,
+            self._surface_export,
+            self.slices_dock,
+            self.iface,
+        )
+        self.session.site_closed.connect(self._close_view3d)
+        self.slices_dock.scope_changed.connect(self.scene3d.request_refresh)
+        self.slices_dock.grid_combo.currentTextChanged.connect(self.scene3d.request_refresh)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
         # Spec 9.2: tabified with Processing rather than a fourth dock
         # competing for screen space. Processing stays the raised tab --
@@ -517,13 +539,15 @@ class NsgeoPlugin:
             lambda: self.processing_dock.diff_button.setChecked(False)
         )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
-        # ProcessingDock never reacts to line_loaded (only ProfileDock
-        # does, to re-render), so a curve step selected before this line's
-        # profiles arrive would otherwise stay exactly as
-        # _sync_gain_strip last left it -- e.g. hidden for want of an axis
-        # -- with nothing to re-check it once ProfileDock's own render
-        # gives it one. Re-running _sync_gain_strip here on the same
-        # signal ProfileDock re-renders from closes that gap.
+        # ProfileDock re-renders on line_loaded, but ProcessingDock does not
+        # re-check the gain strip on it (it reacts only to re-show a form with
+        # a time field and an enabled Time zero above its row, built before
+        # the samples loaded: that field has no clock until then). So a curve
+        # step selected before this line's profiles arrive would stay exactly
+        # as _sync_gain_strip last left it -- e.g. hidden for want of an axis
+        # -- with nothing to re-check it once ProfileDock's own render gives
+        # it one. Re-running _sync_gain_strip here on the same signal
+        # ProfileDock re-renders from closes that gap.
         self.session.line_loaded.connect(self._resync_gain_strip)
         # Walkthrough round 2, W8: the same shape of gap as the gain strip
         # just above, for the profile band. The band is a property of the
@@ -784,6 +808,13 @@ class NsgeoPlugin:
                 "could not save changes before unloading; unsaved changes will be lost",
                 Qgis.MessageLevel.Critical,
             )
+        if self.scene3d is not None:
+            # Before the docks and the surface layers it reads: it closes the view and
+            # removes the picks layer it added.
+            with contextlib.suppress(Exception):
+                self.session.site_closed.disconnect(self._close_view3d)
+            self.scene3d.dispose()
+            self.scene3d = None
         if self.surfaces_dock is not None:
             self.surfaces_dock.dispose()
         if self.slices_dock is not None:
@@ -840,6 +871,7 @@ class NsgeoPlugin:
         self.act_velocity = None
         self.act_cut = None
         self.act_surface = None
+        self.act_view3d = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -892,6 +924,24 @@ class NsgeoPlugin:
         self.toolbar_actions.append(action)
         return action
 
+    def open_view3d(self) -> None:
+        """Open QGIS's 3-D view of the Slices panel's grid; say why when it cannot."""
+        try:
+            if self.scene3d is None:
+                return
+            self.scene3d.open()
+        except (ValueError, RuntimeError) as exc:
+            self.message(str(exc), Qgis.MessageLevel.Warning)
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(VIEW_FAILED.format(error=exc), Qgis.MessageLevel.Critical)
+
+    def _close_view3d(self, *_: Any) -> None:
+        try:
+            if self.scene3d is not None:
+                self.scene3d.close()
+        except Exception as exc:  # noqa: BLE001 -- a slot on session.site_closed
+            _log(f"could not close the 3-D view: {exc}")
+
     def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
@@ -901,6 +951,7 @@ class NsgeoPlugin:
                 self.act_import,
                 self.act_import_gps,
                 self.act_surface,
+                self.act_view3d,
             ):
                 if act is not None:
                     act.setEnabled(is_open)
@@ -986,8 +1037,10 @@ class NsgeoPlugin:
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
         See its own connection in `initGui` for why this is needed at all:
-        `line_loaded` is the one render-triggering event `ProcessingDock`
-        never reacts to, so nothing else re-checks a strip `_sync_gain_strip`
+        `ProcessingDock` reacts to `line_loaded` only to re-show a form with a
+        time field and an enabled Time zero above its row, built before the
+        samples loaded (that field has no clock until then), not to re-check
+        the gain strip, so nothing else re-checks a strip `_sync_gain_strip`
         last left hidden for want of an axis that has since arrived."""
         if self.session is None or self.processing_dock is None:
             return
@@ -2206,6 +2259,20 @@ class NsgeoPlugin:
             self.profile_dock.set_pick_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_velocity_mode_requested(self) -> None:
+        """Ctrl/Cmd+click on the profile with velocity mode off: switch it on
+        when it can be, so the same click goes on to place the dot or box."""
+        try:
+            if self.profile_dock is None or self.act_velocity is None:
+                return
+            if self.act_velocity.isEnabled():
+                self.act_velocity.setChecked(True)
+                self._toggle_velocity_fit_mode(True)
+            elif self.session is not None and is_cut_key(self.session.current_key or ""):
+                self.message(VELOCITY_ON_CUT_TIP, Qgis.MessageLevel.Info)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
     def _toggle_velocity_fit_mode(self, checked: bool) -> None:
         """The Velocity toolbar toggle. Drives the dock, never the view."""

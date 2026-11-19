@@ -40,6 +40,13 @@ GRID2_LINES = dzt_files(DATA / "grid2")
 Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey."""
 
 
+HAND_FIT_SITES = (
+    sorted((DATA / "hand-fits").glob("*.nsgeo.json")) if (DATA / "hand-fits").is_dir() else []
+)
+"""Copied site files holding the author's saved hand fits (#140), built by
+`make_hand_fit_data.py`. Their lines' DZTs live where the site files say."""
+
+
 def real_radargram(path: Path) -> Radargram:
     """Channel 0 of the DZT at `path` as a Radargram; skips when the file is missing (CI)."""
     if not path.exists():

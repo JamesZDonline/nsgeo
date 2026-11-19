@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nsgeo.processing import get_step, grouped_steps
+from nsgeo.processing import TIME_BASE_TIME_ZERO, get_step, grouped_steps
 from nsgeo.slices import (
     METHODS,
     NEIGHBOURS_PER_QUADRANT,
@@ -452,6 +453,33 @@ def old_cube_note(shift_ns: float) -> str:
     return (
         "This cube was saved before times were measured from each line's first break. "
         f"It was rebuilt that way, with its range moved by {shift_ns:+.2f} ns."
+    )
+
+
+def clock_change_note(cube_id: str, preset: str, to: str, shift_ns: float) -> str:
+    """The one line said when a cube saved on one clock is rebuilt on the other
+    because its preset has gained or lost Time zero since (#162 item 1). `to` is
+    the clock it moved onto. `old_cube_note` stays for a record with no clock."""
+    if to == TIME_BASE_TIME_ZERO:
+        return (
+            f"Cube {cube_id!r} was saved on the radar's clock, and preset {preset!r} now has "
+            "Time zero. It was rebuilt from each line's first break, with its range moved by "
+            f"{shift_ns:+.2f} ns (the median line zero)."
+        )
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        f"It was rebuilt on the radar's clock, with its range moved by {shift_ns:+.2f} ns, "
+        "the median first break as Time zero finds it by default."
+    )
+
+
+def no_break_note(cube_id: str, preset: str) -> str:
+    """Said when a cube's preset has lost Time zero and no prepared line has a
+    first break to move its range by: the range stays as saved, on the wrong
+    clock, and this says so rather than leave it unsaid."""
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        "No line has a first break to move it by, so its range was left as saved."
     )
 
 
@@ -992,3 +1020,26 @@ def too_fine_for_export(cell: float, grid_id: str, cells: int, safe: float) -> s
         f"a {cell:g} m cell over grid {grid_id!r} is {cells:,} cells, too fine "
         f"to export; use {safe:g} m or coarser"
     )
+
+
+def slice_dir_prefix(pid: int) -> str:
+    """The name a process's Slices preview folder starts with: the pid says who owns it."""
+    return f"nsgeo-slice-{pid}-"
+
+
+def slice_dir_pid(name: str) -> int | None:
+    """The pid a Slices preview folder was made for, or None when `name` is not one of ours
+    (`nsgeo-slice-<pid>-<random>`)."""
+    match = re.fullmatch(r"nsgeo-slice-(\d+)-[A-Za-z0-9_]+", name)
+    return int(match.group(1)) if match else None
+
+
+def stale_slice_dirs(names: Iterable[str], is_alive: Callable[[int], bool | None]) -> list[str]:
+    """The preview folders left by a process that is gone. `is_alive` says True, False or None
+    (cannot tell: the folder stays)."""
+    out: list[str] = []
+    for name in names:
+        pid = slice_dir_pid(name)
+        if pid is not None and is_alive(pid) is False:
+            out.append(name)
+    return out

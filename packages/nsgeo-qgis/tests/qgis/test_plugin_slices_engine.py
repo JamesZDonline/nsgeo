@@ -41,6 +41,7 @@ from nsgeo_qgis.slices_plan import (
     SourceChoice,
     TooManyLevels,
     limit_windows,
+    transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
 from qgis.core import QgsApplication, QgsTask
@@ -1894,6 +1895,161 @@ def test_a_stored_resolution_past_the_limit_builds_nothing_once_lines_arrive(sou
     assert engine.wait_for_preparation(20_000), "preparation did not finish"
     assert engine.frame is None and engine.z is None
     assert errors == []
+
+
+# ---- #162 item 1: the radar-clock first break of the prepared lines ----------
+
+
+def _banded_engine(tmp_path, band_rows, rise=0.0):
+    """An engine on one line per entry of `band_rows`, under "radar", a preset
+    with no Time zero step. Each line is quiet noise with a flat band at its row,
+    as `_banded_dzt` in the dock tests writes it, rising to `rise` of the band
+    over the two rows before; None is a silent line, every sample zero.
+
+    "gained" is a second preset without Time zero: AGC, then a gain curve that
+    climbs 20 dB between rows 39 and 40 of the raw axis, as a curve drawn on
+    the profile viewer to bring up what lies below the first arrival might. It
+    holds the rows above 40 down, so on these lines it moves a pick taken on
+    the prepared data (`_gained_pick_lands_late`)."""
+    from tests.synthetic import write_dzt
+
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    lines = []
+    for i, row in enumerate(band_rows):
+        path = tmp_path / "raw" / f"FILE__00{i + 1}.DZT"
+        rng = np.random.default_rng(i)
+        data = (rng.normal(size=(512, 60)) * 1e4).astype(np.int32)  # quiet: the band breaks
+        if row is None:
+            data[:] = 0
+        else:
+            data[row : row + 4, :] = 5_000_000
+            if rise:
+                data[row - 2 : row, :] = int(rise * 5_000_000)
+        write_dzt(path, data)
+        lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["radar"] = []
+    raw = _raw_record(lines[0])
+    session.site.presets["gained"] = [
+        {"step": "gain_agc", "params": {}, "enabled": True},
+        {
+            "step": "gain_curve",
+            "params": {"points": [[_row_ns(raw, 39), -20.0], [_row_ns(raw, 40), 0.0]]},
+            "enabled": True,
+        },
+    ]
+    errors: list[str] = []
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
+    return engine, session, errors
+
+
+def _raw_record(line):
+    """A line's record as read, before any step: what Time zero runs on in an
+    ordinary preset, where it comes first."""
+    return Radargram.from_profile(line.load()[0])
+
+
+def _row_ns(rg, row):
+    """The radar-clock time of `row` on a raw record."""
+    return rg.t0_ns + row * rg.dt_ns
+
+
+def test_median_first_break_is_the_median_band_row(qgis_app, tmp_path):
+    """The shift a restore owes when its preset has lost Time zero: the median,
+    over the prepared lines, of each one's radar-clock first break. Two lines
+    break at row 40 and one at 41, so the median is row 40."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41))
+    try:
+        assert engine.median_first_break() is None, "nothing prepared yet"
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == []
+        line = engine.prepared_lines()[0]
+        assert line.zero_ns == 0.0  # the radar's clock
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40 * line.dt_ns)
+    finally:
+        engine.dispose()
+
+
+def test_median_first_break_leaves_out_a_line_with_no_signal(qgis_app, tmp_path):
+    """A line whose samples are all zero has no first break, so it is left out
+    of the median rather than read as row 0; with no break on any line there is
+    no median (Review Focus 5)."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 41, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        line = engine.prepared_lines()[0]
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40.5 * line.dt_ns)
+    finally:
+        engine.dispose()
+    engine, session, errors = _banded_engine(tmp_path / "silent", (None, None, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        assert engine.median_first_break() is None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "transform", [NO_TRANSFORM, *transform_names()], ids=lambda name: name or "none"
+)
+@pytest.mark.parametrize("preset", ["radar", "gained"])
+def test_median_first_break_is_the_raw_records_break_whatever_the_preparation(
+    qgis_app, tmp_path, preset, transform
+):
+    """PF-1: each line's first break is picked on its raw record, where Time
+    zero runs in an ordinary preset (it comes first), so neither the preset's
+    other steps nor the transform move it. These lines rise to 0.3 of the band
+    two rows before it, so Time zero's own pick on the raw records is that rise:
+    rows 38, 38 and 39, median row 38, exactly, under every preset and every
+    transform the registry offers, now or later.
+
+    Picked on the prepared lines instead, "gained" moved it two rows late, onto
+    the band (`_gained_pick_lands_late`), as the author's own gain steps moved
+    it two samples late on the campus lines; and the envelope of a flat step
+    picked three rows early under either preset."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=transform, preset=preset)
+        assert errors == [] and engine.line_count == 3
+        raw = _raw_record(session.line_for_key(session.keys()[0]))
+        estimate = engine.median_first_break()
+        assert estimate is not None
+        late = (estimate - _row_ns(raw, 38)) / raw.dt_ns  # in samples
+        assert late == pytest.approx(0.0, abs=1e-6), (preset, transform, late)
+    finally:
+        engine.dispose()
+
+
+def test_gained_pick_lands_late(qgis_app, tmp_path):
+    """The premise of the test above, a guard that holds today: under "gained",
+    Time zero's own pick taken on the PREPARED lines lands two rows late (row 40,
+    the band, on every line), while the raw records break at rows 38, 38 and 39.
+    Should a change to the gain steps stop moving it, this says so rather than
+    leave the test above checking a preset that moves nothing."""
+    from nsgeo.processing import build_step
+
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="gained")
+        assert errors == []
+        pick = build_step("time_zero")
+        keys = session.keys()  # SiteSession.keys(), a list in survey order
+        raws = [_raw_record(session.line_for_key(key)) for key in keys]
+        rows_raw = [round((pick.apply(rg).zero_ns - rg.t0_ns) / rg.dt_ns) for rg in raws]
+        prepared = [
+            Radargram(data=line.data, dt_ns=line.dt_ns, t0_ns=line.t0_ns)
+            for line in engine.prepared_lines()
+        ]
+        rows_prepared = [round((pick.apply(rg).zero_ns - rg.t0_ns) / rg.dt_ns) for rg in prepared]
+        assert rows_raw == [38, 38, 39]
+        assert rows_prepared == [40, 40, 40]
+    finally:
+        engine.dispose()
 
 
 def test_set_resolution_refuses_before_storing(sourced):

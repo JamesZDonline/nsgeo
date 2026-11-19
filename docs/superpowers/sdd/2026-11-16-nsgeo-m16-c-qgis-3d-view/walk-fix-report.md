@@ -1,0 +1,8 @@
+# Walk-fix report (commit d70900f, pushed to origin nsgeo-m16-c)
+
+1. Crash fix (R15): scene3d.py Scene3D connects project.layersWillBeRemoved in __init__, disconnects in dispose; guarded slot _on_layers_will_be_removed clears setRenderer3D(None) on managed layers (picks + surface layers) about to be removed. Tests (test_plugin_scene3d.py): surface layer, rebuild, picks layer clear renderer while still in project; unmanaged layer keeps renderer; no handler after dispose. RED shown (surface-layer test failed before handler); GREEN 41 passed.
+2. View stretch (R16/R17): core project.py _clean_slice_source keeps view_stretch (number); session.view_stretch/set_view_stretch (ValueError, dirty, signal); scene3d_plan.scene_stretch(value) now takes a value, plus STRETCH_* wording; Scene3D._stretch uses session.view_stretch; Surfaces dock row 2 SteadySpinBox (0.1-50, step 0.5, 1 dp), disabled for All grids with tooltip, loads under _loading. Guide updated. Tests: core round trip/bad value, session default/set/refuse/dirty/signal, scene (export stretch no longer moves view; existing stretch tests switched), dock (disabled/enabled, per-grid values across two grids, loading never dirties).
+3. slice_layer.py _create_layer: skipMemoryLayersCheck=1; test in test_plugin_slice_layer.py; RED shown by removing line.
+
+Runs: core + pure 1802 passed, 8 skipped, 1 xfailed. Whole QGIS tier: 2707 passed, 1 failed (test_plugin_site_scope.py::test_editing_a_grid_in_site_scope_never_overlaps_preparations, a Whole-site progress timing wait; passes alone in 13 s, same family as #166; unrelated to these changes). ruff check/format clean, mypy (CI list) clean.
+Concerns: real-window check is the coordinator's job; that one intermittent test.

@@ -20,3 +20,4 @@ for p in (HERE, PLUGIN_DIR, CORE_DIR, PLUGIN_DIR / "scripts"):
         sys.path.insert(0, str(p))
 
 import nsgeo_qgis  # noqa: E402,F401  (runs the core path shim)
+from temp_dirs import _drop_temp_folders_after_a_passing_run  # noqa: E402,F401

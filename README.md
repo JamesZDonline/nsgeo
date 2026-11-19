@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-16.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-18.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -103,16 +103,17 @@ release's notes list everything in it.
 | | The Slices panel: dz stops at the radar's sample interval and says so, and a cube too deep is refused; warnings and refusals get their own section, and the settings sections fold out of the wheel's way; a Whole site refresh leaves a box you are typing in alone; Edit lines' Grid column ignores the wheel until clicked; grids start at a 0.1 m cell; the panel fits the Processing panel's width ([#177], [#176], [#105], [#121]) | next release |
 | | Export for ParaView, the first of M16's four plans: one action writes a grid's prepared volume, picks and lines, at the grid's own 3-D cell, depth step and depth end, to a folder ParaView opens ready to explore ([#190]) | next release |
 | | Surfaces from picks, M16's second plan: select picks on the map and nsgeo builds the surface they name, leaving holes where the radar saw nothing; it shows on the map coloured by depth, goes into the ParaView export, and is listed in a Surfaces panel with its fit and whether it needs a rebuild; a pick can belong to several surfaces ([#202]) | next release |
+| | A restored cube comes back on the clock it was saved on, even if its preset has since gained or lost Time zero or you edit while it prepares, and says how it moved in Warnings; a quick switch of survey or grid carries nothing over, a new survey opens at its first slice, and a grid the panel falls back to opens on the preset Whole site draws it with ([#162], [#102], [#152], [#200]) | next release |
+| | Trace a hyperbola from a box: in velocity mode, drag a box around a diffraction hyperbola and nsgeo marks about ten dots on the leading edge of its band, ready to edit and save like clicked ones, or says why it can't; Ctrl+click (Cmd+click on a Mac) places velocity dots without switching velocity mode on first ([#140], [#88]) | next release |
+| | QGIS's own 3-D view, M16's third plan: a 3D view button shows a grid's picks at their depths and its surfaces, depth stretched per grid from the Surfaces panel and saying so, keeping up as you pick and rebuild; QGIS no longer warns that the Slices layer is a temporary layer ([#217]) | next release |
 
 ### In progress
 
-- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]) and
-  **Plan B, surfaces from picks** ([#202]) are merged (above). **Plan C, the
-  QGIS 3-D view:** a 3D view button opens QGIS's own 3-D view of the grid the
-  Slices panel shows, with its picks at depth and its surfaces, stretched and
-  saying so. Built and reviewed, awaiting its walkthrough. **Plan D, cuts in
-  3-D:** picks on cuts join surfaces, and the ParaView export gains a wall for
-  every line and cut. Planned; builds after C merges.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
+  **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
+  ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
+  surfaces, and the ParaView export gains a wall for every line and cut.
+  Planned; next to build.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -120,22 +121,9 @@ release's notes list everything in it.
 - **M17a: GPS lines**, the first of four plans. Read the RTK GPS log
   (`.DZG`) beside each DZT and place the line along the track it was
   walked, with no grid: import, the map (with stretches that had no RTK
-  fix marked), the Survey panel, and a destagger you can type. Built;
-  walkthrough under way.
-- **Slices: the right clock and preset after a change** ([#162], [#102], [#152],
-  part of [#163]). A restored cube comes back on the clock it was saved on, even
-  if you edit while its lines prepare or its preset has since gained or lost
-  Time zero; a quick switch to another survey no longer carries the last one's
-  palette or slice time over; and a grid the panel falls back to opens on the
-  preset Whole site draws it with. Built and reviewed, awaiting its
-  walkthrough.
-- **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
-  drag a box around a diffraction hyperbola and the plugin marks about ten
-  dots on the leading edge of its band, ready to edit and save like
-  clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
-  switching velocity mode on first. Built, reviewed and checked against the
-  author's own hand fits and an independent migration check; awaiting its
-  walkthrough.
+  fix marked), the Survey panel, and a destagger you can type. Walked
+  through; PR [#208](https://github.com/JamesZDonline/nsgeo/pull/208) awaits
+  merge.
 
 ### Next, in order
 
@@ -157,9 +145,15 @@ than reworking M16–M17 afterwards.
    above the radargram on lines and cuts. Designed, in three parts; the first
    is ready to plan, now that [#180] has merged.
 
+Not yet placed in the order:
+
+- **M20: topography.** Profiles, slices, cuts and the 3-D view in elevation
+  rather than depth below a sloping surface, with each trace's ground
+  elevation from a DEM layer, the GPS altitude M17 already stores, or
+  surveyed points; and the mast-tilt correction M17 left for later ([#216]).
+
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
-that cuts carry picks too; and the three ways a restored cube can still come
-back on the wrong clock without a note ([#162], in progress above).
+that cuts carry picks too.
 
 ### Wishlist, not yet scheduled
 
@@ -175,12 +169,16 @@ Grouped by area. The order within a group is not a priority.
   ([#187]); exports record where the grid's velocity came from ([#188]); show
   migration's velocity beside a traced one, as a second, independent number
   ([#195]); warn when a grid's velocity from fits is on another clock than its
-  slices ([#201]).
+  slices ([#201]); the hyperbola tracer's known limits on layered ground and
+  on very wide boxes ([#209]) and its review follow-ups ([#212]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
-  ([#158]); a frequency profile
+  ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
+  clock share one rule ([#210]); the profile no longer jumps when the velocity
+  strip appears ([#211]); a frequency profile
   ([#34]); configurable axes ([#11]); a step's refusal stays in the panel
-  until it is fixed, instead of a six-second toast ([#197]).
+  until it is fixed, instead of a six-second toast ([#197]); deconvolution,
+  with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
@@ -198,11 +196,15 @@ Grouped by area. The order within a group is not a priority.
   grid's preset straight from the Whole site grid list ([#199]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
-  ([#171]).
+  ([#171]); cuts that show the wiggle, read from the lines they cross with
+  one smooth gain, instead of the slice's squared amplitudes ([#215]).
 - **3-D:** surfaces stay fresh after a reopen without Save site in the cases
   the walkthrough fix left open, such as a Slices transform other than the
   default ([#203]); an untouched ParaView export no longer marks surfaces stale
-  when the cell is not a 3-decimal number ([#204]).
+  when the cell is not a 3-decimal number ([#204]); on a multi-channel line,
+  read time zero from the same channel the volume is built from ([#218]); a
+  line whose time zero can't be read is not re-read on every 3-D view refresh
+  ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -244,7 +246,6 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
-[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
@@ -264,10 +265,22 @@ Grouped by area. The order within a group is not a priority.
 [#199]: https://github.com/JamesZDonline/nsgeo/issues/199
 [#201]: https://github.com/JamesZDonline/nsgeo/issues/201
 [#190]: https://github.com/JamesZDonline/nsgeo/pull/190
+[#200]: https://github.com/JamesZDonline/nsgeo/issues/200
 [#202]: https://github.com/JamesZDonline/nsgeo/pull/202
 [#203]: https://github.com/JamesZDonline/nsgeo/issues/203
 [#204]: https://github.com/JamesZDonline/nsgeo/issues/204
 [#205]: https://github.com/JamesZDonline/nsgeo/issues/205
+[#209]: https://github.com/JamesZDonline/nsgeo/issues/209
+[#210]: https://github.com/JamesZDonline/nsgeo/issues/210
+[#211]: https://github.com/JamesZDonline/nsgeo/issues/211
+[#212]: https://github.com/JamesZDonline/nsgeo/issues/212
+[#214]: https://github.com/JamesZDonline/nsgeo/issues/214
+[#215]: https://github.com/JamesZDonline/nsgeo/issues/215
+[#216]: https://github.com/JamesZDonline/nsgeo/issues/216
+[#217]: https://github.com/JamesZDonline/nsgeo/pull/217
+[#218]: https://github.com/JamesZDonline/nsgeo/issues/218
+[#219]: https://github.com/JamesZDonline/nsgeo/issues/219
+[#220]: https://github.com/JamesZDonline/nsgeo/issues/220
 
 ## Why
 

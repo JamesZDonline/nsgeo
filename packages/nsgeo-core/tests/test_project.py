@@ -1348,3 +1348,18 @@ def test_a_pinned_crs_survives_an_edit_of_the_first_grid_through_save_and_load(t
     out = tmp_path / "survey.nsgeo.json"
     save_site(gps, out)
     assert load_site(out).crs == _TRACK_CRS
+
+
+def test_view_stretch_round_trips_and_a_bad_one_is_dropped(tmp_path):
+    site = _two_grid_site()
+    site.slice_sources = {"A": {"view_stretch": 2.5}, "B": {"preset": "p"}}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert load_site(path).slice_sources == site.slice_sources
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {"A": {"view_stretch": "wide"}, "B": {"view_stretch": True}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}
+    doc["slice_sources"] = {"A": {"view_stretch": 0}, "B": {"view_stretch": -2.0}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}

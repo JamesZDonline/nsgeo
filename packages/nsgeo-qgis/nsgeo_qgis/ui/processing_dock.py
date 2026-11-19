@@ -172,6 +172,9 @@ class ProcessingDock(QgsDockWidget):
         # (row -1, nothing open yet) is never mistaken for an echo.
         self._shown: tuple[str | None, int] = (None, -2)
         self._shown_step: Any = None
+        # (key, row) of a form built while its time field had no clock
+        # (`input_axis` was None); `line_loaded` re-shows only that one.
+        self._form_axis_unknown: tuple[str, int] | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -280,6 +283,7 @@ class ProcessingDock(QgsDockWidget):
 
         session.line_opened.connect(self.rebuild)
         session.stack_changed.connect(self._on_stack_changed)
+        session.line_loaded.connect(self._on_line_loaded)
         session.site_closed.connect(self.rebuild)
         self.rebuild()
 
@@ -462,6 +466,7 @@ class ProcessingDock(QgsDockWidget):
             if shown == self._shown:
                 return  # already showing "nothing"
             self._shown, self._shown_step = shown, None
+            self._form_axis_unknown = None
             self.form.clear()
             return
         step, _ = self.session.stack_for(key).entries[row]
@@ -469,10 +474,29 @@ class ProcessingDock(QgsDockWidget):
             return  # an echo of our own commit, or add_step()'s second emit
         self._shown, self._shown_step = shown, step
         range_kwargs: dict[str, Any] = {}
+        self._form_axis_unknown = None
         if any(spec.kind == "time" for spec in get_step(step.name).schema()):
-            t0, dt, n = self.input_axis(row)
-            range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
+            axis = self.input_axis(row)
+            if axis is None:
+                self._form_axis_unknown = (key, row)
+            else:
+                t0, dt, n = axis
+                range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
         self.form.set_step(step.name, step.params, **range_kwargs)
+
+    def _on_line_loaded(self, key: str) -> None:
+        """The samples arrived: a time field shown without a clock (see
+        `input_axis`) gets its real range now."""
+        try:
+            if key != self.key():
+                return
+            row = self.list.currentRow()
+            if row < 0 or self._form_axis_unknown != (key, row):
+                return
+            self._shown = (None, -2)
+            self._show_form(row)
+        except Exception as exc:
+            _log(f"_on_line_loaded: {exc}")
 
     def _on_form_committed(self, params: dict[str, Any]) -> None:
         key = self.key()
@@ -542,12 +566,17 @@ class ProcessingDock(QgsDockWidget):
         self.session.append_step(key, build_step(name, **default_params(name)))
         self.list.setCurrentRow(self.list.count() - 1)
 
-    def input_axis(self, row: int) -> tuple[float, float, int]:
+    def input_axis(self, row: int) -> tuple[float, float, int] | None:
         """(t0_ns, dt_ns, n_samples) of what the step at `row` receives:
         the stack's state after the step above it, or the source when it is
         first. Bounds a time field to the record that step can clip, so a
         `time_zero` ahead of it moves the lower limit. Falls back the way
-        `time_axis` does when the stack does not evaluate cleanly."""
+        `time_axis` does when the stack does not evaluate cleanly.
+
+        None when the samples have not loaded and an enabled `time_zero` sits
+        above `row`: the header's radar-clock range is the wrong clock then,
+        and the real one is unknown until the source arrives (the dock
+        re-shows the form on `line_loaded`)."""
         key = self.key()
         assert key is not None
         stack = self.session.stack_for(key)
@@ -561,6 +590,8 @@ class ProcessingDock(QgsDockWidget):
                 )
                 rg = stack.source
             return rg.t0_ns, rg.dt_ns, rg.n_samples
+        if any(step.name == "time_zero" and on for step, on in stack.entries[:row]):
+            return None
         h = self.session.line_for_key(key).header
         return h.position_ns, h.dt_ns, h.n_samples
 
@@ -571,7 +602,8 @@ class ProcessingDock(QgsDockWidget):
         axis (`time_zero` crops `n_samples` and relabels `t0_ns` -- see
         `nsgeo.processing.timezero`) is accounted for, exactly as the new
         step's own `apply()` will see it. Only used today to seed a new
-        curve step's identity default (see `add_step_with_dialog`), so the
+        step's required parameters (see `add_step_with_dialog`): a curve's
+        identity default, and a time at the record's end, so the
         distinction only bites once something ahead of it in the stack
         changes the sample axis.
 
@@ -580,14 +612,27 @@ class ProcessingDock(QgsDockWidget):
         Nyquist, say) -- that is a problem with that step, not a reason
         this method should raise too: it falls back to the stack's raw
         source instead, same as before this method looked at `result()` at
-        all, and to the line's header when nothing has loaded yet. Logged
-        when it fires: the seed then lands on the raw axis while the
-        viewer keeps its last good (possibly quite different) transform,
+        all. Logged when it fires: the seed then lands on the raw axis while
+        the viewer keeps its last good (possibly quite different) transform,
         so a curve step seeded right now can end up with control points
-        off the drawn axis with nothing said otherwise."""
+        off the drawn axis with nothing said otherwise.
+
+        With no samples loaded yet it reads the line's header, the radar's
+        clock (`input_axis`), unless an enabled `time_zero` is in the stack:
+        then the header is the wrong clock and the real one is unknown, so it
+        is `(0.0, dt, n_samples)` from the header. On the time-zero clock the
+        record starts at 0 and has at most the header's samples, so a time
+        seeded at its end crops nothing (#163 item 3)."""
         key = self.key()
         assert key is not None
-        return self.input_axis(len(self.session.stack_for(key).entries))
+        axis = self.input_axis(len(self.session.stack_for(key).entries))
+        if axis is None:
+            # Behind a time_zero with no samples yet: the record starts at 0
+            # on the time-zero clock and has at most the header's samples, so
+            # a cutoff seeded at its end crops nothing.
+            h = self.session.line_for_key(key).header
+            return 0.0, h.dt_ns, h.n_samples
+        return axis
 
     def probe_radargram(self, key: str) -> Radargram | None:
         """What a step appended right now would actually receive: the
