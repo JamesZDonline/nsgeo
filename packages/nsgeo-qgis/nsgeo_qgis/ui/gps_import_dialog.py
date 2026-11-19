@@ -356,10 +356,16 @@ class GpsImportDialog(QDialog):
         except ValueError as exc:  # a key already in the site, or a CRS mismatch
             self.status.setText(str(exc))
             return
-        if chosen is not None:
-            self.session.apply_preset_to(chosen, new_keys)
-        if self.preset_box.is_choice():
-            self.session.remember_import_preset(None, chosen)
-        self.imported_keys = new_keys
+        self.imported_keys = new_keys  # the lines are in the site whatever follows
         self.messages = import_messages(self.rows, len(lines))
+        try:
+            if chosen is not None:
+                self.session.apply_preset_to(chosen, new_keys)
+            if self.preset_box.is_choice():
+                self.session.remember_import_preset(None, chosen)
+        except Exception as exc:  # noqa: BLE001 -- the import happened; say what did not
+            self.messages.append(
+                f"the lines were imported, but the preset could not be applied: {exc}"
+            )
+            self.status.setText(self.messages[-1])
         super().accept()

@@ -1025,3 +1025,23 @@ def test_a_reentrant_follow_spacing_does_not_clear_its_guard_early(session):
     assert seen == [True]
     assert not d._first_offset_own
     assert not d._following
+
+
+def test_a_preset_that_cannot_be_applied_is_reported_and_the_import_stands(
+    session, tmp_path, monkeypatch
+):
+    _with_presets(session, tmp_path, "One")
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+
+    def boom(*a, **k):
+        raise RuntimeError("no disk")
+
+    monkeypatch.setattr(session, "apply_preset_to", boom)
+    d.accept()
+    assert d.result() == d.DialogCode.Accepted
+    assert len(session.keys_on_grid("A")) == 1
+    assert d.imported_keys == session.keys_on_grid("A")
+    assert "could not be applied" in d.status.text()
+    assert "no disk" in d.status.text()

@@ -2333,3 +2333,37 @@ def test_a_rebuild_keeps_a_grid_the_user_folded_and_its_selected_lines(dock):
 
     assert not _grid_item(dock, "A").isExpanded()
     assert _selected_keys(dock) == [KEYS[0], KEYS[1]]
+
+
+@pytest.mark.parametrize("how", ["new_site", "close_site"])
+def test_a_site_switch_with_lines_selected_and_none_open_rebuilds_cleanly(
+    dock, message_log, tmp_path, how
+):
+    session, dock = dock
+    assert session.current_key is None  # nothing open: a map rectangle opens nothing
+    dock.select_lines(KEYS[:2])
+    assert len(dock.selected_line_keys()) == 2
+    if how == "new_site":
+        (tmp_path / "other").mkdir()
+        session.new_site(tmp_path / "other")
+    else:
+        session.close_site()
+    assert [m for m in message_log if "could not rebuild" in m] == []
+    assert message_log == []
+    assert "survey tree error" not in dock.status.text()
+    assert dock.selected_line_keys() == []
+
+
+def test_the_menu_and_removal_text_ignore_selected_keys_that_are_not_lines(
+    dock, answer_modal, message_log, monkeypatch
+):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    monkeypatch.setattr(dock, "_selected_targets", lambda: ([], ["mag/FILE_M.dat"]))
+    item = dock.item_for_key(KEYS[0])
+    _select(dock, item, dock.item_for_key(KEYS[1]))
+    menu = _right_click(dock, item)
+    assert _texts(menu) == ["Remove 1 line from site"]
+    assert dock._fits_would_go([], ["mag/FILE_M.dat"]) is False
+    assert dock._lines_going([], ["mag/FILE_M.dat"]) == []
+    assert message_log == []

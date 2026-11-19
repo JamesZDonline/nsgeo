@@ -566,3 +566,21 @@ def test_real_gps_lines_import_with_a_preset(plugin, project_degrees):
     for k, dicts in kept.items():
         assert session.stack_for(k).to_dicts() == dicts
     assert session.site.import_presets["site"] == "Plain"
+
+
+def test_a_preset_that_cannot_be_applied_is_reported_and_the_gps_import_stands(
+    session, tmp_path, monkeypatch
+):
+    _preset_from_a_line(session, tmp_path, "Plain")
+    d = GpsImportDialog(session)
+    d.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
+
+    def boom(*a, **k):
+        raise RuntimeError("no disk")
+
+    monkeypatch.setattr(session, "apply_preset_to", boom)
+    d.accept()
+    assert d.result() == d.DialogCode.Accepted
+    assert len(d.imported_keys) == 1
+    assert "could not be applied" in d.status.text()

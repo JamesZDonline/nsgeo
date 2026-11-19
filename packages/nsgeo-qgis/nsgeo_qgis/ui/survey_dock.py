@@ -396,9 +396,9 @@ class SurveyDock(QgsDockWidget):
         return None
 
     def _restore_selection(self, previous: tuple[str, str | None] | None) -> None:
-        # The session's current line always wins: whatever the user last
-        # clicked in the tree before an unrelated rebuild is a weaker claim
-        # than "this is the line open in the profile view right now".
+        # Order of claims: the lines that were selected before the rebuild
+        # (spec 3.4), then the session's current line, then whatever the user
+        # last clicked: each is a weaker claim than the one before it.
         if self._restore_line_selection():
             return
         key = self.session.current_key
@@ -492,10 +492,8 @@ class SurveyDock(QgsDockWidget):
     def _follow_current(self, key: str) -> None:
         try:
             item = self.item_for_key(key) if key else None
-            # Twice on purpose. The bare call is the only one that moves
-            # Qt's Shift anchor (a later Shift-click must range from this
-            # line); the explicit command then undoes the toggle a held
-            # Ctrl would have made of it (see _SELECT_ONLY).
+            # Makes `item` the only selected row, moves Qt's Shift anchor to
+            # it and announces the selection (see _select_only_announcing).
             self._select_only_announcing(item)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
@@ -526,14 +524,17 @@ class SurveyDock(QgsDockWidget):
                 # Qt before this runs: the press selects just that item.
                 # Editing and moving are for recorded lines; a selection that
                 # holds a cut offers removal only.
-                gps = [k for k in keys if self._is_gps(k)]
+                # Only keys the session knows as lines get line items: a
+                # selection may carry other kinds of file (magnetometer).
+                only_lines = self._line_keys_only(keys) == keys
+                gps = [k for k in keys if only_lines and self._is_gps(k)]
                 if keys and gps and len(gps) == len(keys):
                     # Only GPS lines: destagger is all they have until GPS areas (M17c).
                     menu.addAction(
                         f"Set destagger for {len(keys)} GPS lines…",
                         lambda: self._request_destagger(keys),
                     )
-                elif keys and not gps and not any(is_cut_key(k) for k in keys):
+                elif keys and only_lines and not gps:
                     grids = {self._grid_of_key(k) for k in keys}
                     if len(grids) == 1:
                         grid = grids.pop()
@@ -544,7 +545,7 @@ class SurveyDock(QgsDockWidget):
                     self._add_move_menu(
                         menu, keys, f"Move {self._count_phrase(grid_ids, keys)} to grid"
                     )
-                if keys and not any(is_cut_key(k) for k in keys):
+                if keys and only_lines:
                     self._add_bulk_items(menu, keys)
                 menu.addSeparator()
                 menu.addAction(
@@ -726,6 +727,8 @@ class SurveyDock(QgsDockWidget):
     def selected_line_keys(self) -> list[str]:
         """The keys of the selected line rows, in tree order. Grid, cut and site
         rows, and rows already gone from the session, are left out."""
+        if not self.session.is_open:  # a site closing: the rows are about to go
+            return []
         keys: list[str] = []
         it = QTreeWidgetItemIterator(self.tree, QTreeWidgetItemIterator.IteratorFlag.Selected)
         while it.value():
@@ -1024,9 +1027,17 @@ class SurveyDock(QgsDockWidget):
             return text + GRID_CUT_PICK_TAIL.format(they=they)
         return text + GRID_CUT_PICKS_TAIL.format(they=they, m=m)
 
+    def _line_keys_only(self, keys: list[str]) -> list[str]:
+        """`keys` that are lines the session knows (not cuts, nor any other
+        kind of file a selection may carry), in order."""
+        if not self.session.is_open:
+            return []
+        known = set(self.session.keys())
+        return [k for k in keys if k in known]
+
     def _lines_going(self, grid_ids: list[str], keys: list[str]) -> list[str]:
         """Every line a removal takes: the selected lines and the grids' lines."""
-        going = [k for k in keys if not is_cut_key(k)]
+        going = self._line_keys_only(keys)
         for grid_id in grid_ids:
             going += self.session.keys_on_grid(grid_id)
         return going

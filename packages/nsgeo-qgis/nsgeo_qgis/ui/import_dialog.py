@@ -122,6 +122,7 @@ class ImportDialog(QDialog):
         self._opened_against = session.json_path
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
+        self.preset_notice = ""  # set when the import stood but its preset did not apply
         self._updating = 0
         # #69: whether "First line at" holds a value the user gave it, and
         # so no longer follows the spacing (see _follow_spacing).
@@ -612,9 +613,15 @@ class ImportDialog(QDialog):
                 self.session.set_slice_preset(gid, None)
             self.status.setText(str(exc))
             return
-        if chosen is not None:
-            self.session.apply_preset_to(chosen, new_keys)
-        if self.preset_box.is_choice():
-            self.session.remember_import_preset(gid, chosen)
-        self.imported_keys = new_keys
+        self.imported_keys = new_keys  # the lines are in the site whatever follows
+        try:
+            if chosen is not None:
+                self.session.apply_preset_to(chosen, new_keys)
+            if self.preset_box.is_choice():
+                self.session.remember_import_preset(gid, chosen)
+        except Exception as exc:  # noqa: BLE001 -- the import happened; say what did not
+            self.preset_notice = (
+                f"the lines were imported, but the preset could not be applied: {exc}"
+            )
+            self.status.setText(self.preset_notice)
         super().accept()

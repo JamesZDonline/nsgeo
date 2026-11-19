@@ -3087,6 +3087,8 @@ class NsgeoPlugin:
             try:
                 if result == QDialog.DialogCode.Accepted:
                     self.message(f"imported {len(dialog.imported_keys)} line(s)")
+                    if dialog.preset_notice:
+                        self.message(dialog.preset_notice, Qgis.MessageLevel.Warning)
             finally:
                 dialog.deleteLater()
                 self._import_dialog = None
