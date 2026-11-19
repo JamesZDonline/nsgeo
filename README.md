@@ -127,8 +127,9 @@ release's notes list everything in it.
   fine cell no longer freezes QGIS while its fill is worked out, in Whole
   site or This grid: the fill is worked out in the background, with its
   progress and a Cancel. Also the site engine's review follow-ups. In two
-  plans: Plan A, the engine, is being built; Plan B, the background fill,
-  follows it.
+  plans: Plan A, the engine, is built (one moved-grid hang found and fixed;
+  the local loop never reproduced #166); Plan B, the background fill, is
+  next, after measuring what comes after the fill.
 - **M17b: Add data and GPS grids** ([#134]). One **Add data ▾ ▸ GPR…**
   dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
   new one fitted around their tracks, previewed on the map; files GPS cannot
