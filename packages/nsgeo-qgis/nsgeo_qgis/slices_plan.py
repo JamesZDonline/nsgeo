@@ -39,6 +39,7 @@ from nsgeo.slices import (
     SliceWindow,
     VolumeSettings,
     ZAxis,
+    cut_wall_columns,
     plan_windows,
     wall_columns,
 )
@@ -1016,18 +1017,16 @@ def export_size_bytes(nx: int, ny: int, nd: int) -> int:
 
 
 def walls_size(
-    nz: int, line_traces: Iterable[int], cut_lengths: Iterable[float], cell: float
+    nz: int, line_traces: Iterable[int], cut_paths: Iterable[Any], cell: float
 ) -> tuple[int, int]:
     """`(how many walls, bytes they take)` for the export: one wall per line, from its trace
-    count, and one per cut, from its length in metres at about two columns a cell (the rule
-    of `nsgeo.slices.cut_wall`), each on `nz` levels with one `amplitude` array. A wall that
-    cannot be made (under 2 columns, or a length that is not finite) is not counted."""
-    counts: list[int] = []
-    for n in line_traces:
-        counts.append(int(n))
-    for length in cut_lengths:
+    count, and one per cut, from its path (frame-local metres) by the core's own column rule
+    (`cut_wall_columns`), each on `nz` levels with one `amplitude` array. A wall that cannot
+    be made (under 2 columns, or a path that is not finite) is not counted."""
+    counts: list[int] = [int(n) for n in line_traces]
+    for path in cut_paths:
         try:
-            counts.append(math.ceil(float(length) / (cell / 2.0)) + 1)
+            counts.append(cut_wall_columns(path, cell))
         except (ValueError, OverflowError):
             continue
     made = [wall_columns(n) for n in counts if n >= 2]

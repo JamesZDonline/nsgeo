@@ -47,6 +47,7 @@ from nsgeo.processing import (
     time_base_of,
 )
 from nsgeo.slices import (
+    SQUARED_TRANSFORM,
     CubeFrame,
     PreparedLine,
     VolumeStopped,
@@ -59,6 +60,7 @@ from nsgeo.slices import (
     plan_line,
     prepare_volume,
     surface_mesh,
+    wall_amplitude,
     wall_points,
 )
 from nsgeo.vtkxml import write_image_data, write_poly_data, write_structured_grid
@@ -355,25 +357,24 @@ class ParaViewExport:
         source = self._source(grid_id, choice)
         t0, t1 = self._time_range(source, choice)
         z, nd = _levels(t0, t1, choice)
-        _n, walls = self._walls_size(grid_id, frame, z.nz, source.line_keys)
+        _n, walls = self._walls_size(grid_id, frame, nd, source.line_keys)
         return export_size_bytes(frame.nx, frame.ny, nd) + walls
 
-    def _cut_lengths(self, grid_id: str, frame: CubeFrame) -> list[float]:
-        """Each cut of the grid's length in metres, in the cuts' order (the walls' rule)."""
+    def _cut_paths(self, grid_id: str, frame: CubeFrame) -> list[np.ndarray]:
+        """Each cut of the grid as a path in the frame's metres, in the cuts' order."""
         grid = self.session.grid(grid_id)
-        lengths = []
-        for key in self.session.cut_keys_on_grid(grid_id):
-            vertices = np.asarray(self.session.cut_for_key(key).vertices, dtype=float)
-            local = frame.to_local(grid.to_world(vertices))
-            lengths.append(float(np.hypot(*np.diff(local, axis=0).T).sum()))
-        return lengths
+        return [
+            frame.to_local(grid.to_world(np.asarray(self.session.cut_for_key(k).vertices, float)))
+            for k in self.session.cut_keys_on_grid(grid_id)
+        ]
 
     def _walls_size(
-        self, grid_id: str, frame: CubeFrame, nz: int, line_keys: Sequence[str]
+        self, grid_id: str, frame: CubeFrame, nd: int, line_keys: Sequence[str]
     ) -> tuple[int, int]:
-        """`(walls, bytes)` for these lines and the grid's cuts, from their headers and vertices."""
+        """`(walls, bytes)` for these lines and the grid's cuts, each on the cube's `nd` depth
+        levels, from their headers and vertices."""
         traces = [self.session.line_for_key(k).n_traces for k in line_keys]
-        return walls_size(nz, traces, self._cut_lengths(grid_id, frame), frame.cell)
+        return walls_size(nd, traces, self._cut_paths(grid_id, frame), frame.cell)
 
     def panel_values(self, grid_id: str) -> tuple[float | None, float, float | None]:
         """`(the Slices panel's cell for this grid or None, the files' own depth step in ns,
@@ -401,8 +402,8 @@ class ParaViewExport:
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
         t0, t1 = self._time_range(source, choice)
-        z, nd = _levels(t0, t1, choice)
-        n_walls, walls_bytes = self._walls_size(grid_id, frame, z.nz, source.line_keys)
+        _z, nd = _levels(t0, t1, choice)
+        n_walls, walls_bytes = self._walls_size(grid_id, frame, nd, source.line_keys)
         velocity = self.session.grid_depth_velocity(grid_id)
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
@@ -757,7 +758,7 @@ class ParaViewExport:
                 slab_levels=slab,
                 progress=lambda done, n: tick_trend(),
             )
-            _n, walls_bytes = self._walls_size(grid_id, frame, z.nz, [ln.key for ln in lines])
+            _n, walls_bytes = self._walls_size(grid_id, frame, nd, [ln.key for ln in lines])
             reason = export_refusal(
                 export_size_bytes(frame.nx, frame.ny, nd) + walls_bytes,
                 shutil.disk_usage(cache_dir).free,
@@ -783,7 +784,7 @@ class ParaViewExport:
             )
             features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
-            walls = self._write_walls(partial, got, cut_keys, grid, choice.stretch, step)
+            walls = self._write_walls(partial, got, cut_keys, grid, choice, window, step)
             cuts = [
                 {"index": i, "key": k, "name": self.session.cut_for_key(k).name}
                 for i, k in enumerate(cut_keys)
@@ -1162,17 +1163,23 @@ class ParaViewExport:
         got: FilledGrid,
         cut_keys: Sequence[str],
         grid: Grid,
-        stretch: float,
+        choice: VolumeChoice,
+        window: int,
         step: Callable[[int], None],
     ) -> list[dict[str, Any]]:
-        """walls/<n>.vts: a curtain under each line (in key order) and then each cut, on the
-        cube's levels at true depth times `stretch`, its `amplitude` coloured like the slices.
-        Returns export.json's `walls`. A wall that cannot be made (a line of one trace, a cut
-        of no length) is logged and left out. One progress step each, made or not; the cube
-        is read level by level from its map, never copied."""
+        """walls/<n>.vts: a curtain under each line (in key order) and then each cut, on
+        exactly the levels `cube.vti` keeps (from time zero on), at true depth times the
+        stretch. Its `amplitude` is on the cube's amplitude scale (RMS over the same
+        `window`, `wall_amplitude`), so it agrees with the slices. Returns
+        export.json's `walls`. A wall that cannot be made (a line of one trace, a cut of no
+        length) is logged and left out. One progress step each, made or not; the cube is read
+        level by level from its map, never copied."""
         walls_dir = folder / "walls"
         walls_dir.mkdir()
-        depth = got.velocity.depth_at(got.z.times_ns())
+        first = got.z.nz - _depth_levels(got.z)  # the levels before time zero are not kept
+        depth = got.velocity.depth_at(got.z.times_ns())[first:]
+        squared = str(got.prov.transform) == SQUARED_TRANSFORM
+        stretch = choice.stretch
         made: list[dict[str, Any]] = []
 
         def one(name: str, kind: str, make: Callable[[], Any]) -> None:
@@ -1192,11 +1199,23 @@ class ParaViewExport:
             made.append({"index": index, "name": name, "kind": kind, "file": file})
 
         for line in sorted(got.lines, key=lambda ln: ln.key):
-            one(Path(line.key).stem, "line", lambda line=line: line_wall(line, got.frame, got.z))
+            one(
+                Path(line.key).stem,
+                "line",
+                lambda line=line: wall_amplitude(
+                    line_wall(line, got.frame, got.z), window, squared=squared, first=first
+                ),
+            )
         for key in cut_keys:
             cut = self.session.cut_for_key(key)
             path = got.frame.to_local(grid.to_world(np.asarray(cut.vertices, dtype=float)))
-            one(cut.name, "cut", lambda path=path: cut_wall(got.filled, got.frame, path))
+            one(
+                cut.name,
+                "cut",
+                lambda path=path: wall_amplitude(
+                    cut_wall(got.filled, got.frame, path), window, squared=True, first=first
+                ),
+            )
         return made
 
     def _record(

@@ -26,7 +26,7 @@ from nsgeo_qgis.paraview_export import (
 from nsgeo_qgis.paraview_scene import SCENE_FILES
 from nsgeo_qgis.session import Pick, SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import Resolution, SourceChoice, VolumeChoice
+from nsgeo_qgis.slices_plan import Resolution, SourceChoice, VolumeChoice, export_size_bytes
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys
 from plugin_testing import (
     GRID,
@@ -166,6 +166,9 @@ def test_export_writes_the_folder_ParaView_opens(site):
     assert np.isfinite(arrays["strength"]).any()
     assert arrays["true_depth_m"][0, 0, 0] == pytest.approx(record["max_depth_m"], rel=1e-5)
     assert abs(estimate - sum(len(b) for b in _snapshot(folder).values())) <= 0.05 * estimate
+    # the cube alone, apart from the walls that are most of the folder
+    cube_est = export_size_bytes(nx, ny, nd)
+    assert abs(cube_est - (folder / "cube.vti").stat().st_size) <= 0.05 * cube_est
     assert record["slices"]["lines_along"] == "y" and record["n_picks"] == 0
     assert seen[-1][0] == seen[-1][1] and all(a <= b for a, b in seen)
     # Exporting changed nothing the Slices panel shows or holds.
@@ -224,17 +227,21 @@ def test_a_cancel_during_the_write_pass_leaves_the_previous_export_intact(site):
     folder = export.run("Grid A", choice, progress=_noop)
     snapshot = _snapshot(folder)
     partial = folder.with_name(folder.name + ".partial")
-    seen = {"partial": False}
+    seen = {"partial": False, "walls": None}
+    n_walls = export.summary("Grid A", choice).n_walls
+    assert n_walls == 4
 
     def stop_in_the_write_pass(done, total):
-        if done >= total - 1:  # the last slab of the amplitude pass
+        if done >= total - n_walls - 1:  # the last slab of the amplitude pass, before the walls
             seen["partial"] = partial.exists()
+            seen["walls"] = (partial / "walls").exists()
             return False
         return True
 
     with pytest.raises(ParaViewExportCancelled):
         export.run("Grid A", _choice(session, stretch=5.0), progress=stop_in_the_write_pass)
     assert seen["partial"], "the cancel came before .partial existed"
+    assert seen["walls"] is False, "the cancel came after the walls began"
     assert _snapshot(folder) == snapshot
     assert not list(folder.parent.glob("*.partial")) and not list(folder.parent.glob("*.old"))
 
@@ -753,6 +760,8 @@ def test_lines_that_fail_to_prepare_are_skipped_named_and_recorded(synth_site):
     assert export.skipped_lines == [keys[1]]
     record = json.loads((folder / "export.json").read_text())
     assert record["skipped_lines"] == [keys[1]] and record["source"]["lines"] == 1
+    # the line that was not prepared gets no wall
+    assert [w["name"] for w in record["walls"]] == [Path(keys[0]).stem]
     export.run("Grid A", _choice(session, stretch=4.0), progress=_noop)
     assert export.skipped_lines == [keys[1]]
 
@@ -1378,14 +1387,76 @@ def test_a_cancelled_export_leaves_no_walls_behind(site):
     folder = export.run("Grid A", choice, progress=_noop)
     snapshot = _snapshot(folder)
     seen = []
+    partial = folder.with_name(folder.name + ".partial")
+    in_walls = []
 
     def cancel_in_the_last_wall(done, total):
         seen.append((done, total))
-        return done < total  # the walls are the last steps: the final one cancels
+        if done >= total:  # the walls are the last steps: the final one cancels
+            in_walls.extend(sorted(p.name for p in (partial / "walls").iterdir()))
+            return False
+        return True
 
     with pytest.raises(ParaViewExportCancelled):
         export.run("Grid A", _choice(session, stretch=5.0), progress=cancel_in_the_last_wall)
     assert seen[-1][0] == seen[-1][1]  # it did get as far as the last wall
+    assert in_walls == ["0.vts", "1.vts", "2.vts", "3.vts"]  # the walls before it were written
     assert not list(folder.parent.glob("*.partial"))
     after = _snapshot(folder)
     assert after == snapshot
+
+
+def _cube_numbers(folder: Path):
+    """`(finite cube amplitudes, the amplitude range top)` of an export."""
+    _, _, _, arrays = read_vti(folder / "cube.vti")
+    amp = arrays["amplitude"]
+    top = json.loads((folder / "export.json").read_text())["amplitude_range"][1]
+    return amp[np.isfinite(amp)], top
+
+
+@needs_real_data
+@pytest.mark.parametrize("transform", ["amp_square", "amp_envelope"])
+def test_walls_are_on_the_cubes_amplitude_scale(site, transform):
+    session, _dock, export = site
+    session.add_cut(GRID.id, [(0.6, 0.5), (1.4, 2.5)])
+    folder = export.run("Grid A", _choice(session, transform=transform), progress=_noop)
+    cube, top = _cube_numbers(folder)
+    cube_median, cube_above = float(np.median(cube)), float((cube > top).mean())
+    assert cube_above < 0.02  # the range top is the cube's own 99th percentile
+    walls = json.loads((folder / "export.json").read_text())["walls"]
+    medians = {}
+    for w in walls:
+        _, amp = _read_wall(folder / w["file"])
+        amp = amp[np.isfinite(amp)]
+        assert amp.size
+        medians[w["kind"]] = medians.get(w["kind"], []) + [float(np.median(amp))]
+        # Within 2x of the cube's median: the walls were 3000x (squared) off before.
+        assert cube_median / 2.0 <= np.median(amp) <= cube_median * 2.0, (w, cube_median)
+        # A wall is not blurred sideways, so it has a few more strong spots than the cube,
+        # whose 99th percentile is the range top (measured 1.0-2.0% against the cube's 1.0%);
+        # 3%, not the 76-100% that squared values gave.
+        assert float((amp > top).mean()) < 0.03, (w, float((amp > top).mean()))
+    # a line wall and the cut across it agree in scale, whatever the transform
+    assert max(medians["cut"]) / 2.0 <= min(medians["line"]) * 2.0
+    assert min(medians["cut"]) * 2.0 >= max(medians["line"]) / 2.0
+
+
+@needs_real_data
+def test_walls_stand_on_the_levels_the_cube_has_with_no_time_zero(site):
+    session, _dock, export = site
+    session.site.presets["p"] = list(STEPS_RADAR)  # no time zero: levels before it exist
+    session.add_cut(GRID.id, [(0.6, 0.5), (1.4, 2.5)])
+    choice = _choice(session)
+    folder = export.run("Grid A", choice, progress=_noop)
+    ext, origin, spacing, _ = read_vti(folder / "cube.vti")
+    nd = ext[5] + 1
+    cube_top = origin[2] + spacing[2] * (nd - 1)  # the shallowest level
+    cube_bottom = origin[2]
+    walls = json.loads((folder / "export.json").read_text())["walls"]
+    assert len(walls) == 5
+    for w in walls:
+        points, amp = _read_wall(folder / w["file"])
+        assert points.shape[0] == nd == amp.shape[0], w
+        assert points[..., 2].max() <= 1e-9, w  # never above ground
+        assert points[..., 2].max() == pytest.approx(cube_top, abs=1e-3), w
+        assert points[..., 2].min() == pytest.approx(cube_bottom, abs=1e-3), w

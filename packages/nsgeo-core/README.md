@@ -131,6 +131,7 @@ several grids' slices into one site view.
 | `SectionCrop` | A box of cells round one piece of a cut, and the columns it serves. |
 | `SiteLattice` | A north-up pixel lattice in the site's CRS. |
 | `SliceCube` | Binned amplitude over a frame and a z axis. |
+| `SQUARED_TRANSFORM` | The amplitude transform (`amp_square`) whose lines already hold squared amplitude, as a cube's fill does. |
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
@@ -150,6 +151,7 @@ several grids' slices into one site view.
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
 | `cut_wall` | The filled cube sampled along a cut's path: a wall of amplitude, about two columns a cell, at most 300. |
+| `cut_wall_columns` | How many columns a wall along a path has (the one rule the wall and its size estimate share). |
 | `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
@@ -194,6 +196,7 @@ several grids' slices into one site view.
 | `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
+| `wall_amplitude` | A wall put on the volume's amplitude scale (RMS over the wave-period window), so it agrees with the slices. |
 | `wall_columns` | How many columns a wall of that many candidates keeps (at most 300; under 2 is an error). |
 | `wall_points` | A wall's (levels, columns, 3) points, z at true depth times the stretch. |
 | `window_depths_m` | A window in metres, through a velocity model. |

@@ -157,3 +157,59 @@ def test_a_long_cut_wall_is_capped_at_300_columns():
     # 100 m on a 0.05 m cell would be 4001 columns uncapped
     wall = cut_wall(filled, frame, np.array([[0.5, 0.1], [100.5, 0.1]]))
     assert wall.values.shape[1] == 300 and wall.local.shape == (300, 2)
+
+
+def _column(nz: int = 40) -> np.ndarray:
+    rng = np.random.default_rng(3)
+    return (rng.normal(size=nz) * np.hanning(nz) * 5.0).astype(np.float32)
+
+
+def test_a_wall_is_put_on_the_volumes_amplitude_scale():
+    from nsgeo.slices.volume import _rms_levels
+    from nsgeo.slices.walls import Wall, wall_amplitude
+
+    nz, w = 40, 5
+    squared = _column(nz) ** 2
+    wall = Wall(local=np.zeros((2, 2)), values=np.stack([squared, 2.0 * squared], axis=1))
+    out = wall_amplitude(wall, w, squared=True)
+    # the volume's own helper, on a cube whose every cell holds the first column
+    cube = np.broadcast_to(squared[:, None, None], (nz, 2, 2)).astype(np.float32)
+    want = _rms_levels(cube, np.ones((2, 2), bool), w, 0, nz - 1, nz)[:, 0, 0]
+    np.testing.assert_allclose(out.values[:, 0], want, rtol=1e-5)
+    # and the plain formula: sqrt of the mean over the window, the edge level repeated
+    padded = np.pad(squared.astype(np.float64), (w // 2, w - w // 2 - 1), mode="edge")
+    by_hand = np.sqrt(np.array([padded[i : i + w].mean() for i in range(nz)]))
+    np.testing.assert_allclose(out.values[:, 0], by_hand, rtol=1e-5)
+    np.testing.assert_allclose(out.values[:, 1], np.sqrt(2.0) * by_hand, rtol=1e-5)
+    assert out.values.dtype == np.float32 and out.local is wall.local
+
+
+def test_wall_amplitude_squares_what_is_not_squared_keeps_nan_and_drops_levels_above_first():
+    from nsgeo.slices.walls import Wall, wall_amplitude
+
+    nz = 20
+    env = np.abs(_column(nz)) + 0.1  # an envelope, not squared
+    values = np.stack([env, env], axis=1).copy()
+    values[:3, 1] = np.nan
+    wall = Wall(local=np.zeros((2, 2)), values=values)
+    out = wall_amplitude(wall, 3, squared=False, first=4)
+    same = wall_amplitude(Wall(wall.local, values[:, :1] ** 2), 3, squared=True)
+    assert out.values.shape == (nz - 4, 2)
+    np.testing.assert_allclose(out.values[:, 0], same.values[4:, 0], rtol=1e-5)
+    # the NaN rows were dropped with `first`; a NaN left below it would stay NaN
+    values2 = values.copy()
+    values2[10, 1] = np.nan
+    out2 = wall_amplitude(Wall(wall.local, values2), 3, squared=False, first=4)
+    assert np.isnan(out2.values[10 - 4, 1]) and np.isfinite(out2.values[:, 0]).all()
+
+
+def test_the_cut_column_rule_is_one_function():
+    from nsgeo.slices.walls import cut_wall_columns
+
+    frame = CubeFrame((0.0, 0.0), 0.0, 1.0, 20, 4, "EPSG:32633")
+    path = np.array([[2.5, 2.0], [17.5, 2.0]])
+    assert cut_wall_columns(path, 1.0) == cut_wall(_ramp_cube(), frame, path).values.shape[1] == 31
+    with pytest.raises(ValueError):
+        cut_wall_columns(np.array([[1.0, 1.0], [1.0, 1.0]]), 1.0)
+    with pytest.raises(OverflowError):
+        cut_wall_columns(np.array([[0.0, 0.0], [np.inf, 0.0]]), 1.0)

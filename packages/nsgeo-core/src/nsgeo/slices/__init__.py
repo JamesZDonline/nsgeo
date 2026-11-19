@@ -99,6 +99,7 @@ from nsgeo.slices.surface import (
     surface_volume,
 )
 from nsgeo.slices.volume import (
+    SQUARED_TRANSFORM,
     PreparedVolume,
     VolumeSettings,
     VolumeStopped,
@@ -106,7 +107,14 @@ from nsgeo.slices.volume import (
     fill_levels,
     prepare_volume,
 )
-from nsgeo.slices.walls import cut_wall, line_wall, wall_columns, wall_points
+from nsgeo.slices.walls import (
+    cut_wall,
+    cut_wall_columns,
+    line_wall,
+    wall_amplitude,
+    wall_columns,
+    wall_points,
+)
 
 __all__ = [
     "BACKGROUND_FRACTION",
@@ -139,6 +147,7 @@ __all__ = [
     "SEAM_WIDTH_SPACINGS",
     "SECTION_MARGIN_SPACINGS",
     "SECTION_PIECE_M",
+    "SQUARED_TRANSFORM",
     "Seam",
     "SectionColumns",
     "SectionCrop",
@@ -164,6 +173,7 @@ __all__ = [
     "covered_pixels",
     "curvature_margin_cells",
     "cut_wall",
+    "cut_wall_columns",
     "depth_axis",
     "edge_match_solve",
     "fill_levels",
@@ -207,6 +217,7 @@ __all__ = [
     "surface_volume",
     "to_north_up",
     "uses_crops",
+    "wall_amplitude",
     "wall_columns",
     "wall_points",
     "window_depths_m",
