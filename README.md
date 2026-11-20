@@ -109,15 +109,10 @@ release's notes list everything in it.
 | M17a | GPS lines, M17's first plan: lines placed along the RTK track they were walked, with no grid; stretches without an RTK fix marked on the map; a destagger you can type. A site with GPS lines saves as schema 4, which 0.4.0 cannot open ([#208]) | next release |
 | | The Processing panel: a step that can't run stays marked under the step list until it is fixed, and opening a line whose steps can't run says so instead of showing the last picture; the gain strip stops at ±120 dB, reaches every point, fits its caption and gets a Reset; the Difference view follows a dragged step; the panel names its line ([#197], [#49], [#8], [#9], [#13], [#48], [#33], [#224]) | next release |
 | | Lines in bulk and at import: choose a processing preset when importing lines (remembered per grid; the first import into an empty grid sets its Slices preset too); a selection of lines on the map selects them in the Survey panel and back; apply a preset, the open line's steps or a velocity to a selection at once; removing lines says what processing, velocity and saved fits go with them; a comma in a number box is refused, not read as a decimal point ([#129], [#57], [#58], [#221], [#16], [#17], [#225]) | next release |
+| M16 | Cuts in 3-D, M16's fourth and last plan: picks made on a cut join surfaces, the ParaView export's picks and the 3-D view, on the clock the cut was made on; deleting a cut marks its surfaces stale and a rebuild says which picks it left out. Walls in the ParaView export were built and dropped at the walkthrough ([#229]) | next release |
 
 ### In progress
 
-- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
-  **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
-  ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
-  surfaces, picks.vtp and the 3-D view. Walked through (the walls in the
-  ParaView export added little over the cut and are dropped); [#229] awaits
-  merge.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -144,8 +139,7 @@ release's notes list everything in it.
 Most are things the next milestones build on, so doing them now is cheaper
 than reworking M16–M17 afterwards.
 
-1. **M16: 3-D.** In progress (above).
-2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+1. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Designed, in four parts: GPS lines placed
    along their track (M17a, merged above); **M17b**, one **Add data** menu,
    with GPS lines going into an existing grid or a new one fitted around them;
@@ -153,9 +147,9 @@ than reworking M16–M17 afterwards.
    ruler (reversed lines mirrored, as tape lines are) and their destagger
    measured, both moved up from M17d at the M17b walkthrough; and **M17d**,
    outlines with holes and Place by GPS. M17b is in progress (above).
-3. **M18: issue cleanup.** Work through the backlog of open bugs and review
+2. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-4. **M19: magnetometer data.** The first instrument other than GPR:
+3. **M19: magnetometer data.** The first instrument other than GPR:
    Bartington Grad601 grids placed on the map with the GPR, cleaned up in
    the Processing panel (zero, destripe, despike) and Edit lines (destagger),
    joined into one map with the grids levelled to each other, and a mag strip
