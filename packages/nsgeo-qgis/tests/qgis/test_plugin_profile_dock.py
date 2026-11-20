@@ -611,6 +611,8 @@ def test_true_scale_greys_when_the_window_moves_onto_a_flat_run(opened, monkeypa
     )
     v.view_changed.emit()
     assert not dock.one_to_one_button.isEnabled()
+    assert dock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_FLAT_TIP
+    assert profile_dock.TRUE_SCALE_FLAT_TIP != profile_dock.TRUE_SCALE_GREYED_TIP
 
 
 def test_true_scale_is_greyed_on_a_line_with_no_metres(opened):

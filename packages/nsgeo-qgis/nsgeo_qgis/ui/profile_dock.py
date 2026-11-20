@@ -146,6 +146,10 @@ TRUE_SCALE_TIP = (
     "True scale: a metre down is as long as a metre along the line, at the line's velocity"
 )
 TRUE_SCALE_GREYED_TIP = "True scale needs metres along the line and a velocity"
+TRUE_SCALE_FLAT_TIP = (
+    "True scale needs some distance along the line in view: this stretch was recorded "
+    "standing still"
+)
 SLICE_BAND_TIP = (
     "Show or hide the slice's depth window on the profile. The window is kept while it's hidden."
 )
@@ -1935,7 +1939,13 @@ class ProfileDock(QgsDockWidget):
         try:
             ok = self.view.can_true_scale()
             self.one_to_one_button.setEnabled(ok)
-            self.one_to_one_button.setToolTip(TRUE_SCALE_TIP if ok else TRUE_SCALE_GREYED_TIP)
+            if ok:
+                tip = TRUE_SCALE_TIP
+            elif self.view.true_scale_window_is_flat():
+                tip = TRUE_SCALE_FLAT_TIP
+            else:
+                tip = TRUE_SCALE_GREYED_TIP
+            self.one_to_one_button.setToolTip(tip)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not update the 1:1 button: {exc}", Qgis.MessageLevel.Critical)
 

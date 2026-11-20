@@ -502,6 +502,19 @@ class ProfileView(QWidget):
             return None
         return per_unit, 1.0 / slope
 
+    def true_scale_window_is_flat(self) -> bool:
+        """True where metres and a velocity are there but the window spans no
+        distance along the line (the radar stood still): the one missing input
+        that is neither of those two."""
+        t = self.transform
+        if t is None or self._velocity is None:
+            return False
+        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
+        if lo is None or hi is None:
+            return False
+        per_unit = abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
+        return not (math.isfinite(per_unit) and per_unit > 0)
+
     def can_true_scale(self) -> bool:
         """True with a transform, a velocity and metres along the line, and a
         non-zero, finite metre span across the current window."""
