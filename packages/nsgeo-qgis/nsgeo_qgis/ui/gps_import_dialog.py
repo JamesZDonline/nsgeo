@@ -282,7 +282,7 @@ class GpsImportPage(QWidget):
         return None
 
     def can_import(self) -> bool:
-        if self.n_ready == 0 or self._lost is not None:
+        if self.n_ready == 0:
             return False
         if self.target() is None:
             return self._name_problem() is None and self._proposal is not None
@@ -408,8 +408,11 @@ class GpsImportPage(QWidget):
 
     def _picked(self, *_: Any) -> None:
         # A slot (activated): the user chose, so a lost grid is forgotten.
-        self._lost = None
-        self._refresh()
+        try:
+            self._lost = None
+            self._refresh()
+        except Exception as exc:  # noqa: BLE001 -- a slot (activated): see plugin.py's module docstring
+            self.status.setText(f"could not change the target: {exc}")
 
     def _target_changed(self, *_: Any) -> None:
         # A slot (currentIndexChanged): guarded, see plugin.py's module docstring.
@@ -480,12 +483,12 @@ class GpsImportPage(QWidget):
         grid = self._target_grid()
         if grid is None:
             return list(self._planned), {}, {}
-        rows, outside = with_grid(self._planned, grid)
-        every = {
-            r.path: metres_outside(grid, r.line.trace_coords({}))[0]
-            for r in self._planned
-            if r.line is not None
-        }
+        every: dict[Path, float] = {}
+        any_inside: dict[Path, bool] = {}
+        for r in self._planned:
+            if r.line is not None:
+                every[r.path], any_inside[r.path] = metres_outside(grid, r.line.trace_coords({}))
+        rows, outside = with_grid(self._planned, grid, measured=(every, any_inside))
         return rows, outside, every
 
     def _apply_target(self) -> None:
@@ -592,7 +595,7 @@ class GpsImportPage(QWidget):
             self.status.setText(EMPTY_STATUS)
         elif n and existing is None and (problem := self._name_problem()) is not None:
             self.status.setText(problem)
-        elif n and existing is None and self._proposal is None:
+        elif n and existing is None and self._proposal is None and self.spacing.value() <= 0.0:
             self.status.setText(SPACING_FIRST)
         else:
             self.status.setText(f"{n} of {len(self.rows)} file(s) ready to import.")
@@ -644,7 +647,11 @@ class GpsImportPage(QWidget):
                 self.status.setText(problem)
                 return False
             if self._proposal is None:
-                self.status.setText(SPACING_FIRST)
+                self.status.setText(
+                    SPACING_FIRST
+                    if self.spacing.value() <= 0.0
+                    else "Could not fit a grid around these tracks."
+                )
                 return False
             new_grid = dataclasses.replace(self._proposal, id=self._name())
             target_id = new_grid.id
@@ -663,8 +670,8 @@ class GpsImportPage(QWidget):
         if clash:
             self.status.setText(f"line {clash[0]!r} is already in the site")
             return False
-        if in_force is None:
-            self.session.set_site_crs(self._crs.authid())
+        # No set_site_crs here: a new grid gives the site its CRS (add_grid) and
+        # add_lines pins site.crs itself, so a rollback leaves nothing pinned.
         if new_grid is not None:
             try:
                 self.session.add_grid(new_grid)
@@ -693,7 +700,9 @@ class GpsImportPage(QWidget):
         self.messages = [
             (t, i > 0)
             for i, t in enumerate(
-                import_messages(self.rows, len(lines), into=into, outside=self._outside)
+                import_messages(
+                    self.rows, len(lines), into=into, gid=target_id, outside=self._outside
+                )
             )
         ]
         self.last_import = GpsImportResult(

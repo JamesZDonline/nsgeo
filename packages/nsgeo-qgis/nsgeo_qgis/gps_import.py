@@ -186,17 +186,25 @@ def shifted_lines(rows: Sequence[GpsRow], metres: float, grid_id: str | None = N
     return out
 
 
-def with_grid(rows: Sequence[GpsRow], grid: Grid) -> tuple[list[GpsRow], dict[Path, float]]:
+def with_grid(
+    rows: Sequence[GpsRow],
+    grid: Grid,
+    measured: tuple[Mapping[Path, float], Mapping[Path, bool]] | None = None,
+) -> tuple[list[GpsRow], dict[Path, float]]:
     """Rows against an existing grid: a ready line with no trace inside it
     becomes refused `OUTSIDE`; the dict holds the metres outside for every
-    ready row that stays."""
+    ready row that stays. `measured` (metres outside, any trace inside; both by
+    path) reuses what the caller already computed with `metres_outside`."""
     out: list[GpsRow] = []
     outside: dict[Path, float] = {}
     for row in rows:
         if row.line is None or row.refusal is not None:
             out.append(row)
             continue
-        metres, any_inside = metres_outside(grid, row.line.trace_coords({}))
+        if measured is not None and row.path in measured[0]:
+            metres, any_inside = measured[0][row.path], measured[1][row.path]
+        else:
+            metres, any_inside = metres_outside(grid, row.line.trace_coords({}))
         if not any_inside:
             out.append(dataclasses.replace(row, line=None, refusal=OUTSIDE.format(gid=grid.id)))
         else:
@@ -205,22 +213,20 @@ def with_grid(rows: Sequence[GpsRow], grid: Grid) -> tuple[list[GpsRow], dict[Pa
     return out, outside
 
 
-def _gid_of(into: str) -> str:
-    return into.split(" ")[2] if into.startswith("new grid ") else into
-
-
 def import_messages(
     rows: Sequence[GpsRow],
     imported: int,
     *,
     into: str,
+    gid: str,
     outside: Mapping[Path, float] = {},  # noqa: B006 -- read only
     handed_on: Collection[Path] = (),
 ) -> list[str]:
     """What the plugin says after an import: the count and where it went, then
     every bridge, then every end run over END_LIMIT_M, then each line's metres
     outside its grid, then every refused file that is not handed on.
-    `into` is "new grid G (w × l m, spacing s m)" or just the grid's id."""
+    `into` is "new grid G (w × l m, spacing s m)" or just the grid's id; `gid`
+    is the grid's id, named in the outside warnings."""
     ready = [r for r in rows if r.refusal is None]
     out = [f"imported {imported} GPS line(s) into {into}"]
     for r in ready:
@@ -235,7 +241,6 @@ def import_messages(
             out.append(f"{r.path.name}: its start runs {start:.1f} m before the first RTK fix")
         if end > END_LIMIT_M:
             out.append(f"{r.path.name}: its end runs {end:.1f} m past the last RTK fix")
-    gid = _gid_of(into)
     for r in ready:
         metres = outside.get(r.path, 0.0)
         if metres >= OUTSIDE_NOTE_M:

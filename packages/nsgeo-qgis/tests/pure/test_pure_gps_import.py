@@ -168,7 +168,7 @@ def test_import_messages_follow_the_copy_in_order(tmp_path):
     bare = synthetic_dzt(tmp_path, "FILE__002.DZT")
     rows = plan([bridged, bare])
     assert END_LIMIT_M == 2.0
-    assert import_messages(rows, 1, into="G1") == [
+    assert import_messages(rows, 1, into="G1", gid="G1") == [
         "imported 1 GPS line(s) into G1",
         "FILE__001.DZT: 10.0 m without an RTK fix, traces 25–125",
         "FILE__001.DZT: its start runs 2.5 m before the first RTK fix",
@@ -185,7 +185,7 @@ def test_an_end_run_within_the_limit_is_not_reported(tmp_path):
         traces_per_metre=10.0,
     )
     rows = plan([path])
-    assert import_messages(rows, 1, into="G1") == ["imported 1 GPS line(s) into G1"]
+    assert import_messages(rows, 1, into="G1", gid="G1") == ["imported 1 GPS line(s) into G1"]
 
 
 def test_a_dzg_naming_a_trace_beyond_its_dzt_is_refused(tmp_path):
@@ -273,7 +273,7 @@ def test_import_messages_name_a_new_grid_list_outside_metres_and_skip_handed_on(
     other = synthetic_dzt(tmp_path, "FILE__003.DZT")
     rows = plan([ok, bare, other])
     into = "new grid G4 (4.0 × 20.0 m, spacing 0.50 m)"
-    assert import_messages(rows, 1, into=into, outside={ok: 3.04}, handed_on=[bare]) == [
+    assert import_messages(rows, 1, into=into, gid="G4", outside={ok: 3.04}, handed_on=[bare]) == [
         "imported 1 GPS line(s) into new grid G4 (4.0 × 20.0 m, spacing 0.50 m)",
         "FILE__001.DZT: its start runs 2.5 m before the first RTK fix",
         "FILE__001.DZT: its end runs 2.4 m past the last RTK fix",
@@ -281,6 +281,28 @@ def test_import_messages_name_a_new_grid_list_outside_metres_and_skip_handed_on(
         "not imported: FILE__003.DZT (no DZG beside it)",
     ]
     # an existing grid, and a stretch under 0.05 m is not worth a line
-    assert import_messages(rows[:1], 1, into="G1", outside={ok: 0.04})[-1].startswith("FILE__001")
-    assert "outside" not in " ".join(import_messages(rows[:1], 1, into="G1", outside={ok: 0.04}))
-    assert "outside G1" in import_messages(rows[:1], 1, into="G1", outside={ok: 1.0})[-1]
+    assert import_messages(rows[:1], 1, into="G1", gid="G1", outside={ok: 0.04})[-1].startswith(
+        "FILE__001"
+    )
+    assert "outside" not in " ".join(
+        import_messages(rows[:1], 1, into="G1", gid="G1", outside={ok: 0.04})
+    )
+    assert "outside G1" in import_messages(rows[:1], 1, into="G1", gid="G1", outside={ok: 1.0})[-1]
+
+
+def test_the_outside_warning_names_the_grid_whatever_its_name_looks_like(tmp_path):
+    ok = make(tmp_path, "FILE__001.DZT")
+    rows = plan([ok])
+    into = "new grid North field (4.0 × 20.0 m, spacing 0.50 m)"
+    out = import_messages(rows, 1, into=into, gid="North field", outside={ok: 2.0})
+    assert out[-1] == "FILE__001.DZT: 2.0 m lies outside North field and is left out of its slices"
+    out = import_messages(rows, 1, into="2", gid="2", outside={ok: 2.0})
+    assert "lies outside 2 and" in out[-1]
+
+
+def test_with_grid_reuses_measurements_it_is_given(tmp_path):
+    ok = make(tmp_path, "FILE__001.DZT")
+    rows = plan([ok])
+    grid = _grid_around(rows)
+    _, outside = with_grid(rows, grid, measured=({ok: 7.5}, {ok: True}))
+    assert outside == {ok: 7.5}

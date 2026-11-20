@@ -173,3 +173,13 @@ def test_opening_a_site_refills_the_box_and_moves_to_the_starting_value(session,
     assert box.is_choice()
     assert box.chosen() == "Plain"
     assert "deleted" not in box.note.text()
+
+
+def test_a_site_opening_keeps_a_new_grid_box_new(session):
+    _save(session, "Plain", ("dewow", {}))
+    session.remember_import_preset(None, "Plain")
+    box = PresetBox(session)
+    box.set_grid("G4", new=True)
+    box._on_site_opened()
+    assert box.chosen() == "Plain"
+    assert box.note.text() == "G4's first lines: this becomes its Slices preset too."

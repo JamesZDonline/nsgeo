@@ -46,6 +46,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import GpsImportPage
 from nsgeo_qgis.ui.grid_overlay import GridOverlay
 from nsgeo_qgis.ui.import_dialog import GridImportPage
+from nsgeo_qgis.ui.preset_box import _log
 
 if TYPE_CHECKING:
     from qgis.gui import QgsMapCanvas
@@ -231,8 +232,8 @@ class AddDataDialog(QDialog):
         try:
             if self.overlay is not None:
                 self.overlay.dispose()
-        except Exception:  # noqa: BLE001 -- a slot (finished): nothing to report to
-            pass
+        except Exception:  # noqa: BLE001 -- a slot (finished): log, never raise
+            _log()
 
     def _update_note(self) -> None:
         """The GPS-available note: Grid mode only, from the Grid page's paths."""

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import pytest
 from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo.processing import build_step
@@ -13,6 +16,7 @@ from nsgeo_qgis.ui.gps_import_dialog import (
     COL_GAP,
     COL_STATUS,
     HEADERS,
+    lonlat_to_xy,
 )
 from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
@@ -546,7 +550,6 @@ def test_gps_import_with_a_preset_changes_only_the_new_lines_and_remembers_the_s
     d_dlg = gps_dialog(session)
     d = d_dlg.gps_page
     d.add_files([gps_file(tmp_path / "raw", "FILE__002.DZT")])
-    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
     d.target_combo.setCurrentIndex(d.target_combo.findData("G1"))  # now G1 has lines
     d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("Plain"))
     d_dlg.accept()
@@ -620,10 +623,6 @@ def test_a_preset_that_cannot_be_applied_is_reported_and_the_gps_import_stands(
 
 # ---- M17b Task 5: into a grid, new or existing ---------------------------------------
 
-import math  # noqa: E402
-
-import numpy as np  # noqa: E402
-
 M_PER_DEG_LON = M_PER_DEG * math.cos(math.radians(LAT0))
 
 
@@ -671,7 +670,7 @@ def test_new_grid_is_the_first_target_and_import_waits_for_a_name(session, tmp_p
     d_dlg.reject()
 
 
-def test_a_typed_spacing_sticks_and_the_grid_is_one_spacing_wider_per_line(session, tmp_path):
+def test_a_typed_spacing_sticks_through_adding_a_file_and_sets_the_grids_width(session, tmp_path):
     d_dlg = gps_dialog(session)
     d = d_dlg.gps_page
     files = zigzag(tmp_path / "raw", n=9)
@@ -680,7 +679,10 @@ def test_a_typed_spacing_sticks_and_the_grid_is_one_spacing_wider_per_line(sessi
     assert d.spacing_note.text() == ""
     d.add_files(files[8:])
     assert d.spacing.value() == 0.6
-    d_dlg.reject()
+    d.name_edit.setText("G9")
+    d_dlg.accept()
+    assert session.grid("G9").default_spacing == 0.6
+    assert session.grid("G9").size_x == pytest.approx(8 * 0.5 + 0.6, abs=0.05)
 
 
 def test_import_makes_the_grid_and_the_lines_in_one_step(plugin, tmp_path):
@@ -781,9 +783,7 @@ def test_the_new_grid_rows_hide_for_an_existing_grid(session, tmp_path):
 
 
 def _xy(lon, lat):
-    to_xy = __import__("nsgeo_qgis.ui.gps_import_dialog", fromlist=["x"]).lonlat_to_xy(
-        QgsCoordinateReferenceSystem("EPSG:32632")
-    )
+    to_xy = lonlat_to_xy(QgsCoordinateReferenceSystem("EPSG:32632"))
     x, y = to_xy(np.array([lon]), np.array([lat]))
     return float(x[0]), float(y[0])
 
@@ -854,6 +854,24 @@ def test_a_refused_add_lines_takes_the_new_grid_and_its_preset_back(session, tmp
     d_dlg.reject()
 
 
+def test_a_refused_add_lines_leaves_a_crs_less_site_without_a_crs(session, tmp_path, monkeypatch):
+    d_dlg = gps_dialog(session)
+    d = d_dlg.gps_page
+    d.add_files(zigzag(tmp_path / "raw"))
+    d.name_edit.setText("G4")
+
+    def refuse(lines):
+        raise ValueError("those lines do not fit")
+
+    monkeypatch.setattr(session, "add_lines", refuse)
+    d_dlg.accept()
+    assert grid_ids(session) == [] and d.status.text() == "those lines do not fit"
+    assert session.site.crs is None and session.site_crs() is None
+    monkeypatch.undo()
+    d_dlg.accept()  # the same dialog can try again
+    assert session.site.crs == "EPSG:32632" and len(session.site.lines) == 8
+
+
 def test_a_site_without_a_crs_and_a_geographic_project_lands_in_the_picked_zone(
     qgis_app, tmp_path, session, project_degrees
 ):
@@ -863,23 +881,38 @@ def test_a_site_without_a_crs_and_a_geographic_project_lands_in_the_picked_zone(
     d.name_edit.setText("G4")
     assert session.site_crs() is None
     d_dlg.accept()
-    assert session.grid("G4").crs == session.site_crs() == "EPSG:32632"
+    assert session.grid("G4").crs == session.site_crs() == session.site.crs == "EPSG:32632"
     assert {ln.placement.crs for ln in session.site.lines} == {"EPSG:32632"}
 
 
-def test_a_grid_removed_under_the_page_refuses_the_import(session, tmp_path):
+def test_a_grid_removed_under_the_page_keeps_import_enabled_and_a_click_refuses(session, tmp_path):
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 5.0, 5.0, "EPSG:32632", 0.5))
+    d_dlg = gps_dialog(session)
+    d = d_dlg.gps_page
+    d.add_files(zigzag(tmp_path / "raw"))
+    d.target_combo.setCurrentIndex(d.target_combo.findData("A"))
+    d.target_combo.activated.emit(d.target_combo.currentIndex())  # a user pick
+    session.remove_grid("A")
+    assert d.target() is None
+    d.name_edit.setText("G1")
+    assert d_dlg.import_button.isEnabled()  # like the Grid page: refuse on the status line
+    d_dlg.import_button.click()
+    assert d.status.text() == "grid 'A' no longer exists; nothing was imported"
+    assert session.site.lines == [] and grid_ids(session) == []
+    d_dlg.reject()
+
+
+def test_a_user_pick_clears_the_lost_grid_and_the_import_goes_through(session, tmp_path):
     session.add_grid(Grid("A", (0.0, 0.0), 0.0, 5.0, 5.0, "EPSG:32632", 0.5))
     d_dlg = gps_dialog(session)
     d = d_dlg.gps_page
     d.add_files(zigzag(tmp_path / "raw"))
     d.target_combo.setCurrentIndex(d.target_combo.findData("A"))
     session.remove_grid("A")
-    assert d.target() is None and not d_dlg.import_button.isEnabled()
     d.name_edit.setText("G1")
-    d_dlg.accept()
-    assert d.status.text() == "grid 'A' no longer exists; nothing was imported"
-    assert session.site.lines == [] and grid_ids(session) == []
-    d_dlg.reject()
+    d.target_combo.activated.emit(0)  # the user picks New grid again
+    d_dlg.import_button.click()
+    assert grid_ids(session) == ["G1"] and len(session.site.lines) == 8
 
 
 # ---- the preview -----------------------------------------------------------------

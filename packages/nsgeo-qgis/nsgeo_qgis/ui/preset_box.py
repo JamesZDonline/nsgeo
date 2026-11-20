@@ -143,7 +143,7 @@ class PresetBox(QWidget):
     def _on_site_opened(self, *_: Any) -> None:
         """A site opening refills the list and moves to the starting value."""
         try:
-            self.set_grid(self._grid_id)
+            self.set_grid(self._grid_id, new=self._new)
         except Exception:  # noqa: BLE001
             _log()
 
