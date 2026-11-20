@@ -37,7 +37,7 @@ def test_the_gps_set_is_the_sixty_with_dzg_lines_each_with_its_dzg():
 
 @pytest.mark.skipif(not GRID2_LINES, reason="no Grid 2 survey in tests/data/local/grid2")
 def test_the_grid2_set_is_the_sixty_grid2_lines_each_with_its_dzg():
-    """Nashville Grid 2 for #159, kept apart from the lines whose names it reuses."""
+    """GPS survey Grid 2 for #159, kept apart from the lines whose names it reuses."""
     assert [p.name for p in GRID2_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 61)]
     assert {p.parent for p in GRID2_LINES} == {DATA / "grid2"}
     assert all(p.with_suffix(".DZG").is_file() for p in GRID2_LINES)

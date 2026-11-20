@@ -25,7 +25,7 @@ hard part.
 How the author judges it, in their words: **"how much wiggle there was in big sharp features."**
 
 In the placement-corrections walkthrough (2026-11-11), the right value could not be guessed. On
-Nashville City Cemetery Grid 1, unfitted, +0.15 m was much better, 0.10 too little and 0.25 a
+GPS survey Grid 1, unfitted, +0.15 m was much better, 0.10 too little and 0.25 a
 little too much. Once the lines were fitted to the grid's edges, +0.15 made it worse, and −0.15
 "looks fantastic". The fit removes a wheel's length error, and that error had been looking like
 stagger (§4).
@@ -73,12 +73,12 @@ Real data, spike method (§7), destagger in metres:
 
 | Grid | Lines | Measured, whole grid | By eye (walkthrough) |
 |---|---|---|---|
-| Nashville 2023 Grid 1 | unfitted | **+0.152** (95% +0.140…+0.165) | +0.15 |
-| Nashville 2023 Grid 1 | fitted | **−0.065** (95% −0.057…−0.073) | −0.15 |
-| Nashville 2023 Grid 2 | unfitted | **+0.165** | – |
-| Nashville 2023 Grid 2 | fitted | **−0.059** | – |
+| GPS survey Grid 1 | unfitted | **+0.152** (95% +0.140…+0.165) | +0.15 |
+| GPS survey Grid 1 | fitted | **−0.065** (95% −0.057…−0.073) | −0.15 |
+| GPS survey Grid 2 | unfitted | **+0.165** | – |
+| GPS survey Grid 2 | fitted | **−0.059** | – |
 
-- **Nashville 2023 Grid 1 is the same survey as `tests/data/local/with-dzg/`** (the 60-line RTK
+- **GPS survey Grid 1 is the same survey as `tests/data/local/with-dzg/`** (the 60-line RTK
   survey; identical files). The two acceptance cases #159 listed are one survey, unfitted and
   fitted.
 - **Measure recovers the sign on its own.** Unfitted, a wheel reading about 1.4% short, with
@@ -134,7 +134,7 @@ Real data, spike method (§7), destagger in metres:
 - Lines may each need their own value. Automating per-line values is a main reason for Measure.
 - It measures the lines as they are placed now, and the data decides the sign (#159, and the
   author agreed with the playback of §4).
-- Nashville 2023 Grid 2 joins the local test data as links, so the per-line rules are tuned and
+- GPS survey Grid 2 joins the local test data as links, so the per-line rules are tuned and
   tested on its real off lines (§10).
 
 Claude's calls are marked **C1–C14** in §7–§10. The author has not separately confirmed them.
@@ -297,7 +297,7 @@ checks that the dialog, the site and the table snapshot are all still current.
 
 ## 10. Acceptance
 
-**Real-data tests (nsgeo-core),** using `GPS_LINES` from `tests/real_data.py` (= Nashville 2023
+**Real-data tests (nsgeo-core),** using `GPS_LINES` from `tests/real_data.py` (= the GPS survey's
 Grid 1). Skip when the data is absent. Place the lines as the spike did: zigzag at 0.5 m with
 line 1 forward, on a 30 m grid.
 - **Unfitted** (scale 1, each line starting at its edge): grid value +0.15 ± 0.02.
@@ -325,7 +325,7 @@ line 1 forward, on a 30 m grid.
 **Real-data tests on Grid 2** (decided by the author, 2026-11-11). Grid 1 has almost no lines that
 need their own value, and Grid 2 has several. The per-line thresholds (§11) are tuned on these
 lines, not only on injected errors.
-- **The data.** `tests/data/local/grid2/` holds links to Nashville 2023 Grid 2's raw files
+- **The data.** `tests/data/local/grid2/` holds links to GPS survey Grid 2's raw files
   (DZT, DZX and DZG, 60 lines) on `/mnt/DataStorage`, so these tests skip when the drive is not
   mounted. The links were made on 2026-11-11 in the main checkout. Add a `GRID2_LINES` list to
   `tests/real_data.py` and the folder to the layout in `tests/data/local/README.md`. Place the
