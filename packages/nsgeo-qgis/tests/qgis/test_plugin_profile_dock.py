@@ -2734,3 +2734,24 @@ def test_a_time_zoom_survives_time_zero_on_a_gps_line(qgis_app, tmp_path):
     finally:
         dock.hide()
         dock.deleteLater()
+
+
+def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened):
+    """The header-only axes `_take_down_picture` sets are on the radar clock,
+    not a clock the user zoomed on: the load that follows must not shift the
+    held window by the line's zero (spec §4.8; the module's hold promise)."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    kb, lb = _add_line(session, "B1", GridPlacement("A", "y", 0.5, 0.0, 1, "B1"), n_traces=240)
+    session.append_step(kb, build_step("time_zero", mode="sample", sample=60))
+    _zoom_middle(dock)
+    zoomed = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    session.open_line(kb)
+    assert dock._shown_radargram is None and dock.shown_zero_ns() == 0.0  # header-only
+    session.set_profiles(kb, lb.load())
+    assert dock.shown_zero_ns() != 0.0
+    first_visit = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    assert first_visit == pytest.approx(zoomed)
+    session.open_line(key)
+    session.open_line(kb)  # already loaded: no header step
+    assert (dock.view.transform.time_lo, dock.view.transform.time_hi) == pytest.approx(first_visit)

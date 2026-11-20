@@ -324,6 +324,9 @@ class ProfileDock(QgsDockWidget):
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
         self._axes_zero = 0.0  # the zero_ns of the drawing those axes were set for
+        # True when those axes are header-only (`_take_down_picture`): on the radar
+        # clock, not one the user zoomed on, so the clock rule skips them.
+        self._axes_from_header = False
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
@@ -663,12 +666,17 @@ class ProfileDock(QgsDockWidget):
         toggle) keeps the time zoom through `carry_time_window`. `zero_ns` is
         the zero of what is being drawn; the dock compares it with its own
         `_axes_zero` (set at the end of every call), because `_shown_radargram`
-        is reassigned before this runs and cannot give the old zero.
+        is reassigned before this runs and cannot give the old zero. Header-only
+        axes (`_axes_from_header`, set by `_take_down_picture`) are on the radar
+        clock, not one the user zoomed on: when the previous axes were those,
+        the clock rule is skipped so rule 2 holds the window and the load that
+        follows does not move it.
         """
         view = self.view
         old = view.transform
         old_ruler = view.ruler
         old_key = self._axes_key
+        was_header = self._axes_from_header
         self._file_window()
         # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
         # against its own distance along the path (cut spec call 5).
@@ -692,6 +700,7 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and new is not None
             and key == old_key
+            and not was_header
             and not is_cut_key(key)
             and (new.n_traces, new.dt_ns, new.bounds, new.mirrored)
             == (old.n_traces, old.dt_ns, old.bounds, old.mirrored)
@@ -715,6 +724,7 @@ class ProfileDock(QgsDockWidget):
             view.transform = old
         self._axes_key = key
         self._axes_zero = zero_ns
+        self._axes_from_header = False
 
     def _file_window(self) -> None:
         """File the window the view is showing under its ruler's key, with
@@ -945,6 +955,7 @@ class ProfileDock(QgsDockWidget):
             line.header.dt_ns,
             self._safe_distance(line),
         )
+        self._axes_from_header = True  # also the `_show_steps_refused` path
         self.view.set_image(None)
         self._sync_true_scale_button()
 
@@ -1218,6 +1229,7 @@ class ProfileDock(QgsDockWidget):
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
         self._axes_zero = 0.0
+        self._axes_from_header = False
         self._shown_radargram = None
         self.image = None
         self._set_cut_chrome(False)
@@ -2097,7 +2109,7 @@ class ProfileDock(QgsDockWidget):
             rg.t0_ns,
             rg.dt_ns,
             distance,
-            zero_ns=rg.zero_ns or 0.0,
+            zero_ns=rg.zero_ns,
         )
         reference = self._scale_reference(rg)
         self.image = (
