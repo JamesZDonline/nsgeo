@@ -92,7 +92,7 @@ import functools
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from nsgeo.slices import (
@@ -108,8 +108,6 @@ from nsgeo.slices import (
     finest_fitting_cell,
     fitting_lattice,
     grid_axis,
-    limit_over_slices,
-    normalise,
     site_axis,
     stretching_grids,
     window_on,
@@ -134,6 +132,10 @@ from nsgeo_qgis.slices_plan import (
     preview_note,
     window_levels,
 )
+from nsgeo_qgis.stretch_jobs import GridStretch, StretchJob, limit_of, shown_window
+
+if TYPE_CHECKING:
+    from nsgeo_qgis.fill_jobs import FillJob
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
 #: engine -- its own or a peer -- is still preparing.
@@ -994,13 +996,13 @@ class SiteEngine(QObject):
             }
             return windows, counts, dict.fromkeys(binned, (1.0, 0.0))
         seams = self._site_seams() if method == "edge" else ()
-        factors = normalise(method, binned, seams, manual)
-        shown: dict[str, np.ndarray] = {}
-        for grid_id, (values, cov) in binned.items():
+
+        def drawn(grid_id: str, values: np.ndarray, cov: np.ndarray) -> np.ndarray:
             window = windows[grid_id]
             assert window is not None  # binned only where present
-            a, b = factors[grid_id]
-            shown[grid_id] = a * draw(grid_id, window, values, cov) + b
+            return draw(grid_id, window, values, cov)
+
+        shown, factors = shown_window(binned, method, seams, manual, drawn)
         return windows, shown, factors
 
     def _draw_full(self, finish: SliceFinish) -> _Draw:
@@ -1202,9 +1204,49 @@ class SiteEngine(QObject):
         for top, thickness in self._limit_windows_ns(thickness_ns):
             _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
             slices.extend(shown.values())
-        if not slices:
-            return float(clip.limit(np.array([], dtype=float)))
-        return limit_over_slices(slices, clip)
+        return limit_of(slices, clip)
+
+    def stretch_job(
+        self,
+        thickness_ns: float,
+        clip: Any,
+        *,
+        finish: SliceFinish,
+        method: str,
+        manual: Mapping[str, float],
+        fills: Mapping[str, FillJob] | None = None,
+    ) -> StretchJob:
+        """`stretch_limit` as a job for a worker (#193). Everything it reads is
+        captured here, on the GUI thread: each grid's snapshot, its windows at
+        every measured time, its finish settings, its held fill or the fill job
+        in `fills` (by grid id), a copy of its solved cache and, for edge
+        normalisation, the seams. `job.limit` and `job.final` equal what
+        `stretch_limit` returns."""
+        self._require_lattice()
+        times = self._limit_windows_ns(thickness_ns)
+        seams = self._site_seams() if method == "edge" else ()
+        steps: list[dict[str, SliceWindow | None]] = []
+        grids: dict[str, GridStretch] = {}
+        for top, thickness in times:
+            step: dict[str, SliceWindow | None] = {}
+            for grid_id in self.ready_grids:
+                window = self._grid_window(grid_id, top, thickness)
+                step[grid_id] = window
+                if window is not None and grid_id not in grids:
+                    grids[grid_id] = self._engines[grid_id].stretch_parts(
+                        finish, (fills or {}).get(grid_id)
+                    )
+            steps.append(step)
+        return StretchJob(
+            grids,
+            steps,
+            clip,
+            curvature=finish.method == "min_curvature",
+            site=True,
+            method=method,
+            manual=manual,
+            seams=seams,
+        )
 
     def shared_limit(
         self,

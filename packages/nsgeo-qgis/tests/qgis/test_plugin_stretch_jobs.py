@@ -1,0 +1,162 @@
+"""The shared stretch measured by a job equals today's synchronous one (#193)."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+from nsgeo.render import PercentileClip, UnipolarClip
+from nsgeo.slices import SliceWindow, SolveStopped, plan_fill
+from nsgeo_qgis.slices_plan import SliceFinish
+from test_plugin_site_engine import FINISH, MC, prepared
+from test_plugin_slices_engine import _prepare, sourced  # noqa: F401 -- fixture
+
+THICKNESS = 5  # levels: does not divide the 56-level axis, so a tail window is measured
+
+
+def _slice_cases():
+    return [
+        pytest.param("idw", True, False, id="idw-resident"),
+        pytest.param("kriging", False, False, id="kriging-streaming"),
+        pytest.param("min_curvature", False, False, id="min-curvature-unsolved"),
+        pytest.param("min_curvature", True, True, id="min-curvature-solved"),
+    ]
+
+
+@pytest.mark.parametrize(("method", "resident", "solve"), _slice_cases())
+def test_this_grids_stretch_job_equals_stretch_limit(sourced, method, resident, solve):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(resident)
+    assert engine.mode == ("resident" if resident else "streaming")
+    finish = SliceFinish(method=method)
+    clip = PercentileClip()
+    cold = engine.stretch_job(THICKNESS, clip, finish)  # nothing held: the job builds
+    cold.run(lambda: False)
+    if solve:
+        for job in engine.stretch_solves(THICKNESS, finish):
+            job.run(lambda: False)
+            assert job.land()
+    warm = engine.stretch_job(THICKNESS, clip, finish)
+    warm.run(lambda: False)
+    expected_limit, expected_final = engine.stretch_limit(THICKNESS, clip, finish)
+    assert expected_final is (method != "min_curvature" or solve)
+    assert warm.limit == expected_limit
+    assert warm.final is expected_final
+    if not solve:
+        assert (cold.limit, cold.final) == (expected_limit, expected_final)
+    if method == "min_curvature" and not solve:
+        assert warm.limit == engine.shared_limit(THICKNESS, clip, finish, preview=True)
+    assert warm.land() is True
+
+
+NORMALISATIONS = ["none", "background", "edge"]
+
+
+@pytest.mark.parametrize("method", NORMALISATIONS)
+@pytest.mark.parametrize("finish", [FINISH, MC], ids=["idw", "min-curvature-unsolved"])
+def test_the_sites_stretch_job_equals_stretch_limit(site3, make_site, method, finish):
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": finish, "method": method, "manual": {"B": 2.5}}
+    job = site.stretch_job(2.0, clip, **tick)
+    job.run(lambda: False)
+    expected_limit, expected_final = site.stretch_limit(2.0, clip, **tick)
+    assert job.limit == expected_limit
+    assert job.final is expected_final
+    assert expected_final is (finish is not MC)
+    again = site.stretch_job(2.0, clip, **tick)  # now with fills held
+    again.run(lambda: False)
+    assert (again.limit, again.final) == (expected_limit, expected_final)
+
+
+def test_a_site_stretch_job_over_solved_windows_is_final(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": MC, "method": "background", "manual": {"A": 1.5}}
+    for job in site.stretch_solves(2.0, MC):
+        job.run(lambda: False)
+        assert job.land()
+    job = site.stretch_job(2.0, clip, **tick)
+    job.run(lambda: False)
+    expected = site.stretch_limit(2.0, clip, **tick)
+    assert expected[1] is True
+    assert (job.limit, job.final) == expected
+
+
+def test_a_window_with_other_covered_cells_gets_its_own_fill(sourced):  # noqa: F811
+    """A held fill built for other covered cells (a line gone) is never reused for
+    a window it does not match, nor replaced: the job builds its own."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(False)
+    finish = SliceFinish(method="idw")
+    clip = PercentileClip()
+    _, cov = engine.slice_at(SliceWindow(4, 14))
+    narrowed = cov.copy()
+    narrowed[:, : cov.shape[1] // 2] = 0
+    assert (narrowed > 0).sum() < (cov > 0).sum()
+    settings = engine.finish_settings(finish)
+    held = plan_fill(
+        narrowed > 0, engine.frame.cell, "idw", settings.max_distance_m, settings.search_radius_m
+    )
+    engine._weights = (engine._weights_key(engine.frame, settings), held, None)
+    job = engine.stretch_job(THICKNESS, clip, finish)
+    job.run(lambda: False)
+    assert engine._weights[1] is held
+    expected = engine.stretch_limit(THICKNESS, clip, finish)
+    assert engine._weights[1] is not held  # today's path replaces it; the job did not
+    assert (job.limit, job.final) == expected
+
+
+def test_a_stretch_job_reads_its_fill_jobs_results(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": FINISH, "method": "background", "manual": {}}
+    for grid in site.ready_grids:  # every fill held, so only B's is the job's
+        site.engine_for(grid).stretch_parts(FINISH)
+    site.stretch_limit(2.0, clip, **tick)
+    engine_b = site.engine_for("B")
+    cov = engine_b.slice_at(SliceWindow(0, 1))[1]
+    engine_b._drop_fill()
+    fill_job = engine_b.fill_job(cov, FINISH)
+    stretch = site.stretch_job(2.0, clip, **tick, fills={"B": fill_job})
+    for job in (fill_job, stretch):
+        job.run(lambda: False)
+    assert fill_job.land() is True
+    expected = site.stretch_limit(2.0, clip, **tick)
+    assert (stretch.limit, stretch.final) == expected
+
+
+def test_a_stretch_job_whose_fill_landing_was_refused_measures_nothing(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    finish = SliceFinish(method="idw")
+    _, cov = engine.slice_at(SliceWindow(4, 14))
+    fill_job = engine.fill_job(cov, finish)
+    stretch = engine.stretch_job(THICKNESS, PercentileClip(), finish, fill=fill_job)
+    fill_job.run(lambda: False)
+    engine._drop_fill()  # the engine moved on: the landing is refused
+    assert fill_job.land() is False
+    assert fill_job.fill is None
+    stretch.run(lambda: False)
+    assert stretch.limit is None
+    assert stretch.final is False
+
+
+def test_a_stopped_stretch_job_raises(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
+    with pytest.raises(SolveStopped):
+        job.run(lambda: True)
+    assert job.limit is None
+
+
+def test_a_stretch_job_leaves_its_inputs_alone(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(False)
+    before = [line.data.copy() for line in engine._lines]
+    job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
+    job.run(lambda: False)
+    assert all(np.array_equal(b, line.data) for b, line in zip(before, engine._lines))

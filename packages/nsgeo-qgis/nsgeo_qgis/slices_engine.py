@@ -153,7 +153,6 @@ from nsgeo.slices import (
     north_up_plans_nbytes,
     plan_fill,
     plan_line,
-    plan_windows,
     smooth,
     stream_slice,
 )
@@ -181,6 +180,7 @@ from nsgeo_qgis.slices_plan import (
     limit_windows,
     preset_transform_conflict,
 )
+from nsgeo_qgis.stretch_jobs import GridStretch, StretchJob, WindowSource, shared_windows
 
 #: How much of the previous redraw timing survives into the reported one.
 #: A plain last-value readout flickers between 2 ms and 9 ms on a drag and
@@ -1833,12 +1833,7 @@ class SliceEngine(QObject):
         slices (interpolation spec §7).
         """
         _, z = self._require_geometry()
-        if finish.method == "min_curvature":
-            windows = list(limit_windows(z, thickness_levels))
-        else:
-            windows = list(plan_windows(z, thickness_levels, thickness_levels))
-            if windows[-1].k1 < z.nz:
-                windows.append(SliceWindow(windows[-1].k1, z.nz))
+        windows = shared_windows(z, thickness_levels, finish.method == "min_curvature")
         draw = self.preview if preview else self.finish
         if self._mode == "resident":
             cube = self.cube()
@@ -1847,6 +1842,61 @@ class SliceEngine(QObject):
         else:
             slices = (draw(*self._slice(w), finish) for w in windows)
         return limit_over_slices(slices, clip)
+
+    def window_source(self) -> WindowSource:
+        """A frozen snapshot that slices as `_slice` does, for a job on a worker
+        (#193). Taken on the GUI thread: plans are made (and in resident mode
+        the cube built) here, so the worker only reads. Raises as `_slice`
+        does when no lines are prepared."""
+        frame, z = self._require_geometry()
+        if not self._lines:
+            raise RuntimeError("no lines are prepared")
+        plans = self._ensure_plans()
+        cube = self.cube() if self._mode == "resident" else None
+        return WindowSource(frame, z, cube=cube, lines=self._lines, plans=plans)
+
+    def stretch_parts(self, finish: SliceFinish, fill: FillJob | None = None) -> GridStretch:
+        """What this engine contributes to a stretch job: its snapshot, its
+        finish settings and cell, and the fill it will use, which is `fill`'s
+        result when a fill job is given, else what is held for these settings
+        (None when nothing is: the job builds). The solved cache is copied
+        only when the held plan is the one in use."""
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        held = None
+        solved: dict[bytes, np.ndarray] = {}
+        weights = self._weights
+        key = self._weights_key(frame, settings)
+        if fill is None and weights is not None and weights[0] == key:
+            held = (weights[1], weights[2])
+            solved = dict(self._solved)
+        return GridStretch(
+            self.window_source(), settings, frame.cell, fill_job=fill, held=held, solved=solved
+        )
+
+    def stretch_job(
+        self,
+        thickness_levels: int,
+        clip: Any,
+        finish: SliceFinish,
+        *,
+        fill: FillJob | None = None,
+    ) -> StretchJob:
+        """`stretch_limit` as a job for a worker (#193): the same windows and
+        the same arithmetic, so `job.limit` and `job.final` equal what
+        `stretch_limit` returns. Minimum curvature is final only when every
+        window is solved on the plan held; otherwise the kriging preview's
+        provisional limit."""
+        _, z = self._require_geometry()
+        curvature = finish.method == "min_curvature"
+        windows = shared_windows(z, thickness_levels, curvature)
+        return StretchJob(
+            {"": self.stretch_parts(finish, fill)},
+            [{"": w} for w in windows],
+            clip,
+            curvature=curvature,
+            site=False,
+        )
 
     def cube(self) -> SliceCube:
         """The resident cube, built on first use and cached.
