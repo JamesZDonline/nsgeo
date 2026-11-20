@@ -122,7 +122,13 @@ def _docked_with(tmp_path, preset, band_rows=None, record=None):
     if record is not None:
         session.remember_slice_resolution("A", **record)
     dock = SlicesDock(session)
-    yield dock, session
+    try:
+        yield dock, session
+    finally:
+        _tear_down(dock)
+
+
+def _tear_down(dock):
     # Fix round 1: Important 2's first-computation trigger means
     # construction ALREADY dispatched a real QgsTask here, and most tests
     # above never call wait_for_preparation() themselves. dispose() only

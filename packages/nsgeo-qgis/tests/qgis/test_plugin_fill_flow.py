@@ -56,9 +56,10 @@ QUICK_CELL = 0.1
 MID_CELL = 0.022
 MIN_SLOW_S = 1.0
 #: Whole site: the cell at which the three grids' fills together take about
-#: 2.5 s here (CI about 0.65 of that, 1.6 s). Measured per cell: 0.08 m 1.0 s,
-#: 0.06 m 2.5 s, 0.05 m 4.4 s, in the three grids' sum.
-SITE_SLOW_CELL = 0.06
+#: 3.3 s here (CI about 0.65 of that, 2.1 s, about 0.7 s a grid against the
+#: 0.25 s gap limit). Measured per cell: 0.08 m 1.0 s, 0.06 m 2.5 s, 0.05 m
+#: 4.4 s, in the three grids' sum.
+SITE_SLOW_CELL = 0.055
 #: The floor: four times the gap limit, as MIN_SLOW_S.
 MIN_SLOW_SITE_S = 1.0
 GAP_LIMIT_S = 0.25
@@ -125,13 +126,13 @@ def _release(dock) -> None:
     dock.fill_worker.shutdown()
 
 
-def _calibrated(dock, check=None) -> None:
-    """`_assert_slow` (or `check`), and a failed one never leaks: the dock's
+def _calibrated(dock) -> None:
+    """`_assert_slow`, and a failed one never leaks: the dock's
     workers are joined before the failure is raised, so a runner that is too
     fast for the fixture reports that, not a stray `nsgeo-refine` thread in
     some later test."""
     try:
-        (check or _assert_slow)(dock)
+        _assert_slow(dock)
     except BaseException:
         _release(dock)
         raise
@@ -1036,41 +1037,98 @@ def test_cancel_with_a_picture_puts_the_site_back(site_slow):
 
 
 def test_cancel_with_no_picture_latches_the_site(fake_iface, site3, answer_modal):
-    """Nothing drawn at all (a latch with no picture to go back to): the note,
-    no restart from a slider move, and a fill setting draws again."""
+    """A survey opened with a slow saved site cell has no picture to go back
+    to: the note, no job from a slider move or from a grid becoming ready, and a
+    fill setting draws again."""
     plugin = _open(fake_iface, site3, answer_modal)
     try:
         dock = plugin.slices_dock
+        jobs: list[int] = []
+        real = dock.site_engine.fill_jobs
+        dock.site_engine.fill_jobs = lambda *a, **k: jobs.append(1) or real(*a, **k)
+        plugin.session.remember_site_resolution(cell=SITE_SLOW_CELL)
         dock.set_scope("site")
-        wait_for_site(dock.site_engine, 60_000)
-        _assert_slow_site(dock)
-        dock.fill_flow.stop()
-        # No picture: forget it, as a survey with nothing drawn yet has none.
-        dock.fill_picture.forget()
-        dock.cell_spin.setValue(SITE_SLOW_CELL)
-        dock.flush_debounce()
-        assert spin_until(lambda: dock.fill_flow.working, 20_000)
-        dock.fill_picture.forget()
+        assert spin_until(lambda: dock.fill_flow.working, 60_000)
+        assert dock.current_site_slice() is None, "nothing was ever drawn for the site"
         record = plugin.session.site_resolution()
         dock.cancel_link.linkActivated.emit("cancel")
         assert dock.fill_flow.latched
         assert FILL_CANCELLED_NOTE in _notes(dock)
         assert plugin.session.site_resolution() == record
         assert dock.cell_spin.value() == SITE_SLOW_CELL
-        jobs: list[int] = []
-        real = dock.site_engine.fill_jobs
-        dock.site_engine.fill_jobs = lambda *a, **k: jobs.append(1) or real(*a, **k)
+        wait_for_site(dock.site_engine, 60_000)
+        started = len(jobs)
         dock.slice_slider.setValue(min(dock.slice_slider.maximum(), dock.slice_slider.value() + 2))
         spin_until(lambda: False, 300)
-        assert jobs == [] and not dock.fill_flow.working
+        assert len(jobs) == started and not dock.fill_flow.working, "a slider move starts none"
+        # A grid becoming ready (a preparation landing) builds nothing either.
+        table = dock.site_panel.table
+        table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
+        wait_for_site(dock.site_engine, 60_000)
+        spin_until(lambda: False, 200)
+        table.item(2, 0).setCheckState(Qt.CheckState.Checked)
+        wait_for_site(dock.site_engine, 60_000)
+        spin_until(lambda: False, 300)
+        assert dock.site_engine.ready_grids == ("A", "B", "C")
+        assert len(jobs) == started and not dock.fill_flow.working
+        assert dock.fill_flow.latched
         dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
-        assert spin_until(lambda: len(jobs) == 1, 20_000), "a method edit draws again"
+        assert spin_until(lambda: len(jobs) > started, 20_000), "a method edit draws again"
         assert not dock.fill_flow.latched
         assert FILL_CANCELLED_NOTE not in _notes(dock)
         dock.fill_flow.stop()
         dock.site_engine.fill_jobs = real
     finally:
         _close(plugin, answer_modal)
+
+
+def test_a_site_with_nothing_to_draw_keeps_a_cancelled_fills_latch(site_quick, monkeypatch):
+    _, dock = site_quick
+    dock.fill_picture.cancelled(("other",))  # a cancel with no picture of the site's: latches
+    assert dock.fill_flow.latched
+    monkeypatch.setattr(type(dock.site_engine), "geometry_problem", property(lambda self: "x"))
+    dock._site.refresh_slice()
+    assert not dock._site.drawn
+    assert dock.fill_flow.latched, "nothing to draw is not a fill setting changing"
+    dock.fill_picture.unlatch()
+
+
+def test_a_slider_move_mid_fill_never_restarts_the_grid_in_flight(site_slow):
+    """The key is what the tick wants, not what is still missing: the missing
+    set shrinks as each grid lands, and a slider move or a bare redraw after
+    the first landing must leave the running jobs alone."""
+    _, dock = site_slow
+    flow = dock.fill_flow
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: flow.working and flow._landed >= 1, 60_000)
+    assert flow._landed < len(flow._fills)
+    jobs = [id(job) for job in flow._fills]
+    assert len(jobs) == 3
+    landed = flow._landed
+    dock.slice_slider.setValue(min(dock.slice_slider.maximum(), dock.slice_slider.value() + 1))
+    dock._site.tick.stop()
+    dock._site.refresh_slice()
+    dock._site.refresh_slice()
+    assert [id(job) for job in flow._fills] == jobs, "the work was restarted"
+    assert flow._landed >= landed
+    texts: list[str] = []
+    assert spin_until(lambda: texts.append(dock.refine_label.text()) or not flow.working, 120_000)
+    last = FILL_WORKING_GRIDS_INDICATOR.format(cell=SITE_SLOW_CELL, n=3, total=3)
+    assert last in texts, texts
+    assert not any(t.endswith("of 2") for t in texts), texts
+    _wait_idle(dock)
+
+
+def test_closing_the_generator_runs_the_docked_teardown(tmp_path, qgis_app):
+    gen = _docked_with(tmp_path, PRESET)
+    dock, _ = next(gen)
+    for worker in (dock.refiner, dock.fill_worker):
+        worker._executor.submit(lambda: None).result()  # start its thread
+    threads = list(dock.refiner._executor._threads) + list(dock.fill_worker._executor._threads)
+    assert len(threads) == 2
+    gen.close()
+    assert dock.refiner._closed and dock.fill_worker._closed
+    assert not any(t.is_alive() for t in threads)
 
 
 def test_a_quick_site_fill_draws_in_the_same_tick(site_quick, monkeypatch):

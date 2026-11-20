@@ -1222,6 +1222,14 @@ class SiteEngine(QObject):
     ) -> bool:
         return self._engines[grid_id].fill_held(binned[grid_id][1], finish)
 
+    def fills_wanted(self, top_ns: float, thickness_ns: float) -> list[str]:
+        """The ready grids with a window at this time, in `ready_grids` order:
+        the grids a draw here finishes, whether or not their fills are held."""
+        self._require_lattice()
+        return [
+            g for g in self.ready_grids if self._grid_window(g, top_ns, thickness_ns) is not None
+        ]
+
     def fill_jobs(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[FillJob]:
         """One `FillJob` per missing grid, in `fills_missing` order. Making a job
         drops that engine's held fill, as `_fill_for` does, so call this only

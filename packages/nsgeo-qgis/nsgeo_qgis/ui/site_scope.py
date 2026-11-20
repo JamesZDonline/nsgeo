@@ -27,7 +27,6 @@ the rest, as before minimum curvature came. Leaving the site stops them too.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -65,7 +64,7 @@ from nsgeo_qgis.slices_plan import (
     snap_inside,
     window_levels,
 )
-from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
+from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import SiteRow
 from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
@@ -1112,13 +1111,13 @@ class SiteScope:
         others still solve does not. A full minimum-curvature tick leaves a
         running list alone; any other method's stops it (plan call 5).
 
-        Which grids the tick previews is known only once it has drawn them,
-        but whether it builds new weights or plans is known before, from the
-        grids present at its window alone (`SiteEngine.weights_cached(...,
-        at=)`): a grid whose axis misses it builds nothing here. A tick that
-        builds shows the wait cursor, and cancels a running list first, so
-        the old list neither competes with every grid's build nor keeps the
-        plans it drops alive through it (`RefineFlow.before_draw`).
+        Which grids the tick previews is known only once it has drawn them.
+        Whether it must build weights or plans is known before: from the grids
+        present at its window alone (`SiteEngine.fills_missing`). Those are worked
+        out on the fill worker (#193), after cancelling a running list so the old
+        list neither competes with the builds nor keeps the plans they drop
+        alive (`RefineFlow.before_draw`), and the tick draws once they have
+        landed; the map keeps its picture meanwhile.
         """
         dock = self.dock
         try:
@@ -1134,7 +1133,9 @@ class SiteScope:
             dock.show_warnings()
             if not self.drawn:
                 self.refine.stop()  # nothing drawn: no refine is owed
-                self.stop_fill_work()
+                # A latch holds: it ends only on a fill setting, a scope switch
+                # or a reopened survey.
+                self.dock.fill_flow.stop()
                 self._clear_shown()
                 self.slice = None
                 self.window = None
@@ -1162,21 +1163,19 @@ class SiteScope:
             if not coverage and not self._fills_ready(top, span, finish, z):
                 dock.show_refine()
                 return
-            # A coverage tick finishes nothing, so builds nothing.
-            builds = not coverage and not self.engine.weights_cached(finish, at=(top, span))
-            self.refine.before_draw(rebuilds=builds)
-            # Building the weights, or the plans and their previews, takes
-            # seconds at a fine cell: say so (interpolation spec §7).
-            with busy_cursor() if builds else contextlib.nullcontext():
-                shown = self.engine.slice_at(
-                    top,
-                    thickness * z.dz_ns,
-                    finish=finish,
-                    method=dock.normalisation_panel.method(),
-                    manual=self.gains(),
-                    coverage=coverage,
-                    preview=curvature,
-                )
+            # Every fill it needs is held now (`_fills_ready`), so the draw builds
+            # no weights: the fills were worked out on the fill worker, which
+            # also cancelled any refine list made on the plans it dropped.
+            self.refine.before_draw(rebuilds=False)
+            shown = self.engine.slice_at(
+                top,
+                thickness * z.dz_ns,
+                finish=finish,
+                method=dock.normalisation_panel.method(),
+                manual=self.gains(),
+                coverage=coverage,
+                preview=curvature,
+            )
             self.slice = shown
             self.window = window
             self.drawn_at = (top, thickness * z.dz_ns)
@@ -1221,15 +1220,19 @@ class SiteScope:
         (cancelled) site starts nothing and draws nothing new."""
         dock = self.dock
         flow = dock.fill_flow
-        missing = self.engine.fills_missing(top, span, finish)
-        if not missing:
+        if not self.engine.fills_missing(top, span, finish):
             return True
         if flow.latched:
             return False
         engine = self.engine
         # A running refine list was made on the plans about to be dropped.
         self.refine.before_draw(rebuilds=True)
-        key = (engine.lattice, tuple(missing), engine.fill_keys(missing, finish))
+        # What the tick WANTS, not what is still missing: the missing set shrinks
+        # as each grid lands, and a slider move after that must not restart the
+        # grid in flight. The key moves only with the lattice, the ready grids
+        # at this time, and cell, method or max distance.
+        wanted = engine.fills_wanted(top, span)
+        key = (engine.lattice, tuple(wanted), engine.fill_keys(wanted, finish))
         return flow.request(
             key,
             lambda: self._fill_jobs(top, span, finish, z),

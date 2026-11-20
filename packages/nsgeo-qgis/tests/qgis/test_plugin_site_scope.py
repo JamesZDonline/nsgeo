@@ -278,6 +278,18 @@ def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
     drawn = []
     real = site.refresh_slice
     monkeypatch.setattr(site, "refresh_slice", lambda: drawn.append(1) or real())
+    # The fill requests the edits make (#193): a fill over the flow's budget goes
+    # to the worker and its landing draws once more, through the same
+    # `refresh_slice`. That landing redraw is allowed; a second REQUEST is not.
+    requests: list[bool] = []
+    flow = dock.fill_flow
+    real_request = flow.request
+
+    def counting(*args, **kwargs):
+        requests.append(real_request(*args, **kwargs))
+        return requests[-1]
+
+    monkeypatch.setattr(flow, "request", counting)
     spin = dock.site_finish.max_distance_spin
     spin.setValue(1.0)
     _events()
@@ -287,8 +299,14 @@ def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
     assert plugin.session.site_resolution()["max_distance_spacings"] == 1.25
     assert "A 1.88 m" in spin.toolTip()  # 1.25 x A's 1.5 m
     assert spin_until(lambda: drawn, 5_000)
-    spin_until(lambda: False, 300)  # long past another debounce
-    assert drawn == [1]
+    # Whichever way the fills ran (inside the budget, or on the worker), wait
+    # until they and any landing redraw are done, then long past another debounce.
+    assert spin_until(lambda: not flow.working and not flow.stretching, 60_000)
+    spin_until(lambda: False, 300)
+    assert len(requests) == 1, "the two edits re-planned more than once"
+    # One tick for the pause, plus the landing's own redraw when the fills went
+    # to the worker (the request answered False).
+    assert drawn == [1] * (1 if requests[0] else 2)
     assert dock.current_site_slice() is not None
 
 
@@ -2764,17 +2782,13 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
     """Move to slider `at`, every grid present there slow, and hold every
     solve but the first. The first grid's landing redraw still previews the
     others and must leave their solves running: one list, no rest restarted,
-    and no wait cursor, since nothing is rebuilt."""
+    and no fill built, since nothing is rebuilt (#193: the wait cursor is gone;
+    a rebuild is a fill request on the fill worker)."""
     site, scope = dock.site_engine, dock._site
     starts = _starts(dock, monkeypatch)
-    cursors: list[int] = []
-    real_cursor = site_scope_module.busy_cursor
-
-    def counting_cursor():
-        cursors.append(1)
-        return real_cursor()
-
-    monkeypatch.setattr(site_scope_module, "busy_cursor", counting_cursor)
+    rebuilds: list[int] = []
+    real_jobs = site.fill_jobs
+    monkeypatch.setattr(site, "fill_jobs", lambda *a, **k: rebuilds.append(1) or real_jobs(*a, **k))
     gate = threading.Event()
     real = site.pending_solves
 
@@ -2791,6 +2805,7 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
         drawn(dock)
         first, *others = list(scope.slice.previewed)
         assert others
+        del rebuilds[:]  # the move's own fills are done; the landings build none
         _pump_until(lambda: list(scope.slice.previewed) == others and not scope.tick.isActive())
         assert dock.refiner.busy, "the first grid's redraw stopped the others' solves"
         assert scope.provisional
@@ -2799,7 +2814,7 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
         gate.set()
     _wait_for_refine(dock)
     assert len(starts) == 1
-    assert cursors == [], "a tick that builds nothing showed the wait cursor"
+    assert rebuilds == [], "a landing's redraw built fills"
     assert not scope.provisional
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
 
