@@ -24,17 +24,26 @@ limit is taken from the stack with every enabled curve step switched off
 against a scale that holds still, instead of the scale chasing the curve
 (spec §3, call 1). A difference view is its own scale (call 4). The time
 cutoff is never bypassed in that measurement, so selecting the cutoff row
-shows more record without changing the brightness (call 11).
+shows more record without changing the brightness (call 11). A row handle's
+input view (Time zero, below) is its own scale too: the record drawn is the
+record measured.
 
-The time cutoff: a step with a `time`-kind parameter (`handle_spec`)
-is drawn as a draggable line, and while its row is selected the image
-shows the stack with that step bypassed so there is something below the
-line to drag it over. The *cutoff row* is that selected row, but only when
-no preview is up, a working line is open and the step now at that row has
-a time parameter. It is resolved against the live stack at every render and
-every drag, never cached: a line switch or a stack edit can change what sits
-at the selected row, and a remembered "this is the cutoff" would then
-bypass, or write onto, the wrong step.
+The handle: a step with a `time`- or `row`-kind parameter that is visible in
+the step's current mode (`handle_spec`) is drawn as a draggable line. The
+*handle row* is the selected row, but only when no preview is up, a working
+line is open and the step now at that row has such a parameter. It is
+resolved against the live stack at every render and every drag, never cached:
+a line switch or a stack edit can change what sits at the selected row, and a
+remembered "this is the handle" would then bypass, or write onto, the wrong
+step.
+
+What the image shows while a handle row is selected depends on its kind. A
+`time` handle (the cutoff) shows the stack with that step bypassed, so there
+is something below the line to drag it over. A `row` handle (Time zero's first
+kept row) shows what the step receives -- the step before it, or the source --
+relabelled onto the line's clock (`relabel_onto`), because nothing after Time
+zero runs and the bypass would hand a later step (migration) a record it
+refuses.
 
 The window across lines: every line on a grid, along the same axis, is drawn
 against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
@@ -87,6 +96,7 @@ from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     TIME_BASE_RADAR,
+    ParamSpec,
     Radargram,
     StepStack,
     build_step,
@@ -189,7 +199,7 @@ def _time_base_of_provenance(provenance_json: str) -> str:
     return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
-def handle_spec(step: Any) -> Any:
+def handle_spec(step: Any) -> ParamSpec | None:
     """The spec of a step's draggable parameter: the first of kind `time` or
     `row` that is visible for the step's own params (spec §4.11). None when it
     has none, as Time zero has none in `first_break` mode. Decided by the
@@ -2119,12 +2129,19 @@ class ProfileDock(QgsDockWidget):
         try:
             row = self._handle_row()
             if row >= 0:
-                spec = handle_spec(stack.entries[row][0])
+                spec = self._handle_spec_at(row)
                 if spec is not None and spec.kind == "row":
                     # What Time zero receives, on the line's clock (spec
                     # §4.11): nothing after it runs, so nothing can refuse it.
                     received = stack.source if row == 0 else stack.intermediate(row - 1)
-                    return relabel_onto(received, stack.zero_ns())
+                    try:
+                        line_zero = stack.zero_ns()
+                    except ValueError:
+                        # This very step refuses (a sample past the record's
+                        # end): the input, on its own clock, is what the user
+                        # needs in order to fix the row.
+                        return received
+                    return relabel_onto(received, line_zero)
                 return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
@@ -2234,11 +2251,12 @@ class ProfileDock(QgsDockWidget):
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
-        for a difference view, else the displayed stack with every enabled
-        gain-curve step bypassed (just `result()` when there is none).
-        Never bypasses the time cutoff -- see the module docstring. Called
-        after `current_radargram`, so a declined difference has already
-        reset `_effective_difference_index`."""
+        for a difference view or a row handle's input view (each is its own
+        scale), else the displayed stack with every enabled gain-curve step
+        bypassed (just `result()` when there is none). Never bypasses the
+        time cutoff -- see the module docstring. Called after
+        `current_radargram`, so a declined difference has already reset
+        `_effective_difference_index`."""
         if self._effective_difference_index >= 0 or self._key is None:
             return shown
         if self._shows_row_handle():
@@ -2275,13 +2293,19 @@ class ProfileDock(QgsDockWidget):
             return -1
         return row
 
+    def _handle_spec_at(self, row: int) -> ParamSpec | None:
+        """The handle parameter of the working stack's step at `row`, None
+        when `row` is no handle row or nothing is open."""
+        if self._working_key is None or not self.session.is_open:
+            return None
+        entries = self.session.stack_for(self._working_key, insert=False).entries
+        return handle_spec(entries[row][0]) if 0 <= row < len(entries) else None
+
     def _shows_row_handle(self) -> bool:
         """Whether the selected row is a step whose handle is a `row`: the
         profile then draws that step's input (see `current_radargram`)."""
         row = self._handle_row()
-        if row < 0 or self._working_key is None:
-            return False
-        spec = handle_spec(self.session.stack_for(self._working_key, insert=False).entries[row][0])
+        spec = self._handle_spec_at(row) if row >= 0 else None
         return spec is not None and spec.kind == "row"
 
     def _show_cutoff(self) -> None:
@@ -2291,7 +2315,7 @@ class ProfileDock(QgsDockWidget):
             self.view.set_cutoff(None)
             return
         step = self.session.stack_for(self._working_key, insert=False).entries[row][0]
-        spec = handle_spec(step)
+        spec = self._handle_spec_at(row)
         assert spec is not None
         if spec.kind != "time":
             # A row handle (Time zero's first kept row) is drawn and dragged

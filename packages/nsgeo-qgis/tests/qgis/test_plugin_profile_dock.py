@@ -2875,6 +2875,8 @@ def test_a_time_zero_that_is_not_first_draws_what_it_receives(opened):
 
 
 def test_selecting_time_zero_at_the_top_brings_the_cropped_rows_in(opened):
+    """A guard for Plan A's top-stays-top rule with the new view: it passes
+    without this task's relabel, which only the mid-record test below needs."""
     session, dock, key, line = opened
     _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
     t = dock.view.transform
@@ -2894,8 +2896,13 @@ def test_selecting_time_zero_mid_record_holds_the_picture_still(opened):
     _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
     _zoom_middle(dock)
     before = _radar_window(dock)
+    labels = (dock.view.transform.time_lo, dock.view.transform.time_hi)
     dock.set_selected_step(0)
     assert _radar_window(dock) == pytest.approx(before)
+    # spec §4.11 "elsewhere, nothing moves": the relabel keeps the zero, so the
+    # tick labels do not shift either
+    t = dock.view.transform
+    assert (t.time_lo, t.time_hi) == pytest.approx(labels)
     dock.set_selected_step(-1)
     assert _radar_window(dock) == pytest.approx(before)
 
@@ -2938,3 +2945,25 @@ def test_the_campus_line_with_time_zero_selected_starts_49_rows_above_the_line(b
     assert t.n_samples == n_kept + 49
     assert t.t0_ns == pytest.approx(-11.086 - (-0.476), abs=0.01)
     assert dock.shown_zero_ns() == pytest.approx(session.stack_for(key).zero_ns())
+
+
+def test_a_row_handles_input_view_is_its_own_scale(opened):
+    """The display limit is taken from the drawn input, not the processed
+    stack, whose scale can differ by orders of magnitude."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)), ("gain_agc", {}))
+    dock.set_selected_step(0)
+    assert dock.image.reference is dock.image.rg
+    assert dock.image.limit == _clip(dock)(stack.source.data)
+
+
+def test_a_time_zero_that_refuses_still_draws_its_input(opened):
+    """A sample past the record's end (a preset on a shorter record): the
+    input, unrelabelled, is what the user needs to fix the row. No error."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=600)))
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
