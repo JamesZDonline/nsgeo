@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from nsgeo.geometry import END_LIMIT_M, Grid, GridPlacement
@@ -20,6 +22,9 @@ from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
 from plugin_testing import (
     CRS,
+    LAT0,
+    LON0,
+    M_PER_DEG,
     fix,
     gps_line,
     open_gps,
@@ -387,7 +392,7 @@ def test_a_gps_line_naming_a_grid_in_another_crs_is_drawn_in_its_own_crs(site):
 
     expected = line.trace_coords({})
     assert np.allclose(np.array(vertices(feature(layers, "lines"))), expected, atol=1e-6)
-    assert feature(layers, "lines")["grid_id"] == ""
+    assert feature(layers, "lines")["grid_id"] == "A"  # M17b: the grid it belongs to
     m = feature(layers, "marks").geometry().asPoint()
     assert (m.x(), m.y()) == pytest.approx(tuple(expected[50]), abs=1e-6)
     gap = feature(layers, "rtk_gaps", kind="bridge")
@@ -485,3 +490,70 @@ def test_a_tape_only_refresh_logs_nothing_critical(tape_site, monkeypatch):
     session.add_lines([Line.open(p, GridPlacement("A", "y", 0.5, 0.0, 1, p.stem))])
     layers.refresh()
     assert [m for m, _ in logged if "rtk_gaps" in m] == []
+
+
+def _walked(tmp, names, grid_id=None, step_m=0.5):
+    """Lines walked due north `step_m` apart (longitude steps), at 10 traces a metre."""
+    out = []
+    for i, name in enumerate(names):
+        path = synthetic_gps_dzt(
+            tmp / "raw",
+            name,
+            [
+                (
+                    t,
+                    LAT0 + t * 0.1 / M_PER_DEG,
+                    LON0 + i * step_m / (M_PER_DEG * math.cos(math.radians(LAT0))),
+                    4,
+                )
+                for t in (25, 175)
+            ],
+            traces_per_metre=10.0,
+        )
+        out.append(open_gps(path, grid_id=grid_id))
+    return out
+
+
+def test_a_gps_line_in_a_grid_writes_its_grid_so_it_takes_the_grids_colour(site):
+    session, layers, tmp = site
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.5))
+    session.add_lines(_walked(tmp, ["FILE__001.DZT"], grid_id="A"))
+    session.add_lines(_walked(tmp, ["FILE__002.DZT"]))
+    assert feature(layers, "lines", file_name="FILE__001.DZT")["grid_id"] == "A"
+    assert feature(layers, "lines", file_name="FILE__002.DZT")["grid_id"] == ""
+    cats = {
+        c.value(): c.symbol().color().name() for c in layers.layers["lines"].renderer().categories()
+    }
+    assert cats["A"] == GRID_COLOURS[0].lower()
+    assert cats["A"] != cats[""]
+
+
+def test_lines_hide_on_zoom_out_at_the_measured_spacing_of_gps_lines_in_no_grid(site):
+    from nsgeo.geometry import measure_spacing
+    from nsgeo_qgis.layers import HIDE_LINES_BEYOND_SCALE_PER_M
+
+    session, layers, tmp = site
+    lines = _walked(tmp, ["FILE__001.DZT", "FILE__002.DZT", "FILE__003.DZT"])
+    session.add_lines(lines)
+    layer = layers.layers["lines"]
+    spacing = measure_spacing([ln.trace_coords({}) for ln in lines])
+    assert spacing == pytest.approx(0.5, abs=0.01)
+    assert layer.hasScaleBasedVisibility()
+    assert layer.minimumScale() == pytest.approx(HIDE_LINES_BEYOND_SCALE_PER_M * spacing)
+
+
+def test_a_single_gps_line_in_no_grid_leaves_the_lines_visible_at_every_scale(site):
+    session, layers, tmp = site
+    session.add_lines(_walked(tmp, ["FILE__001.DZT"]))
+    assert not layers.layers["lines"].hasScaleBasedVisibility()
+
+
+def test_a_gps_line_in_a_grid_hides_by_the_grids_default_spacing(site):
+    from nsgeo_qgis.layers import HIDE_LINES_BEYOND_SCALE_PER_M
+
+    session, layers, tmp = site
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.4))
+    session.add_lines(_walked(tmp, ["FILE__001.DZT", "FILE__002.DZT"], grid_id="A"))
+    assert layers.layers["lines"].minimumScale() == pytest.approx(
+        HIDE_LINES_BEYOND_SCALE_PER_M * 0.4
+    )

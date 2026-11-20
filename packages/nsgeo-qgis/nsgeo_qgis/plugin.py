@@ -429,6 +429,7 @@ class NsgeoPlugin:
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
         self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
+        self.survey_dock.fit_tracks_requested.connect(self.fit_tracks)
         self.survey_dock.bulk_velocity_requested.connect(self.open_bulk_velocity_dialog)
         self.survey_dock.report.connect(self.message)
         # One line selection, both ways (#57); the map link exists already (above).
@@ -3268,6 +3269,13 @@ class NsgeoPlugin:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def fit_tracks(self, keys: list[str]) -> None:
+        """Fit a grid to GPS tracks, from the Survey panel. A slot; Task 6 builds it."""
+        try:
+            _log(f"Fit to these tracks asked for {len(keys)} line(s)", Qgis.MessageLevel.Info)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise into Qt
+            _log(f"could not fit a grid to the tracks: {exc}", Qgis.MessageLevel.Critical)
 
     def move_lines(self, keys: list[str], grid_id: str) -> None:
         """Move lines to another grid, from the Survey panel's Move to grid.

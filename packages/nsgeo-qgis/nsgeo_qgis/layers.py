@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement
+from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement, measure_spacing
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Cut, Line, is_cut_key
 from nsgeo.processing import retime_ns
@@ -2321,7 +2321,7 @@ class SiteLayers(QObject):
             if isinstance(p, TrackPlacement):
                 # P12: the tape-only fields stay NULL; the length is walked.
                 walked = p.distance_along(line.n_traces, line.header)
-                f["grid_id"] = ""
+                f["grid_id"] = p.grid_id or ""
                 f["length_m"] = float(walked[-1] - walked[0]) if len(walked) else 0.0
                 f["placed_by"] = "gps"
                 f["without_rtk_m"] = float(sum(b.metres for b in p.bridges()))
@@ -2515,10 +2515,18 @@ class SiteLayers(QObject):
         closely spaced lines start to run together."""
         spacings = set()
         keys = self.session.keys()
+        loose: list[Any] = []  # GPS lines in no grid: their spacing is measured (#222)
         for key in keys:
-            grid = self.session.grid_for_line(self.session.line_for_key(key))
+            line = self.session.line_for_key(key)
+            grid = self.session.grid_for_line(line)
             if grid is not None:
                 spacings.add(grid.default_spacing)
+            elif isinstance(line.placement, TrackPlacement) and line.placement.grid_id is None:
+                loose.append(line.trace_coords({}))
+        if len(loose) >= 2:
+            measured = measure_spacing(loose)
+            if measured is not None:
+                spacings.add(measured)
         layer = self.layers[name]
         if not spacings:
             layer.setScaleBasedVisibility(False)

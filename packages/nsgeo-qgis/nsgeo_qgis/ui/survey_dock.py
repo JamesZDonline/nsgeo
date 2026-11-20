@@ -111,6 +111,7 @@ class SurveyDock(QgsDockWidget):
     add_grid_requested = pyqtSignal()
     edit_grid_requested = pyqtSignal(str)
     import_requested = pyqtSignal(str)
+    fit_tracks_requested = pyqtSignal(list)  # keys of the GPS lines (M17b)
     grid_velocity_requested = pyqtSignal(str)
     line_velocity_requested = pyqtSignal(str)
     # (grid id, line keys to select); keys may be empty (line editing spec §3 call 7).
@@ -529,15 +530,21 @@ class SurveyDock(QgsDockWidget):
                 only_lines = self._line_keys_only(keys) == keys
                 gps = [k for k in keys if only_lines and self._is_gps(k)]
                 if keys and gps and len(gps) == len(keys):
-                    # Only GPS lines: destagger is all they have until GPS areas (M17c).
+                    phrase = self._count_phrase(grid_ids, keys)
                     menu.addAction(
                         f"Set destagger for {len(keys)} GPS lines…",
                         lambda: self._request_destagger(keys),
                     )
-                elif keys and only_lines and not gps:
-                    grids = {self._grid_of_key(k) for k in keys}
-                    if len(grids) == 1:
-                        grid = grids.pop()
+                    self._add_move_menu(menu, keys, f"Move {phrase} to grid")
+                    menu.addAction(
+                        f"Fit a grid to these {len(keys)} tracks…",
+                        lambda: self._request_fit(keys),
+                    )
+                elif keys and only_lines:
+                    # Tape lines, or tape and GPS lines together.
+                    grids = {self._grid_of_line(k) for k in keys}
+                    if len(grids) == 1 and None not in grids:
+                        grid = str(grids.pop())
                         menu.addAction(
                             f"Edit {self._count_phrase(grid_ids, keys)}…",
                             lambda: self._request_edit(grid, keys),
@@ -559,7 +566,7 @@ class SurveyDock(QgsDockWidget):
                 menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
                 edit_lines = menu.addAction("Edit lines…", lambda: self._request_edit(gid, []))
                 edit_lines.setEnabled(bool(self.session.keys_on_grid(gid)))
-                menu.addAction("Import DZT files…", lambda: self.import_requested.emit(gid))
+                menu.addAction("Add GPR data…", lambda: self.import_requested.emit(gid))
                 menu.addAction("Set velocity…", lambda: self.grid_velocity_requested.emit(gid))
                 menu.addSeparator()
                 menu.addAction("Remove grid", lambda: self.remove_grid_action(gid))
@@ -573,11 +580,13 @@ class SurveyDock(QgsDockWidget):
                 key = self.key_of(item) or ""
                 menu.addAction("Open", lambda: self._open_line(key))
                 if self._is_gps(key):
-                    # Edit line… and Move to grid are tape-only until M17c.
+                    # Edit line… is tape-only until M17c.
                     menu.addAction(
                         "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
                     )
                     menu.addAction("Set destagger…", lambda: self._request_destagger([key]))
+                    self._add_move_menu(menu, [key], "Move to grid")
+                    menu.addAction("Fit a grid to this track…", lambda: self._request_fit([key]))
                 else:
                     # Worked out here, inside the guard, not when the action fires.
                     grid = self._grid_of_key(key)
@@ -593,7 +602,8 @@ class SurveyDock(QgsDockWidget):
             _log(f"could not build the survey tree context menu: {exc}", Qgis.MessageLevel.Critical)
 
     def _grid_of_key(self, key: str) -> str:
-        return str(getattr(self.session.line_for_key(key).placement, "grid_id", ""))
+        """The grid a line is on, "" for a GPS line in none."""
+        return str(getattr(self.session.line_for_key(key).placement, "grid_id", None) or "")
 
     def _is_gps(self, key: str) -> bool:
         return not is_cut_key(key) and self.session.is_gps_line(key)
@@ -604,6 +614,13 @@ class SurveyDock(QgsDockWidget):
             self.destagger_requested.emit(list(keys))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not open the destagger dialog: {exc}", Qgis.MessageLevel.Critical)
+
+    def _request_fit(self, keys: list[str]) -> None:
+        # A menu action's slot: guarded, as _on_context_menu's comment asks.
+        try:
+            self.fit_tracks_requested.emit(list(keys))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not start Fit to these tracks: {exc}", Qgis.MessageLevel.Critical)
 
     def _request_edit(self, grid_id: str, keys: list[str]) -> None:
         # A menu action's slot: guarded, as _on_context_menu's comment asks.
