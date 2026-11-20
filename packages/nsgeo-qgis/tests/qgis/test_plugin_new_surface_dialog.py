@@ -230,14 +230,17 @@ def test_a_locked_site_file_says_to_save_the_picks_layers_edits(surface_plugin, 
     assert _shown(plugin) == LOCKED_PICKS_TEXT
 
 
-def test_a_pick_on_a_cut_or_a_missing_line_opens_the_dialog_with_the_refusal(
+def test_cut_picks_open_the_dialog_unrefused_but_picks_on_a_removed_line_are_refused(
     surface_plugin, drive_dialog
 ):
     plugin = surface_plugin
     session = plugin.session
-    cut = session.add_cut("Grid A", [(1.0, 1.0), (5.0, 1.0)])
+    # a bent cut, so three picks on it are not in a straight line
+    cut = session.add_cut("Grid A", [(1.0, 1.0), (5.0, 1.0), (5.0, 5.0)])
     session.open_line(cut)
-    cut_picks = [session.add_cut_pick(cut, 3 * i + 1, 1.0 + i, 12.5, "{}") for i in range(3)]
+    cut_picks = [
+        session.add_cut_pick(cut, 3 * i + 1, d, 12.5, "{}") for i, d in enumerate((1, 4, 6))
+    ]
     assert len(cut_picks) == 3
     # picks on a line that has since left the site stay on the picks layer
     gone = session.keys()[1]
@@ -260,8 +263,10 @@ def test_a_pick_on_a_cut_or_a_missing_line_opens_the_dialog_with_the_refusal(
     for picks in (cut_fids, orphan_rows):
         plugin.layers.select_picks(picks)
         _open(plugin, drive_dialog, driver)
-    assert len(seen) == 2 and not any(enabled for _, enabled in seen)
-    assert "on a cut" in seen[0][0] and "not on a line of a grid" in seen[1][0]
+    assert len(seen) == 2
+    # cut picks are not refused for being on a cut: no refusal text (Create waits for a name)
+    assert seen[0][0] == ""
+    assert not seen[1][1] and "not on a line of a grid" in seen[1][0]
 
 
 def test_the_dialog_states_the_grids_resolution(surface_plugin, drive_dialog):

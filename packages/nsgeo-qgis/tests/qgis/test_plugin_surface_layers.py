@@ -16,14 +16,18 @@ from nsgeo_qgis.surface_layers import (
     SurfaceLayers,
     depth_ramp,
 )
+from nsgeo_qgis.surface_plan import STALE_SUFFIX
 from plugin_testing import spin_until
 from qgis.core import QgsMeshDatasetIndex, QgsMeshLayer, QgsProject
 from qgis.PyQt.QtWidgets import QApplication
 from test_plugin_surface_build import (
     GRID,
+    PICKS,
+    _cut_along_line_0,
     _noop,
     _surface,
     _write,
+    _write_cut_picks,
 )
 
 
@@ -280,6 +284,22 @@ def test_signals_ask_for_a_sync_that_coalesces(built_site, shown, monkeypatch):
     QApplication.processEvents()
     assert calls == [1]
     assert len(_by_feature(project, record.feature_id)) == 1
+
+
+def test_deleting_a_cut_relabels_its_surface_stale_on_the_map(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    surfaces.build([record.feature_id], progress=_noop)
+    sl.sync()
+    (layer,) = _by_feature(project, record.feature_id)
+    assert layer.name() == "Mixed"
+    session.remove_cut(cut_key)  # emits cuts_changed and nothing else
+    assert spin_until(
+        lambda: _by_feature(project, record.feature_id)[0].name().endswith(STALE_SUFFIX)
+    )
 
 
 def test_dispose_removes_its_layers_and_group_and_stops_listening(built_site, shown):

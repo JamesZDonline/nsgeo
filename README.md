@@ -109,15 +109,10 @@ release's notes list everything in it.
 | M17a | GPS lines, M17's first plan: lines placed along the RTK track they were walked, with no grid; stretches without an RTK fix marked on the map; a destagger you can type. A site with GPS lines saves as schema 4, which 0.4.0 cannot open ([#208]) | next release |
 | | The Processing panel: a step that can't run stays marked under the step list until it is fixed, and opening a line whose steps can't run says so instead of showing the last picture; the gain strip stops at ±120 dB, reaches every point, fits its caption and gets a Reset; the Difference view follows a dragged step; the panel names its line ([#197], [#49], [#8], [#9], [#13], [#48], [#33], [#224]) | next release |
 | | Lines in bulk and at import: choose a processing preset when importing lines (remembered per grid; the first import into an empty grid sets its Slices preset too); a selection of lines on the map selects them in the Survey panel and back; apply a preset, the open line's steps or a velocity to a selection at once; removing lines says what processing, velocity and saved fits go with them; a comma in a number box is refused, not read as a decimal point ([#129], [#57], [#58], [#221], [#16], [#17], [#225]) | next release |
+| M16 | Cuts in 3-D, M16's fourth and last plan: picks made on a cut join surfaces, the ParaView export's picks and the 3-D view, on the clock the cut was made on; deleting a cut marks its surfaces stale and a rebuild says which picks it left out. Walls in the ParaView export were built and dropped at the walkthrough ([#229]) | next release |
 
 ### In progress
 
-- **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
-  **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
-  ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
-  surfaces, picks.vtp and the 3-D view. The walkthrough passed except the
-  walls in the ParaView export, which added little over the cut and are
-  dropped; a short second walkthrough awaits.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -134,24 +129,27 @@ release's notes list everything in it.
   dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
   new one fitted around their tracks, previewed on the map; files GPS cannot
   place are handed on to Grid mode with their offsets guessed; GPS lines in
-  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed; built
-  and reviewed, awaiting its walkthrough.
+  Edit lines, Move to grid and Fit to these tracks. Walked through: ten of
+  eleven checks passed; a fitted grid now grows to hold every trace, and GPS
+  mode from the toolbar starts on a new grid. Awaiting a re-check of those
+  fixes.
 
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
 than reworking M16–M17 afterwards.
 
-1. **M16: 3-D.** In progress (above).
-2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+1. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Designed, in four parts: GPS lines placed
    along their track (M17a, merged above); **M17b**, one **Add data** menu,
    with GPS lines going into an existing grid or a new one fitted around them;
-   **M17c**, profiles at true distance; and **M17d**, outlines with holes,
-   Place by GPS and the rest of the GPS areas. M17b is in progress (above).
-3. **M18: issue cleanup.** Work through the backlog of open bugs and review
+   **M17c**, profiles at true distance, with GPS lines drawn on their grid's
+   ruler (reversed lines mirrored, as tape lines are) and their destagger
+   measured, both moved up from M17d at the M17b walkthrough; and **M17d**,
+   outlines with holes and Place by GPS. M17b is in progress (above).
+2. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-4. **M19: magnetometer data.** The first instrument other than GPR:
+3. **M19: magnetometer data.** The first instrument other than GPR:
    Bartington Grad601 grids placed on the map with the GPR, cleaned up in
    the Processing panel (zero, destripe, despike) and Edit lines (destagger),
    joined into one map with the grids levelled to each other, and a mag strip
@@ -175,7 +173,9 @@ Grouped by area. The order within a group is not a priority.
 - **Line placement and survey geometry:** grids that are not rectangles
   ([#130]; the outline and its slice mask come with M17d); a site of GPS
   lines alone hides its lines when you zoom out, as a tape site does
-  ([#222]); balancing
+  ([#222]); Add data's Grid mode draws where each line will go before
+  Import, with the selected rows highlighted ([#230]); choose the coordinate
+  system in GPS mode rather than only take the suggested one ([#231]); balancing
   lines walked in different directions (the second half of [#47]).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
@@ -218,11 +218,16 @@ Grouped by area. The order within a group is not a priority.
   line whose time zero can't be read is not re-read on every 3-D view refresh
   ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]);
   a 3D Analysis drop-down on the toolbar for Surface from picks, the 3D view
-  and the ParaView export, which leaves the Slices panel ([#227]).
+  and the ParaView export, which leaves the Slices panel ([#227]); Plan D's
+  tidy-ups: cut-pick reasons, one time-base reader, the outlier cursor ([#228]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
+- **In the field:** a cut-down Android app for checking results on the GSSI
+  collection tablet while you can still collect more. It's an idea, not yet a
+  milestone; first find out whether anything can be installed on the tablet
+  and whether its DZT files can be reached ([#232]).
 
 [#8]: https://github.com/JamesZDonline/nsgeo/issues/8
 [#9]: https://github.com/JamesZDonline/nsgeo/issues/9
@@ -307,11 +312,16 @@ Grouped by area. The order within a group is not a priority.
 [#219]: https://github.com/JamesZDonline/nsgeo/issues/219
 [#220]: https://github.com/JamesZDonline/nsgeo/issues/220
 [#227]: https://github.com/JamesZDonline/nsgeo/issues/227
+[#228]: https://github.com/JamesZDonline/nsgeo/issues/228
+[#229]: https://github.com/JamesZDonline/nsgeo/pull/229
 [#208]: https://github.com/JamesZDonline/nsgeo/pull/208
 [#221]: https://github.com/JamesZDonline/nsgeo/issues/221
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
 [#224]: https://github.com/JamesZDonline/nsgeo/pull/224
 [#225]: https://github.com/JamesZDonline/nsgeo/pull/225
+[#230]: https://github.com/JamesZDonline/nsgeo/issues/230
+[#231]: https://github.com/JamesZDonline/nsgeo/issues/231
+[#232]: https://github.com/JamesZDonline/nsgeo/issues/232
 
 ## Why
 

@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Outcome (2026-11-20):** Tasks 1–2 shipped. Tasks 3–4 (walls) were built, then dropped after the walkthrough (E1): the author found they added little over the cut in the Profile panel. See the spec's §5.5 and the decision record `docs/superpowers/sdd/2026-11-16-nsgeo-m16-d-cuts/`.
+
 **Goal:** Picks made on cuts join surfaces exactly like picks on lines. The ParaView export gains **walls**: every line, and every saved cut on the grid, standing as a curtain coloured like the Slices panel. Each wall is its own item, hidden when the scene opens.
 
 **Architecture:**
