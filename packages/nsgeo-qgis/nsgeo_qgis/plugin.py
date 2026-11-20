@@ -3137,11 +3137,14 @@ class NsgeoPlugin:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 
     def _add_data_from_toolbar(self, *_: Any) -> None:
-        # A slot (triggered). #61: into the grid the Survey panel points at,
-        # not always the first one; the mode is the remembered one.
+        # A slot (triggered). #61: tape lines into the grid the Survey panel
+        # points at, not always the first one; GPS lines into New grid
+        # (walkthrough W5); the mode is the remembered one.
         try:
             dock = self.survey_dock
-            self.open_add_data_dialog(dock.target_grid_id() if dock is not None else None)
+            self.open_add_data_dialog(
+                dock.target_grid_id() if dock is not None else None, gps_on_grid=False
+            )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
@@ -3154,10 +3157,13 @@ class NsgeoPlugin:
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
-    def open_add_data_dialog(self, grid_id: str | None = None, mode: str | None = None) -> None:
+    def open_add_data_dialog(
+        self, grid_id: str | None = None, mode: str | None = None, *, gps_on_grid: bool = True
+    ) -> None:
         """Add data ▸ GPR…: modeless and single-instance, open_grid_dialog()'s
         shape. An open dialog is raised, retargeted (only while its page has no
-        files) and switched to `mode` when one is asked for."""
+        files) and switched to `mode` when one is asked for. `gps_on_grid`
+        False keeps `grid_id` off the GPS page (AddDataDialog's docstring)."""
         # Modeless -- see the module docstring and open_grid_dialog() above:
         # single-instance tracking on self._add_data_dialog, lifecycle on
         # dialog.finished rather than after a blocking exec(), deleteLater()
@@ -3167,7 +3173,7 @@ class NsgeoPlugin:
             return
         if self._add_data_dialog is not None:
             if grid_id is not None:
-                self._add_data_dialog.retarget(grid_id)
+                self._add_data_dialog.retarget(grid_id, gps=gps_on_grid)
             if mode is not None:
                 self._add_data_dialog.set_mode(mode)
             self._add_data_dialog.show()
@@ -3178,6 +3184,7 @@ class NsgeoPlugin:
             self.session,
             grid_id=grid_id,
             mode=mode,
+            gps_on_grid=gps_on_grid,
             canvas=self.iface.mapCanvas(),
             parent=self.iface.mainWindow(),
         )

@@ -680,9 +680,8 @@ def test_new_grid_is_the_first_target_and_import_waits_for_a_name(session, tmp_p
     assert abs(d.spacing.value() - 0.5) < 0.01
     assert d.spacing_note.text() == "measured from the tracks; type over it if it is wrong"
     assert d.fitted.text().startswith("4.0 × 20.0 m, azimuth ")
-    assert d.fitted.text().endswith(
-        "lined up with the lines, half a spacing outside the outer ones"
-    )
+    assert d.fitted.text().endswith("lined up with the lines, holding every trace")
+    assert d.fitted.toolTip().startswith("Lined up: turned to the direction the lines share")
     d_dlg.reject()
 
 

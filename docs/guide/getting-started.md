@@ -429,14 +429,17 @@ again.
    system. A file that cannot be placed in it is refused, with the reason in its
    **Status** cell.
 3. Choose the **Target grid**. GPS lines always go into a grid: pick one the site
-   already has, or **New grid** and type a **Name** for it. The GPS mode opens on
-   the grid the Survey panel points at, or on **New grid** when there is none.
+   already has, or **New grid** and type a **Name** for it. From the toolbar the
+   GPS mode opens on **New grid**; from a grid's **Add GPR data…** in **nsgeo
+   Survey** it opens on that grid.
    * With an existing grid the lines go in as they are. An **Outside** column
      shows how many metres of each line lie outside the grid's rectangle (those
      metres are left out of its slices). A line that lies wholly outside is
      refused.
    * With **New grid**, nsgeo fits a rectangle around the tracks, turned to the
-     direction the lines share, half a **Spacing** outside the outer lines. The
+     direction the lines share. Its sides sit half a **Spacing** outside the outer
+     lines, or further where a line wanders past that, and its ends at the
+     furthest traces along the lines, so every trace is inside the grid. The
      spacing is measured from the tracks and shown so you can type over it; with
      one line, or lines that share no direction, there is nothing to measure and
      you type one. **Fitted** says the size and angle, and while the dialog is

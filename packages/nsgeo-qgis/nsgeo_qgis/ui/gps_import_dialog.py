@@ -88,8 +88,13 @@ SPACING_MEASURED = "measured from the tracks; type over it if it is wrong"
 SPACING_ONE = "type one: one line gives nothing to measure it from"
 SPACING_NO_DIRECTION = "type one: these lines share no direction to measure it along"
 FITTED_LINED_UP = (
-    "{w:.1f} × {l:.1f} m, azimuth {a:.1f}°, lined up with the lines, "
-    "half a spacing outside the outer ones"
+    "{w:.1f} × {l:.1f} m, azimuth {a:.1f}°, lined up with the lines, holding every trace"
+)
+FITTED_TIP = (
+    "Lined up: turned to the direction the lines share, its sides half a spacing outside the "
+    "outer lines (further where a line wanders past that) and its ends at the furthest traces, "
+    "so every trace is inside. Lines that share no direction get the smallest rectangle around "
+    "every trace, half a spacing outside it."
 )
 FITTED_SMALLEST = (
     "{w:.1f} × {l:.1f} m, azimuth {a:.1f}°, the smallest rectangle around them; "
@@ -202,6 +207,7 @@ class GpsImportPage(QWidget):
         form.addRow("Spacing (m)", self._spacing_box)
         self.fitted = QLabel("—")
         self.fitted.setWordWrap(True)
+        self.fitted.setToolTip(FITTED_TIP)
         form.addRow("Fitted", self.fitted)
         # QFormLayout.setRowVisible does not exist on Qt 5: hide label and field together.
         self._new_grid_fields = (self.name_edit, self._spacing_box, self.fitted)

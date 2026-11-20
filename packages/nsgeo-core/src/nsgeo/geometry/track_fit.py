@@ -169,14 +169,12 @@ def fit_frame(tracks: Sequence[np.ndarray], spacing: float) -> TrackFrame:
     if found is not None:
         main, idx = found
         az = _fold(main)
-        smin, smax = _extents(allpts, az)[2:]
+        c0, c1, smin, smax = _extents(allpts, az)
         means = _cross_means(clean, idx, az)
-        cmin, cmax = min(means) - half, max(means) + half
-        along = set(idx)
-        for i, pts in enumerate(clean):
-            if i not in along:
-                lo, hi, _, _ = _extents(pts, az)
-                cmin, cmax = min(cmin, lo), max(cmax, hi)
+        # Half a spacing outside the outer along lines, further where any trace
+        # lies beyond that (a wandering outer line, a cross line): every trace
+        # is inside, none is left out of the slices (walkthrough W3).
+        cmin, cmax = min(min(means) - half, c0), max(max(means) + half, c1)
         return _build(az, cmin, cmax, smin, smax, True)
     hull = _hull(allpts)
     angles = [0.0]

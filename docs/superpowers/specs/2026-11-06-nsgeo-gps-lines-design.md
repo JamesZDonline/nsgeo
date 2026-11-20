@@ -202,7 +202,9 @@ These are the user's, in the order they were made.
     - **The mode it opens in:** Grid the first time, then the mode last used. A grid's own
       shortcut (the Survey panel's **Import DZT files…**, renamed **Add GPR data…**) opens in GPS
       mode when the grid's lines are all GPS lines, in Grid mode when they are all tape lines, and
-      in the last-used mode when it is empty or holds both.
+      in the last-used mode when it is empty or holds both. *From the walkthrough (2026-11-20,
+      W5):* the toolbar's GPS mode always starts on **New grid**; the grid the Survey panel points
+      at is the Grid mode's target only. A grid's own Add GPR data… starts both modes on it.
     - **Files GPS cannot place** (no DZG, or no RTK-fixed position): the user asked whether they
       could be placed by offset, start and direction instead of being dropped. Chosen: **handed on
       to Grid mode** (option B). Import places the GPS lines (and makes the grid); when files were
@@ -407,7 +409,8 @@ Where the action lives (toolbar, Survey panel, or both) is the builder's call.
 - **Fit to these tracks:** from a selection of GPS lines (Survey panel or map), make a grid lined
   up with them (from M17b the same fitting makes a new grid at import, §6.5): azimuth from the
   lines' main direction, cross edges half a spacing outside the
-  outer lines' mean positions, along edges at the extreme trace positions, spacing measured (C7).
+  outer lines' mean positions or further to hold every trace (the M17b walkthrough, §16), along
+  edges at the extreme trace positions, spacing measured (C7).
   It opens in the grid dialog, so the user can name it and set a velocity before OK.
   When the lines share no main direction (supplemental lines at every angle), the rectangle is the
   minimum-area one around every trace, with the same half-spacing margin (decision 14).
@@ -706,9 +709,12 @@ Made by Claude while planning M17b; each is open to veto at the walkthrough.
     direction: the dialog then waits for a typed one.
   - **The rectangle:** +Y along the main direction (azimuth folded into −90°…90°, stored as
     0…360); along edges at the extreme trace positions of every line; cross edges half a spacing
-    outside the outer along lines' mean positions, widened if needed to hold every trace of a line
-    that is not along. With no main direction, the smallest-area rectangle around every trace,
-    half a spacing outside it on all four sides, +Y along its longer side.
+    outside the outer along lines' mean positions, or further where any trace lies beyond that, so
+    every trace is inside. *Changed at the walkthrough (2026-11-20, W3):* the first version
+    widened only for lines that are not along, which left an eighth of a wandering outer line's
+    traces out of the slices; the user: "grow the grid to hold every trace. Why throw away data?"
+    With no main direction, the smallest-area rectangle around every trace, half a spacing
+    outside it on all four sides, +Y along its longer side.
 - **Metres outside a grid:** the walked length of every trace-to-trace step whose midpoint lies
   outside the rectangle. A line is wholly outside when no trace lies inside.
 - **The hand-on guess:** a leftover file's offset is interpolated by file position between the

@@ -34,15 +34,15 @@ def survey_tracks(dzts):
     return tracks
 
 
-def inside_mask(grid, xy):
-    local = grid.to_local(xy)
-    ok = np.isfinite(local).all(axis=1)
-    return (
-        ok
-        & (local[:, 0] >= 0.0)
-        & (local[:, 0] <= grid.size_x)
-        & (local[:, 1] >= 0.0)
-        & (local[:, 1] <= grid.size_y)
+def every_trace_inside(grid, tracks, tol=1e-6):
+    """Every finite trace lies in `grid`, to `tol` m (the edge sits on the outermost one)."""
+    local = np.vstack([grid.to_local(t) for t in tracks])
+    local = local[np.isfinite(local).all(axis=1)]
+    return bool(
+        (local[:, 0] >= -tol).all()
+        and (local[:, 0] <= grid.size_x + tol).all()
+        and (local[:, 1] >= -tol).all()
+        and (local[:, 1] <= grid.size_y + tol).all()
     )
 
 
@@ -60,10 +60,11 @@ def test_the_first_survey_fits_along_its_sixty_lines():
     frame = fit_frame(tracks, s)
     assert frame.lined_up and frame.size_x == pytest.approx(60 * s, abs=0.3)
     grid = frame.as_grid("G", "LOCAL", s)
-    inside = np.mean(np.concatenate([inside_mask(grid, t) for t in tracks]))
-    assert inside >= 0.99
+    # Walkthrough W3: the outer line by FILE__060 wanders past the half-spacing margin,
+    # and the grid grows to hold it rather than leave its traces out of the slices.
+    assert every_trace_inside(grid, tracks)
     cube = CubeFrame.for_grid(grid, s)
-    # Measured 0.82: real lines wander and their gaps run 0.13-0.86 m, so some cell columns
+    # Measured 0.85: real lines wander and their gaps run 0.13-0.86 m, so some cell columns
     # and the start/end rows are part-empty even with a correct frame.
     assert covered_cells(cube, tracks) / cube_cell_count(cube) >= 0.8
 
@@ -77,5 +78,4 @@ def test_the_second_survey_fits_too():
     frame = fit_frame(tracks, s)
     assert frame.lined_up
     grid = frame.as_grid("G", "LOCAL", s)
-    inside = np.mean(np.concatenate([inside_mask(grid, t) for t in tracks]))
-    assert inside >= 0.99
+    assert every_trace_inside(grid, tracks)

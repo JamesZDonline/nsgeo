@@ -53,6 +53,23 @@ def test_a_zigzag_survey_is_fitted_along_its_lines():
     assert local[:, 1].min() >= -1e-9 and local[:, 1].max() <= grid.size_y + 1e-9
 
 
+def test_a_wandering_outer_line_grows_the_rectangle_to_hold_every_trace():
+    # Walkthrough W3: the last line bulges 0.6 m outward over its middle third,
+    # past the half-spacing margin; the grid grows to the bulge on that side only.
+    tracks = zigzag(12, 0.5, 0.0, wobble=0.0)
+    outer = tracks[-1].copy()
+    middle = (outer[:, 1] > 210.0) & (outer[:, 1] < 220.0)
+    outer[middle, 0] += 0.6
+    tracks[-1] = outer
+    frame = fit_frame(tracks, 0.5)
+    assert frame.lined_up and frame.azimuth == pytest.approx(0.0, abs=0.1)
+    grid = frame.as_grid("G", "EPSG:32632", 0.5)
+    low_x, high_x, low_y, high_y = gaps_to_edges(grid, tracks)
+    assert low_x == pytest.approx(0.25, abs=0.02)  # the straight side keeps its margin
+    assert high_x == pytest.approx(0.0, abs=1e-6)  # the bulge's furthest trace is on the edge
+    assert min(low_y, high_y) >= -1e-6
+
+
 def test_reversed_lines_and_a_bearing_past_90_fold_to_one_azimuth():
     assert main_direction(zigzag(6, 0.5, 170.0)) == pytest.approx(170.0, abs=0.2)
     assert fit_frame(zigzag(6, 0.5, 170.0), 0.5).azimuth == pytest.approx(350.0, abs=0.2)

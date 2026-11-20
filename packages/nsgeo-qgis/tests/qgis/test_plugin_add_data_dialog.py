@@ -17,7 +17,7 @@ from nsgeo_qgis.ui.add_data_dialog import (
     opening_mode,
 )
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
-from qgis.core import QgsCoordinateReferenceSystem, QgsProject, QgsSettings
+from qgis.core import QgsApplication, QgsCoordinateReferenceSystem, QgsProject, QgsSettings
 from qgis.PyQt.QtCore import QEvent
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -95,6 +95,23 @@ def test_set_mode_swaps_the_page_retitles_and_hides_the_note(session, tmp_path):
     assert d.windowTitle() == d.gps_page.title() == "Add GPR data into A"  # opened on A
     d.set_mode(GRID)
     assert d.windowTitle() == "Add GPR data into A"
+    d.reject()
+
+
+def test_the_switch_buttons_keep_their_place_as_the_note_comes_and_goes(session, tmp_path):
+    # Walkthrough W2: hiding the GPS note must not widen or move the buttons.
+    d = AddDataDialog(session, grid_id="A", mode=GRID)
+    d.show()
+    QgsApplication.processEvents()
+    before = (d.grid_button.geometry(), d.gps_button.geometry())
+    d.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
+    QgsApplication.processEvents()
+    assert d.gps_note.isVisible()
+    assert (d.grid_button.geometry(), d.gps_button.geometry()) == before
+    d.set_mode(GPS)
+    QgsApplication.processEvents()
+    assert not d.gps_note.isVisible()
+    assert (d.grid_button.geometry(), d.gps_button.geometry()) == before
     d.reject()
 
 
@@ -361,6 +378,28 @@ def test_the_survey_panels_add_gpr_data_opens_it_on_that_grid_in_its_mode(plugin
     plugin.survey_dock.import_requested.emit("A")  # raised, no files: switched to A's mode
     assert plugin._add_data_dialog is d and d.mode() == GRID
     assert d.grid_page.grid_combo.currentData() == "A"
+    d.reject()
+
+
+def test_the_toolbar_opens_gps_on_new_grid_and_grid_on_the_panels_grid(
+    plugin, tmp_path, monkeypatch
+):
+    # Walkthrough W5: the toolbar's GPR… opens GPS mode on New grid; the Survey
+    # panel's grid stays the Grid page's target. Raising the open dialog keeps it so.
+    (tmp_path / "site").mkdir()
+    plugin.session.new_site(tmp_path / "site")
+    plugin.session.add_grid(GRID_A)
+    monkeypatch.setattr(plugin.survey_dock, "target_grid_id", lambda: "A")
+    QgsSettings().setValue(MODE_KEY, GPS)
+    plugin.act_add_gpr.trigger()
+    d = plugin._add_data_dialog
+    assert d is not None and d.mode() == GPS
+    assert d.gps_page.target() is None and d.gps_page.target_combo.currentText() == "New grid"
+    assert d.grid_page.grid_combo.currentData() == "A"
+    plugin.act_add_gpr.trigger()  # raised, no files
+    assert plugin._add_data_dialog is d and d.gps_page.target() is None
+    plugin.survey_dock.import_requested.emit("A")  # a grid's own Add GPR data…: that grid
+    assert d.gps_page.target() == "A"
     d.reject()
 
 

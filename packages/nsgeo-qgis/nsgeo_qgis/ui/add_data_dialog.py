@@ -88,9 +88,14 @@ class AddDataDialog(QDialog):
         *,
         grid_id: str | None = None,
         mode: str | None = None,
+        gps_on_grid: bool = True,
         canvas: QgsMapCanvas | None = None,
         parent: QWidget | None = None,
     ) -> None:
+        """`grid_id` targets the Grid page, and the GPS page too unless
+        `gps_on_grid` is False: the toolbar passes the Survey panel's grid as
+        a default for tape lines only, and GPS lines then start on New grid
+        (walkthrough W5). A grid's own Add GPR data… targets both."""
         super().__init__(parent)
         self.session = session
         self.canvas = canvas
@@ -117,7 +122,10 @@ class AddDataDialog(QDialog):
         self.gps_note = QLabel("")
         self.gps_note.setStyleSheet("color: gray;")
         self.gps_note.setVisible(False)
-        switch.addWidget(self.gps_note, 1)
+        switch.addWidget(self.gps_note)
+        # The stretch, not the note, takes the spare width: hiding the note
+        # must not widen the buttons (walkthrough W2).
+        switch.addStretch(1)
         layout.addLayout(switch)
 
         self.grid_page = GridImportPage(session, grid_id=grid_id)
@@ -139,7 +147,7 @@ class AddDataDialog(QDialog):
 
         self.grid_button.clicked.connect(lambda: self._switch(GRID))
         self.gps_button.clicked.connect(lambda: self._switch(GPS))
-        if grid_id:
+        if grid_id and gps_on_grid:
             self.gps_page.retarget(grid_id)
         self.grid_page.changed.connect(self._page_changed)
         self.gps_page.changed.connect(self._page_changed)
@@ -260,13 +268,14 @@ class AddDataDialog(QDialog):
     def add_files(self, paths: list[Path]) -> None:
         self._page().add_files(paths)
 
-    def retarget(self, grid_id: str) -> None:
+    def retarget(self, grid_id: str, *, gps: bool = True) -> None:
         """Point the dialog at `grid_id`, but only while it has no files (or no
-        grid yet: the files then wait for one)."""
+        grid yet: the files then wait for one). `gps` False leaves the GPS
+        page's target alone (the toolbar: see `__init__`)."""
         if self._page().paths() and self.grid_page.grid_combo.currentData():
             return
         self.grid_page.retarget(grid_id)
-        if not self.gps_page.paths():
+        if gps and not self.gps_page.paths():
             self.gps_page.retarget(grid_id)
 
     # ---- import ------------------------------------------------------------------
