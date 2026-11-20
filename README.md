@@ -116,7 +116,9 @@ release's notes list everything in it.
 
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
-  map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
+  map in a new Mag panel, beside the GPR. Built and brought up to date with main: the import
+  is **Add data ▾ ▸ Magnetometer…**, and a site with mag saves as schema 5. Awaiting its
+  walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
 - **Whole site: never stuck, never frozen** ([#166], [#193], parts of [#75]
   and [#157]). Whole site no longer sits at "preparing" now and then, and a
