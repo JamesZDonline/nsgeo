@@ -620,6 +620,8 @@ class ProfileView(QWidget):
         if t is None or self._hover is None:
             return ""
         x, y = self._hover
+        if not (0 <= x < t.width and 0 <= y < t.height):  # stale: the view has been resized
+            return ""
         i = t.trace_at(x)
         if i is None:
             return ""
@@ -1143,8 +1145,10 @@ class ProfileView(QWidget):
         pos = event_pos(event)
         x, y = self._local(event)
         inside = 0 <= x < self.transform.width and 0 <= y < self.transform.height
+        before = self.readout_text()
         self._hover = (x, y) if inside else None
-        self.update()
+        if self.readout_text() != before:  # repaint just the strip that holds it
+            self.update(QRect(0, 0, self.width(), MARGIN_TOP))
         if self._pan_last is not None:
             # I3: `_pan_last` was only ever cleared by a *middle-button*
             # mouseReleaseEvent. A middle-press followed by an unrelated

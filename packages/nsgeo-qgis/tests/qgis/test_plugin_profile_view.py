@@ -2168,9 +2168,10 @@ def test_true_scale_is_off_where_the_metre_span_is_not_finite(make_view):
     v = make_view()
     v.set_axes(200, 128, -4.0, 0.5, distance_along=np.r_[np.arange(199.0), np.inf] / 60.0)
     v.set_velocity(VelocityModel.constant(0.1))
-    assert not v.can_true_scale()
-    before = v.transform
-    v.true_scale()
+    with np.errstate(invalid="ignore"):  # inf - inf in the ruler's extrapolation
+        assert not v.can_true_scale()
+        before = v.transform
+        v.true_scale()
     assert v.transform == before
 
 
@@ -2331,19 +2332,60 @@ def test_the_readout_clears_off_the_image(make_view):
     assert v.readout_text() != ""
     send_hover(v, QPoint(5, MARGIN_TOP + 40))  # the left axis strip
     assert v.readout_text() == ""
+    # Over an image column but outside the image: `sample_index_at` would clamp.
+    for y in (v.height() - 10, 5):
+        _hover_at(v, 100, 40)
+        assert v.readout_text() != ""
+        send_hover(v, QPoint(MARGIN_LEFT + 100, y))
+        assert v.readout_text() == ""
 
 
-def test_the_readout_clears_when_the_pointer_leaves(make_view):
+def test_the_readout_is_painted_and_clears_when_the_pointer_leaves(make_view, message_log):
     v = _sampled(make_view)
+
+    def strip_has_ink():
+        shot, r = v.grab_image(), v.image_rect()
+        bg = BACKGROUND.rgb()
+        x0 = r.right() - 150
+        return any(
+            shot.pixel(x, y) != bg
+            for x in range(x0, r.right())
+            for y in range(MARGIN_TOP // 2 - 4, MARGIN_TOP // 2 + 4)
+        )
+
+    assert not strip_has_ink()
     _hover_at(v, 100, 40)
     assert v.readout_text() != ""
+    assert strip_has_ink()
     QApplication.sendEvent(v, QEvent(QEvent.Type.Leave))
     assert v.readout_text() == ""
-    v.grab_image()  # paints without raising
+    assert not strip_has_ink()
+    assert not any("could not paint the profile view" in m for m in message_log)
+
+
+def test_the_readout_is_empty_after_the_view_shrinks(make_view):
+    v = _sampled(make_view)
+    r = v.image_rect()
+    send_hover(v, QPoint(r.right() - 5, r.bottom() - 5))
+    assert v.readout_text() != ""
+    v.resize(VIEW_W, 150)
+    assert v.readout_text() == ""
 
 
 def test_a_mirrored_line_reads_its_own_metres(ruled):
     v = ruled
     t, r = v.transform, v.image_rect()
-    send_hover(v, QPoint(int(r.left() + t.x_of_trace(10.5)), int(r.top() + 30)))
-    assert v.readout_text().startswith(f"{D[10] + 0.5 * (D[11] - D[10]):.2f} m along (trace 10)")
+    for i in (10, 11, 150):
+        send_hover(v, QPoint(round(r.left() + t.x_of_trace(i + 0.5)), int(r.top() + 30)))
+        text = v.readout_text()
+        assert text.startswith(f"{D[i]:.2f} m along (trace {i})")
+        # half a trace (1/120 m) is under the 2 dp rounding step, so also check the
+        # unrounded value through a finer helper: the pair must be asked at i + 0.5
+        assert float(v.metres_at_trace_units(i + 0.5)) == pytest.approx(D[i], abs=1e-9)
+
+
+def test_the_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatch):
+    v = _sampled(make_view)
+    monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(42.0))
+    _hover_at(v, 100, 40)
+    assert v.readout_text().startswith("42.00 m along")
