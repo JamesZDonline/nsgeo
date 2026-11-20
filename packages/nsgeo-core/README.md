@@ -104,6 +104,7 @@ User-ordered processing steps. Nothing runs automatically.
 | `grouped_steps` | The registered steps by group, in menu order. |
 | `is_unipolar` | Whether a step's output has no negative side. |
 | `nyquist_mhz` | Nyquist frequency in MHz for a sample interval in ns. |
+| `param_problem` | Why a parameter value is refused (bounds, type, finiteness), or None when it is acceptable. |
 | `param_visible` | Whether a parameter applies under the step's current mode (its `when`). |
 | `required_params` | Parameters that must be collected before a step can be built. |
 | `retime_ns` | A time on one clock, read on another: `t + (from_zero_ns - to_zero_ns)`. The one conversion rule between clocks. |
