@@ -482,7 +482,8 @@ RTK and away from lifts of the cart until true-distance profiles arrive.
 
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
-cannot yet measure the destagger from GPS lines; that comes with GPS areas.
+cannot yet measure the destagger from GPS lines; that comes with true-distance
+profiles.
 
 To put lines that have no grid (or the wrong one) into a grid fitted around
 them, select only GPS lines in **nsgeo Survey**, right-click, and choose **Fit

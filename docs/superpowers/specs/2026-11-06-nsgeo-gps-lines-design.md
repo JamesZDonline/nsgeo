@@ -147,8 +147,8 @@ These are the user's, in the order they were made.
       extends M17's. *Destagger landed first* (#47's stagger half in PR #160, automatic Measure in
       #159 / PR #168; §15), so M17a's `TrackPlacement.travel_shift` is `GridPlacement`'s field
       under the same name, and the Survey panel calls it "destagger" for both kinds of line. #47
-      stays open for its other half, direction balancing. Measure works on grid lines only; M17d
-      extends it to GPS lines in a grid (§9).
+      stays open for its other half, direction balancing. Measure works on grid lines only; M17c
+      extends it to GPS lines in a grid (§9; moved from M17d at the M17b walkthrough).
     - A delay term (seconds, scaled by walking speed) is measurable only on GPS lines. It is worth
       4–11 cm here; whether nsgeo carries it is for destagger to decide.
 11. **True-distance profiles are in M17, as their own middle chunk** (after the builder check
@@ -266,7 +266,7 @@ Made without the user; each is open to veto.
   lines… does. The tape line's own `travel_shift` (destagger, from #47) is not carried over: it
   corrected where the tape placement put the traces, and once GPS places the line a different offset
   applies (the GPS's position relative to the radar, §7: −48 cm between neighbours by GPS against
-  −30 cm by tape on the same lines), so the value is measured again (typed, or by Measure once M17d
+  −30 cm by tape on the same lines), so the value is measured again (typed, or by Measure once M17c
   extends it to GPS lines). A line with no usable DZG is refused with the import's reasons. M17a's
   import refuses a file already in the site with "already in the site"; it does not tell the user to
   remove it.
@@ -551,20 +551,25 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   (§6.5, mock-up first); GPS lines into an existing grid or a new one fitted around them; GPS lines
   working in grids: slices and Whole site (they bin at their own positions through `trace_coords`),
   the Survey panel under their grid, Edit lines (tape-only fields read-only), Move to grid ▸ (C3),
-  grid edits that leave GPS lines where they are (C13), profiles in distance walked until M17d's
+  grid edits that leave GPS lines where they are (C13), profiles in distance walked until M17c's
   shared rulers; Fit to these tracks from a selection, for lines M17a imported unattached. GPS lines
   never join a mag grid.
 - **M17c — True-distance profiles** (decision 11; M17b before 2026-11-17). The profile view draws
   every trace at its true distance, with a visible gap where the cart was lifted; picks, the
   velocity-fit curve, hover, mirroring, the gain strip and the Difference view follow. The velocity
   fit uses each trace's true distance; migration re-samples a GPS line to even spacing, migrates and
-  maps back. Tape lines, being evenly spaced, look exactly as before. Expect a fix round after the
-  walkthrough: the profile view is where walkthroughs have found the most (#67, the time cutoff, the
-  gain strip).
+  maps back. Tape lines, being evenly spaced, look exactly as before. **Also, moved from M17d at the
+  M17b walkthrough (the user, 2026-11-20):** shared rulers (decision 8, C8), so a GPS line in a
+  grid is drawn on the grid's ruler and a reversed line is mirrored like a reversed tape line (W11:
+  "It makes interpretation much harder when lines aren't consistent like that"); and destagger's
+  Measure (#159) for GPS lines in a grid (§15; W8: destagger was prioritized because of the GPS
+  lines' stagger). Shared rulers are exact for zigzag lines only with true distance, which is why
+  they travel together. With these M17c may need two plans (3–6 tasks each). Expect a fix round
+  after the walkthrough: the profile view is where walkthroughs have found the most (#67, the time
+  cutoff, the gain strip).
 - **M17d — Outlines and the rest of the areas.** Grid outline with holes and its mask, which the
-  colour stretch ignores (decision 13); drawing and reshaping; Place by GPS for tape lines (C9);
-  destagger's Measure (#159) for GPS lines in a grid (§15); shared rulers (decision 8, C8), exact
-  for zigzag lines once M17c is in. Needs line editing merged.
+  colour stretch ignores (decision 13); drawing and reshaping; Place by GPS for tape lines (C9).
+  Needs line editing merged.
 
 ---
 
@@ -599,12 +604,14 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   others. Edit lines with GPS rows; editing the grid leaves its GPS lines in place.
 - **M17c walkthrough:** `FILE__016` and `FILE__028` show their lifts as gaps; a feature lines up on
   neighbouring profiles across a lift; picks, a velocity fit and mirroring on a GPS line; a tape
-  line looks unchanged; a velocity fitted on a GPS line vs the same diffraction by wheel spacing.
-- **M17d walkthrough:** reshape a grid's outline; zigzag profiles line up on one ruler; slices
+  line looks unchanged; a velocity fitted on a GPS line vs the same diffraction by wheel spacing;
+  zigzag GPS profiles line up on one ruler, the reversed lines mirrored; Measure on a GPS grid's
+  zigzag.
+- **M17d walkthrough:** reshape a grid's outline; slices
   with nothing outside the outline; Whole site with a GPS grid beside an existing tape grid. On the
   survey with roads along two edges: an outline inside the roads, and the slices' colours no longer
   set by them; a hole across the middle. Place by GPS on a tape line with processing, a fit and
-  picks: all three stay. Measure on a GPS grid's zigzag.
+  picks: all three stay.
 
 ---
 
@@ -651,6 +658,9 @@ milestones: M17b GPS grids, M17c true-distance profiles, M17d outlines and the r
 On 2026-11-19 the user answered the M17b mock-up in two rounds (decision 15), adding the hand-on
 of files GPS cannot place to Grid mode.
 
+On 2026-11-20, walking through M17b, the user had a fitted grid hold every trace (§16), and moved
+shared rulers (mirrored GPS profiles) and Measure for GPS lines from M17d into M17c (§9).
+
 ---
 
 ## 15. What main changed before planning (2026-11-13)
@@ -665,7 +675,8 @@ Main moved ~300 commits between this design and the M17a plan. What matters here
   decision 10's model, so **`TrackPlacement` takes a `travel_shift` with the same name and meaning**,
   and the Survey panel names it "destagger" for both kinds of line. **Measure** in Edit lines
   (`nsgeo.destagger.measure`) reads `GridPlacement` fields (`axis`, `offset`, `direction`), so it
-  works on grid lines only; extending it to GPS lines in a grid is M17d's.
+  works on grid lines only; extending it to GPS lines in a grid is M17c's (moved from M17d,
+  2026-11-20).
 - **Cuts are merged** (M15, PR #172), with schema 2 for a site with cuts. **Velocity sources** took
   schema 3 (PR #186). A site with GPS lines therefore saves as **schema 4**.
 - **M19a (magnetometer grids) is built on its own branch, not merged.** It adds `Grid.instrument`
