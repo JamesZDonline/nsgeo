@@ -1,0 +1,7 @@
+# Task 2 report
+Status: DONE_WITH_CONCERNS.
+Built: TrackEdit (line_edit.py); session.edit_lines/move_lines handle TrackEdit (old grid None ok, joins end of order, leaves old slice lines); layers: GPS lines write p.grid_id, _hide_when_lines_crowd adds measure_spacing of no-grid GPS lines (>=2, ignores None); survey_dock: GPS menus (Move to grid, Fit a grid to this track…), GPS-only and mixed selection menus, "Add GPR data…", fit_tracks_requested signal; plugin.fit_tracks guarded logging stub, connected.
+Tests: pure TrackEdit (4), new tests/qgis/test_plugin_session_gps_grids.py (11, includes keys_on_grid, ParaViewExport source, ruler, replace_grid, remove_grid), layers_gps (+4, one changed assert grid_id "A"), survey_dock (+menus, existing updated).
+RED: session file 4 failed/7 passed before session change; survey_dock 8 failed before dock change. Pure TrackEdit and layers tests were written after the code (no RED shown for those).
+GREEN: qgis files (layers, layers_gps, survey_dock, line_selection, session*, import_dialog, gps_import_dialog) 547 passed; core+pure 2079 passed, 9 skipped, 19 xfailed; ruff check/format clean; mypy clean.
+Concerns: menu titles carry no arrow glyph (existing tests use "Move to grid"). A mixed selection on one grid offers Edit {phrase}…, which opens the existing Edit lines table with GPS keys until Task 3. Profile ruler needed no change (axis None). CI QGIS 4.2 not yet read.
