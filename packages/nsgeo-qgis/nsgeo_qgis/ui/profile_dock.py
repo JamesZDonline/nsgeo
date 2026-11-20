@@ -140,6 +140,10 @@ from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
 LEFT_AXIS_KEY = "nsgeo/profile/leftAxis"
 RIGHT_AXIS_KEY = "nsgeo/profile/rightAxis"
+TRUE_SCALE_TIP = (
+    "True scale: a metre down is as long as a metre along the line, at the line's velocity"
+)
+TRUE_SCALE_GREYED_TIP = "True scale needs metres along the line and a velocity"
 SLICE_BAND_TIP = (
     "Show or hide the slice's depth window on the profile. The window is kept while it's hidden."
 )
@@ -483,7 +487,7 @@ class ProfileDock(QgsDockWidget):
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
         self.colormap_combo.currentTextChanged.connect(self._display_changed)
-        self.one_to_one_button.clicked.connect(self.view.one_to_one)
+        self.one_to_one_button.clicked.connect(self.view.true_scale)
         self.fit_all_action.triggered.connect(self.view.fit)
         self.fit_width_action.triggered.connect(self.view.fit_width)
         self.fit_height_action.triggered.connect(self.view.fit_height)
@@ -906,6 +910,7 @@ class ProfileDock(QgsDockWidget):
             self._safe_distance(line),
         )
         self.view.set_image(None)
+        self._sync_true_scale_button()
 
     def _show_steps_refused(self, key: str, *, is_preview: bool) -> None:
         """The line's samples are here but its steps cannot run: say so
@@ -1015,6 +1020,7 @@ class ProfileDock(QgsDockWidget):
         depths transparent, so the view's hatch shows through them."""
         section = self._cut_shown
         if section is None:
+            self._sync_true_scale_button()
             return
         rgba = section_rgba8(
             section.values,
@@ -1023,6 +1029,7 @@ class ProfileDock(QgsDockWidget):
             unipolar=section.source.unipolar,
         )
         self.view.set_image(rgba_to_qimage(rgba))
+        self._sync_true_scale_button()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -1867,6 +1874,15 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
 
+    def _sync_true_scale_button(self) -> None:
+        """Grey 1:1 where there is no velocity or no metres along the line."""
+        try:
+            ok = self.view.can_true_scale()
+            self.one_to_one_button.setEnabled(ok)
+            self.one_to_one_button.setToolTip(TRUE_SCALE_TIP if ok else TRUE_SCALE_GREYED_TIP)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the 1:1 button: {exc}", Qgis.MessageLevel.Critical)
+
     def _sync_slice_band_button(self) -> None:
         """Grey the button while there is no window; the checked choice is kept."""
         has_window = self._slice_band is not None
@@ -2017,6 +2033,7 @@ class ProfileDock(QgsDockWidget):
         self._refresh_picks()
         self._push_slice_band()
         self._push_headroom()
+        self._sync_true_scale_button()
 
     def shown_zero_ns(self) -> float:
         """The radar-clock time the drawn radargram's axis calls 0 (0.0 when
@@ -2291,6 +2308,7 @@ class ProfileDock(QgsDockWidget):
         # Every path, the early ones included, resets the strip: a line that
         # just went away must not leave the old read-out and buttons behind.
         self._update_velocity_fit()
+        self._sync_true_scale_button()
 
     def _configure_channels(self, n: int) -> None:
         self.channel_combo.blockSignals(True)

@@ -562,26 +562,38 @@ def test_fit_button_restores_the_full_extent_after_a_zoom(opened):
     assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
 
 
-def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
-    """I2: same gap as the fit button, for `one_to_one_button`. A line
-    narrower than the view (the `opened` fixture's 240 traces, in a
-    ~800px-wide image area) would make one-to-one indistinguishable from
-    fit -- `with_window` clamps the requested one-trace-per-pixel span
-    back down to `n_traces` either way (this is the real M5 behaviour: the
-    review noted "1:1" looks like a no-op on these lines). Opens a second,
-    much wider line so the two buttons' effects are actually distinguishable.
-    """
+def test_the_one_to_one_button_shows_true_scale(opened):
+    """The button gives a metre down the same length as a metre along. `GRID`'s
+    0.08 m/ns makes `ns_per_metre` 25."""
     session, dock, key, line = opened
-    p2 = synthetic_dzt(session.root / "raw", "FILE__WIDE.DZT", n_traces=2000)
-    wide = Line.open(p2, GridPlacement("A", "y", 0.5, 0.0, 1, "FILE__WIDE"))
-    session.add_lines([wide])
-    key2 = next(k for k in session.keys() if k != key)  # noqa: SIM118 -- SiteSession.keys(), not a dict
-    session.open_line(key2)
-    left = dock.view.transform.trace_lo
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
     dock.one_to_one_button.click()
     t = dock.view.transform
-    assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
-    assert t.trace_lo == pytest.approx(left)  # 1:1 holds the screen-left trace
+    lo, hi = t.trace_lo, t.trace_hi
+    m = dock.view.metres_at_trace_units
+    across = t.width / (abs(m(hi) - m(lo)) / (hi - lo) * (hi - lo))
+    assert t.time_hi - t.time_lo == pytest.approx(t.height / across * 25.0, rel=0.01)
+
+
+def test_true_scale_is_greyed_without_a_velocity(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.one_to_one_button.isEnabled()
+    monkeypatch.setattr(
+        session, "resolved_velocity", lambda k: (_ for _ in ()).throw(KeyError("none"))
+    )
+    dock._refresh_velocity()
+    assert not dock.one_to_one_button.isEnabled()
+
+
+def test_true_scale_is_greyed_on_a_line_with_no_metres(opened):
+    session, dock, key, line = opened
+    k2, _ = _add_line(
+        session, "U1", GridPlacement("A", "y", 0.0, 0.0, 1, "U1"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    assert not dock.one_to_one_button.isEnabled()
+    assert dock.view.metres_at_trace_units(10.0) is None
 
 
 def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):

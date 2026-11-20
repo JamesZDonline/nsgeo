@@ -248,20 +248,31 @@ class ViewTransform:
             self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
         )
 
-    def one_to_one(self) -> ViewTransform:
-        """One trace per pixel column, keeping the trace at the screen's left
-        edge where it is: `trace_lo` normally, `trace_hi` when mirrored."""
-        if self.mirrored:
-            return self.with_window(
-                self.trace_hi - self.width, self.trace_hi, self.time_lo, self.time_hi
-            )
-        return self.with_window(
-            self.trace_lo, self.trace_lo + self.width, self.time_lo, self.time_hi
-        )
-
     def resized(self, width: int, height: int) -> ViewTransform:
         # replace() carries mirrored and bounds along with the window.
         return replace(self, width=max(1, width), height=max(1, height))
+
+
+def true_scale_window(
+    t: ViewTransform, metres_per_trace_unit: float, ns_per_metre: float
+) -> ViewTransform:
+    """The window in which a metre down is as long on screen as a metre along.
+
+    Keeps the window's trace span and sets the time span to match when the
+    whole record is deep enough to do so, centred on the window's middle time.
+    Otherwise (a long line) keeps the whole record and narrows the trace span
+    about the window's middle. `with_window` clamps at the minimum spans.
+    """
+    across = t.width / ((t.trace_hi - t.trace_lo) * metres_per_trace_unit)  # px per metre along
+    span = t.height / across * ns_per_metre  # ns that make px/m equal
+    record = t.n_samples * t.dt_ns
+    if span <= record:
+        mid = (t.time_lo + t.time_hi) / 2
+        return t.with_window(t.trace_lo, t.trace_hi, mid - span / 2, mid + span / 2)
+    down = t.height / (record / ns_per_metre)  # px per metre down, whole record
+    traces = t.width / down / metres_per_trace_unit
+    mid = (t.trace_lo + t.trace_hi) / 2
+    return t.with_window(mid - traces / 2, mid + traces / 2, t.t0_ns, t.t_end)
 
 
 def nice_ticks(vmin: float, vmax: float, target: int = 6) -> np.ndarray:

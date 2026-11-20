@@ -58,7 +58,7 @@ from nsgeo_qgis.ui.ruler import (
     metres_at,
     trace_units_at,
 )
-from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
+from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks, true_scale_window
 
 # The axis captions ("ns" / "m") get a row of their own above the image,
 # CAPTION_ROW tall; a tick label is a 16-px rect centred on its tick, so the
@@ -247,14 +247,28 @@ class ProfileView(QWidget):
     def ruler(self) -> Ruler | None:
         return self._ruler
 
+    def metres_at_trace_units(self, u: Any) -> Any:
+        """Metres along the line at the `ViewTransform` horizontal coordinate `u`
+        (a number or an array); None without a distance of at least 2 traces.
+        The one road from trace units to metres."""
+        if self._distance is None or len(self._distance) < 2:
+            return None
+        return metres_at(self._distance, u)
+
+    def trace_units_at_metres(self, m: Any) -> Any:
+        """The inverse of `metres_at_trace_units`; None likewise."""
+        if self._distance is None or len(self._distance) < 2:
+            return None
+        return trace_units_at(self._distance, m)
+
     def window_m(self) -> tuple[float, float] | None:
         """The window's two ends in metres along the grid, ascending; None
         without a ruler."""
         if self._ruler is None or self._distance is None or self.transform is None:
             return None
         t = self.transform
-        a = float(metres_at(self._distance, t.trace_lo))
-        b = float(metres_at(self._distance, t.trace_hi))
+        a = float(self.metres_at_trace_units(t.trace_lo))
+        b = float(self.metres_at_trace_units(t.trace_hi))
         return (min(a, b), max(a, b))
 
     def set_window_m(self, lo_m: float, hi_m: float, time_lo: float, time_hi: float) -> None:
@@ -262,8 +276,8 @@ class ProfileView(QWidget):
         `with_window` clamps it. Does nothing without a ruler."""
         if self._ruler is None or self._distance is None or self.transform is None:
             return
-        a = float(trace_units_at(self._distance, lo_m))
-        b = float(trace_units_at(self._distance, hi_m))
+        a = float(self.trace_units_at_metres(lo_m))
+        b = float(self.trace_units_at_metres(hi_m))
         self.transform = self.transform.with_window(min(a, b), max(a, b), time_lo, time_hi)
         self.view_changed.emit()
         self.update()
@@ -434,12 +448,36 @@ class ProfileView(QWidget):
         self.view_changed.emit()
         self.update()
 
-    def one_to_one(self) -> None:
-        """One trace per pixel column, anchored at the current window's left."""
-        if self.transform is None:
-            return
+    def _true_scale_inputs(self) -> tuple[float, float] | None:
+        """(metres per trace unit across, ns per metre down) for the current
+        window, or None where a true scale cannot be worked out."""
         t = self.transform
-        self.transform = t.one_to_one()
+        if t is None or self._velocity is None:
+            return None
+        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
+        if lo is None or hi is None:
+            return None
+        per_unit = abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
+        if not (math.isfinite(per_unit) and per_unit > 0):
+            return None
+        h = t.dt_ns
+        tm = max((t.time_lo + t.time_hi) / 2, h)
+        z = self._velocity.depth_at
+        slope = (float(z(tm + h)) - float(z(tm - h))) / (2 * h)
+        if not (math.isfinite(slope) and slope > 0):
+            return None
+        return per_unit, 1.0 / slope
+
+    def can_true_scale(self) -> bool:
+        """True with a transform, a velocity and metres along the line."""
+        return self._true_scale_inputs() is not None
+
+    def true_scale(self) -> None:
+        """A metre down as long as a metre along, at the line's velocity."""
+        inputs = self._true_scale_inputs()
+        if inputs is None or self.transform is None:
+            return
+        self.transform = true_scale_window(self.transform, *inputs)
         self.view_changed.emit()
         self.update()
 
@@ -847,12 +885,11 @@ class ProfileView(QWidget):
         # reads two samples); the old interpolation gave no ticks either.
         if t.n_traces < 2:
             return []
-        d = self._distance
         # The window's ends in metres, read off the extrapolating map so the
         # ticks run on across blank space; each tick sits on its column centre.
-        m_lo, m_hi = (float(metres_at(d, v)) for v in (lo, hi))
+        m_lo, m_hi = (float(self.metres_at_trace_units(v)) for v in (lo, hi))
         return [
-            (f"{tick:g}", t.x_of_trace(float(trace_units_at(d, float(tick)))))
+            (f"{tick:g}", t.x_of_trace(float(self.trace_units_at_metres(float(tick)))))
             for tick in nice_ticks(min(m_lo, m_hi), max(m_lo, m_hi))
         ]
 

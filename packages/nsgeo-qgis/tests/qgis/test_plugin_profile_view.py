@@ -1299,25 +1299,20 @@ def test_set_axes_and_fit_emit_view_changed(make_view):
     assert len(changed) == 2
 
 
-def test_one_to_one_sets_a_trace_per_pixel_column_and_emits_view_changed(make_view):
-    """m9: `one_to_one()` was never called by any test at all.
-
-    Needs `n_traces > width` (696 for this fixture's 800px resize) -- the
-    `view` fixture's 200-trace radargram would have `with_window`'s own
-    `n_traces - t_span` clamp cap the requested 696-trace span back down to
-    200 (there simply aren't 696 traces to show one-per-pixel), which would
-    make a `trace_hi - trace_lo == width` assertion pass at 200 == 200 by
-    coincidence of clamping, not because one_to_one asked for `width`.
-    """
-    v = make_view()
-    v.resize(800, 300)
-    v.set_axes(1000, 128, -4.0, 0.5)
+def test_true_scale_matches_metres_across_and_down_and_emits_view_changed(view):
+    v, rg = view
+    v.set_velocity(VelocityModel.constant(0.1))
+    v.zoom_at(2.0, 100.0, 100.0)
     changed = []
     v.view_changed.connect(lambda: changed.append(1))
-    v.one_to_one()
-    assert changed
-    assert v.transform.trace_hi - v.transform.trace_lo == pytest.approx(v.transform.width)
-    assert v.transform.trace_lo == pytest.approx(0.0)  # anchored at the window's left
+    v.true_scale()
+    assert len(changed) == 1
+    t = v.transform
+    lo, hi = t.trace_lo, t.trace_hi
+    m_per_unit = abs(v.metres_at_trace_units(hi) - v.metres_at_trace_units(lo)) / (hi - lo)
+    across = t.width / ((hi - lo) * m_per_unit)
+    down = t.height / ((t.time_hi - t.time_lo) * 0.1 / 2)  # depth = 0.1 m/ns * ns / 2
+    assert down == pytest.approx(across, rel=0.01)
 
 
 def test_clear_resets_state_and_paints_safely(view):
@@ -2007,7 +2002,7 @@ def test_wheel_and_middle_drag_follow_the_pointer_when_mirrored(ruled):
     assert v.transform.x_of_trace(100.0) == pytest.approx(start - 50, abs=1.0)
 
 
-def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
+def test_fit_and_true_scale_keep_the_ruler_and_the_mirror(ruled):
     v = ruled
     r = v.image_rect()
     v.zoom_at(4.0, r.width() / 2, r.height() / 2)
@@ -2015,19 +2010,34 @@ def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
     assert v.transform.mirrored and (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx(
         (-59.5, 300.5)
     )
-    # A ruler wider than the panel (1680 trace units > 696 px), zoomed in past 1:1,
-    # so the 1:1 window neither clamps back to the bounds nor is a no-op.
-    # Mirrored, the screen-left edge is trace_hi and stays.
+    # A ruler wider than the panel, zoomed in, so true scale moves the window.
+    # Mirrored, the ruler and the mirror stay.
     rg = _rg()
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, D, Ruler("A", "y", -12.0, 16.0))
+    v.set_velocity(VelocityModel.constant(0.1))
     v.zoom_at(8.0, r.width() / 2, r.height() / 2)
+    assert v.can_true_scale()
+    before = v.transform
+    v.true_scale()
     t = v.transform
-    assert t.trace_hi - t.trace_lo < t.width
-    left = t.trace_hi
-    v.one_to_one()
-    t = v.transform
-    assert t.trace_hi == pytest.approx(left) and t.mirrored
-    assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
+    assert t.mirrored and v.ruler == Ruler("A", "y", -12.0, 16.0)
+    assert t.bounds == before.bounds
+    assert (t.time_lo, t.time_hi) != (before.time_lo, before.time_hi)
+
+
+def test_true_scale_needs_a_velocity_and_metres_and_a_nonzero_span(make_view):
+    v = make_view()
+    v.set_axes(200, 128, -4.0, 0.5)  # no distance, no velocity
+    assert v.metres_at_trace_units(10.0) is None and v.trace_units_at_metres(1.0) is None
+    assert not v.can_true_scale()
+    v.set_velocity(VelocityModel.constant(0.1))
+    assert not v.can_true_scale()  # still no metres
+    v.set_axes(200, 128, -4.0, 0.5, distance_along=np.zeros(200))  # a constant distance
+    v.set_velocity(VelocityModel.constant(0.1))
+    assert not v.can_true_scale()
+    before = v.transform
+    v.true_scale()  # must not raise
+    assert v.transform == before
 
 
 def test_distance_ticks_rise_left_to_right_across_blank_space(ruled):
@@ -2118,3 +2128,29 @@ def test_fit_width_and_fit_height_emit_view_changed_once(view):
     assert len(seen) == 1
     v.fit_height()
     assert len(seen) == 2
+
+
+def test_the_metre_helpers_are_the_only_road(view, monkeypatch):
+    v, rg = view
+    calls = []
+    real = ProfileView.metres_at_trace_units
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: (calls.append(u), real(self, u))[1]
+    )
+    v.grab_image()
+    assert calls  # the distance ticks went through it
+
+
+def test_the_metre_helpers_carry_the_held_window(ruled, monkeypatch):
+    v = ruled
+    fwd, back = [], []
+    real_m, real_t = ProfileView.metres_at_trace_units, ProfileView.trace_units_at_metres
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: (fwd.append(u), real_m(self, u))[1]
+    )
+    monkeypatch.setattr(
+        ProfileView, "trace_units_at_metres", lambda self, m: (back.append(m), real_t(self, m))[1]
+    )
+    lo, hi = v.window_m()
+    v.set_window_m(lo + 0.5, hi - 0.5, v.transform.time_lo, v.transform.time_hi)
+    assert fwd and back  # window_m and set_window_m both went through the pair

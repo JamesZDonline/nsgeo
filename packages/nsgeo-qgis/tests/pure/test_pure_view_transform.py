@@ -4,7 +4,13 @@ import dataclasses
 
 import numpy as np
 import pytest
-from nsgeo_qgis.ui.view_transform import MIN_SAMPLE_SPAN, MIN_TRACE_SPAN, ViewTransform, nice_ticks
+from nsgeo_qgis.ui.view_transform import (
+    MIN_SAMPLE_SPAN,
+    MIN_TRACE_SPAN,
+    ViewTransform,
+    nice_ticks,
+    true_scale_window,
+)
 
 FIT = ViewTransform.fit(
     n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300
@@ -320,12 +326,39 @@ def test_a_window_in_blank_space_has_an_empty_source():
     assert z.trace_at(400.0) is None and z.traces_between(0.0, 799.0) is None
 
 
-def test_one_to_one_keeps_the_screen_left_edge():
-    w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
-    plain = w.with_window(500.0, 700.0, 0.0, 20.0).one_to_one()
-    assert (plain.trace_lo, plain.trace_hi) == (500.0, 1300.0)
-    m = dataclasses.replace(w, mirrored=True).with_window(1000.0, 1200.0, 0.0, 20.0).one_to_one()
-    assert (m.trace_lo, m.trace_hi) == (400.0, 1200.0)
+def test_true_scale_sets_the_time_span_to_match_metres_across():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264).with_window(50.0, 100.0, 20.0, 60.0)
+    s = true_scale_window(t, 1 / 60, 20.0)  # 60 traces/m; 0.1 m/ns -> 20 ns per metre of depth
+    across = 696 / (50 / 60)
+    assert s.time_hi - s.time_lo == pytest.approx(264 / across * 20.0)
+    assert (s.time_lo + s.time_hi) / 2 == pytest.approx(40.0)
+    assert (s.trace_lo, s.trace_hi) == pytest.approx((50.0, 100.0))
+
+
+def test_true_scale_keeps_the_record_and_narrows_along_a_long_line():
+    t = ViewTransform.fit(1800, 512, 0.0, 0.2, 696, 264)  # 30 m at 60 traces/m, 102.4 ns
+    s = true_scale_window(t, 1 / 60, 20.0)
+    assert (s.time_lo, s.time_hi) == pytest.approx((0.0, 102.4))
+    assert s.trace_hi - s.trace_lo == pytest.approx(696 / (264 / (102.4 / 20.0)) * 60)
+    assert (s.trace_lo + s.trace_hi) / 2 == pytest.approx(900.0)
+
+
+def test_true_scale_on_a_mirrored_ruler_keeps_the_mirror():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264, bounds=(-20.0, 260.0), mirrored=True)
+    t = t.with_window(50.0, 100.0, 20.0, 60.0)
+    s = true_scale_window(t, 1 / 60, 20.0)
+    across = 696 / (50 / 60)
+    assert s.time_hi - s.time_lo == pytest.approx(264 / across * 20.0)
+    assert (s.time_lo + s.time_hi) / 2 == pytest.approx(40.0)
+    assert (s.trace_lo, s.trace_hi) == pytest.approx((50.0, 100.0))
+    assert s.mirrored and s.bounds == (-20.0, 260.0)
+
+
+def test_true_scale_at_the_clamps_does_not_raise():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264).with_window(0.0, 4.0, 0.0, 0.8)
+    s = true_scale_window(t, 1 / 60, 2000.0)  # absurdly slow ground
+    assert s.time_hi - s.time_lo >= 4 * 0.2 - 1e-9
+    assert s.trace_hi - s.trace_lo >= 4.0 - 1e-9
 
 
 def test_resized_keeps_the_mirror_and_the_bounds():
@@ -341,7 +374,7 @@ def test_bounds_must_be_finite_and_ordered():
 
 def test_traces_between_agrees_with_trace_at_on_column_boundaries():
     w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
-    for t in (w.one_to_one(), dataclasses.replace(w, mirrored=True).one_to_one()):
+    for t in (w, dataclasses.replace(w, mirrored=True)):
         for px in (0, 10, 11, 799):
             c = t.trace_at(float(px))
             assert t.traces_between(float(px), float(px)) == (c, c)
