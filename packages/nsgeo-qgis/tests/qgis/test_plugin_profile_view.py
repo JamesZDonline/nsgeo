@@ -2149,6 +2149,32 @@ def test_the_metre_helpers_are_the_only_road(view, monkeypatch):
     assert calls  # the distance ticks went through it
 
 
+def test_the_metre_helpers_decide_the_outputs_not_just_the_calls(make_view, monkeypatch):
+    """Spec 3.1: the ticks, the ruler's bounds (what Fit and Fit width show) and
+    `window_m` all follow the pair. A pair that scales metres by 2 moves them."""
+
+    def fresh():
+        v = make_view()
+        v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+        v.show()
+        rg = _rg()
+        v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=D, ruler=R)
+        return v
+
+    plain = fresh()
+    plain_ticks = [text for text, _ in plain._distance_ticks(plain.transform)]
+    real_m, real_t = ProfileView.metres_at_trace_units, ProfileView.trace_units_at_metres
+    monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda s, u: 2.0 * real_m(s, u))
+    monkeypatch.setattr(ProfileView, "trace_units_at_metres", lambda s, m: real_t(s, m / 2.0))
+    v = fresh()
+    expected = sorted(float(real_t(v, m / 2.0)) for m in (R.lo_m, R.hi_m))
+    assert v.transform.trace_bounds == pytest.approx(tuple(expected))
+    assert v.transform.trace_bounds != pytest.approx(plain.transform.trace_bounds)
+    assert [text for text, _ in v._distance_ticks(plain.transform)] != plain_ticks
+    ends = sorted(2.0 * float(real_m(v, u)) for u in (v.transform.trace_lo, v.transform.trace_hi))
+    assert v.window_m() == pytest.approx(tuple(ends))
+
+
 def test_the_metre_helpers_carry_the_held_window(ruled, monkeypatch):
     v = ruled
     fwd, back = [], []

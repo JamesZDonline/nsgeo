@@ -53,7 +53,6 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.ruler import (
     Ruler,
-    bounds_on,
     is_reversed,
     metres_at,
     trace_units_at,
@@ -221,9 +220,17 @@ class ProfileView(QWidget):
             ruler = None
         # A constant (or non-finite) distance axis has no spacing to place
         # traces by: its bounds are infinite and would not build a transform.
+        # The ruler's two ends in trace units, read through the metre helper
+        # pair (spec 3.1), so the pair is the only road between the two.
+        self._distance = distance_along
+        bounds = (math.nan, math.nan)
         if ruler is not None and distance_along is not None:
             with np.errstate(divide="ignore", invalid="ignore"):
-                lo, hi = bounds_on(ruler, distance_along)
+                ends = sorted(
+                    float(self.trace_units_at_metres(m)) for m in (ruler.lo_m, ruler.hi_m)
+                )
+            bounds = (ends[0], ends[1])
+            lo, hi = bounds
             if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
                 ruler = None
         if ruler is not None and distance_along is not None:
@@ -234,7 +241,7 @@ class ProfileView(QWidget):
                 dt_ns,
                 r.width(),
                 r.height(),
-                bounds=bounds_on(ruler, distance_along),
+                bounds=bounds,
                 mirrored=is_reversed(distance_along),
             )
         else:
@@ -242,7 +249,6 @@ class ProfileView(QWidget):
                 n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height()
             )
         self._ruler = ruler
-        self._distance = distance_along
         self._message = "loading…"
         self.view_changed.emit()
         self.update()
