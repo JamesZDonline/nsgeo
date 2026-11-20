@@ -149,8 +149,10 @@ than reworking M16–M17 afterwards.
    lines by their track ([#134]). Designed, in four parts: GPS lines placed
    along their track (M17a, merged above); **M17b**, one **Add data** menu,
    with GPS lines going into an existing grid or a new one fitted around them;
-   **M17c**, profiles at true distance; and **M17d**, outlines with holes,
-   Place by GPS and the rest of the GPS areas. M17b is in progress (above).
+   **M17c**, profiles at true distance, with GPS lines drawn on their grid's
+   ruler (reversed lines mirrored, as tape lines are) and their destagger
+   measured, both moved up from M17d at the M17b walkthrough; and **M17d**,
+   outlines with holes and Place by GPS. M17b is in progress (above).
 3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 4. **M19: magnetometer data.** The first instrument other than GPR:
@@ -177,7 +179,9 @@ Grouped by area. The order within a group is not a priority.
 - **Line placement and survey geometry:** grids that are not rectangles
   ([#130]; the outline and its slice mask come with M17d); a site of GPS
   lines alone hides its lines when you zoom out, as a tape site does
-  ([#222]); balancing
+  ([#222]); Add data's Grid mode draws where each line will go before
+  Import, with the selected rows highlighted ([#230]); choose the coordinate
+  system in GPS mode rather than only take the suggested one ([#231]); balancing
   lines walked in different directions (the second half of [#47]).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
@@ -317,6 +321,8 @@ Grouped by area. The order within a group is not a priority.
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
 [#224]: https://github.com/JamesZDonline/nsgeo/pull/224
 [#225]: https://github.com/JamesZDonline/nsgeo/pull/225
+[#230]: https://github.com/JamesZDonline/nsgeo/issues/230
+[#231]: https://github.com/JamesZDonline/nsgeo/issues/231
 
 ## Why
 
