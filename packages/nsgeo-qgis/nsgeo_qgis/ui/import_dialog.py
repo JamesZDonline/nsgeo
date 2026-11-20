@@ -359,6 +359,12 @@ class GridImportPage(QWidget):
                     if widget is not None:
                         widget.setVisible(shown)
 
+    def end_hand_on(self) -> None:
+        """Leave the hand-on: the banner goes and the placement rows are back
+        (idempotent; the rows keep whatever they hold)."""
+        self.banner.setVisible(False)
+        self._show_placement_rows(True)
+
     def hand_on(
         self,
         paths: Sequence[Path],
@@ -771,7 +777,7 @@ class GridImportPage(QWidget):
             self.status.setText(str(exc))
             return False
         self.imported_keys = new_keys  # the lines are in the site whatever follows
-        self._show_placement_rows(True)
+        self.end_hand_on()
         self.messages = [(f"imported {len(new_keys)} line(s)", False)]
         try:
             if chosen is not None:

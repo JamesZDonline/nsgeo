@@ -648,6 +648,9 @@ class SurveyDock(QgsDockWidget):
         for grid in site.grids if site is not None else []:
             action = sub.addAction(grid.id, lambda g=grid.id: self._request_move(keys, g))
             action.setEnabled(any(g != grid.id for g in on.values()))
+        # The submenu object is reused, so a gridless site greys it and the
+        # next fill (with a grid) wakes it again.
+        sub.menuAction().setEnabled(bool(site is not None and site.grids))
         menu.addMenu(sub)
 
     # ---- one line selection with the map (#57) -----------------------------------

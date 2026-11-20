@@ -960,7 +960,9 @@ class SiteSession(QObject):
     def move_lines(self, keys: Iterable[str], grid_id: str) -> EditOutcome:
         """Move lines to another grid, keeping each one's inset from the edge
         it starts at (line editing spec §3 calls 7 and 1). Lines already on
-        `grid_id` are left out; a key that is gone is skipped and named."""
+        `grid_id` are left out; a key that is gone is skipped and named. A GPS
+        line moves by a `TrackEdit`: only its grid changes, never its track,
+        and a grid in another CRS than its track is skipped and named."""
         self._require_site()
         self.grid(grid_id)
         edits: list[LineEdit | TrackEdit] = []

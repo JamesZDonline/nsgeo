@@ -389,6 +389,20 @@ def test_import_leaves_files_it_hands_on_out_of_the_summary(plugin, tmp_path):
     assert [r.path.name for r in dialog.grid_page.rows] == ["FILE__002.DZT"]
 
 
+def test_a_file_outside_what_the_crs_can_place_is_not_handed_on(plugin, tmp_path, project_utm):
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)  # type: ignore[method-assign]
+    raw = tmp_path / "raw"
+    plugin.open_add_data_dialog(None, GPS)
+    dialog = plugin._add_data_dialog
+    dialog.add_files([gps_file(raw, "FILE__001.DZT"), gps_file(raw, "FILE__002.DZT", lon=-90.0)])
+    ready(dialog.gps_page)
+    dialog.accept()
+    assert len(plugin.session.site.lines) == 1
+    assert "not imported: FILE__002.DZT (outside what EPSG:32632 can place)" in shown
+    assert plugin._add_data_dialog is None  # nothing was handed on to Grid mode
+
+
 def test_an_import_into_a_site_with_grids_uses_their_crs(plugin, tmp_path, project_degrees):
     plugin.session.add_grid(Grid("A", (500_000.0, 5_000_000.0), 0.0, 5.0, 11.0, "EPSG:32632", 0.5))
     plugin.open_add_data_dialog(None, GPS)
@@ -896,11 +910,33 @@ def test_a_grid_removed_under_the_page_keeps_import_enabled_and_a_click_refuses(
     d.target_combo.activated.emit(d.target_combo.currentIndex())  # a user pick
     session.remove_grid("A")
     assert d.target() is None
-    d.name_edit.setText("G1")
-    assert d_dlg.import_button.isEnabled()  # like the Grid page: refuse on the status line
-    d_dlg.import_button.click()
+    assert d.import_lines() is False  # no name typed yet and New grid not re-picked
     assert d.status.text() == "grid 'A' no longer exists; nothing was imported"
     assert session.site.lines == [] and grid_ids(session) == []
+    d.name_edit.setText("G1")  # typing a name is choosing New grid
+    assert d_dlg.import_button.isEnabled()
+    d_dlg.import_button.click()
+    assert grid_ids(session) == ["G1"] and len(session.site.lines) == 8
+
+
+def test_a_name_change_does_not_fit_the_grid_again(session, tmp_path, monkeypatch):
+    from nsgeo_qgis.ui import gps_import_dialog
+
+    d_dlg = gps_dialog(session)
+    d = d_dlg.gps_page
+    d.add_files(zigewag := zigzag(tmp_path / "raw"))
+    assert zigewag
+    d.spacing.setValue(0.5)
+    calls: list[int] = []
+    real = gps_import_dialog.fit_frame
+    monkeypatch.setattr(
+        gps_import_dialog, "fit_frame", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    d.name_edit.setText("G")
+    d.name_edit.setText("G1")
+    assert calls == []
+    assert d.proposal() is not None and d.proposal().id == "G1"
+    assert d_dlg.import_button.text() == f"Import {d.n_ready} line(s) into new grid G1"
     d_dlg.reject()
 
 

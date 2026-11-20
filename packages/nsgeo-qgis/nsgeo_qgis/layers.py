@@ -228,7 +228,9 @@ _GROUP_TOKEN = "nsgeo/site_group"
 # a moire pattern over the slice, from about 1:400 at 0.5 m spacing by the
 # user's eye (lines about 4.7 px apart on a 96 dpi screen). Lines and their
 # marks hide beyond this scale denominator per metre of the finest line
-# spacing among the grids that have lines (see `_hide_when_lines_crowd`).
+# spacing among the lines: each line's grid's default spacing (tape or GPS
+# alike), and for GPS lines in no grid the spacing measured from their tracks
+# (see `_hide_when_lines_crowd`).
 HIDE_LINES_BEYOND_SCALE_PER_M = 800.0
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]

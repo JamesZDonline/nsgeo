@@ -539,6 +539,19 @@ def test_files_gps_cannot_place_are_handed_on_to_grid_mode_with_a_guess(session,
     assert d.import_button.text() == "Import 2 line(s) into G4"
 
 
+def test_switching_mode_ends_the_hand_on_on_the_grid_page_too(session, tmp_path):
+    d, _ = handed_on_dialog(session, tmp_path)
+    d.accept()
+    page = d.grid_page
+    assert page.banner.isVisibleTo(d) and not page.first_offset.isVisibleTo(d)
+    d.set_mode(GPS)
+    d.set_mode(GRID)
+    assert not page.banner.isVisibleTo(d)
+    assert page.first_offset.isVisibleTo(d)
+    assert page.direction_alternate.isVisibleTo(d)
+    d.reject()
+
+
 def test_importing_the_handed_on_files_adds_tape_lines_and_closes(session, tmp_path):
     d, batches = handed_on_dialog(session, tmp_path)
     d.accept()

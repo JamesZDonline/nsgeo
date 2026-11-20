@@ -80,6 +80,7 @@ HEADERS = ["File", "Traces", "RTK fixes", "Without RTK", "Ends", "Status"]
 COL_OUTSIDE, COL_STATUS_OUTSIDE = 5, 6
 OUTSIDE_HEADER = "Outside {gid}"
 NEW_GRID = "New grid"
+OUTSIDE_CRS_PREFIX = "outside what "  # gps_import: "outside what {crs} can place"
 NAME_FIRST = "Name the new grid."
 NAME_TAKEN = "A grid named {name} already exists."
 SPACING_FIRST = "Give the new grid a spacing."
@@ -431,8 +432,14 @@ class GpsImportPage(QWidget):
 
     def _name_changed(self, *_: Any) -> None:
         try:
+            # Typing a name is choosing New grid: a target grid that went is
+            # forgotten, and Import goes into the new grid.
+            self._lost = None
             self.preset_box.rename_new_grid(self._name() or None)
-            self._apply_target()
+            # Only the name changed: the tracks, spacing and fit stand, so the
+            # proposal is renamed and nothing is measured or fitted again.
+            if self._proposal is not None:
+                self._proposal = dataclasses.replace(self._proposal, id=self._name() or "_")
             self._refresh()
         except Exception as exc:  # noqa: BLE001 -- a slot
             self.status.setText(f"could not use the name: {exc}")
@@ -703,6 +710,9 @@ class GpsImportPage(QWidget):
             if r.refusal is not None
             and r.refusal != ALREADY_IN_SITE
             and r.refusal != OUTSIDE.format(gid=target_id)
+            # decision 15: only files GPS cannot place are handed on; a position
+            # the site's CRS cannot place stays "not imported"
+            and not r.refusal.startswith(OUTSIDE_CRS_PREFIX)
             # a DZT that could not be read has no trace count: a Grid-mode row
             # could never import it, so it stays in the summary as "not imported"
             and r.n_traces is not None

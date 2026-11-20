@@ -171,6 +171,9 @@ class AddDataDialog(QDialog):
         if mode != self._mode:
             src = self._page()
             self._mode = mode
+            # Any switch leaves a hand-on: its banner and hidden rows go with it
+            # (_hand_on re-applies them right after its own switch).
+            self.grid_page.end_hand_on()
             if carry:
                 self._handed_on = False  # the user chose a mode
                 self._page().set_files(src.paths())

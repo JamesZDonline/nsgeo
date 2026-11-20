@@ -360,6 +360,12 @@ changes as one step. Picks move with their lines.
 Changing a grid's length in **Edit grid…** moves its reversed lines with the far
 edge. The message bar tells you how many moved.
 
+A GPS line can be in the table too. It is placed by its track, so its **Offset**,
+**Dir**, **Start** and **Scale** read **—** and cannot change; only its **Label**,
+**Destagger** and **Grid** can. A change to a whole selection and **Measure**
+leave GPS rows alone and say so: "Left 3 GPS line(s) alone: Offset applies to tape
+lines only."
+
 A wheel on rough ground, or one that is slightly out of calibration, makes a
 line read longer or shorter than the grid. **Scale** is the number that corrects
 it: the grid metres for each metre the wheel recorded. Type a value in a row, or
@@ -423,7 +429,8 @@ again.
    system. A file that cannot be placed in it is refused, with the reason in its
    **Status** cell.
 3. Choose the **Target grid**. GPS lines always go into a grid: pick one the site
-   already has, or leave **New grid** and type a **Name** for it.
+   already has, or **New grid** and type a **Name** for it. The GPS mode opens on
+   the grid the Survey panel points at, or on **New grid** when there is none.
    * With an existing grid the lines go in as they are. An **Outside** column
      shows how many metres of each line lie outside the grid's rectangle (those
      metres are left out of its slices). A line that lies wholly outside is
@@ -465,7 +472,8 @@ than 2 m.
 
 **nsgeo Survey** shows a GPS line as its label, **GPS**, its walked length and
 any **without RTK** length. Its profile reads in distance walked, one column to
-each trace. A line with no grid has no ruler. A hyperbola fit measures along the walked
+each trace. A GPS line, in a grid or not, has no ruler: it is drawn in distance
+walked until true-distance profiles arrive. A hyperbola fit measures along the walked
 distance at the points you click, so fit hyperbolae away from stretches without
 RTK and away from lifts of the cart until true-distance profiles arrive.
 
@@ -480,6 +488,11 @@ grid** opens with the fitted rectangle and spacing filled in and the **Id**
 blank. Type an Id and click OK: the grid is added and the lines move into it,
 their tracks unchanged. With one line there is no spacing to measure, so the
 dialog starts from its usual spacing.
+
+**Move to grid** works for GPS lines too. It changes only the grid: the line
+stays where its track put it, so a grid the track does not cross leaves it outside.
+A grid in a different coordinate system than the track is refused, and the
+message bar says so.
 
 A line is placed either by tapes or by GPS, not both. To switch a tape-placed
 line to its GPS track, remove it and import it again with **Place lines by:

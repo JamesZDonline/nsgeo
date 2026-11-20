@@ -552,8 +552,9 @@ def test_a_gps_line_in_a_grid_hides_by_the_grids_default_spacing(site):
     from nsgeo_qgis.layers import HIDE_LINES_BEYOND_SCALE_PER_M
 
     session, layers, tmp = site
-    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.4))
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.8))
+    # 0.8 is above the 0.5 m the lines are walked apart, so the walk cannot pass for it
     session.add_lines(_walked(tmp, ["FILE__001.DZT", "FILE__002.DZT"], grid_id="A"))
     assert layers.layers["lines"].minimumScale() == pytest.approx(
-        HIDE_LINES_BEYOND_SCALE_PER_M * 0.4
+        HIDE_LINES_BEYOND_SCALE_PER_M * 0.8
     )

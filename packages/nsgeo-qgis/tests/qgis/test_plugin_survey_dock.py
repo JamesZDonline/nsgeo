@@ -1725,6 +1725,33 @@ def test_a_gps_line_menu_offers_destagger_move_and_fit(gps_dock, answer_modal, m
     assert message_log == []
 
 
+def test_move_to_grid_is_greyed_on_a_site_with_no_grid_and_wakes_with_one(
+    gps_dock, answer_modal, tmp_path
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert not _action(menu, "Move to grid").isEnabled()
+    _add_tape_line(session, tmp_path)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(menu, "Move to grid").isEnabled()
+
+
+def test_a_gps_line_in_a_grid_sits_under_that_grids_item(gps_dock, tmp_path):
+    from plugin_testing import CRS
+
+    session, dock = gps_dock
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    session.move_lines([KEYS[0]], "A")
+    assert session.line_for_key(KEYS[0]).placement.grid_id == "A"
+    grid_item = _grid_item(dock, "A")
+    under = [dock.key_of(grid_item.child(i)) for i in range(grid_item.childCount())]
+    assert KEYS[0] in under
+    root = dock.tree.topLevelItem(0)
+    loose = [dock.key_of(root.child(i)) for i in range(root.childCount())]
+    assert KEYS[0] not in loose
+
+
 def test_moving_a_gps_line_from_its_menu_goes_through_move_lines(
     gps_dock, answer_modal, tmp_path, message_log
 ):
@@ -1784,8 +1811,14 @@ def test_a_mixed_selection_on_one_grid_offers_edit_and_move(
 ):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
-    tape = _add_tape_line(session, tmp_path)
-    session.move_lines([KEYS[0]], "A")
+    from plugin_testing import CRS
+
+    # one grid in the site's CRS (a GPS line only joins a grid in its own CRS)
+    session.add_grid(Grid("S", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+    session.add_lines([Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))])
+    tape = "raw/FILE__009.DZT"
+    session.move_lines([KEYS[0]], "S")
     first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(tape)
     _unfold(first)
     _select(dock, first, second)
