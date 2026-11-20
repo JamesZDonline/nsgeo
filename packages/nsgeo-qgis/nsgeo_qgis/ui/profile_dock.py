@@ -331,6 +331,7 @@ class ProfileDock(QgsDockWidget):
         # True when those axes are header-only (`_take_down_picture`): on the radar
         # clock, not one the user zoomed on, so the clock rule skips them.
         self._axes_from_header = False
+        self._clock_carried = False  # set by `_set_axes_holding` when the clock rule fires
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
@@ -687,6 +688,7 @@ class ProfileDock(QgsDockWidget):
         old_ruler = view.ruler
         old_key = self._axes_key
         was_header = self._axes_from_header
+        self._clock_carried = False
         self._file_window()
         # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
         # against its own distance along the path (cut spec call 5).
@@ -716,6 +718,7 @@ class ProfileDock(QgsDockWidget):
             == (old.n_traces, old.dt_ns, old.bounds, old.mirrored)
         ):
             view.transform = carry_time_window(old, new, self._axes_zero, zero_ns)
+            self._clock_carried = True
             view.view_changed.emit()
             view.update()
         elif ruler is not None and ruler.key in self._held:
@@ -965,7 +968,10 @@ class ProfileDock(QgsDockWidget):
             line.header.dt_ns,
             self._safe_distance(line),
         )
-        self._axes_from_header = True  # also the `_show_steps_refused` path
+        # Header axes are the radar clock, unless the clock rule just carried
+        # this same line's window onto them: then the window is still the one
+        # the user zoomed on, and the render that follows must carry it again.
+        self._axes_from_header = not self._clock_carried  # also `_show_steps_refused`
         self.view.set_image(None)
         self._sync_true_scale_button()
 

@@ -2761,6 +2761,21 @@ def test_a_time_zoom_survives_time_zero_on_a_gps_line(qgis_app, tmp_path):
         dock.deleteLater()
 
 
+def test_a_same_line_take_down_then_render_keeps_the_radar_window(opened):
+    """`_take_down_picture` can follow a render of the SAME line (a refused
+    steps path). The header axes keep the radar times through the clock rule;
+    the render after must not read them as a processed clock and move the
+    window by the line's zero."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=60))
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    dock._show_steps_refused(key, is_preview=False)
+    dock._render()
+    assert _radar_window(dock) == pytest.approx(before)
+
+
 def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened):
     """The header-only axes `_take_down_picture` sets are on the radar clock,
     not a clock the user zoomed on: the load that follows must not shift the
