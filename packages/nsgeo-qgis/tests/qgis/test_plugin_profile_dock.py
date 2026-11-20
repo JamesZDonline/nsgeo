@@ -15,6 +15,7 @@ from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui import profile_dock
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import (
+    LEFT_AXIS_KEY,
     PREVIEW_STEPS_REFUSED_TEXT,
     SLICE_BAND_KEY,
     STEPS_REFUSED_TEXT,
@@ -2579,3 +2580,57 @@ def test_the_toolbar_fits_the_users_panel_in_the_worst_case(opened):
     for b in (dock.fit_button, dock.one_to_one_button, dock.slice_band_button):
         assert b.geometry().right() < dock.widget().width()
     assert dock.velocity_label.text() == "v = 0.100 m/ns (Grid A, average of 6 fits)"
+
+
+def test_the_axis_menu_sets_a_unit_and_remembers_it(opened):
+    session, dock, key, line = opened
+    dock._on_axis_menu_requested("left", QPoint(0, 0))
+    act = next(a for a in dock.axis_menu.actions() if a.data() == "sample")
+    act.trigger()
+    assert dock.view.axis_units == ("sample", "m")
+    other = ProfileDock(session)
+    try:
+        assert other.view.axis_units == ("sample", "m")
+    finally:
+        other.deleteLater()
+    dock.axis_menu.hide()
+
+
+def test_the_axis_menu_names_its_three_units(opened):
+    session, dock, key, line = opened
+    dock._on_axis_menu_requested("right", QPoint(0, 0))
+    try:
+        assert [(a.text(), a.data()) for a in dock.axis_menu.actions()] == [
+            ("Time (ns)", "ns"),
+            ("Samples", "sample"),
+            ("Depth (m)", "m"),
+        ]
+        dock.axis_menu.actions()[0].trigger()
+        assert dock.view.axis_units == ("ns", "ns")
+    finally:
+        dock.axis_menu.hide()
+
+
+def test_depth_is_greyed_in_the_menu_without_a_velocity(opened, monkeypatch):
+    session, dock, key, line = opened
+    _break_velocity(session, monkeypatch, KeyError("no velocity"))
+    dock._refresh_velocity()
+    dock._on_axis_menu_requested("left", QPoint(0, 0))
+    try:
+        depth = next(a for a in dock.axis_menu.actions() if a.data() == "m")
+        assert not depth.isEnabled()
+        assert depth.toolTip() == "Depth needs a velocity for this line"
+    finally:
+        dock.axis_menu.hide()
+
+
+def test_a_bad_remembered_unit_falls_back_and_is_overwritten(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(LEFT_AXIS_KEY, "feet")
+    other = ProfileDock(session)
+    try:
+        assert other.view.axis_units == ("ns", "m")
+        other._set_axis_unit("left", "sample")
+        assert profile_dock.profile_settings().value(LEFT_AXIS_KEY) == "sample"
+    finally:
+        other.deleteLater()

@@ -13,6 +13,7 @@ from nsgeo.render import DEFAULT_COLORMAP, PercentileClip
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.render.qimage import RadargramImage, rgb_to_qimage
 from nsgeo_qgis.ui.profile_view import (
+    AXIS_UNITS,
     BACKGROUND,
     CAPTION_ROW,
     CURSOR_COLOUR,
@@ -1163,7 +1164,9 @@ def test_depth_axis_uses_the_velocity_model(view):
     # or (labels[0] == "0")` -- if `labels` were ever empty, the left disjunct
     # is `[]` (falsy) and evaluation falls through to `labels[0] == "0"`,
     # indexing an empty list: `IndexError`, not a clean assertion failure.
-    assert labels == ["0", "1", "2", "3"]
+    # Depth is drawn only from time 0 on the shown clock (#11), so the span is
+    # depths [0, 3] and nice_ticks steps by 0.5.
+    assert labels == ["0", "0.5", "1", "1.5", "2", "2.5", "3"]
 
     # tick *positions* are untested by the label list alone (`out.append((...,
     # 0.0))` also survives a labels-only check): each depth tick's y must be
@@ -1171,7 +1174,7 @@ def test_depth_axis_uses_the_velocity_model(view):
     # pinned constant. Values below computed independently (np.linspace/
     # depth_at/y_of_time), not by calling `_depth_ticks` itself.
     ys = [y for _, y in v._depth_ticks(v.transform)]
-    assert ys == [pytest.approx(expected) for expected in (16.5, 99.0, 181.5, 264.0)]
+    assert ys == [pytest.approx(expected) for expected in (16.5, 57.75, 99.0, 140.25, 181.5, 222.75, 264.0)]
 
 
 def test_time_ticks_use_the_actual_time_range_and_positions(view):
@@ -2167,3 +2170,107 @@ def test_true_scale_is_off_where_the_metre_span_is_not_finite(make_view):
     before = v.transform
     v.true_scale()
     assert v.transform == before
+
+
+def _sampled(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25, distance_along=np.arange(200) / 60.0)
+    v.set_velocity(VelocityModel.constant(0.1))
+    return v
+
+
+def _click(v, button, pos):
+    QTest.mousePress(v, button, Qt.KeyboardModifier.NoModifier, pos)
+    QTest.mouseRelease(v, button, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_an_axis_in_samples_ticks_row_centres(make_view):
+    v = _sampled(make_view)
+    v.set_axis_units("sample", "m")
+    ticks = v._axis_ticks("sample", v.transform)
+    # nice_ticks(-0.5, 127.5) steps by 50 at the default target of 6
+    assert [label for label, _ in ticks] == ["0", "50", "100"]
+    assert ticks[1][1] == pytest.approx(v.transform.y_of_time(50.5 * 0.25))
+
+
+def test_each_side_takes_each_unit(make_view):
+    v = _sampled(make_view)
+    for left in AXIS_UNITS:
+        for right in AXIS_UNITS:
+            v.set_axis_units(left, right)
+            assert v.axis_units == (left, right)
+            v.grab_image()  # paints without raising
+
+
+def test_a_unit_outside_the_three_is_refused(make_view):
+    v = _sampled(make_view)
+    with pytest.raises(ValueError):
+        v.set_axis_units("feet", "m")
+    assert v.axis_units == ("ns", "m")
+
+
+def test_depth_is_blank_without_a_velocity(make_view):
+    v = _sampled(make_view)
+    v.set_velocity(None)
+    assert not v.has_velocity
+    assert v._axis_ticks("m", v.transform) == []
+
+
+def test_depth_ticks_start_at_zero_on_a_shifted_clock(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, -4.0, 0.25)
+    v.set_velocity(VelocityModel.constant(0.1))
+    ticks = v._axis_ticks("m", v.transform)
+    assert ticks
+    # no depth is drawn above time 0
+    assert min(y for _, y in ticks) >= v.transform.y_of_time(0.0) - 1e-6
+
+
+def test_the_strips_are_the_margins_beside_the_image(make_view):
+    v = _sampled(make_view)
+    w, h = v.transform.width, v.transform.height
+    assert v.axis_strip_at(-5, 50) == "left"
+    assert v.axis_strip_at(w + 5, 50) == "right"
+    assert v.axis_strip_at(-5, -MARGIN_TOP) == "left"
+    assert v.axis_strip_at(w, h - 1) == "right"
+    assert v.axis_strip_at(-1, h) is None
+    assert v.axis_strip_at(-1, -MARGIN_TOP - 1) is None
+    assert v.axis_strip_at(0, 50) is None
+    assert v.axis_strip_at(w - 1, 50) is None
+    assert v.axis_strip_at(50, h + 5) is None
+
+
+def test_a_press_on_an_axis_strip_asks_for_its_menu_and_keeps_the_selection(make_view):
+    v = _sampled(make_view)
+    v.set_selection(10, 40)
+    got = []
+    v.axis_menu_requested.connect(lambda side, pos: got.append(side))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(10, MARGIN_TOP + 50))
+    QTest.mousePress(
+        v,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(v.width() - 10, MARGIN_TOP + 50),
+    )
+    QTest.mouseRelease(
+        v,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(v.width() - 10, MARGIN_TOP + 50),
+    )
+    assert got == ["left", "right"]
+    assert v._selection == (10, 40)
+
+
+def test_a_press_on_the_bottom_axis_still_clears_the_selection(make_view):
+    v = _sampled(make_view)
+    v.set_selection(10, 40)
+    got = []
+    v.axis_menu_requested.connect(lambda side, pos: got.append(side))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(MARGIN_LEFT + 100, v.height() - 10))
+    assert v._selection == (-1, -1)
+    assert got == []

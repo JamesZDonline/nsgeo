@@ -112,7 +112,7 @@ from nsgeo.velocity_fit import (
 from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis, QgsSettings
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPoint, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
@@ -133,13 +133,14 @@ from nsgeo_qgis.render.qimage import RadargramImage, rgba_to_qimage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
-from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
+from nsgeo_qgis.ui.profile_view import AXIS_UNITS, MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
 SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
 LEFT_AXIS_KEY = "nsgeo/profile/leftAxis"
 RIGHT_AXIS_KEY = "nsgeo/profile/rightAxis"
+AXIS_DEPTH_GREYED_TIP = "Depth needs a velocity for this line"
 TRUE_SCALE_TIP = (
     "True scale: a metre down is as long as a metre along the line, at the line's velocity"
 )
@@ -452,6 +453,12 @@ class ProfileDock(QgsDockWidget):
         viewer_row = QHBoxLayout()
         viewer_row.setSpacing(0)
         self.view = ProfileView(body)
+        self.axis_menu: QMenu | None = None
+        # A remembered unit that is not one of the three means the default.
+        self.view.set_axis_units(
+            self._remembered_axis_unit(LEFT_AXIS_KEY, "ns"),
+            self._remembered_axis_unit(RIGHT_AXIS_KEY, "m"),
+        )
         viewer_row.addWidget(self.view, 1)
         self.gain_strip = GainStrip(body)
         self.gain_strip.hide()
@@ -507,6 +514,7 @@ class ProfileDock(QgsDockWidget):
         self.save_fit_button.clicked.connect(self._save_velocity_fit)
         self.clear_velocity_button.clicked.connect(self._clear_velocity_points)
         self.view.view_changed.connect(self._sync_strip_mapping)
+        self.view.axis_menu_requested.connect(self._on_axis_menu_requested)
         # True scale depends on the window (a flat stretch has no metres).
         self.view.view_changed.connect(self._sync_true_scale_button)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
@@ -1892,6 +1900,45 @@ class ProfileDock(QgsDockWidget):
         has_window = self._slice_band is not None
         self.slice_band_button.setEnabled(has_window)
         self.slice_band_button.setToolTip(SLICE_BAND_TIP if has_window else SLICE_BAND_GREYED_TIP)
+
+    def _remembered_axis_unit(self, key: str, default: str) -> str:
+        value = profile_settings().value(key, default)
+        return value if value in AXIS_UNITS else default
+
+    def _on_axis_menu_requested(self, side: str, pos: QPoint) -> None:
+        """Open the unit menu for one vertical axis. `popup`, not `exec`: a
+        modal loop would hang offscreen; the menu is kept for tests."""
+        try:
+            if self.axis_menu is not None:
+                self.axis_menu.hide()
+                self.axis_menu.deleteLater()
+            menu = QMenu(self.view)
+            current = self.view.axis_units[0 if side == "left" else 1]
+            for text, unit in (("Time (ns)", "ns"), ("Samples", "sample"), ("Depth (m)", "m")):
+                action = menu.addAction(text)
+                action.setData(unit)
+                action.setCheckable(True)
+                action.setChecked(unit == current)
+                if unit == "m" and not self.view.has_velocity:
+                    action.setEnabled(False)
+                    action.setToolTip(AXIS_DEPTH_GREYED_TIP)
+                action.triggered.connect(lambda _=False, u=unit: self._set_axis_unit(side, u))
+            self.axis_menu = menu
+            menu.popup(pos)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the axis menu: {exc}", Qgis.MessageLevel.Critical)
+
+    def _set_axis_unit(self, side: str, unit: str) -> None:
+        try:
+            left, right = self.view.axis_units
+            if side == "left":
+                left = unit
+            else:
+                right = unit
+            self.view.set_axis_units(left, right)
+            profile_settings().setValue(LEFT_AXIS_KEY if side == "left" else RIGHT_AXIS_KEY, unit)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not change the axis unit: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_fit_picked(self, action: QAction) -> None:
         """The Fit button repeats whichever fit was picked last."""

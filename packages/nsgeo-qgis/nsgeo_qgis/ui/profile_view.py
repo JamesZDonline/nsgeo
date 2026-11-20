@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis
-from qgis.PyQt.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor, QImage, QPainter, QPen
 from qgis.PyQt.QtWidgets import QApplication, QWidget
 
@@ -66,6 +66,7 @@ from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks, true_scale_w
 # what keeps a "0" tick at the very top (an active `time_zero` step) off the
 # caption without hiding the label (issue #7).
 CAPTION_ROW = 14
+AXIS_UNITS = ("ns", "sample", "m")
 MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 56, CAPTION_ROW + 8, 28
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
@@ -123,6 +124,7 @@ class ProfileView(QWidget):
     # the snapped end time (ns). Always emitted, even for an unmoved line:
     # the no-op guard lives with the consumer.
     cutoff_dragged = pyqtSignal(float)
+    axis_menu_requested = pyqtSignal(str, QPoint)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -133,6 +135,7 @@ class ProfileView(QWidget):
         self._distance: np.ndarray | None = None
         self._ruler: Ruler | None = None
         self._velocity: VelocityModel | None = None
+        self._axis_units: tuple[str, str] = ("ns", "m")
         self._direction = 1
         self._cursor = -1
         self._selection = (-1, -1)
@@ -292,6 +295,23 @@ class ProfileView(QWidget):
         cut spec §4.3). None goes back to the "loading…" `set_axes` leaves."""
         self._message = "loading…" if text is None else text
         self.update()
+
+    def set_axis_units(self, left: str, right: str) -> None:
+        """Which unit each vertical axis shows: one of `AXIS_UNITS`. Raises
+        `ValueError` for anything else, leaving both sides as they were."""
+        for unit in (left, right):
+            if unit not in AXIS_UNITS:
+                raise ValueError(f"axis unit {unit!r} is not one of {AXIS_UNITS}")
+        self._axis_units = (left, right)
+        self.update()
+
+    @property
+    def axis_units(self) -> tuple[str, str]:
+        return self._axis_units
+
+    @property
+    def has_velocity(self) -> bool:
+        return self._velocity is not None
 
     def set_velocity(self, model: VelocityModel | None) -> None:
         self._velocity = model
@@ -793,33 +813,36 @@ class ProfileView(QWidget):
         font = p.font()
         font.setPointSize(8)
         p.setFont(font)
-        # left: two-way time
+        # left and right: each in the unit chosen for it
+        left_unit, right_unit = self._axis_units
         p.drawLine(r.topLeft(), r.bottomLeft())
-        for tick, y in self._time_ticks(t):
+        for label, y in self._axis_ticks(left_unit, t):
             yy = r.top() + y
             p.drawLine(QPointF(r.left() - 4, yy), QPointF(r.left(), yy))
             p.drawText(
                 QRectF(0, yy - 8, r.left() - 6, 16),
                 int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                tick,
+                label,
             )
-        p.drawText(QRectF(0, 0, r.left() - 6, CAPTION_ROW), int(Qt.AlignmentFlag.AlignRight), "ns")
-        # right: depth
+        p.drawText(
+            QRectF(0, 0, r.left() - 6, CAPTION_ROW),
+            int(Qt.AlignmentFlag.AlignRight),
+            f"{left_unit} \u25be",
+        )
         p.drawLine(r.topRight(), r.bottomRight())
-        if self._velocity is not None:
-            for label, y in self._depth_ticks(t):
-                yy = r.top() + y
-                p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                p.drawText(
-                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    label,
-                )
+        for label, y in self._axis_ticks(right_unit, t):
+            yy = r.top() + y
+            p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
             p.drawText(
-                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_ROW),
-                int(Qt.AlignmentFlag.AlignLeft),
-                "m",
+                QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                label,
             )
+        p.drawText(
+            QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_ROW),
+            int(Qt.AlignmentFlag.AlignLeft),
+            f"{right_unit} \u25be",
+        )
         # bottom: distance along the line, or trace index
         p.drawLine(r.bottomLeft(), r.bottomRight())
         for label, x in self._distance_ticks(t):
@@ -845,6 +868,38 @@ class ProfileView(QWidget):
             (f"{tick:g}", t.y_of_time(float(tick))) for tick in nice_ticks(t.time_lo, t.time_hi)
         ]
 
+    def _axis_ticks(self, unit: str, t: ViewTransform) -> list[tuple[str, float]]:
+        """Tick labels and pixel y-positions for a vertical axis in `unit`.
+        Depth is blank without a velocity."""
+        if unit == "sample":
+            return self._sample_ticks(t)
+        if unit == "m":
+            return self._depth_ticks(t) if self._velocity is not None else []
+        return self._time_ticks(t)
+
+    def _sample_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
+        """Whole sample numbers, each on its row's centre (row s spans
+        t0 + s*dt to t0 + (s+1)*dt)."""
+        s_lo = (t.time_lo - t.t0_ns) / t.dt_ns - 0.5
+        s_hi = (t.time_hi - t.t0_ns) / t.dt_ns - 0.5
+        return [
+            (str(int(s)), t.y_of_time(t.t0_ns + (float(s) + 0.5) * t.dt_ns))
+            for s in nice_ticks(s_lo, s_hi)
+            if 0 <= s <= t.n_samples - 1
+        ]
+
+    def axis_strip_at(self, x: float, y: float) -> str | None:
+        """ "left" or "right" for image-local (x, y) in the margin beside the
+        image, where a press picks that axis's unit; else None."""
+        t = self.transform
+        if t is None or not (-MARGIN_TOP <= y < t.height):
+            return None
+        if x < 0:
+            return "left"
+        if x >= t.width:
+            return "right"
+        return None
+
     def _distance_unit_label(self) -> str:
         return "m" if self._distance is not None else "trace"
 
@@ -858,7 +913,11 @@ class ProfileView(QWidget):
 
     def _depth_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         assert self._velocity is not None
-        times = np.linspace(t.time_lo, t.time_hi, 512)
+        # No depth above time 0 on the shown clock.
+        lo = max(t.time_lo, 0.0)
+        if not t.time_hi > lo:
+            return []
+        times = np.linspace(lo, t.time_hi, 512)
         depths = self._velocity.depth_at(times)
         out = []
         for d in nice_ticks(float(depths[0]), float(depths[-1])):
@@ -923,6 +982,13 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = event_pos(event)
             return
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            side = self.axis_strip_at(x, y)
+            if side is not None:
+                # A press on an axis picks its unit and nothing else: no
+                # selection, pick, velocity gesture or cutoff grab starts.
+                self.axis_menu_requested.emit(side, self.mapToGlobal(event_pos(event).toPoint()))
+                return
         if event.button() == Qt.MouseButton.RightButton and self._velocity_mode:
             self._abandon_stale_cutoff_grab()
             # Nearest in SCREEN space: the points live in trace/ns, whose
