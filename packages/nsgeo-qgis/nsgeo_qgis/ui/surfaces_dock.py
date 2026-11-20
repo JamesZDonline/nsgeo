@@ -200,6 +200,7 @@ class SurfacesDock(QgsDockWidget):
             session.slice_sources_changed,
             session.lines_changed,
             session.grids_changed,
+            session.cuts_changed,
             session.presets_changed,
             session.site_opened,
             session.site_closed,
@@ -520,10 +521,13 @@ class SurfacesDock(QgsDockWidget):
             self.problem.emit(NO_LONGER_MEMBER)
             return
         self.select_picks_requested.emit([pick.fid])
-        # A line that left the site is only selected; there is nothing to open.
+        # A line or cut that left the site is only selected; there is nothing to open.
         if key in set(self.session.keys()):
             self.session.open_line(key)
             self.session.set_trace(key, pick.pick.trace)
+        elif key in set(self.session.cut_keys()):
+            # A cut pick's column is its record of the section, not a trace of the cut.
+            self.session.open_line(key)
 
     def _pick_of(self, feature_id: str, outlier: dict[str, Any]) -> Any:
         """The member the outlier names: its line and trace (an older build has the distance)."""

@@ -860,7 +860,8 @@ by depth, goes into the next ParaView export (Step 9), and stays listed in the
 **Pick only where the reflection is clear, and the same part of the wave each
 time.** A surface is only as good as its picks: pick the same peak or trough on
 every line, and leave a line out where you cannot tell. Picks on one grid only.
-Picks on cuts cannot be used yet.
+Picks on cuts join surfaces like picks on lines, as long as they were made
+on the clock the grid's preset uses now.
 
 1. Make the **picks** layer current in QGIS and select picks with QGIS's own
    Select tool: a box, a polygon, or by expression. At least three, not all in a
@@ -887,6 +888,8 @@ Picks on cuts cannot be used yet.
 5. **Rebuild after changes.** Changing a surface's picks, its settings, or the
    grid's processing, lines, 3-D cell or velocity makes it **stale**: the map and
    the next export keep showing the last build, and the panel says what changed.
+   Deleting a cut, or drawing it again, does the same to the surfaces holding its
+   picks (the panel says "its picks changed"), and a rebuild reports those picks.
    Nothing rebuilds by itself, so a scene never changes in the middle of showing it.
    Select the surface (or several) and click **Rebuild**. Browsing slices never
    makes a surface stale.
@@ -913,9 +916,10 @@ closing it never marks the site changed.
 - **It follows your work.** A new pick appears, and a rebuilt surface is replaced in
   place. A **stale** surface is labelled in the Layers panel, and the title counts
   the stale surfaces on the grid.
-- **Which picks.** Only picks on the grid's lines. Picks on cuts are not shown, and neither
-  are picks on lines you left out of the grid's slices (**Choose lines…**).
-- **What it leaves out.** It shows no slices and no walls. ParaView does those better
+- **Which picks.** The grid's picks on its lines, and its picks on cuts as long as they
+  were made on the clock the grid's preset uses now. Picks on lines you left out of the
+  grid's slices (**Choose lines…**) are not shown.
+- **What it leaves out.** It shows no slices. ParaView does those better
   (see [Step 9](#step-9-export-for-paraview)).
 - **QGIS's own controls.** Rotating, zooming and **Save as image** are QGIS's, not
   nsgeo's.

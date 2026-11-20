@@ -10,6 +10,8 @@ from nsgeo_qgis.surface_plan import (
     also_note,
     built_message,
     clean_name,
+    cut_pick_base,
+    cut_pick_on_clock,
     delete_question,
     empty_message,
     feature_ids,
@@ -61,18 +63,14 @@ def test_names_are_trimmed_and_unique_case_folded():
 
 
 def test_selection_refusals_come_in_order():
-    ok = {"n": 5, "unsaved": 0, "on_cuts": 0, "grids": {"A"}, "spans_area": True}
+    ok = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
     assert selection_refusal(**ok) == ""
-    everything = {"n": 2, "unsaved": 2, "on_cuts": 5, "grids": {"A", "B"}, "spans_area": False}
+    everything = {"n": 2, "unsaved": 2, "grids": {"A", "B"}, "spans_area": False}
     assert selection_refusal(**{**everything, "n": 0}).startswith("Select picks")
     assert selection_refusal(**everything) == (
         "Save the picks layer's edits first; 2 of these picks are not saved yet."
     )
     everything["unsaved"] = 0
-    assert selection_refusal(**everything) == (
-        "5 of these picks are on a cut. Picks on cuts can join surfaces in a later version."
-    )
-    everything["on_cuts"] = 0
     assert selection_refusal(**everything) == (
         "These picks are on Grid A and Grid B. "
         "A surface comes from one grid; select picks on one grid only."
@@ -85,6 +83,12 @@ def test_selection_refusals_come_in_order():
     assert "straight line" in selection_refusal(**{**ok, "n": 2})
     # a pick that cannot be placed comes before the grids check
     assert "not on a line of a grid" in selection_refusal(**{**everything, "no_grid": 1})
+    # picks on a deleted cut are told so, ahead of the generic no-grid wording
+    gone = selection_refusal(**{**everything, "deleted_cut": 1, "no_grid": 1})
+    assert gone == "1 of these picks is on a cut that has been deleted, so it cannot be placed."
+    assert "2 of these picks are on a cut that has been deleted, so they" in selection_refusal(
+        **{**everything, "deleted_cut": 2}
+    )
     # adding to a surface needs no area of its own
     assert selection_refusal(**{**ok, "n": 1, "spans_area": True, "minimum": 1}) == ""
 
@@ -118,13 +122,12 @@ def test_remove_and_delete_wording():
 
 
 def test_unreadable_picks_have_their_own_wording_and_come_after_unsaved():
-    base = {"n": 5, "unsaved": 0, "on_cuts": 0, "grids": {"A"}, "spans_area": True}
+    base = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
     assert selection_refusal(**base, unreadable=1) == (
         "1 of these picks has no trace or time; edit or delete it in the picks layer."
     )
     assert "3 of these picks have no trace or time" in selection_refusal(**base, unreadable=3)
     assert selection_refusal(**{**base, "unsaved": 1}, unreadable=2).startswith("Save")
-    assert "cut" not in selection_refusal(**{**base, "on_cuts": 2}, unreadable=1)
 
 
 def test_stale_text_names_every_reason():
@@ -263,6 +266,20 @@ def test_the_dialog_and_panel_wording():
         "88 picks selected, all on Grid 1 (lines F__020 to F__033)."
     )
     assert selection_label(5, None, []) == "5 picks selected."
+    # cuts are named as cuts, never in the line range
+    assert selection_label(4, "1", ["F__001"], ["Cut 1"]) == (
+        "4 picks selected, all on Grid 1 (line F__001; cut Cut 1)."
+    )
+    assert selection_label(4, "1", ["F__001"], [], 1) == (
+        "4 picks selected, all on Grid 1 (line F__001; a deleted cut)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"], 2) == (
+        "2 picks selected, all on Grid 1 (cut Cut 1; 2 deleted cuts)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"]) == "2 picks selected, all on Grid 1 (cut Cut 1)."
+    assert selection_label(3, "1", ["F__001", "F__003"], ["Cut 2", "Cut 1"]) == (
+        "3 picks selected, all on Grid 1 (lines F__001 to F__003; cuts Cut 1, Cut 2)."
+    )
     assert settings_summary(SurfaceSettings()) == (
         "smooth join · window ±2 cm · strength 1.0 × typical · no smoothing"
     )
@@ -346,3 +363,35 @@ def test_remembered_step_is_the_export_dialogs_four_decimals():
     assert remembered_step(0.21653124690055847) == 0.2165
     assert remembered_step(0.00004) == 0.00004  # rounding to nothing keeps the step
     assert remembered_step(remembered_step(0.07812)) == 0.0781
+
+
+def test_cut_picks_are_no_longer_refused():
+    refusal = selection_refusal(n=5, unsaved=0, grids={"A"}, spans_area=True)
+    assert "cut" not in (refusal or "")
+    assert "cut" not in selection_refusal(
+        n=5, unsaved=0, grids={"A"}, spans_area=True, unreadable=1
+    )
+
+
+def _pick(**kw):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**kw)
+
+
+def test_a_cut_picks_time_base_comes_from_its_provenance():
+    assert cut_pick_base(_pick(stack_json='{"time_base": "time_zero"}')) == "time_zero"
+    assert cut_pick_base(_pick(stack_json="")) == "radar"
+    assert cut_pick_base(_pick(stack_json="not json")) == "radar"
+    assert cut_pick_base(_pick(stack_json='{"other": 1}')) == "radar"
+    assert cut_pick_base(_pick(stack_json="[1]")) == "radar"
+
+
+def test_a_cut_pick_is_on_the_clock_when_it_has_a_distance_and_the_presets_base():
+    zero = [{"step": "time_zero"}]  # a preset that sets time zero
+    z = _pick(distance_m=3.0, stack_json='{"time_base": "time_zero"}')
+    r = _pick(distance_m=3.0, stack_json='{"time_base": "radar"}')
+    none = _pick(distance_m=None, stack_json='{"time_base": "time_zero"}')
+    none_r = _pick(distance_m=None, stack_json='{"time_base": "radar"}')
+    assert [cut_pick_on_clock(p, zero) for p in (z, r, none, none_r)] == [True, False, False, False]
+    assert [cut_pick_on_clock(p, []) for p in (z, r, none, none_r)] == [False, True, False, False]
