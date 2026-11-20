@@ -2,13 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from nsgeo.vtkxml import (
-    image_data_bytes,
-    structured_grid_bytes,
-    write_image_data,
-    write_poly_data,
-    write_structured_grid,
-)
+from nsgeo.vtkxml import image_data_bytes, write_image_data, write_poly_data
 
 from tests.vtk_reader import read_vtk_xml
 
@@ -92,31 +86,3 @@ def test_image_data_bytes_is_within_the_header_allowance_of_the_file(tmp_path):
     size = (tmp_path / "c.vti").stat().st_size
     bound = image_data_bytes((4, 3, 2), 2)
     assert bound - 4096 <= size <= bound
-
-
-def test_structured_grid_round_trips_and_its_size_estimate_is_a_tight_upper_bound(tmp_path):
-    pts = np.random.default_rng(0).random((4, 5, 3))
-    amp = np.arange(20.0).reshape(4, 5)
-    n = write_structured_grid(tmp_path / "w.vts", pts, {"amplitude": amp})
-    doc = read_vtk_xml(tmp_path / "w.vts")
-    assert np.allclose(doc["points"].reshape(4, 5, 3), pts, atol=1e-6)
-    assert np.allclose(doc["point_data"]["amplitude"].reshape(4, 5), amp)
-    assert doc["WholeExtent"] == (0, 4, 0, 3, 0, 0)
-    assert doc["points"].dtype == np.float32 and doc["point_data"]["amplitude"].dtype == np.float32
-    size = (tmp_path / "w.vts").stat().st_size
-    assert n == size
-    # the estimate is the payload plus the header allowance (as image_data_bytes is):
-    # never short, and never off by more than the allowance
-    est = structured_grid_bytes(20, 1)
-    assert est == (8 + 12 * 20) + (8 + 4 * 20) + 4096
-    assert size <= est and est - size < 4096
-    assert not (tmp_path / "w.vts.part").exists()
-
-
-def test_a_structured_grid_array_of_the_wrong_size_is_refused_and_leaves_no_file(tmp_path):
-    pts = np.zeros((4, 5, 3))
-    with pytest.raises(ValueError):
-        write_structured_grid(tmp_path / "w.vts", pts, {"amplitude": np.zeros((5, 4))})
-    with pytest.raises(ValueError):
-        write_structured_grid(tmp_path / "w.vts", np.zeros((4, 5, 2)), {})
-    assert list(tmp_path.iterdir()) == []

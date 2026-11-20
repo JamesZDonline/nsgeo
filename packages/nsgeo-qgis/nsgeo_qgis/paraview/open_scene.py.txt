@@ -166,18 +166,6 @@ for f in FEATURES:
     Hide(thr, view)
     surface_items.append((thr, thr_d))
 
-# ---------------------------------------------------------------- walls under lines and cuts
-# One curtain per line and per cut, hidden at first, coloured like the slices (the
-# amplitude colours are set below). Names come from export.json and are only ever handed
-# to ParaView as data, never as code.
-for w in INFO["walls"]:
-    label = ("Wall: " if w["kind"] == "line" else "Cut: ") + str(w["name"])
-    wall = XMLStructuredGridReader(registrationName=label, FileName=[path(w["file"])])
-    wall_d = Show(wall, view)
-    ColorBy(wall_d, ("POINTS", "amplitude"))
-    try_set(wall_d, Ambient=1.0, Diffuse=0.0)  # flat colours, no shading
-    Hide(wall, view)
-
 # ---------------------------------------------------------------- colours, set last so nothing rescales them
 str_lut = GetColorTransferFunction("strength")
 apply_preset(str_lut, "Inferno", "Inferno (matplotlib)")

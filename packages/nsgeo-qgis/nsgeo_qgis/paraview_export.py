@@ -47,23 +47,18 @@ from nsgeo.processing import (
     time_base_of,
 )
 from nsgeo.slices import (
-    SQUARED_TRANSFORM,
     CubeFrame,
     PreparedLine,
     VolumeStopped,
     ZAxis,
     build_cube,
-    cut_wall,
     fill_levels,
-    line_wall,
     plan_fill,
     plan_line,
     prepare_volume,
     surface_mesh,
-    wall_amplitude,
-    wall_points,
 )
-from nsgeo.vtkxml import write_image_data, write_poly_data, write_structured_grid
+from nsgeo.vtkxml import write_image_data, write_poly_data
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -95,7 +90,6 @@ from nsgeo_qgis.slices_plan import (
     smallest_safe_cell,
     too_fine_for_export,
     volume_choice,
-    walls_size,
 )
 from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
@@ -197,27 +191,6 @@ def _slab_levels(cells: int, window: int) -> int:
 
 def _spans(n: int, step: int) -> list[tuple[int, int]]:
     return [(j, min(j + step, n)) for j in range(0, n, step)]
-
-
-def _total_bytes(frame: CubeFrame, nd: int, walls_bytes: int) -> int:
-    """`cube.vti` and the walls: the one sum the dialog's figure and the run's refusal share."""
-    return export_size_bytes(frame.nx, frame.ny, nd) + walls_bytes
-
-
-@dataclass(frozen=True)
-class _Sizes:
-    """What `estimate` and `summary` both work from."""
-
-    frame: CubeFrame
-    source: SourceChoice
-    nd: int
-    t1: float
-    n_walls: int
-    walls_bytes: int
-
-    @property
-    def total_bytes(self) -> int:
-        return _total_bytes(self.frame, self.nd, self.walls_bytes)
 
 
 @dataclass(frozen=True)
@@ -370,36 +343,14 @@ class ParaViewExport:
 
     # ---- the size, before anything is prepared ----------------------------
     def estimate(self, grid_id: str, choice: VolumeChoice) -> int:
-        """About how many bytes the export will take: `cube.vti` and the walls. Cheap, and
-        prepares nothing: it reads the panel's engine when that matches, else the first line's
-        header and, for a preset that sets time zero, a probe of where that first line's zero
-        falls."""
-        return self._sizes(grid_id, choice).total_bytes
-
-    def _sizes(self, grid_id: str, choice: VolumeChoice) -> _Sizes:
-        """The one computation of the size, which `estimate` and `summary` both read."""
+        """About how many bytes `cube.vti` will take. Cheap, and prepares nothing: it reads
+        the panel's engine when that matches, else the first line's header and, for a preset
+        that sets time zero, a probe of where that first line's zero falls."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
         t0, t1 = self._time_range(source, choice)
         _z, nd = _levels(t0, t1, choice)
-        n_walls, walls_bytes = self._walls_size(grid_id, frame, nd, source.line_keys)
-        return _Sizes(frame, source, nd, t1, n_walls, walls_bytes)
-
-    def _cut_paths(self, grid_id: str, frame: CubeFrame) -> list[np.ndarray]:
-        """Each cut of the grid as a path in the frame's metres, in the cuts' order."""
-        grid = self.session.grid(grid_id)
-        return [
-            frame.to_local(grid.to_world(np.asarray(self.session.cut_for_key(k).vertices, float)))
-            for k in self.session.cut_keys_on_grid(grid_id)
-        ]
-
-    def _walls_size(
-        self, grid_id: str, frame: CubeFrame, nd: int, line_keys: Sequence[str]
-    ) -> tuple[int, int]:
-        """`(walls, bytes)` for these lines and the grid's cuts, each on the cube's `nd` depth
-        levels, from their headers and vertices."""
-        traces = [self.session.line_for_key(k).n_traces for k in line_keys]
-        return walls_size(nd, traces, self._cut_paths(grid_id, frame), frame.cell)
+        return export_size_bytes(frame.nx, frame.ny, nd)
 
     def panel_values(self, grid_id: str) -> tuple[float | None, float, float | None]:
         """`(the Slices panel's cell for this grid or None, the files' own depth step in ns,
@@ -424,9 +375,10 @@ class ParaViewExport:
         `estimate` and `cache_bytes`, which it uses) and prepares nothing, so a dialog can
         call it on every edit. Raises the same ValueError as `estimate` for a cell that is
         too fine, or a grid that cannot be exported."""
-        sizes = self._sizes(grid_id, choice)
-        frame, source, nd, t1 = sizes.frame, sizes.source, sizes.nd, sizes.t1
-        n_walls, walls_bytes = sizes.n_walls, sizes.walls_bytes
+        frame = self._frame(grid_id, choice)
+        source = self._source(grid_id, choice)
+        t0, t1 = self._time_range(source, choice)
+        _z, nd = _levels(t0, t1, choice)
         velocity = self.session.grid_depth_velocity(grid_id)
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
@@ -454,11 +406,9 @@ class ParaViewExport:
             n_lines=len(source.line_keys),
             n_surfaces=len(states),
             n_stale_surfaces=sum(1 for st in states if st.stale),
-            export_bytes=sizes.total_bytes,
+            export_bytes=self.estimate(grid_id, choice),
             cache_bytes=self.cache_bytes(grid_id, choice),
             free_bytes=int(shutil.disk_usage(Path(self.session.root)).free),
-            n_walls=n_walls,
-            walls_bytes=walls_bytes,
         )
 
     def _surface_states(self, grid_id: str) -> list[Any]:
@@ -738,7 +688,7 @@ class ParaViewExport:
         paraview_path: str = "",
     ) -> Path:
         """Write the grid's folder and return it. `progress(done, total)` counts the fill
-        levels, the volume's trend slabs, the written slabs and the walls; False cancels
+        levels, the volume's trend slabs and the written slabs; False cancels
         (ParaViewExportCancelled) and leaves any earlier export as it was."""
         grid = self.session.grid(grid_id)
         folder = paraview_folder(self.session, grid_id)
@@ -759,10 +709,7 @@ class ParaViewExport:
         def announce(frame: CubeFrame, z: ZAxis) -> None:
             window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
             spans.extend(_spans(_depth_levels(z), _slab_levels(frame.n_cells, window)))
-            walled = len(self._source(grid_id, choice).line_keys) - len(self.skipped_lines)
-            state["total"] = (
-                z.nz + 3 * len(spans) + walled + len(self.session.cut_keys_on_grid(grid_id))
-            )
+            state["total"] = z.nz + 3 * len(spans)
 
         try:
             got = self._fill_grid(grid_id, choice, step, announce)
@@ -781,10 +728,8 @@ class ParaViewExport:
                 slab_levels=slab,
                 progress=lambda done, n: tick_trend(),
             )
-            _n, walls_bytes = self._walls_size(grid_id, frame, nd, [ln.key for ln in lines])
             reason = export_refusal(
-                _total_bytes(frame, nd, walls_bytes),
-                shutil.disk_usage(cache_dir).free,
+                export_size_bytes(frame.nx, frame.ny, nd), shutil.disk_usage(cache_dir).free
             )
             if reason:
                 raise ValueError(reason)
@@ -807,7 +752,6 @@ class ParaViewExport:
             )
             features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
-            walls = self._write_walls(partial, got, grid_id, cut_keys, choice, window, step)
             cuts = [
                 {"index": i, "key": k, "name": self.session.cut_for_key(k).name}
                 for i, k in enumerate(cut_keys)
@@ -825,7 +769,6 @@ class ParaViewExport:
                 n_picks,
                 features,
                 cuts,
-                walls,
             )
             record["skipped_lines"] = list(self.skipped_lines)
             write_scene_files(partial, record, paraview_path)
@@ -1180,64 +1123,6 @@ class ParaViewExport:
         cells.append([count, count + 1, count + 2, count + 3, count])
         write_poly_data(folder / "lines.vtp", np.vstack(pts), {}, lines=cells)
 
-    def _write_walls(
-        self,
-        folder: Path,
-        got: FilledGrid,
-        grid_id: str,
-        cut_keys: Sequence[str],
-        choice: VolumeChoice,
-        window: int,
-        step: Callable[[int], None],
-    ) -> list[dict[str, Any]]:
-        """walls/<n>.vts: a curtain under each line (in key order) and then each cut, on
-        exactly the levels `cube.vti` keeps (from time zero on), at true depth times the
-        stretch. Its `amplitude` is on the cube's amplitude scale (RMS over the same
-        `window`, `wall_amplitude`), so it agrees with the slices. Returns
-        export.json's `walls`. A wall that cannot be made (a line of one trace, a cut of no
-        length) is logged and left out. One progress step each, made or not; the cube is read
-        level by level from its map, never copied."""
-        walls_dir = folder / "walls"
-        walls_dir.mkdir()
-        first = got.z.nz - _depth_levels(got.z)  # the levels before time zero are not kept
-        depth = got.velocity.depth_at(got.z.times_ns())[first:]
-        squared = str(got.prov.transform) == SQUARED_TRANSFORM
-        stretch = choice.stretch
-        made: list[dict[str, Any]] = []
-
-        def one(name: str, kind: str, make: Callable[[], Any], scale: Callable[[Any], Any]) -> None:
-            step(1)
-            try:
-                bare = make()
-            except (ValueError, OverflowError) as exc:
-                _log(f"ParaView export: no wall for {kind} {name!r}: {exc}")
-                return
-            wall = scale(bare)  # outside the try: a bug here fails the export
-            index = len(made)
-            file = f"walls/{index}.vts"
-            write_structured_grid(
-                folder / file,
-                wall_points(wall, depth, stretch),
-                {"amplitude": wall.values},
-            )
-            made.append({"index": index, "name": name, "kind": kind, "file": file})
-
-        for line in sorted(got.lines, key=lambda ln: ln.key):
-            one(
-                Path(line.key).stem,
-                "line",
-                lambda line=line: line_wall(line, got.frame, got.z),
-                lambda w: wall_amplitude(w, window, squared=squared, first=first),
-            )
-        for key, path in zip(cut_keys, self._cut_paths(grid_id, got.frame)):
-            one(
-                self.session.cut_for_key(key).name,
-                "cut",
-                lambda path=path: cut_wall(got.filled, got.frame, path),
-                lambda w: wall_amplitude(w, window, squared=True, first=first),
-            )
-        return made
-
     def _record(
         self,
         grid: Any,
@@ -1252,7 +1137,6 @@ class ParaViewExport:
         n_picks: int,
         features: list[dict[str, Any]],
         cuts: list[dict[str, Any]],
-        walls: list[dict[str, Any]],
     ) -> dict[str, Any]:
         depths = vol.depths_m
         local = [frame.to_local(line.coords) for line in lines]
@@ -1301,7 +1185,6 @@ class ParaViewExport:
             n_picks=int(n_picks),
             features=features,
             cuts=cuts,
-            walls=walls,
             nsgeo_version=str(nsgeo.__version__),
             written_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )

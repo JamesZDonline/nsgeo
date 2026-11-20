@@ -210,7 +210,7 @@ On main (414b6aa or later):
    The Slices panel's scope, grid and resolution never make a surface stale. Rebuilding is always explicit, so a scene never changes during a presentation. Stale surfaces keep showing their last build, labelled as stale.
 10. **One grid per feature.** A surface needs at least 3 picks that are not in a straight line. Picks from two grids are refused with a message.
 11. **QGIS's 3-D view shows the scene grid's picks and surfaces, with the stretch in its title.**
-    - It shows no slice and no walls, since ParaView does both better.
+    - It shows no slice, since ParaView does that better.
     - It opens from a **3D view** toolbar button that is greyed out until a site is open.
     - nsgeo only adds layers and sets renderers, so an engine change in QGIS doesn't reach it.
 12. **On the 2-D map, a surface is a layer coloured by depth,** with one ramp per grid so depths compare. This is the map form of the 3-D surface.
@@ -267,7 +267,7 @@ The builder chooses how to cache it (§11).
 | `picks.vtp` | The grid's picks at their depths, with `true_depth_m`, `line` and `feature`. |
 | `lines.vtp` | The survey lines at ground level, plus the grid outline. |
 | `features.vtp` | The grid's built surfaces, with `true_depth_m`, `feature` and a stale flag. Stale features are included and labelled. |
-| `walls.vts` (Plan D) | Lines and cuts standing as curtains, coloured by amplitude. |
+| ~~`walls.vts` (Plan D)~~ | Dropped after Plan D's walkthrough (see §5.5). |
 | `open_scene.py` | The ParaView setup script. |
 | `open.sh` / `open.bat` | Launchers that pass the folder in. |
 | `README.md` | A one-page guide, adapted from the trial's `THINGS-TO-TRY.md`. |
@@ -335,7 +335,8 @@ You can add picks to a surface, remove them, change its parameters, rebuild it, 
 ### 5.5 Cuts (Plan D, after M15 merges)
 
 - Picks on cuts can join surfaces, exactly like picks on lines.
-- The export gains `walls.vts`: every line, and every saved cut on the grid, as a curtain coloured like the profile view. They are hidden at first in the scene, one item each.
+- ~~The export gains `walls.vts`: every line, and every saved cut on the grid, as a curtain coloured like the profile view. They are hidden at first in the scene, one item each.~~
+  **Dropped after Plan D's walkthrough (2026-11-19).** Walls were built (coloured like the slices, at the author's choice) and shown in ParaView. The author found they added little over the cut in the Profile panel, rendered poorly and crowded the Pipeline Browser. They are recoverable from commits e987486, 501f0c5, e896885 and 463bdf7 on branch nsgeo-m16-d (decision record `docs/superpowers/sdd/2026-11-16-nsgeo-m16-d-cuts/`).
 
 ---
 
@@ -398,7 +399,7 @@ Each plan has 3–6 tasks.
 | **A. Prepared volume and Export for ParaView** | Core volume (§5.1); VTK writers; scene script and guide; the export task and the launch setting; the 3-D fill spike (call 16) | No |
 | **B. Surfaces from picks** | `features` table and membership; the core builder (§5.3); the feature list, after its mockup review; surfaces in the export; the 2-D depth layer | No |
 | **C. QGIS 3-D view** | The 3D view button, picks and surfaces at depth, live updates, labelled stretch | No |
-| **D. Cuts** | Picks on cuts join surfaces; walls in the export | Yes (after M15 merges) |
+| **D. Cuts** | Picks on cuts join surfaces (walls dropped, §5.5) | Yes (after M15 merges) |
 
 **Order:** A, B, C, then D.
 

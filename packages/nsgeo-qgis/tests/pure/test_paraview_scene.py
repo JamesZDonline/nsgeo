@@ -440,32 +440,3 @@ def test_scene_record_validates_cuts():
         scene_record(**{**FIELDS, "cuts": [{**entry, "index": 1}]})
     with pytest.raises(ValueError):
         scene_record(**{**FIELDS, "cuts": "Cut 1"})
-
-
-def test_scene_record_validates_walls():
-    assert scene_record(**FIELDS)["walls"] == []
-    line = {"index": 0, "name": "FILE__001", "kind": "line", "file": "walls/0.vts"}
-    cut = {"index": 1, "name": 'a "quoted"/cut é', "kind": "cut", "file": "walls/1.vts"}
-    assert scene_record(**{**FIELDS, "walls": [line, cut]})["walls"] == [line, cut]
-    for bad in (
-        [{**line, "extra": 1}],  # a key too many
-        [{k: v for k, v in line.items() if k != "file"}],  # a key too few
-        [{**line, "index": 1}],  # not numbered from 0
-        [{**line, "kind": "slab"}],  # neither a line nor a cut
-        [{**line, "file": "walls/7.vts"}],  # the file is named by the index
-        [line, {**cut, "index": 0, "file": "walls/0.vts"}],  # numbered twice
-        "FILE__001",
-    ):
-        with pytest.raises(ValueError):
-            scene_record(**{**FIELDS, "walls": bad})
-
-
-def test_summary_rows_name_the_walls_and_their_size():
-    from nsgeo_qgis.paraview_scene import summary_rows
-
-    rows = dict(summary_rows(_summary(n_walls=34, walls_bytes=76_000_000)))
-    assert rows["Also"] == "1 pick, 4 lines, 34 walls, about 76 MB"
-    assert dict(summary_rows(_summary(n_walls=1, walls_bytes=2_000_000)))["Also"].endswith(
-        "1 wall, about 2 MB"
-    )
-    assert dict(summary_rows(_summary()))["Also"] == "1 pick, 4 lines"  # no walls, none said

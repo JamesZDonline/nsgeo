@@ -772,7 +772,6 @@ The folder is `paraview/<grid>/` in the site folder. It holds:
 | `cube.vti` | The block: strength, amplitude and true depth. |
 | `picks.vtp` | Your picks, in 3-D. |
 | `lines.vtp` | The recorded lines at ground level, and the grid's outline. |
-| `walls/` | Walls: every line in the cube and every cut, as a curtain coloured like the slices (black is strong), one item each, hidden at first. |
 | `export.json` | Every number the scene needs. |
 | `open_scene.py`, `open.sh`, `open.bat`, `README.md` | The scene, its launchers, and notes. |
 
@@ -863,7 +862,7 @@ closing it never marks the site changed.
 - **Which picks.** The grid's picks on its lines, and its picks on cuts as long as they
   were made on the clock the grid's preset uses now. Picks on lines you left out of the
   grid's slices (**Choose lines…**) are not shown.
-- **What it leaves out.** It shows no slices and no walls. ParaView does those better
+- **What it leaves out.** It shows no slices. ParaView does those better
   (see [Step 9](#step-9-export-for-paraview)).
 - **QGIS's own controls.** Rotating, zooming and **Save as image** are QGIS's, not
   nsgeo's.
