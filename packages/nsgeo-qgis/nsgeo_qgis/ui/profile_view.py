@@ -418,6 +418,22 @@ class ProfileView(QWidget):
         self.view_changed.emit()
         self.update()
 
+    def fit_width(self) -> None:
+        """Every trace across; the time zoom is kept."""
+        if self.transform is None:
+            return
+        self.transform = self.transform.fit_width()
+        self.view_changed.emit()
+        self.update()
+
+    def fit_height(self) -> None:
+        """The whole record down; the zoom along the line is kept."""
+        if self.transform is None:
+            return
+        self.transform = self.transform.fit_height()
+        self.view_changed.emit()
+        self.update()
+
     def one_to_one(self) -> None:
         """One trace per pixel column, anchored at the current window's left."""
         if self.transform is None:

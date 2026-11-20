@@ -346,3 +346,26 @@ def test_traces_between_agrees_with_trace_at_on_column_boundaries():
             c = t.trace_at(float(px))
             assert t.traces_between(float(px), float(px)) == (c, c)
     assert FIT.traces_between(0.0, FIT.x_of_trace(19)) == (0, 19)
+
+
+def _w():
+    return ViewTransform.fit(200, 128, 0.0, 0.25, 696, 264).with_window(50.0, 100.0, 4.0, 12.0)
+
+
+def test_fit_width_shows_every_trace_and_keeps_the_time_window():
+    t = _w().fit_width()
+    assert (t.trace_lo, t.trace_hi) == (0.0, 200.0)
+    assert (t.time_lo, t.time_hi) == pytest.approx((4.0, 12.0))
+
+
+def test_fit_height_shows_the_whole_record_and_keeps_the_trace_window():
+    t = _w().fit_height()
+    assert (t.trace_lo, t.trace_hi) == pytest.approx((50.0, 100.0))
+    assert (t.time_lo, t.time_hi) == pytest.approx((0.0, 32.0))
+
+
+def test_fit_width_on_a_mirrored_ruler_shows_the_ruler():
+    w = ViewTransform.fit(200, 128, 0.0, 0.25, 696, 264, bounds=(-20.0, 260.0), mirrored=True)
+    t = w.with_window(40.0, 90.0, 4.0, 12.0).fit_width()
+    assert (t.trace_lo, t.trace_hi) == (-20.0, 260.0) and t.mirrored
+    assert (t.time_lo, t.time_hi) == pytest.approx((4.0, 12.0))

@@ -2106,3 +2106,15 @@ def test_a_constant_distance_axis_drops_the_ruler_instead_of_raising(make_view):
     assert v.ruler is None
     t = v.transform
     assert (t.trace_lo, t.trace_hi) == (0.0, 30.0)
+
+
+def test_fit_width_and_fit_height_emit_view_changed_once(view):
+    v, _ = view
+    r = v.image_rect()
+    v.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    seen = []
+    v.view_changed.connect(lambda: seen.append(1))
+    v.fit_width()
+    assert len(seen) == 1
+    v.fit_height()
+    assert len(seen) == 2

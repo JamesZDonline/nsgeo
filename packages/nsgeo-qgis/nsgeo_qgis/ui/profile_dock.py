@@ -114,10 +114,12 @@ from qgis.core import Qgis, QgsSettings
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QAction,
     QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSlider,
     QToolButton,
@@ -401,8 +403,20 @@ class ProfileDock(QgsDockWidget):
         # any of this: a plain `QLabel`, immediately before `fit_button`.
         self.difference_label = QLabel("")
         bar.addWidget(self.difference_label)
-        self.fit_button = QPushButton("Fit")
-        self.one_to_one_button = QPushButton("1:1")
+        self.fit_button = QToolButton()
+        self.fit_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.fit_menu = QMenu(self.fit_button)
+        self.fit_all_action = self.fit_menu.addAction("Fit")
+        self.fit_all_action.setToolTip("The whole line across and the whole record down")
+        self.fit_width_action = self.fit_menu.addAction("Fit width")
+        self.fit_width_action.setToolTip("The whole line across; keeps the time zoom")
+        self.fit_height_action = self.fit_menu.addAction("Fit height")
+        self.fit_height_action.setToolTip("The whole record down; keeps the zoom along the line")
+        self.fit_button.setMenu(self.fit_menu)
+        # Not remembered between sessions: a new dock starts with Fit.
+        self.fit_button.setDefaultAction(self.fit_all_action)
+        self.one_to_one_button = QToolButton()
+        self.one_to_one_button.setText("1:1")
         bar.addWidget(self.fit_button)
         bar.addWidget(self.one_to_one_button)
         self.slice_band_button = QToolButton()
@@ -415,9 +429,15 @@ class ProfileDock(QgsDockWidget):
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)
-        bar.addStretch(1)
-        self.velocity_label = QLabel("")
-        bar.addWidget(self.velocity_label)
+        # Deferred: slices_dock imports grid_velocity_label from this module,
+        # so a module-level import of ElidedLabel would be circular.
+        from nsgeo_qgis.ui.slices_dock import ElidedLabel
+
+        self.velocity_label = ElidedLabel("")
+        self.velocity_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        bar.addWidget(self.velocity_label, 1)
         layout.addLayout(bar)
         # Parented to `body`, which this dock owns via setWidget() below --
         # not a top-level, parentless widget the way a naive test fixture
@@ -463,8 +483,11 @@ class ProfileDock(QgsDockWidget):
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
         self.colormap_combo.currentTextChanged.connect(self._display_changed)
-        self.fit_button.clicked.connect(self.view.fit)
         self.one_to_one_button.clicked.connect(self.view.one_to_one)
+        self.fit_all_action.triggered.connect(self.view.fit)
+        self.fit_width_action.triggered.connect(self.view.fit_width)
+        self.fit_height_action.triggered.connect(self.view.fit_height)
+        self.fit_menu.triggered.connect(self._on_fit_picked)
         self.slice_band_button.toggled.connect(self._on_slice_band_toggled)
         self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.view.trace_hovered.connect(self._hovered)
@@ -1849,6 +1872,13 @@ class ProfileDock(QgsDockWidget):
         has_window = self._slice_band is not None
         self.slice_band_button.setEnabled(has_window)
         self.slice_band_button.setToolTip(SLICE_BAND_TIP if has_window else SLICE_BAND_GREYED_TIP)
+
+    def _on_fit_picked(self, action: QAction) -> None:
+        """The Fit button repeats whichever fit was picked last."""
+        try:
+            self.fit_button.setDefaultAction(action)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not change the Fit button: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_slice_band_toggled(self, checked: bool) -> None:
         try:

@@ -674,11 +674,13 @@ def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
     `difference_label` is back to a plain, unreserved `QLabel`, and there
     is no preview label in the row at all any more.
 
-    Re-pinned for spec section 4.1, which adds the Slice band button
-    (measured 766px here); the bound is now 800 and Task 2 tightens it."""
+    Re-pinned for spec section 4.1: the Slice band button took the row to
+    766px, then the velocity label became an eliding one (it asks for no
+    width) and Fit became a split button; measured now 684px, so the bound
+    is 690 (the measurement rounded up to the next 10px)."""
     session = SiteSession()
     dock = ProfileDock(session)
-    assert dock.minimumSizeHint().width() <= 800
+    assert dock.minimumSizeHint().width() <= 690
     dock.hide()
     dock.deleteLater()
 
@@ -2486,3 +2488,57 @@ def test_a_missing_velocity_on_a_line_clears_the_depth_axis(opened, monkeypatch)
     dock._refresh_velocity()
     assert dock.view.depth_tick_labels() == []
     assert dock.velocity_label.text() == ""
+
+
+def test_fit_width_and_fit_height_from_the_menu(opened):
+    session, dock, key, line = opened
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_width_action.trigger()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == pytest.approx((z.time_lo, z.time_hi))
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_height_action.trigger()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx((z.trace_lo, z.trace_hi))
+    assert (t.time_lo, t.time_hi) == pytest.approx((t.t0_ns, t.t_end))
+
+
+def test_the_fit_button_repeats_the_last_pick(opened):
+    session, dock, key, line = opened
+    dock.fit_width_action.trigger()
+    # QAction.trigger() on a menu action emits the menu's triggered signal.
+    assert dock.fit_button.text() == "Fit width"
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_button.click()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == pytest.approx((z.time_lo, z.time_hi))
+
+
+def test_a_new_dock_starts_with_fit(opened):
+    session, dock, key, line = opened
+    dock.fit_height_action.trigger()
+    other = ProfileDock(session)
+    try:
+        assert other.fit_button.text() == "Fit"
+    finally:
+        other.deleteLater()
+
+
+def test_the_toolbar_fits_the_users_panel_in_the_worst_case(opened):
+    # 1361 px wide, a long Difference label and a velocity label naming its fits.
+    session, dock, key, line = opened
+    dock.resize(1361, 448)
+    dock.difference_label.setText("Difference: Background removal (sliding)")
+    dock.velocity_label.setText("v = 0.100 m/ns (Grid A, average of 6 fits)")
+    QTest.qWait(50)
+    assert dock.widget().minimumSizeHint().width() <= 1361
+    for b in (dock.fit_button, dock.one_to_one_button, dock.slice_band_button):
+        assert b.geometry().right() < dock.widget().width()
+    assert dock.velocity_label.text() == "v = 0.100 m/ns (Grid A, average of 6 fits)"

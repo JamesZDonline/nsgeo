@@ -210,6 +210,15 @@ class ViewTransform:
             )
         return replace(self, trace_lo=lo, trace_hi=lo + t_span, time_lo=tlo, time_hi=tlo + s_span)
 
+    def fit_width(self) -> ViewTransform:
+        """Every trace across (the whole ruler when there is one); the time window is kept."""
+        blo, bhi = self.trace_bounds
+        return self.with_window(blo, bhi, self.time_lo, self.time_hi)
+
+    def fit_height(self) -> ViewTransform:
+        """The whole record down; the trace window is kept."""
+        return self.with_window(self.trace_lo, self.trace_hi, self.t0_ns, self.t_end)
+
     def zoomed(self, factor: float, anchor_x: float, anchor_y: float) -> ViewTransform:
         """Scale both spans by 1/factor keeping the data point under the
         anchor pixel fixed. Clamped by with_window."""
