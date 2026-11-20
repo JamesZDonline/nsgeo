@@ -2528,6 +2528,11 @@ def test_a_missing_velocity_on_a_line_clears_the_depth_axis(opened, monkeypatch)
     assert dock.velocity_label.text() == ""
 
 
+def test_the_fit_menu_shows_its_tooltips(opened):
+    session, dock, key, line = opened
+    assert dock.fit_menu.toolTipsVisible()
+
+
 def test_fit_width_and_fit_height_from_the_menu(opened):
     session, dock, key, line = opened
     r = dock.view.image_rect()
@@ -2618,6 +2623,7 @@ def test_depth_is_greyed_in_the_menu_without_a_velocity(opened, monkeypatch):
     dock._on_axis_menu_requested("left", QPoint(0, 0))
     try:
         depth = next(a for a in dock.axis_menu.actions() if a.data() == "m")
+        assert dock.axis_menu.toolTipsVisible()
         assert not depth.isEnabled()
         assert depth.toolTip() == "Depth needs a velocity for this line"
     finally:

@@ -2224,10 +2224,10 @@ def test_depth_ticks_start_at_zero_on_a_shifted_clock(make_view):
     v = make_view()
     v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
-    v.set_axes(200, 128, -4.0, 0.25)
+    v.set_axes(200, 128, -10.0, 0.25)  # depths would span [-0.5, 1.1]
     v.set_velocity(VelocityModel.constant(0.1))
     ticks = v._axis_ticks("m", v.transform)
-    assert ticks
+    assert [label for label, _ in ticks] == ["0", "0.2", "0.4", "0.6", "0.8", "1"]
     # no depth is drawn above time 0
     assert min(y for _, y in ticks) >= v.transform.y_of_time(0.0) - 1e-6
 

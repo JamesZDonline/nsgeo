@@ -411,6 +411,7 @@ class ProfileDock(QgsDockWidget):
         self.fit_button = QToolButton()
         self.fit_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.fit_menu = QMenu(self.fit_button)
+        self.fit_menu.setToolTipsVisible(True)
         self.fit_all_action = self.fit_menu.addAction("Fit")
         self.fit_all_action.setToolTip("The whole line across and the whole record down")
         self.fit_width_action = self.fit_menu.addAction("Fit width")
@@ -1913,6 +1914,7 @@ class ProfileDock(QgsDockWidget):
                 self.axis_menu.hide()
                 self.axis_menu.deleteLater()
             menu = QMenu(self.view)
+            menu.setToolTipsVisible(True)
             current = self.view.axis_units[0 if side == "left" else 1]
             for text, unit in (("Time (ns)", "ns"), ("Samples", "sample"), ("Depth (m)", "m")):
                 action = menu.addAction(text)
