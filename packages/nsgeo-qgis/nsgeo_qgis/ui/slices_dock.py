@@ -83,6 +83,7 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     DEFAULT_CELL_M,
     DEFAULT_TRANSFORM,
+    FILL_THREAD_NAME_PREFIX,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
     MemoryEstimate,
@@ -303,6 +304,10 @@ class SlicesDock(QgsDockWidget):
         #: both scopes. `plugin.unload` shuts it down, cancelling and joining
         #: its thread, before any engine is disposed.
         self.refiner = Refiner(self)
+        #: The interpolation fills built off the GUI thread (#193), on a worker
+        #: of their own so a long fill never queues behind a refine list.
+        #: `plugin.unload` shuts it down beside `refiner`.
+        self.fill_worker = Refiner(self, thread_name_prefix=FILL_THREAD_NAME_PREFIX)
         #: This grid's side of it (plan calls 5 and 7): its rest timer, its
         #: preview, the running list's progress, and its shared stretch,
         #: `(key, limit, final)` keyed by `_stretch_key`. Built here, with the

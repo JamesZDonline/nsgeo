@@ -37,7 +37,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Protocol
 
 from nsgeo.slices import SolveStopped
@@ -119,6 +119,22 @@ class Refiner:
             self._run_list, self._generation, list(jobs), self._stop
         )
         self._poll.start(REFINE_POLL_MS)
+
+    def settle(self, timeout_s: float) -> bool:
+        """Block the GUI thread up to `timeout_s` for the running list to end.
+
+        Ended: the queue is drained now, so `on_landed` and `on_error` have run
+        before this returns, and the answer is True. Still running: False, and
+        nothing has been delivered. With no list ever started: True. A caller
+        that would rather not show a wait for a quick list uses a short budget.
+        """
+        future = self._future
+        if future is not None and not future.done():
+            wait([future], timeout=timeout_s)
+            if not future.done():
+                return False
+        self._drain()
+        return True
 
     def cancel(self) -> None:
         """The running job stops at its next iteration; nothing more of its

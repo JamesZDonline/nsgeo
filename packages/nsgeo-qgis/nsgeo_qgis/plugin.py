@@ -837,6 +837,7 @@ class NsgeoPlugin:
                 self.cut_sections.dispose()
                 self.cut_sections = None
             self.slices_dock.refiner.shutdown()
+            self.slices_dock.fill_worker.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
             # -- so nothing it owns can start or outlive the teardown.

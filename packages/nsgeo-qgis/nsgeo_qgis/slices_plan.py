@@ -93,6 +93,13 @@ REFINE_REST_MS = 300
 #: twelve stretch windows (`SITE_LIMIT_WINDOWS`) and a few recently viewed.
 SOLVED_SLICES_KEPT = 16
 
+#: How long a fill is waited for on the GUI thread before a working line shows
+#: (no flicker for a quick one), how often that line refreshes, and the
+#: name of the fill worker's thread (#193).
+FILL_BUDGET_S = 0.2
+FILL_POLL_MS = 100
+FILL_THREAD_NAME_PREFIX = "nsgeo-fill"
+
 #: The method a slow minimum-curvature slice is previewed with (plan call 5),
 #: at the same max distance, search radius and smoothing, so its blanks are
 #: the full result's.

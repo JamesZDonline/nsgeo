@@ -160,6 +160,7 @@ from nsgeo.slices import (
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis.fill_jobs import FillJob
 from nsgeo_qgis.line_edit import same_placement
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_plan import (
@@ -368,6 +369,11 @@ class SliceEngine(QObject):
         #: the kriging weights built with it (plan call 5); for any other
         #: method `preview` is None.
         self._weights: tuple[tuple[Any, ...], SliceFill, FillWeights | None] | None = None
+        #: Counts every `_drop_fill`, so a `FillJob` made before a drop can tell
+        #: it must not land (#193). `_rebuild_geometry` puts it back when the
+        #: frame is unchanged (a dz edit moves nothing a fill depends on).
+        self._fill_epoch = 0
+        self._disposed = False
         #: Slices solved on that plan, unsmoothed, least recently used first
         #: (plan call 8), keyed by `solve_key`; at most `SOLVED_SLICES_KEPT`.
         #: Written on the GUI thread only, and dropped with the plan.
@@ -1113,6 +1119,7 @@ class SliceEngine(QObject):
         # The slices solved on a kept plan stay with it: a solve depends on the
         # plan and the values alone (plan call 8).
         held = (self._weights, self._solved, self._last_solve_ms)
+        old_frame, old_epoch = self._frame, self._fill_epoch
         self._plans = None
         self._covered = None
         self._cube = None
@@ -1132,6 +1139,10 @@ class SliceEngine(QObject):
             return
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
+        if old_frame == self._frame:
+            # Nothing a fill depends on moved (a z edit): a job in flight for
+            # this frame may still land. Any other change dropped for good.
+            self._fill_epoch = old_epoch
         if held[0] is not None and held[0][0][0] == self._frame:
             self._weights, self._solved, self._last_solve_ms = held
         self._choose_mode()
@@ -1407,6 +1418,51 @@ class SliceEngine(QObject):
         self._weights = None
         self._solved = OrderedDict()
         self._last_solve_ms = None
+        self._fill_epoch += 1
+
+    def fill_key(self, finish: SliceFinish) -> tuple[Any, ...]:
+        """The key a fill built for `finish` is held under."""
+        if self._frame is None:
+            raise RuntimeError("no frame: nothing to build a fill for")
+        return self._weights_key(self._frame, self.finish_settings(finish))
+
+    def fill_held(self, coverage: np.ndarray, finish: SliceFinish) -> bool:
+        """Whether a fill for `finish` over these cells is held, so a draw
+        would build nothing. False with no frame or no choice."""
+        if self._frame is None or self._choice is None or not self.session.is_open:
+            return False
+        held = self._held_fill(coverage > 0, self._frame, self.finish_settings(finish))
+        return held is not None
+
+    def fill_job(self, coverage: np.ndarray, finish: SliceFinish) -> FillJob:
+        """A job that builds this fill off the GUI thread (#193). The held fill
+        is dropped first, as `_fill_for` does, so the memory peak is the same;
+        the job lands only while nothing it was made for has moved."""
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        assert self._choice is not None
+        self._drop_fill()
+        return FillJob(
+            self,
+            (coverage > 0).copy(),
+            frame,
+            settings,
+            self._choice.grid_id,
+            self._weights_key(frame, settings),
+            self._fill_epoch,
+        )
+
+    def _land_fill(self, job: FillJob) -> bool:
+        """Hold what `job` built, if the engine still wants it."""
+        if (
+            self._disposed
+            or job.fill is None
+            or job.epoch != self._fill_epoch
+            or job.frame != self._frame
+        ):
+            return False
+        self._weights = (job.key, job.fill, job.preview)
+        return True
 
     def _held_fill(
         self, populated: np.ndarray, frame: CubeFrame, settings: FinishSettings
@@ -1919,6 +1975,7 @@ class SliceEngine(QObject):
         # applied by anything -- exactly right for an engine that is being
         # torn down and must dispatch nothing further.
         self._dispatching = True
+        self._disposed = True
         # nsgeo-qgis fix round 1 (M11, Task 3): stop any in-flight
         # preparation FIRST. Every caller of this method before Task 3's
         # SlicesDock always called wait_for_preparation() itself before
