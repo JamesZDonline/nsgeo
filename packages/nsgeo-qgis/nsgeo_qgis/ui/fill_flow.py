@@ -59,7 +59,7 @@ class FillFlow(QObject):
         on_stretch: Callable[[Hashable, float, bool], None],
         on_cancelled: Callable[[], None],
         on_tick: Callable[[], None] | None = None,
-        on_error: Callable[[str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._worker = worker
@@ -194,12 +194,25 @@ class FillFlow(QObject):
         except Exception as exc:  # noqa: BLE001 -- the link's slot must not raise
             _log(f"could not handle a cancelled fill: {exc}")
 
-    def stop(self) -> None:
-        """A scope switch or a closed survey: cancel without the callback and
-        unlatch."""
+    def stop(self, *, keep_latch: bool = False) -> None:
+        """A scope switch, a closed survey, or work for what is no longer drawn:
+        cancel without the callback, and unlatch unless `keep_latch`."""
         self._clear()
         self._worker.cancel()
-        self._latched = False
+        if not keep_latch:
+            self._latched = False
+
+    def drop_stretch(self) -> None:
+        """The held stretch was dropped (the cube's geometry or source moved): a
+        stretch measured over what it snapshotted, running or waiting for its
+        fills, would be stored as current. Cancelled, never landed; the next
+        draw asks again."""
+        self._pending_stretch = None
+        if self._stretching:
+            self._stretching = False
+            self._worker.cancel()
+            if not self._working:
+                self._timer.stop()
 
     # ---- landings ----------------------------------------------------------
     def _clear(self) -> None:
@@ -256,12 +269,13 @@ class FillFlow(QObject):
 
     def _failed_with(self, message: str) -> None:
         try:
+            what = "fill" if self._working else "colour stretch"
             self._clear()
             self._failed = True
             if self._on_error is not None:
-                self._on_error(message)
+                self._on_error(what, message)
             else:
-                _log(f"a fill or stretch failed: {message}")
+                _log(f"the {what} failed: {message}")
         except Exception as exc:  # noqa: BLE001 -- from the worker's poll timer
             _log(f"could not report a failed fill: {exc}")
 

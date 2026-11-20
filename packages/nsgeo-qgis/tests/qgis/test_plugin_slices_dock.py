@@ -507,6 +507,8 @@ def test_lines_added_after_construction_are_picked_up_as_the_default(qgis_app, t
         assert dock.included_label.text().startswith("3 of 3 included")
         assert len(dock.included_keys()) == 3
     finally:
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -553,6 +555,8 @@ def test_accepting_the_line_chooser_on_an_empty_grid_does_not_latch_the_seed_fla
             "construction-time default of 0.0"
         )
     finally:
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -1048,6 +1052,8 @@ def test_with_no_grid_the_max_distance_reads_blank(qgis_app, tmp_path):
         assert dock.view_settings().radius_m == 0.0
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -1233,6 +1239,8 @@ def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
         assert dock.slice_finish() == SliceFinish()
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2006,6 +2014,8 @@ def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_ap
         assert not [m for m in errors if "does not cover" in m], errors
     finally:
         dock.engine.wait_for_preparation(60_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2092,6 +2102,8 @@ def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path)
                     plan_line(line, dock.engine.frame, wider)
     finally:
         dock.engine.wait_for_preparation(60_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2128,6 +2140,8 @@ def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
         # How wide it opens is pinned in test_plugin_slices_width.py (#50).
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2193,6 +2207,8 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         assert start - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2302,6 +2318,8 @@ def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app
         assert dock.warnings_panel.entries() == ()
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2358,6 +2376,8 @@ def test_the_legend_label_elides_rather_than_widening_the_dock(qgis_app):
         assert dock.legend_label.toolTip() == text
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -2400,6 +2420,8 @@ def _two_grids_with(tmp_path, preset):
     dock = SlicesDock(session)
     yield dock, session
     dock.engine.wait_for_preparation(20_000)
+    dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.dispose()
     dock.deleteLater()
 
@@ -2478,6 +2500,8 @@ def _reopened_with_a_late_import(session, tmp_path):
 
 def _dispose(dock):
     dock.engine.wait_for_preparation(20_000)
+    dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.dispose()
     dock.deleteLater()
 
@@ -2578,6 +2602,8 @@ def test_reopening_a_survey_restores_a_remembered_source_without_dirtying_or_rew
         assert reopened.slice_source("A") == stored
     finally:
         dock2.engine.wait_for_preparation(20_000)
+        dock2.refiner.shutdown()
+        dock2.fill_worker.shutdown()
         dock2.engine.dispose()
         dock2.deleteLater()
 
@@ -2897,6 +2923,8 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         assert reopened.slice_source("A") == stored
     finally:
         dock2.engine.wait_for_preparation(20_000)
+        dock2.refiner.shutdown()
+        dock2.fill_worker.shutdown()
         dock2.engine.dispose()
         dock2.deleteLater()
 
@@ -4036,6 +4064,8 @@ def test_a_real_data_old_record_restores_without_a_coverage_error(qgis_app, tmp_
         _assert_a_clean_old_restore(dock, errors)
     finally:
         dock.engine.wait_for_preparation(60_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -4672,6 +4702,8 @@ def _real_docked(tmp_path, paths, length_m, presets):
         yield dock, session
     finally:
         dock.engine.wait_for_preparation(60_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -4873,6 +4905,8 @@ def test_real_grid2_slice_depth_follows_the_grid_with_an_override_on_the_first_l
         assert message_log == []
     finally:
         dock.engine.wait_for_preparation(60_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -4910,6 +4944,8 @@ def test_the_colours_choice_needs_an_open_survey(qgis_app):
         assert not dock.colours_combo.isEnabled()
         assert not dock.own_colours_on() and dock.own_style() is None
     finally:
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -5003,6 +5039,8 @@ def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app,
         assert session.site.cubes["cube1"]["cell"] == 0.05
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -5122,6 +5160,8 @@ def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
         assert dock.dz_floor_note.isHidden()
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -5173,6 +5213,8 @@ def docked_fine_b(qgis_app, tmp_path):
     dock = SlicesDock(session)
     yield dock, session
     dock.engine.wait_for_preparation(20_000)
+    dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.dispose()
     dock.deleteLater()
 
@@ -5302,6 +5344,8 @@ def test_real_lines_floor_at_0_2165_and_allow_1024_levels(qgis_app, tmp_path):
         assert "1,024 (twice the 512 samples in each line)" in level_limit_problem(deep, samples)
     finally:
         dock.engine.wait_for_preparation(20_000)
+        dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.engine.dispose()
         dock.deleteLater()
 
@@ -5474,6 +5518,8 @@ def _make_dock(session):
 
 def _dispose(dock):
     dock.engine.wait_for_preparation(20_000)
+    dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.dispose()
     dock.deleteLater()
 
