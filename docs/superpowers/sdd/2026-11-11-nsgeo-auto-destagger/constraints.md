@@ -70,8 +70,8 @@
 
 The worktree uses the main checkout's virtualenvs, with the worktree's core on `PYTHONPATH`, plus a local `.venv-tools` (git-excluded) holding the CI-pinned ruff 0.17.1 and mypy 2.4.0. Real data is linked under `packages/nsgeo-core/tests/data/local/`:
 - the campus lines at the top level;
-- `with-dzg/` (Nashville 2023 Grid 1);
-- `grid2/` (Nashville 2023 Grid 2).
+- `with-dzg/` (GPS survey Grid 1);
+- `grid2/` (GPS survey Grid 2).
 
 A real-data test that skips has validated nothing, so the skip count must not rise.
 

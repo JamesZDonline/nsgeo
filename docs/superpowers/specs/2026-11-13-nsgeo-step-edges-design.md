@@ -66,7 +66,7 @@ because the real files are gitignored and the test would skip on CI either way.
   `StepStack.from_dicts`, and any `ValueError` becomes a `ProjectError` that stops the whole project
   opening (around lines 495 and 520).
 - **No saved project of the user's holds a value the new rules refuse.** 13 project files were
-  scanned on 2026-11-13: the campus, Nashville, Negley, Sunnyside, Site1 and Fort Negley projects,
+  scanned on 2026-11-13: the campus, the GPS site, Negley, Sunnyside, Site1 and Fort Negley projects,
   the walkthrough copies and the two hand-fit site copies. Every stack and preset uses Time zero
   (first break, 0.2), Time cutoff, Dewow 4 ns, Background mean, AGC (20 ns, target 1, epsilon
   1e-12), Bandpass (four bands), Migration and Gain curve. Sliding background, SVD and parametric
@@ -340,7 +340,7 @@ A new step in a new module, `processing/trace_stack.py`. Not `stack.py`, which h
 
 ### 7.1 The diffractions
 
-Both are on Nashville City Cemetery 2023 **Grid 2**, already local as `tests/data/local/grid2`
+Both are on the GPS survey's **Grid 2**, already local as `tests/data/local/grid2`
 (`GRID2_LINES`). They come from the user's saved hand fits (gitignored, in the hyperbola-tracer
 worktree's `tests/data/local/hand-fits/site-1.nsgeo.json`). The test carries the numbers as
 **literals** with that provenance in a comment, so it does not depend on those files.

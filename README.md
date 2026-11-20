@@ -115,9 +115,9 @@ release's notes list everything in it.
 - **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
   **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
   ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
-  surfaces, picks.vtp and the 3-D view, and the ParaView export gains a wall
-  for every line and cut, shaded like the slices. Built and reviewed, awaiting
-  its walkthrough.
+  surfaces, picks.vtp and the 3-D view. The walkthrough passed except the
+  walls in the ParaView export, which added little over the cut and are
+  dropped; a short second walkthrough awaits.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -134,8 +134,8 @@ release's notes list everything in it.
   dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
   new one fitted around their tracks, previewed on the map; files GPS cannot
   place are handed on to Grid mode with their offsets guessed; GPS lines in
-  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed, planned
-  in six tasks; the plan awaits review.
+  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed; built
+  and reviewed, awaiting its walkthrough.
 
 ### Next, in order
 
@@ -216,7 +216,9 @@ Grouped by area. The order within a group is not a priority.
   when the cell is not a 3-decimal number ([#204]); on a multi-channel line,
   read time zero from the same channel the volume is built from ([#218]); a
   line whose time zero can't be read is not re-read on every 3-D view refresh
-  ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]).
+  ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]);
+  a 3D Analysis drop-down on the toolbar for Surface from picks, the 3D view
+  and the ParaView export, which leaves the Slices panel ([#227]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -304,6 +306,7 @@ Grouped by area. The order within a group is not a priority.
 [#218]: https://github.com/JamesZDonline/nsgeo/issues/218
 [#219]: https://github.com/JamesZDonline/nsgeo/issues/219
 [#220]: https://github.com/JamesZDonline/nsgeo/issues/220
+[#227]: https://github.com/JamesZDonline/nsgeo/issues/227
 [#208]: https://github.com/JamesZDonline/nsgeo/pull/208
 [#221]: https://github.com/JamesZDonline/nsgeo/issues/221
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
