@@ -95,6 +95,7 @@ def _loaded_dock(session: SiteSession, scope: str):
         yield dock
     finally:
         dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.dispose_site()
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()

@@ -100,6 +100,17 @@ FILL_BUDGET_S = 0.2
 FILL_POLL_MS = 100
 FILL_THREAD_NAME_PREFIX = "nsgeo-fill"
 
+#: The working line while a fill is built off the GUI thread, a stretch is
+#: measured, and the Warnings note when a cancelled fill leaves no picture.
+FILL_WORKING_INDICATOR = "Working out the fill at {cell:g} m: {percent}%"
+FILL_WORKING_GRIDS_INDICATOR = "Working out the fill at {cell:g} m: grid {n} of {total}"
+STRETCH_WORKING_INDICATOR = "Working out the colour stretch…"
+FILL_CANCEL_LINK = "Cancel"
+FILL_CANCELLED_NOTE = (
+    "The picture was not drawn: its fill was cancelled. "
+    "Change the cell or the interpolation to draw it."
+)
+
 #: The method a slow minimum-curvature slice is previewed with (plan call 5),
 #: at the same max distance, search radius and smoothing, so its blanks are
 #: the full result's.

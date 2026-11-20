@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from nsgeo_qgis.refine import Refiner
     from nsgeo_qgis.session import SiteSession
     from nsgeo_qgis.site_engine import SiteEngine
+    from nsgeo_qgis.ui.fill_flow import FillFlow
     from nsgeo_qgis.ui.finish_panel import FinishPanel
     from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
     from nsgeo_qgis.ui.slices_dock import ElidedLabel
@@ -129,6 +130,9 @@ class SlicesDockView(Protocol):
     grid_finish: FinishPanel
     site_finish: FinishPanel
     refiner: Refiner
+    #: The fill worker and the flow over it (#193): Whole site's fills run there too.
+    fill_worker: Refiner
+    fill_flow: FillFlow
     site_engine: SiteEngine
     session: SiteSession
     # Signals (a bound signal, as read off an instance).

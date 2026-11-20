@@ -1958,7 +1958,8 @@ def test_editing_a_grid_in_site_scope_never_overlaps_preparations(plugin, monkey
     assert dock.engine.is_prepared
     assert dock.engine.frame is not None and dock.engine.frame.origin == (500.0, 690.0)
     _events()
-    assert dock.current_values() is not None, "This grid is drawn again"
+    # A fill over the budget is drawn from the fill worker (#193), not in this tick.
+    assert spin_until(lambda: dock.current_values() is not None), "This grid is drawn again"
 
 
 def test_flipping_scope_mid_preparation_never_overlaps_and_settles(plugin, monkeypatch):
@@ -3120,7 +3121,8 @@ def test_entering_the_site_cancels_this_grids_refine(plugin, monkeypatch):
     _choose_method(dock.grid_finish, "min_curvature")  # a new plan's first draw is a preview
     dock._finish_debounce.stop()
     dock._on_finish_timeout()
-    assert dock.provisional
+    # The plan's fill is worked out on the fill worker (#193): wait for the preview.
+    _pump_until(lambda: dock.provisional)
     _pump_until(job.started.is_set)
     assert dock.refiner.busy
     dock.site_scope_button.click()  # no event is processed before the asserts
@@ -4227,6 +4229,7 @@ def test_the_normalisation_section_folds_and_is_remembered(plugin):
         assert again_group.height() < 60 and again_group.maximumHeight() < 60
     finally:
         again.refiner.shutdown()
+        again.fill_worker.shutdown()
         again.site_engine.wait_until_idle(60_000)
         again.engine.wait_for_preparation(20_000)
         again.engine.dispose()

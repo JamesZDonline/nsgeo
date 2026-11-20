@@ -10,7 +10,7 @@ import pytest
 from nsgeo.slices import finish_section, section_columns
 from nsgeo.slices.resample import sample
 from nsgeo_qgis import cut_sections as cut_sections_module
-from nsgeo_qgis import site_engine as site_engine_module
+from nsgeo_qgis import stretch_jobs as stretch_jobs_module
 from nsgeo_qgis.cut_sections import (
     BUILD_FAILED_TEXT,
     NO_CUBE_TEXT,
@@ -45,6 +45,7 @@ def _shown_with(tmp_path, preset):
     yield dock, session, sections
     sections.dispose()
     dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
@@ -117,7 +118,7 @@ def test_whole_site_reads_the_grids_site_engine_without_the_gain(site, monkeypat
     key = session.add_cut("B", H)
     # Whatever the site normalises by, a section is not scaled by it.
     monkeypatch.setattr(
-        site_engine_module,
+        stretch_jobs_module,  # `normalise` lives there since the stretch became a job (#193)
         "normalise",
         lambda method, binned, seams, manual: dict.fromkeys(binned, (2.0, 5.0)),
     )

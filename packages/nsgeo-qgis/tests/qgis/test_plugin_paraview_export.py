@@ -314,6 +314,7 @@ def test_the_standalone_engine_holds_both_dock_engines_back(synth_site, monkeypa
     finally:
         own.dispose()
         dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.site_engine.cancel()
         dock.site_engine.wait_until_idle(20_000)
         dock.engine.wait_for_preparation(20_000)
@@ -351,6 +352,7 @@ def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_ba
     finally:
         own.dispose()
         dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.site_engine.cancel()
         dock.site_engine.wait_until_idle(20_000)
         dock.engine.wait_for_preparation(20_000)
@@ -398,6 +400,7 @@ def test_a_second_export_is_refused_while_the_first_exports_engine_is_live(synth
     finally:
         own.dispose()
         dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.site_engine.cancel()
         dock.site_engine.wait_until_idle(20_000)
         dock.engine.wait_for_preparation(20_000)

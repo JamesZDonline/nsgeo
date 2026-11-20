@@ -49,6 +49,7 @@ from plugin_testing import (
     layout_width,
     needs_real_data,
     slow_jobs,
+    spin_until,
     synthetic_dzt,
     wait_for_site,
     wheel_event,
@@ -102,7 +103,7 @@ def _banded_dzt(folder, name, band_row):
     return folder / name
 
 
-def _docked_with(tmp_path, preset, band_rows=None):
+def _docked_with(tmp_path, preset, band_rows=None, record=None):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
@@ -118,6 +119,8 @@ def _docked_with(tmp_path, preset, band_rows=None):
     session.add_lines(lines)
     session.site.presets["p"] = list(preset)
     session.presets_changed.emit()
+    if record is not None:
+        session.remember_slice_resolution("A", **record)
     dock = SlicesDock(session)
     yield dock, session
     # Fix round 1: Important 2's first-computation trigger means
@@ -136,6 +139,7 @@ def _docked_with(tmp_path, preset, band_rows=None):
     # starts building a new one. The refine worker first: it is joined, so
     # no solve outlives the test that started it.
     dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
@@ -725,6 +729,16 @@ def _ready(dock):
     dock.flush_debounce()  # applies the pending Resolution change immediately
 
 
+def _limit(dock):
+    """`display_limit()` once the stretch it asks the worker for has landed
+    (#193): the first call asks, and the map keeps the limit it had until then."""
+    dock.display_limit()
+    assert spin_until(lambda: not (dock.fill_flow.working or dock.fill_flow.stretching), 30_000), (
+        "the fill flow never went idle"
+    )
+    return dock.display_limit()
+
+
 def test_the_seeded_default_resolution_actually_slices(docked):
     """Fix round 1, Important 6. Every other navigation test in this file
     runs through `_ready()`, which overwrites `z0_spin`/`z1_spin` with
@@ -1241,11 +1255,11 @@ def test_the_shared_stretch_follows_a_finish_change(docked):
     is keyed on the finish in metres, not served stale."""
     dock, _ = docked
     _ready(dock)
-    first = dock.display_limit()
+    first = _limit(dock)
     assert first > 0.0
     assert dock.display_limit() == first  # cached, unchanged
     _set_finish(dock, smooth_x_m=1.0, smooth_y_m=1.0)
-    smoothed = dock.display_limit()
+    smoothed = _limit(dock)
     assert smoothed != pytest.approx(first, rel=1e-6)
     clip = dock.engine.output_unipolar
     from nsgeo.render import PercentileClip, UnipolarClip
@@ -1257,7 +1271,7 @@ def test_the_shared_stretch_follows_a_finish_change(docked):
     )
     assert smoothed == pytest.approx(expected)
     _set_finish(dock, smooth_x_m=0.0, smooth_y_m=0.0)
-    assert dock.display_limit() == pytest.approx(first)
+    assert _limit(dock) == pytest.approx(first)
 
 
 def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
@@ -1309,9 +1323,9 @@ def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(do
     _ready(dock)
     dock.stretch_combo.setCurrentText("shared across the cube")
     dock.slice_slider.setValue(4)
-    shallow = dock.display_limit()
+    shallow = _limit(dock)
     dock.slice_slider.setValue(40)
-    deep = dock.display_limit()
+    deep = _limit(dock)
     assert shallow == pytest.approx(deep)
 
     dock.stretch_combo.setCurrentText("this slice")
@@ -3268,14 +3282,14 @@ def test_the_shared_stretch_is_provisional_until_its_windows_are_solved(docked):
     n = dock.current_window().n_levels
     clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
     assert engine.stretch_solves(n, mc) != []
-    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc, preview=True))
+    assert _limit(dock) == pytest.approx(engine.shared_limit(n, clip, mc, preview=True))
     finals: list[Any] = []
     dock.slice_changed.connect(
         lambda: finals.append(dock._grid_refine.stretch and dock._grid_refine.stretch[2])
     )
     _wait_for_refine(dock)
     assert engine.stretch_solves(n, mc) == []
-    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc))
+    assert _limit(dock) == pytest.approx(engine.shared_limit(n, clip, mc))
     assert finals and finals[-1] is True, "the slice must be redrawn with the final stretch"
 
 
@@ -3646,7 +3660,12 @@ def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeyp
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         probe.record()
-        if not (dock.provisional or dock.refiner.busy or dock._grid_refine.rest.isActive()):
+        if not (
+            dock.provisional
+            or dock.refiner.busy
+            or dock._grid_refine.rest.isActive()
+            or dock.fill_flow.stretching  # the colour stretch is measured on a worker (#193)
+        ):
             break
         time.sleep(0.005)
     probe.record()
@@ -5389,6 +5408,7 @@ def test_folds_are_remembered_across_a_restart(docked):
         assert _drawn_open(again.resolution_group)
     finally:
         again.refiner.shutdown()
+        again.fill_worker.shutdown()
         again.engine.wait_for_preparation(20_000)
         again.engine.dispose()
         again.deleteLater()
