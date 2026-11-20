@@ -127,8 +127,8 @@ release's notes list everything in it.
   band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
   true scale; each vertical axis shows ns, samples or m, with a cursor
   read-out; a time zoom stays put when Time zero changes; and Time zero set
-  by dragging its line on the profile. Designed with you; the written design
-  is next.
+  by dragging its line on the profile. Built and reviewed in two plans;
+  walkthrough next.
 
 ### Next, in order
 
