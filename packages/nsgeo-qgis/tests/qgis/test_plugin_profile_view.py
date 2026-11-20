@@ -1612,6 +1612,53 @@ def test_the_cutoff_dims_the_samples_below_it(view):
     assert QColor(shot.pixel(x, line)).red() >= 150
 
 
+def test_a_start_handle_dims_above_and_tags_its_row(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_axes(100, 200, 0.0, 0.5)
+    t0 = v.transform.t0_ns
+    v.set_cutoff(t0 + 60 * 0.5, kind="start")
+    shot = v.grab_image()
+    r = v.image_rect()
+    t = v.transform
+    line = r.top() + round(t.y_of_time(30.0))
+    x = r.left() + 20
+    above = QColor(shot.pixel(x, line - 10)).value()
+    below = QColor(shot.pixel(x, line + 10)).value()
+    assert above > below
+    assert v._cutoff_text(t) == "Time zero \u00b7 sample 60"
+
+
+def test_a_start_handle_snaps_to_row_tops_and_tags_the_drag(view):
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    v.set_cutoff(10.0, kind="start")
+    r = v.image_rect()
+    t = v.transform
+    y = round(t.y_of_time(10.0))
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    _press_left(v, r.left() + 30, r.top() + y)
+    _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + y + 40))
+    assert v.cutoff_ns == pytest.approx(t.snap_row(t.time_of_y(y + 40)))
+    assert v._cutoff_text(t).startswith("sample ")
+    assert v._cutoff_text(t).endswith(" ns")
+    _release_left(v, r.left() + 30, r.top() + y + 40)
+    assert got == [pytest.approx(v.cutoff_ns)]
+    assert v._cutoff_text(t).startswith("Time zero")
+
+
+def test_set_cutoff_default_kind_is_still_the_end_cutoff(view):
+    """Guard: the default kind is today's cutoff."""
+    v, _ = view
+    v.set_cutoff(40.0, kind="start")
+    v.set_cutoff(40.0)
+    assert v._cutoff_kind == "end"
+    assert v._cutoff_text(v.transform) == cutoff_label(40.0, None)
+
+
 def test_the_cutoff_label_stays_inside_the_image_near_its_top(view):
     """The label sits above the line, and the paint is clipped to the image.
     A line within the label's height of the top, which is where a "keep one

@@ -2317,11 +2317,20 @@ class ProfileDock(QgsDockWidget):
         step = self.session.stack_for(self._working_key, insert=False).entries[row][0]
         spec = self._handle_spec_at(row)
         assert spec is not None
-        if spec.kind != "time":
-            # A row handle (Time zero's first kept row) is drawn and dragged
-            # in the next task; until then its line stays down.
-            self._cutoff_step = None
-            self.view.set_cutoff(None)
+        if spec.kind == "row":
+            # Time zero's first kept row, on the record it receives, relabelled
+            # onto the line's clock: the very record `current_radargram` draws.
+            self._cutoff_step = step
+            shown = self._shown_radargram
+            if shown is None or self._effective_difference_index >= 0:
+                # A difference view draws another record, whose rows are not
+                # the step's: no line to drag there.
+                self._cutoff_step = None
+                self.view.set_cutoff(None)
+                return
+            self.view.set_cutoff(
+                float(shown.t0_ns + int(step.params[str(spec.name)]) * shown.dt_ns), kind="start"
+            )
             return
         name = str(spec.name)
         self._cutoff_step = step
@@ -2362,6 +2371,9 @@ class ProfileDock(QgsDockWidget):
             if step is not self._cutoff_step:
                 return
             spec = handle_spec(step)
+            if spec is not None and spec.kind == "row":
+                self._write_row_handle(key, row, step, spec, end_ns)
+                return
             if spec is None or spec.kind != "time":
                 return
             name = str(spec.name)
@@ -2383,6 +2395,26 @@ class ProfileDock(QgsDockWidget):
             self.session.replace_step(key, row, new)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not move the time cutoff: {exc}", Qgis.MessageLevel.Critical)
+
+    def _write_row_handle(
+        self, key: str, row: int, step: Any, spec: ParamSpec, t_ns: float
+    ) -> None:
+        """A drag of Time zero's line released at `t_ns` on the shown clock:
+        the row it sits on, written when it is not the row already there."""
+        shown = self._shown_radargram
+        if shown is None or not shown.dt_ns:
+            return
+        name = str(spec.name)
+        value = round((t_ns - shown.t0_ns) / shown.dt_ns)
+        if value == step.params[name]:
+            return  # an unmoved handle writes nothing
+        try:
+            new = build_step(step.name, **{**step.params, name: int(value)})
+        except ValueError as exc:
+            self.error.emit(str(exc))
+            return
+        self._cutoff_step = new
+        self.session.replace_step(key, row, new)
 
     def _sync_strip_mapping(self) -> None:
         if self.view.transform is not None:

@@ -250,6 +250,19 @@ def test_snap_cutoff_clamps_into_the_record():
     assert t.snap_cutoff(1e6) == pytest.approx(t.t_end)
 
 
+def test_snap_row_lands_on_row_tops_inside_the_record():
+    t = ViewTransform.fit(10, 100, -2.0, 0.25, 696, 264)
+    assert t.snap_row(-2.1) == -2.0
+    assert t.snap_row(-1.6) == pytest.approx(-1.5)
+    assert t.snap_row(99.0) == pytest.approx(-2.0 + 99 * 0.25)
+
+
+def test_snap_row_clamps_to_the_first_and_last_row_not_the_end():
+    t = ViewTransform.fit(10, 100, -2.0, 0.25, 696, 264)
+    assert t.snap_row(-100.0) == -2.0
+    assert t.snap_row(1e6) == pytest.approx(-2.0 + 99 * 0.25)  # not t_end: one row stays
+
+
 MIR = ViewTransform.fit(
     n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300, mirrored=True
 )

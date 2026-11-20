@@ -148,6 +148,9 @@ class ProfileView(QWidget):
         self._picks: list[tuple[int, float]] = []
         self._slice_band: tuple[float, float] | None = None
         self._cutoff_ns: float | None = None
+        # "end": the time cutoff (dims below the line, snaps to a boundary).
+        # "start": Time zero's row handle (dims above, snaps to a row top).
+        self._cutoff_kind = "end"
         # The value the line had when a drag of it began; not None means a
         # drag is in progress. Kept so a drag whose release never arrives
         # (see `_handle_mouse_move`) can put the line back.
@@ -378,14 +381,19 @@ class ProfileView(QWidget):
         """The end time drawn now, live during a drag; None when hidden."""
         return self._cutoff_ns
 
-    def set_cutoff(self, end_ns: float | None) -> None:
+    def set_cutoff(self, end_ns: float | None, kind: str = "end") -> None:
         """Show the cutoff line at `end_ns`, or hide it with None.
+
+        `kind` is "end" (the time cutoff: dims below the line) or "start"
+        (Time zero's row handle: dims above it, snaps to a row top and is
+        tagged with its row).
 
         A drag in progress is abandoned (no emit): the caller has just
         said where the line is, and the release that follows must not
         overwrite that with a stale gesture.
         """
         self._cutoff_grab = None
+        self._cutoff_kind = "start" if kind == "start" else "end"
         if end_ns is not None and not math.isfinite(end_ns):
             _log(f"set_cutoff: non-finite end time {end_ns}; line hidden instead")
             end_ns = None
@@ -437,6 +445,7 @@ class ProfileView(QWidget):
         self._saved_velocity_highlight = None
         self._slice_band = None
         self._cutoff_ns = None
+        self._cutoff_kind = "end"
         self._cutoff_grab = None
         self._cancel_velocity_box()
         self._message = "no line open"
@@ -753,6 +762,17 @@ class ProfileView(QWidget):
             return None
         return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
 
+    def _cutoff_text(self, t: ViewTransform) -> str:
+        """The tag's text: the time cutoff's time (and depth), or a row
+        handle's row, with its time while it is being dragged."""
+        assert self._cutoff_ns is not None
+        if self._cutoff_kind != "start":
+            return cutoff_label(self._cutoff_ns, self._velocity)
+        k = round((self._cutoff_ns - t.t0_ns) / t.dt_ns) if t.dt_ns else 0
+        if self._cutoff_grab is not None:
+            return f"sample {k} \u00b7 {self._cutoff_ns:.2f} ns"
+        return f"Time zero \u00b7 sample {k}"
+
     def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:
         """The label's tag, or None when the line is hidden. Sized to the
         text plus padding, right-aligned. Factored out the same way
@@ -761,7 +781,7 @@ class ProfileView(QWidget):
         y = self._cutoff_y(t)
         if self._cutoff_ns is None or y is None:
             return None
-        text = cutoff_label(self._cutoff_ns, self._velocity)
+        text = self._cutoff_text(t)
         fm = self.fontMetrics()
         w = fm.horizontalAdvance(text) + 2 * CUTOFF_TAG_PAD_X
         h = fm.height() + 2 * CUTOFF_TAG_PAD_Y
@@ -778,7 +798,10 @@ class ProfileView(QWidget):
         if y is None or tag is None or self._cutoff_ns is None:
             return
         yy = r.top() + y
-        p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
+        if self._cutoff_kind == "start":
+            p.fillRect(QRectF(r.left(), r.top(), r.width(), max(0.0, yy - r.top())), CUTOFF_DIM)
+        else:
+            p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
         p.setPen(QPen(CUTOFF_COLOUR, 2))
         p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
         # White on a magenta tag: magenta text straight onto the radargram
@@ -788,7 +811,7 @@ class ProfileView(QWidget):
         p.drawText(
             tag,
             int(Qt.AlignmentFlag.AlignCenter),
-            cutoff_label(self._cutoff_ns, self._velocity),
+            self._cutoff_text(t),
         )
 
     def _near_cutoff(self, x: float, y: float) -> bool:
@@ -1234,9 +1257,12 @@ class ProfileView(QWidget):
                 if abs(y - self._cutoff_press_y) <= DRAG_THRESHOLD_PX:
                     self._cutoff_ns = self._cutoff_grab
                 else:
-                    self._cutoff_ns = self.transform.snap_cutoff(
-                        self.transform.time_of_y(y + self._cutoff_offset)
+                    snap = (
+                        self.transform.snap_row
+                        if self._cutoff_kind == "start"
+                        else self.transform.snap_cutoff
                     )
+                    self._cutoff_ns = snap(self.transform.time_of_y(y + self._cutoff_offset))
                 self.update()
                 return
         if self._press is not None:

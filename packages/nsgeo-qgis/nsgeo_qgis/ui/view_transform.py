@@ -134,6 +134,12 @@ class ViewTransform:
         m = round((time_ns - self.t0_ns) / self.dt_ns)
         return self.t0_ns + min(max(m, 1), self.n_samples) * self.dt_ns
 
+    def snap_row(self, time_ns: float) -> float:
+        """Round a time to the nearest row top inside the record: where Time
+        zero's line can sit (row 0 to the last row, which keeps one sample)."""
+        m = round((time_ns - self.t0_ns) / self.dt_ns)
+        return self.t0_ns + min(max(m, 0), self.n_samples - 1) * self.dt_ns
+
     def _column_at(self, x: float) -> int:
         """The trace column holding local pixel `x`, unclamped. Floor of the
         trace coordinate, or ceil - 1 when mirrored: either way a pixel on a

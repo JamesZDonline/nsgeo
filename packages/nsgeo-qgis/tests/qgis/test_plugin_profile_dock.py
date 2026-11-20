@@ -2947,6 +2947,105 @@ def test_the_campus_line_with_time_zero_selected_starts_49_rows_above_the_line(b
     assert dock.shown_zero_ns() == pytest.approx(session.stack_for(key).zero_ns())
 
 
+def test_the_line_shows_only_in_sample_mode_while_selected(opened):
+    """Review Focus 3, and the line's place: Time zero's first kept row on the
+    record it receives, relabelled onto the line's clock."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    assert dock.view.cutoff_ns is None  # not selected
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)  # the line's own zero
+    assert dock.view._cutoff_kind == "start"
+    assert dock.view._cutoff_text(dock.view.transform) == "Time zero \u00b7 sample 20"
+    session.replace_step(key, 0, build_step("time_zero", mode="first_break"))
+    assert dock.view.cutoff_ns is None  # first_break mode: no line
+    session.replace_step(key, 0, build_step("time_zero", mode="sample", sample=30))
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)
+    assert dock.view._cutoff_text(dock.view.transform).endswith("sample 30")
+    dock.set_selected_step(-1)
+    assert dock.view.cutoff_ns is None
+
+
+def test_a_time_zero_that_is_not_first_draws_its_line_on_its_input_rows(opened):
+    """Review Focus 1: Dewow, Time zero, AGC. The rows are the step's rows."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+    )
+    dock.set_selected_step(1)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, stack.intermediate(0).data)
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view._cutoff_text(dock.view.transform).endswith("sample 20")
+
+
+def test_dragging_time_zeros_line_through_the_dock_writes_its_row(opened):
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    step = session.stack_for(key).entries[0][0]
+    dock.view.cutoff_dragged.emit(rg.t0_ns + 20 * rg.dt_ns)
+    assert session.stack_for(key).entries[0][0] is step  # unmoved: nothing written
+    dock.view.cutoff_dragged.emit(rg.t0_ns + 26 * rg.dt_ns)
+    assert session.stack_for(key).entries[0][0].params["sample"] == 26
+
+
+def test_a_drag_to_either_end_clamps_and_is_accepted(opened):
+    """Review Focus 5: row 0 and row n - 1 are both writable."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    dock.set_selected_step(0)
+    n = dock._shown_radargram.n_samples
+    t = dock.view.transform
+    assert t.snap_row(-1e6) == pytest.approx(t.t0_ns)
+    dock.view.cutoff_dragged.emit(t.snap_row(-1e6))
+    assert session.stack_for(key).entries[0][0].params["sample"] == 0
+    assert dock.view.cutoff_ns is not None
+    t = dock.view.transform
+    dock.view.cutoff_dragged.emit(t.snap_row(1e6))
+    assert session.stack_for(key).entries[0][0].params["sample"] == n - 1
+    assert session.stack_for(key).result().data.shape[0] == 1
+
+
+def test_a_disabled_time_zero_draws_its_line_as_the_cutoff_does(opened):
+    """Review Focus 2. `_handle_row` ignores `enabled`: a disabled time cutoff
+    still shows its line, and so does a disabled Time zero. With the step
+    disabled, `zero_ns()` skips it, so the relabel is a no-op and the record
+    is on the source's own clock; the line sits at the step's row on it, and
+    a drag writes that row. Nothing is cropped, nor does the line claim it is."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    session.set_step_enabled(key, 0, False)
+    dock.set_selected_step(0)
+    src = stack.source
+    rg = dock._shown_radargram
+    assert rg.t0_ns == pytest.approx(src.t0_ns)  # no crop, no relabel
+    assert dock.view.cutoff_ns == pytest.approx(src.t0_ns + 20 * src.dt_ns)
+    dock.view.cutoff_dragged.emit(src.t0_ns + 26 * src.dt_ns)
+    assert session.stack_for(key).entries[0][0].params["sample"] == 26
+    assert session.stack_for(key).entries[0][1] is False
+
+
+def test_a_row_handle_with_difference_on_draws_no_line(opened):
+    """The line is for the step's own input view; a difference view is another
+    record, so nothing to drag there (the Processing panel declines it anyway)."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("dewow", {}), ("time_zero", dict(mode="sample", sample=20)))
+    dock.set_selected_step(1)
+    assert dock.view.cutoff_ns is not None
+    dock._difference_index = 0
+    dock._render()
+    assert dock._effective_difference_index == 0
+    assert dock.view.cutoff_ns is None
+
+
 def test_a_row_handles_input_view_is_its_own_scale(opened):
     """The display limit is taken from the drawn input, not the processed
     stack, whose scale can differ by orders of magnitude."""
