@@ -71,7 +71,7 @@
 ### Copy (exact)
 
 - **Survey panel.**
-  - The mag grid menu becomes `Edit grid…`, `Edit lines…` (enabled when the grid holds a file), `Import magnetometer file…`, a separator, then `Remove grid`.
+  - The mag grid menu becomes `Edit grid…`, `Edit lines…` (enabled when the grid holds a file), `Add magnetometer data…`, a separator, then `Remove grid`.
   - The mag file row menu becomes `Edit lines…`, `Change setup…`, then `Remove file from site`.
 - **Edit lines, mag mode.**
   - The title is `f"Edit lines · {grid_id} · magnetometer"`.
@@ -116,16 +116,12 @@ These are as in Plan A: the same virtualenvs, `.venv-tools`, and real data linke
 ## Pre-flight (coordinator, before Task 1)
 
 - [ ] Fold Plan A's walkthrough results into this plan (Q1), and land Plan A fixes first.
-- [ ] Take in main: `git merge origin/main` on `nsgeo-m19-mag`, after the Plan A fixes and before Task 1, as its own commit.
-  - A trial merge on 2026-11-13 conflicted in six files: `geometry/grid.py`, `project.py`, `plugin.py`, `ui/grid_dialog.py`, `ui/survey_dock.py`, and `tests/plugin_testing.py`.
-  - **The schema number clashes.** Main's #186 (c88595b) already uses version 3 for `VELOCITY_SOURCE_SCHEMA_VERSION`, and this branch also uses 3 for `MAG_SCHEMA_VERSION`. Resolve it like this:
-    - Set `MAG_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1`, which is 4.
-    - `READABLE_SCHEMA_VERSIONS` lists all four versions.
-    - The writer writes the highest feature the site holds: 4 for mag, else 3 for a velocity record, else 2 for cuts, else 1.
-    - Add a test that a site with both mag data and a grid velocity record writes 4 and loads back.
-    - The two mag tests in `tests/test_project.py` that assert `schema_version == 3` now assert 4.
-  - Survey files saved during the Plan A walkthrough say version 3 and hold mag data. They still load, because the reader does not gate any key on the version number.
-  - Run all four verification commands on the merge commit before Task 1.
+- [x] Take in main. **Done 2026-11-20** at the author's request, before Plan A's walkthrough: main 0255dbd (M16, M17a, M17b, sessions A–E) merged into `nsgeo-m19-mag`. What changed for this plan:
+  - **Schema:** main now holds versions 3 (velocity records) and 4 (GPS lines), so `MAG_SCHEMA_VERSION` is **5**. The writer writes the highest feature the site holds (mag, then GPS, then a velocity record, then cuts).
+  - **Add data:** the toolbar's Import mag… is gone. The magnetometer import is **Add data ▾ ▸ Magnetometer…** (`Plugin.act_add_mag`, `_add_mag_from_toolbar`), beside GPR…; its dialog is titled "Add magnetometer data"; the Survey panel's mag grid item reads **Add magnetometer data…**. Main's GPR import is `AddDataDialog` with a Grid page (`GridImportPage`) and a GPS page; neither lists a mag grid.
+  - **Lines never reach a mag grid:** Move to grid ▸ lists GPR grids only (greyed when there are none), a grid proposed by Fit a grid to these tracks is fixed to GPR, and `session.edit_lines` skips an edit whose new grid is a magnetometer grid ("its new grid 'M1' is a magnetometer grid").
+  - **Panels:** Mag is the sixth panel, after Surfaces.
+- [ ] Re-read Task 1 against main's Edit lines before dispatching it: M17b added GPS rows (`TrackEdit`, tape-only cells read-only) and session D added bulk actions, so the widget names and the rows' kinds in Task 1 may have moved. Rule on any drift in the ledger.
 - [ ] Update the roadmap's M19a entry to "Plan B building", committing straight to main.
 - [ ] Record the baselines (four commands) in a new ledger `.superpowers/sdd/2026-11-13-nsgeo-m19a-plan-b-mag-finish/`. Check that the `mag-data/` link and the other real-data links are still in place.
 
