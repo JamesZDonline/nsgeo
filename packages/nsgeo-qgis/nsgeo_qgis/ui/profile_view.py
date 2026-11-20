@@ -129,6 +129,7 @@ class ProfileView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._hover: tuple[float, float] | None = None  # pointer on the image, for the read-out
         self.setMinimumSize(240, 120)
         self.transform: ViewTransform | None = None
         self._image: QImage | None = None
@@ -606,10 +607,61 @@ class ProfileView(QWidget):
             self._paint_cursor(painter, r, t)
             painter.setClipping(False)
             self._paint_axes(painter, r, t)
+            self._paint_readout(painter, r)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring and C1 above
             _log(f"could not paint the profile view: {exc}")
         finally:
             painter.end()
+
+    def readout_text(self) -> str:
+        """What is under the pointer, in the axes' units; "" off the image or
+        over blank ruler space."""
+        t = self.transform
+        if t is None or self._hover is None:
+            return ""
+        x, y = self._hover
+        i = t.trace_at(x)
+        if i is None:
+            return ""
+        s = t.sample_index_at(y)
+        time_ns = t.t0_ns + s * t.dt_ns
+        m = self.metres_at_trace_units(i + 0.5)
+        parts = [f"trace {i}" if m is None else f"{float(m):.2f} m along (trace {i})"]
+        shown: list[str] = []
+        for unit in self._axis_units:
+            if unit in shown:
+                continue
+            shown.append(unit)
+            if unit == "ns":
+                parts.append(f"{time_ns:.2f} ns")
+            elif unit == "sample":
+                parts.append(f"sample {s}")
+            elif self._velocity is not None and time_ns >= 0:
+                depth = float(self._velocity.depth_at(np.array(time_ns)))
+                parts.append(f"{depth:.2f} m deep")
+        return " \u00b7 ".join(parts)
+
+    def _paint_readout(self, p: QPainter, r: QRect) -> None:
+        text = self.readout_text()
+        if not text:
+            return
+        p.setPen(AXIS_COLOUR)
+        font = p.font()
+        font.setPointSize(9)
+        p.setFont(font)
+        p.drawText(
+            QRectF(r.left(), 0, r.width(), MARGIN_TOP),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            text,
+        )
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802
+        try:
+            self._hover = None
+            self.update()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the read-out: {exc}", Qgis.MessageLevel.Warning)
+        super().leaveEvent(event)
 
     def _paint_cursor(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         if self._cursor < 0:
@@ -1090,6 +1142,9 @@ class ProfileView(QWidget):
         assert self.transform is not None  # only called from mouseMoveEvent's own guard
         pos = event_pos(event)
         x, y = self._local(event)
+        inside = 0 <= x < self.transform.width and 0 <= y < self.transform.height
+        self._hover = (x, y) if inside else None
+        self.update()
         if self._pan_last is not None:
             # I3: `_pan_last` was only ever cleared by a *middle-button*
             # mouseReleaseEvent. A middle-press followed by an unrelated

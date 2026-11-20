@@ -29,7 +29,7 @@ from nsgeo_qgis.ui.ruler import Ruler, trace_units_at
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
@@ -2276,3 +2276,74 @@ def test_a_press_on_the_bottom_axis_still_clears_the_selection(make_view):
     _click(v, Qt.MouseButton.LeftButton, QPoint(MARGIN_LEFT + 100, v.height() - 10))
     assert v._selection == (-1, -1)
     assert got == []
+
+
+# ---- the cursor read-out (#11) -------------------------------------------------
+def _hover_at(v, trace, sample):
+    t, r = v.transform, v.image_rect()
+    x = int(r.left() + t.x_of_trace(trace + 0.5))
+    y = int(r.top() + t.y_of_time(v.transform.t0_ns + (sample + 0.5) * 0.25))
+    send_hover(v, QPoint(x, y))
+
+
+def test_the_readout_reads_the_sample_under_the_pointer(make_view):
+    v = _sampled(make_view)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 10.00 ns \u00b7 0.50 m deep"
+
+
+def test_the_readout_follows_the_axis_units(make_view):
+    v = _sampled(make_view)
+    v.set_axis_units("sample", "m")
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 sample 40 \u00b7 0.50 m deep"
+    v.set_axis_units("ns", "ns")
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 10.00 ns"
+
+
+def test_the_readout_without_metres_or_velocity(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "trace 100 \u00b7 10.00 ns"
+
+
+def test_the_readout_leaves_depth_out_above_zero(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, -2.0, 0.25, distance_along=np.arange(200) / 60.0)
+    v.set_velocity(VelocityModel.constant(0.1))
+    t, r = v.transform, v.image_rect()
+    send_hover(
+        v,
+        QPoint(int(r.left() + t.x_of_trace(100.5)), int(r.top() + t.y_of_time(-2.0 + 4.5 * 0.25))),
+    )
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 -1.00 ns"
+
+
+def test_the_readout_clears_off_the_image(make_view):
+    v = _sampled(make_view)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() != ""
+    send_hover(v, QPoint(5, MARGIN_TOP + 40))  # the left axis strip
+    assert v.readout_text() == ""
+
+
+def test_the_readout_clears_when_the_pointer_leaves(make_view):
+    v = _sampled(make_view)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() != ""
+    QApplication.sendEvent(v, QEvent(QEvent.Type.Leave))
+    assert v.readout_text() == ""
+    v.grab_image()  # paints without raising
+
+
+def test_a_mirrored_line_reads_its_own_metres(ruled):
+    v = ruled
+    t, r = v.transform, v.image_rect()
+    send_hover(v, QPoint(int(r.left() + t.x_of_trace(10.5)), int(r.top() + 30)))
+    assert v.readout_text().startswith(f"{D[10] + 0.5 * (D[11] - D[10]):.2f} m along (trace 10)")
