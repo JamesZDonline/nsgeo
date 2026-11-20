@@ -8,6 +8,7 @@ from nsgeo_qgis.ui.view_transform import (
     MIN_SAMPLE_SPAN,
     MIN_TRACE_SPAN,
     ViewTransform,
+    carry_time_window,
     nice_ticks,
     true_scale_window,
 )
@@ -403,3 +404,31 @@ def test_fit_width_on_a_mirrored_ruler_shows_the_ruler():
     t = w.with_window(40.0, 90.0, 4.0, 12.0).fit_width()
     assert (t.trace_lo, t.trace_hi) == (-20.0, 260.0) and t.mirrored
     assert (t.time_lo, t.time_hi) == pytest.approx((4.0, 12.0))
+
+
+# ---- a time window carried across a clock change (spec §4.8) -------------------
+
+
+def _old():
+    return ViewTransform.fit(200, 512, -11.0, 0.2, 696, 264)  # -11 .. 91.4 ns, radar clock
+
+
+def test_a_whole_record_stays_whole():
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(_old(), new, 0.0, -0.6)
+    assert (c.time_lo, c.time_hi) == pytest.approx((0.0, 92.0))
+
+
+def test_the_top_stays_the_top():
+    old = _old().with_window(0.0, 200.0, -11.0, 4.0)
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(old, new, 0.0, -0.6)
+    assert (c.time_lo, c.time_hi) == pytest.approx((0.0, 15.0))
+
+
+def test_a_window_in_the_middle_keeps_its_radar_times():
+    old = _old().with_window(20.0, 120.0, 30.0, 45.0)
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(old, new, 0.0, -0.6)
+    assert (c.time_lo - 0.6, c.time_hi - 0.6) == pytest.approx((30.0, 45.0))  # radar = zero + t
+    assert (c.trace_lo, c.trace_hi) == pytest.approx((20.0, 120.0))

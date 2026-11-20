@@ -27,6 +27,7 @@ from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, s
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox, QStyle
+from tests.real_data import CAMPUS_LINES, GPS_LINES
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -2640,3 +2641,96 @@ def test_a_bad_remembered_unit_falls_back_and_is_overwritten(opened):
         assert profile_dock.profile_settings().value(LEFT_AXIS_KEY) == "sample"
     finally:
         other.deleteLater()
+
+
+# ---- a time zoom survives a clock change on the same line (#163 item 2, spec §4.8) ----
+
+
+def _radar_window(dock):
+    t = dock.view.transform
+    return (dock.shown_zero_ns() + t.time_lo, dock.shown_zero_ns() + t.time_hi)
+
+
+def _zoom_middle(dock):
+    t = dock.view.transform
+    mid = (t.time_lo + t.time_hi) / 2
+    dock.view.transform = t.with_window(t.trace_lo + 20, t.trace_hi - 20, mid - 5.0, mid + 5.0)
+
+
+def _two_time_zeros(session, dock, key, first, second):
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    session.append_step(key, build_step("time_zero", **first))
+    assert _radar_window(dock) == pytest.approx(before)
+    session.replace_step(key, 0, build_step("time_zero", **second))
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_time_zoom_survives_adding_time_zero_on_an_unruled_line(opened):
+    session, dock, key, line = opened
+    k2, l2 = _add_line(
+        session, "U1", GridPlacement("A", "y", 0.0, 0.0, 1, "U1"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    session.set_profiles(k2, l2.load())
+    _two_time_zeros(
+        session, dock, k2, dict(mode="sample", sample=20), dict(mode="sample", sample=26)
+    )
+
+
+def test_a_time_zoom_survives_adding_time_zero_on_a_ruled_line(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    _two_time_zeros(
+        session, dock, key, dict(mode="sample", sample=20), dict(mode="sample", sample=26)
+    )
+
+
+def test_a_zoom_at_the_top_stays_at_the_top(opened):
+    session, dock, key, line = opened
+    k2, l2 = _add_line(
+        session, "U2", GridPlacement("A", "y", 0.0, 0.0, 1, "U2"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    session.set_profiles(k2, l2.load())
+    t = dock.view.transform
+    dock.view.transform = t.with_window(t.trace_lo, t.trace_hi, t.t0_ns, t.t0_ns + 10.0)
+    session.append_step(k2, build_step("time_zero", mode="sample", sample=20))
+    n = dock.view.transform
+    assert (n.time_lo, n.time_hi) == pytest.approx((n.t0_ns, n.t0_ns + 10.0))
+
+
+@needs_real_data
+def test_a_time_zoom_survives_time_zero_on_the_campus_line(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = next(p for p in CAMPUS_LINES if p.name == "FILE__007.DZT")
+    line = Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__007"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    _two_time_zeros(session, dock, key, dict(mode="first_break"), dict(mode="sample", sample=52))
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="needs the with-dzg lines in tests/data/local")
+def test_a_time_zoom_survives_time_zero_on_a_gps_line(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    try:
+        session.new_site(tmp_path)
+        session.add_grid(Grid("G", (500.0, 700.0), 0.0, 30.0, 29.98, "EPSG:32616", 0.5))
+        line = Line.open(GPS_LINES[0], GridPlacement("G", "y", 0.25, 0.0, 1, "l0"))
+        session.add_lines([line])
+        key = session.keys()[0]
+        session.open_line(key)
+        session.set_profiles(key, line.load())
+        _two_time_zeros(
+            session, dock, key, dict(mode="sample", sample=20), dict(mode="sample", sample=47)
+        )
+    finally:
+        dock.hide()
+        dock.deleteLater()

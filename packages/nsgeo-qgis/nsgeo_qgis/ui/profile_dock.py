@@ -135,6 +135,7 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import AXIS_UNITS, MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.ui.view_transform import carry_time_window
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
 SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
@@ -322,6 +323,7 @@ class ProfileDock(QgsDockWidget):
         self._working_key: str | None = None
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        self._axes_zero = 0.0  # the zero_ns of the drawing those axes were set for
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
@@ -642,6 +644,7 @@ class ProfileDock(QgsDockWidget):
         t0_ns: float,
         dt_ns: float,
         distance: Any,
+        zero_ns: float = 0.0,
     ) -> None:
         """Set the view's axes for `key`, carrying the window over from
         whatever was showing. The only place the dock sets axes.
@@ -653,6 +656,14 @@ class ProfileDock(QgsDockWidget):
         into the new line's record. Rule 1 puts back the very same transform
         object, so a re-render of an unchanged line leaves anything holding
         it (and the zoom itself) untouched.
+
+        Between rules 1 and 2 sits the clock rule (spec §4.8, #163 item 2):
+        the same line, same traces, dt, ruler and direction, but a different
+        record start, length or `zero_ns` (a Time zero or cutoff edit, a step
+        toggle) keeps the time zoom through `carry_time_window`. `zero_ns` is
+        the zero of what is being drawn; the dock compares it with its own
+        `_axes_zero` (set at the end of every call), because `_shown_radargram`
+        is reassigned before this runs and cannot give the old zero.
         """
         view = self.view
         old = view.transform
@@ -672,10 +683,22 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and new is not None
             and key == old_key
+            and zero_ns == self._axes_zero
             and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
             == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
         ):
             view.transform = old
+        elif (
+            old is not None
+            and new is not None
+            and key == old_key
+            and not is_cut_key(key)
+            and (new.n_traces, new.dt_ns, new.bounds, new.mirrored)
+            == (old.n_traces, old.dt_ns, old.bounds, old.mirrored)
+        ):
+            view.transform = carry_time_window(old, new, self._axes_zero, zero_ns)
+            view.view_changed.emit()
+            view.update()
         elif ruler is not None and ruler.key in self._held:
             self._apply_held(self._held[ruler.key])
         elif (
@@ -691,6 +714,7 @@ class ProfileDock(QgsDockWidget):
         ):
             view.transform = old
         self._axes_key = key
+        self._axes_zero = zero_ns
 
     def _file_window(self) -> None:
         """File the window the view is showing under its ruler's key, with
@@ -1193,6 +1217,7 @@ class ProfileDock(QgsDockWidget):
     def _clear_view_only(self) -> None:
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
+        self._axes_zero = 0.0
         self._shown_radargram = None
         self.image = None
         self._set_cut_chrome(False)
@@ -2066,7 +2091,13 @@ class ProfileDock(QgsDockWidget):
                 distance = self._safe_distance(line)
         self._shown_radargram = rg
         self._set_axes_holding(
-            self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
+            self._key or "",
+            rg.n_traces,
+            rg.n_samples,
+            rg.t0_ns,
+            rg.dt_ns,
+            distance,
+            zero_ns=rg.zero_ns or 0.0,
         )
         reference = self._scale_reference(rg)
         self.image = (

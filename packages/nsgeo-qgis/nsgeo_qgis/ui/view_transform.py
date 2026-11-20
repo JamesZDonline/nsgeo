@@ -253,6 +253,30 @@ class ViewTransform:
         return replace(self, width=max(1, width), height=max(1, height))
 
 
+def carry_time_window(
+    old: ViewTransform, new: ViewTransform, old_zero: float, new_zero: float
+) -> ViewTransform:
+    """`new` with the time window `old` was showing, carried across a change of
+    clock or record on the same line (spec §4.8). The trace window is kept.
+
+    A whole-record window stays whole; one that began at the old top begins at
+    the new top with the same span; any other keeps its radar times, so it
+    moves by the zero change (`retime_ns`) and the tick labels shift while the
+    features stay where they were. Clamping is left to `with_window`.
+    """
+    half = old.dt_ns / 2
+    top = old.time_lo <= old.t0_ns + half
+    if top and old.time_hi >= old.t_end - half:
+        lo, hi = new.t0_ns, new.t_end
+    elif top:
+        lo = new.t0_ns
+        hi = lo + (old.time_hi - old.time_lo)
+    else:
+        shift = old_zero - new_zero
+        lo, hi = old.time_lo + shift, old.time_hi + shift
+    return new.with_window(old.trace_lo, old.trace_hi, lo, hi)
+
+
 def true_scale_window(
     t: ViewTransform, metres_per_trace_unit: float, ns_per_metre: float
 ) -> ViewTransform:
