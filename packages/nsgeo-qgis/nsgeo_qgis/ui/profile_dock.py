@@ -2320,7 +2320,6 @@ class ProfileDock(QgsDockWidget):
         if spec.kind == "row":
             # Time zero's first kept row, on the record it receives, relabelled
             # onto the line's clock: the very record `current_radargram` draws.
-            self._cutoff_step = step
             shown = self._shown_radargram
             if shown is None or self._effective_difference_index >= 0:
                 # A difference view draws another record, whose rows are not
@@ -2328,6 +2327,7 @@ class ProfileDock(QgsDockWidget):
                 self._cutoff_step = None
                 self.view.set_cutoff(None)
                 return
+            self._cutoff_step = step
             self.view.set_cutoff(
                 float(shown.t0_ns + int(step.params[str(spec.name)]) * shown.dt_ns), kind="start"
             )

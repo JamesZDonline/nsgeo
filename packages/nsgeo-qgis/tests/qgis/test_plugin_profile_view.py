@@ -1643,11 +1643,60 @@ def test_a_start_handle_snaps_to_row_tops_and_tags_the_drag(view):
     _press_left(v, r.left() + 30, r.top() + y)
     _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + y + 40))
     assert v.cutoff_ns == pytest.approx(t.snap_row(t.time_of_y(y + 40)))
-    assert v._cutoff_text(t).startswith("sample ")
-    assert v._cutoff_text(t).endswith(" ns")
+    k = round(v.cutoff_ns / 0.5)
+    assert 20 < k < 99
+    assert v._cutoff_text(t) == f"sample {k} \u00b7 {v.cutoff_ns:.2f} ns"
+    assert v._cutoff_text(t) == f"sample {k} \u00b7 {k * 0.5:.2f} ns"
     _release_left(v, r.left() + 30, r.top() + y + 40)
     assert got == [pytest.approx(v.cutoff_ns)]
     assert v._cutoff_text(t).startswith("Time zero")
+
+
+def test_a_start_handle_dragged_off_either_edge_lands_on_row_0_and_the_last_row(view):
+    """Review Focus 5, in the view itself: row 0 above and row n - 1 below
+    (the end cutoff's snap would keep row 1 and reach t_end instead)."""
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    t = v.transform
+    r = v.image_rect()
+    for target_y, want in (
+        (-80, t.t0_ns),
+        (t.height + 80, t.t0_ns + (t.n_samples - 1) * t.dt_ns),
+    ):
+        v.set_cutoff(10.0, kind="start")
+        got = []
+        v.cutoff_dragged.connect(got.append)
+        y = round(t.y_of_time(10.0))
+        _press_left(v, r.left() + 30, r.top() + y)
+        _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + target_y))
+        _release_left(v, r.left() + 30, r.top() + target_y)
+        assert got == [pytest.approx(want)]
+        assert v.cutoff_ns == pytest.approx(want)
+        v.cutoff_dragged.disconnect(got.append)
+
+
+def test_the_drag_tag_never_reads_minus_zero(view):
+    """The relabelled line's own row is 0 ns up to float residue; the tag must
+    not print it as -0.00. Here t0 + 53 * dt is -1.8e-15."""
+    v, _ = view
+    v.set_axes(100, 200, -11.4745, 0.2165)
+    line = v.transform.t0_ns + 53 * v.transform.dt_ns
+    assert line < 0 and f"{line:.2f}" == "-0.00"
+    v.set_cutoff(line, kind="start")
+    r = v.image_rect()
+    y = round(v.transform.y_of_time(line))
+    _press_left(v, r.left() + 30, r.top() + y)
+    _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + y + 1))
+    assert v._cutoff_text(v.transform) == "sample 53 \u00b7 0.00 ns"
+    _release_left(v, r.left() + 30, r.top() + y + 1)
+
+
+def test_an_unknown_cutoff_kind_hides_the_line_and_is_logged(view, message_log):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.set_cutoff(40.0, kind="strat")
+    assert v.cutoff_ns is None
+    assert len(message_log) == 1
 
 
 def test_set_cutoff_default_kind_is_still_the_end_cutoff(view):

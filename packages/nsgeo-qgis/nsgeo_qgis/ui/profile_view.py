@@ -378,7 +378,8 @@ class ProfileView(QWidget):
 
     @property
     def cutoff_ns(self) -> float | None:
-        """The end time drawn now, live during a drag; None when hidden."""
+        """The time of the line drawn now (the cutoff's end, or Time zero's row
+        top), live during a drag; None when hidden."""
         return self._cutoff_ns
 
     def set_cutoff(self, end_ns: float | None, kind: str = "end") -> None:
@@ -393,7 +394,10 @@ class ProfileView(QWidget):
         overwrite that with a stale gesture.
         """
         self._cutoff_grab = None
-        self._cutoff_kind = "start" if kind == "start" else "end"
+        if kind not in ("end", "start"):
+            _log(f"set_cutoff: unknown kind {kind!r}; line hidden instead")
+            kind, end_ns = "end", None
+        self._cutoff_kind = kind
         if end_ns is not None and not math.isfinite(end_ns):
             _log(f"set_cutoff: non-finite end time {end_ns}; line hidden instead")
             end_ns = None
@@ -770,7 +774,9 @@ class ProfileView(QWidget):
             return cutoff_label(self._cutoff_ns, self._velocity)
         k = round((self._cutoff_ns - t.t0_ns) / t.dt_ns) if t.dt_ns else 0
         if self._cutoff_grab is not None:
-            return f"sample {k} \u00b7 {self._cutoff_ns:.2f} ns"
+            # `or 0.0`: float residue on the relabelled clock must not print -0.00.
+            t_ns = round(self._cutoff_ns, 2) or 0.0
+            return f"sample {k} \u00b7 {t_ns:.2f} ns"
         return f"Time zero \u00b7 sample {k}"
 
     def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:

@@ -76,11 +76,25 @@ def test_a_typed_row_moves_the_line(fake_iface, tmp_path, answer_modal):
         s.append_step(key, build_step("time_zero", mode="sample", sample=20))
         pd = plugin.processing_dock
         pd.list.setCurrentRow(0)
+        dock = plugin.profile_dock
+        t = dock.view.transform
+        mid = (t.time_lo + t.time_hi) / 2
+        dock.view.transform = t.with_window(t.trace_lo + 5, t.trace_hi - 5, mid - 5.0, mid + 5.0)
+        tr = dock.view.transform
+        z = dock.shown_zero_ns()
+        before_window = (tr.time_lo + z, tr.time_hi + z)
+        y_before = tr.y_of_time(dock.view.cutoff_ns)
         pd.form.set_value("sample", "30")
         pd.form.commit()
         assert _row_of(plugin, s, key) == 30
         rg = plugin.profile_dock._shown_radargram
-        assert plugin.profile_dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 30 * rg.dt_ns)
+        assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 30 * rg.dt_ns)
+        tr = dock.view.transform
+        z2 = dock.shown_zero_ns()
+        assert (tr.time_lo + z2, tr.time_hi + z2) == pytest.approx(before_window)
+        # the picture held, so the line moved down by exactly the ten rows
+        row_px = rg.dt_ns / (tr.time_hi - tr.time_lo) * tr.height
+        assert tr.y_of_time(dock.view.cutoff_ns) - y_before == pytest.approx(10 * row_px)
     finally:
         _unload(plugin, answer_modal)
 
@@ -132,6 +146,52 @@ def test_dragging_with_difference_on_keeps_it_off_and_writes_the_row(
         assert not pd.diff_button.isChecked()
         assert dock.difference_label.text() == ""
         assert _row_of(plugin, s, key) == 26
+    finally:
+        _unload(plugin, answer_modal)
+
+
+def test_a_valid_difference_view_on_time_zero_draws_no_row_line(fake_iface, tmp_path, answer_modal):
+    """With sample 0 nothing is cropped, so Difference on Time zero is not
+    declined; its record is the difference, whose rows are not the step's."""
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.append_step(key, build_step("time_zero", mode="sample", sample=0))
+        pd.list.setCurrentRow(0)
+        assert plugin.profile_dock.view.cutoff_ns is not None
+        pd.diff_button.setChecked(True)
+        assert pd.diff_button.isChecked()
+        assert plugin.profile_dock.difference_label.text() != ""
+        assert plugin.profile_dock.view.cutoff_ns is None
+        pd.diff_button.setChecked(False)
+        assert plugin.profile_dock.view.cutoff_ns is not None
+    finally:
+        _unload(plugin, answer_modal)
+
+
+def test_switching_a_later_time_zero_into_sample_seeds_from_what_it_receives(
+    fake_iface, tmp_path, answer_modal
+):
+    """Review Focus 1: [dewow, time_zero(first_break), gain_agc]. At threshold
+    0.25 the source's first break is row 40 and the dewowed record's is 33."""
+    from nsgeo.processing import first_break_row_or_none
+
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    try:
+        pd = plugin.processing_dock
+        s.append_step(key, build_step("dewow"))
+        s.append_step(key, build_step("time_zero", mode="first_break", threshold=0.25))
+        s.append_step(key, build_step("gain_agc"))
+        st = s.stack_for(key)
+        assert first_break_row_or_none(st.source, 0.25) == 40
+        assert first_break_row_or_none(st.intermediate(0), 0.25) == 33
+        pd.list.setCurrentRow(1)
+        pd.form.set_value("mode", "sample")
+        pd.form.commit()
+        assert _row_of(plugin, s, key, 1) == 33
+        rg = plugin.profile_dock._shown_radargram
+        assert plugin.profile_dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-6)
+        assert round(-rg.t0_ns / rg.dt_ns) == 33
     finally:
         _unload(plugin, answer_modal)
 

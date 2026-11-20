@@ -3033,19 +3033,6 @@ def test_a_disabled_time_zero_draws_its_line_as_the_cutoff_does(opened):
     assert session.stack_for(key).entries[0][1] is False
 
 
-def test_a_row_handle_with_difference_on_draws_no_line(opened):
-    """The line is for the step's own input view; a difference view is another
-    record, so nothing to drag there (the Processing panel declines it anyway)."""
-    session, dock, key, line = opened
-    _stack_of(session, key, ("dewow", {}), ("time_zero", dict(mode="sample", sample=20)))
-    dock.set_selected_step(1)
-    assert dock.view.cutoff_ns is not None
-    dock._difference_index = 0
-    dock._render()
-    assert dock._effective_difference_index == 0
-    assert dock.view.cutoff_ns is None
-
-
 def test_a_row_handles_input_view_is_its_own_scale(opened):
     """The display limit is taken from the drawn input, not the processed
     stack, whose scale can differ by orders of magnitude."""

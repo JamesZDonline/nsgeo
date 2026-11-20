@@ -136,6 +136,8 @@ def test_selecting_time_zero_before_a_migration_declines_the_difference_and_draw
     assert len(errors) == 1
     assert not pd.diff_button.isChecked()
     np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).source.data)
+    # the row line is up on the input it was declined onto
+    assert prd.view.cutoff_ns is not None
 
 
 def test_closing_the_site_with_difference_on_unchecks_it(plugin):
