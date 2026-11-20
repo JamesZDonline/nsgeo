@@ -17,6 +17,7 @@ from nsgeo_qgis.ui.profile_view import (
     CAPTION_ROW,
     CURSOR_COLOUR,
     MARGIN_LEFT,
+    MARGIN_RIGHT,
     MARGIN_TOP,
     NO_DATA_HATCH,
     PICK_COLOUR,
@@ -31,6 +32,8 @@ from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
+
+VIEW_W = 696 + MARGIN_LEFT + MARGIN_RIGHT
 
 
 def _rg(n_traces=200, n_samples=128):
@@ -231,7 +234,7 @@ def test_decimated_image_paints_the_correctly_scaled_source_rect(make_view):
     )  # exact: 20_000 / 10 traces per decimated column, no ragged tail
 
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(n_traces, n_samples, 0.0, 0.5)
     v.set_image(ri.image)
@@ -286,7 +289,7 @@ def test_vertical_scaling_reconciles_an_image_shorter_than_n_samples(make_view):
     assert (img.width(), img.height()) == (20, 2)
 
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(20, 8, 0.0, 1.0)  # n_samples=8, dt_ns=1.0 -> time range [0, 8)
     v.set_image(img)
@@ -315,7 +318,7 @@ def view(make_view):
     v = make_view()
     # An 800x300 widget under the original 8-px top margin: a 696x264 image
     # rect, which the hard-coded tick and zoom numbers below are derived from.
-    v.resize(800, 264 + MARGIN_TOP + 28)
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     rg = _rg()
     v.set_axes(
@@ -400,7 +403,7 @@ def test_set_axes_rejects_a_mismatched_distance_along_and_logs_it(make_view, mes
     axes anyway, and logs instead of storing the bad array.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5, distance_along=np.arange(100) / 60.0)
     v.set_image(RadargramImage(_rg()).image)
     v.grab_image()  # must not raise
@@ -418,7 +421,7 @@ def test_set_axes_rejects_a_non_positive_dt_ns_and_logs_it(make_view, message_lo
     caller between it and a header value, so it enforces its own contract.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     before = v.transform
     v.set_axes(200, 128, 0.0, 0.0)
     assert v.transform is before  # rejected outright; nothing was changed
@@ -1253,7 +1256,7 @@ def test_distance_ticks_fall_back_to_trace_ticks_without_distance_along(make_vie
     all 18 tests because the `view` fixture always supplies
     `distance_along` -- nothing exercised this branch at all."""
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5)  # no distance_along
     ticks = v._distance_ticks(v.transform)
     assert ticks  # "return []" would make this empty
@@ -1290,7 +1293,7 @@ def test_set_axes_and_fit_emit_view_changed(make_view):
     removals survive); only `zoom_at`'s emission is covered, via
     `test_wheel_zooms_about_the_cursor_and_emits_view_changed`."""
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     changed = []
     v.view_changed.connect(lambda: changed.append(1))
     v.set_axes(200, 128, -4.0, 0.5)
@@ -1345,11 +1348,11 @@ def test_resize_after_axes_are_set_updates_the_transform(make_view):
     the correct 178 (`800/896*200`) the new width gives.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(200, 128, -4.0, 0.5)  # transform now set, unlike every other fixture's resize
     assert v.transform.width == 696
-    v.resize(1000, 300)
+    v.resize(VIEW_W + 200, 300)
     QApplication.processEvents()  # a resize on an unshown/unexposed widget can otherwise be queued
     assert v.transform.width == 896  # updated, not left at the stale 696
     assert (
@@ -1876,7 +1879,7 @@ def _local(v, x, y):
 @pytest.fixture
 def ruled(make_view):
     v = make_view()
-    v.resize(800, 264 + MARGIN_TOP + 28)
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     rg = _rg()
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=D, ruler=R)
@@ -2091,14 +2094,14 @@ def test_a_window_entirely_in_blank_space_paints_without_error(ruled, monkeypatc
 
 def test_set_axes_drops_a_ruler_without_a_distance(make_view):
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5, None, R)
     assert v.ruler is None and not v.transform.mirrored and v.transform.bounds is None
 
 
 def test_a_one_trace_line_with_a_distance_paints_its_axes_without_error(make_view, monkeypatch):
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     logged = []
     monkeypatch.setattr(profile_view_module, "_log", lambda *a, **k: logged.append(a))

@@ -66,7 +66,7 @@ from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks, true_scale_w
 # what keeps a "0" tick at the very top (an active `time_zero` step) off the
 # caption without hiding the label (issue #7).
 CAPTION_ROW = 14
-MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, CAPTION_ROW + 8, 28
+MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 56, CAPTION_ROW + 8, 28
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
 # Ruler space with no trace under it: a light hatch over the background, so it
