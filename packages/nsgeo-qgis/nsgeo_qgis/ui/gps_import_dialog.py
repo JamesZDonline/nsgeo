@@ -703,6 +703,9 @@ class GpsImportPage(QWidget):
             if r.refusal is not None
             and r.refusal != ALREADY_IN_SITE
             and r.refusal != OUTSIDE.format(gid=target_id)
+            # a DZT that could not be read has no trace count: a Grid-mode row
+            # could never import it, so it stays in the summary as "not imported"
+            and r.n_traces is not None
         ]
         self.messages = [
             (t, i > 0)

@@ -1055,9 +1055,8 @@ class GridDialog(QDialog):
         a proposed one (Fit to these tracks) leaves the Id empty and editable."""
         if keep_id:
             self.id_edit.setText(grid.id)
-            self.id_edit.setEnabled(
-                False
-            )  # lines reference the id; renaming is a different feature
+            # lines reference the id; renaming is a different feature
+            self.id_edit.setEnabled(False)
         self._write_crs(QgsCoordinateReferenceSystem(grid.crs))
         self._write_numbers(self.crs_widget.crs(), grid.origin[0], grid.origin[1], grid.azimuth)
         self.size_x.setValue(grid.size_x)

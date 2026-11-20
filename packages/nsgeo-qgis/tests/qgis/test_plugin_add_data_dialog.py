@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.model.survey import Line
@@ -473,7 +475,7 @@ def test_the_gps_page_opens_on_the_grid_the_dialog_was_opened_for(session):
 from nsgeo_qgis.ui.import_dialog import COL_DIR, COL_NOTE, COL_OFFSET  # noqa: E402
 from qgis.PyQt.QtGui import QColor  # noqa: E402
 
-COS_LAT = 0.7036  # cos(45.2 deg)
+COS_LAT = math.cos(math.radians(LAT0))
 DLON = 0.5 / (M_PER_DEG * COS_LAT)  # half a metre east, in degrees of longitude
 AMBER = QColor("#fbf3df")
 
@@ -516,7 +518,7 @@ def test_files_gps_cannot_place_are_handed_on_to_grid_mode_with_a_guess(session,
     page = d.grid_page
     assert page.grid_combo.currentData() == "G4"
     assert [r.path.name for r in page.rows] == ["FILE__003.DZT", "FILE__006.DZT"]
-    assert [round(r.offset, 1) for r in page.rows] == [1.8, 3.3]
+    assert [r.offset for r in page.rows] == pytest.approx([1.75, 3.25], abs=0.02)
     assert [r.direction for r in page.rows] == [-1, -1]
     for r in range(2):
         for col in (COL_OFFSET, COL_DIR):
@@ -567,6 +569,17 @@ def test_editing_a_guessed_offset_clears_its_amber_and_note(session, tmp_path):
     assert cell(page, 1, COL_NOTE).text() != ""
 
 
+def test_editing_a_guessed_direction_clears_the_rows_guess(session, tmp_path):
+    d, _ = handed_on_dialog(session, tmp_path)
+    d.accept()
+    page = d.grid_page
+    page.set_direction(0, 1)
+    assert page.rows[0].guess == ""
+    assert cell(page, 0, COL_DIR).background().color() != AMBER
+    assert cell(page, 0, COL_NOTE).text() == ""
+    assert page.rows[1].guess != ""
+
+
 def test_an_already_in_the_site_refusal_is_not_handed_on(session, tmp_path):
     raw = tmp_path / "raw"
     paths = survey(raw, missing=())
@@ -582,3 +595,43 @@ def test_an_already_in_the_site_refusal_is_not_handed_on(session, tmp_path):
     d2.accept()
     assert len(session.site.lines) == 11
     assert d2.result() == 1 and d2.mode() == GPS  # closed as before: nothing to hand on
+
+
+def test_the_hand_on_import_does_not_change_the_remembered_mode(session, tmp_path):
+    d, _ = handed_on_dialog(session, tmp_path)
+    d.accept()
+    assert QgsSettings().value(MODE_KEY) == GPS
+    d.accept()  # the tape Import of the leftovers
+    assert QgsSettings().value(MODE_KEY) == GPS
+
+
+def test_a_failing_guess_still_hands_the_files_on_without_one(session, tmp_path, monkeypatch):
+    import nsgeo_qgis.ui.add_data_dialog as mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no guess today")
+
+    monkeypatch.setattr(mod, "guess_tape_rows", boom)
+    d, batches = handed_on_dialog(session, tmp_path)
+    d.accept()
+    assert len(session.site.lines) == 8 and d.mode() == GRID
+    assert [r.path.name for r in d.grid_page.rows] == ["FILE__003.DZT", "FILE__006.DZT"]
+    assert all(r.guess == "" for r in d.grid_page.rows)
+    assert "could not import" not in d.gps_page.status.text()
+    assert len(batches) == 1
+
+
+def test_a_dzt_that_cannot_be_read_stays_in_the_gps_summary_not_the_hand_on(session, tmp_path):
+    paths = survey(tmp_path / "raw")
+    bad = tmp_path / "raw" / "FILE__099.DZT"
+    bad.write_bytes(b"not a dzt")
+    d = AddDataDialog(session, mode=GPS)
+    batches: list[list] = []
+    d.imported.connect(batches.append)
+    d.add_files([*paths, bad])
+    d.gps_page.name_edit.setText("G4")
+    d.accept()
+    assert [r.path.name for r in d.grid_page.rows] == ["FILE__003.DZT", "FILE__006.DZT"]
+    texts = [t for t, _ in batches[0]]
+    assert any(t.startswith("not imported: FILE__099.DZT (could not read it") for t in texts)
+    assert not any("FILE__003" in t and "not imported" in t for t in texts)

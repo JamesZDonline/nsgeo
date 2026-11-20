@@ -395,9 +395,49 @@ def test_lines_along_x_guess_axis_x_with_offsets_in_local_y():
     assert g.direction == 1
 
 
-def test_a_leftover_after_an_unguessed_one_is_left_out_too():
+def test_a_diagonal_neighbour_leaves_every_leftover_that_leans_on_it_unguessed():
     diag = np.column_stack([np.linspace(0, 10, 5), np.linspace(0, 10, 5)])
     order = NAMES[:4]
     placed = {NAMES[0]: _along_y(0.25), NAMES[1]: diag}
-    # file 2 leans on a diagonal neighbour: no guess; file 3 follows file 2
+    # files 2 and 3 both lean on the diagonal line 1 (and line 0): the axes disagree
     assert guess_tape_rows(order, placed, G0) == {}
+
+
+G200 = Grid("R", (100.0, 200.0), 200.0, 10.0, 20.0, CRS, 0.5)
+
+
+def _rotated(offset, up=True, length=20.0):
+    """A line along local Y at local x = offset, in world coordinates of G200."""
+    ys = np.linspace(0, length, 5)
+    local = np.column_stack([np.full(5, offset), ys if up else ys[::-1]])
+    return G200.to_world(local)
+
+
+def _descending(skip):
+    """Ten files numbered DOWN local X (offsets 9.75, 9.25, ...) on a rotated grid."""
+    placed = {p: _rotated(9.75 - 0.5 * i, i % 2 == 0) for i, p in enumerate(NAMES) if i not in skip}
+    return NAMES, placed
+
+
+def test_files_numbered_down_the_grid_are_guessed_at_both_ends_and_between():
+    order, placed = _descending({0, 4, 9})
+    guess = guess_tape_rows(order, placed, G200)
+    assert guess[NAMES[0]].offset == pytest.approx(9.75)  # one spacing before 9.25, away from 8.75
+    assert guess[NAMES[0]].note == "1 spacing before FILE__303"
+    assert guess[NAMES[4]].offset == pytest.approx(9.75 - 0.5 * 4)
+    assert guess[NAMES[9]].offset == pytest.approx(9.75 - 0.5 * 9)  # 5.25, past 5.75 going down
+    assert guess[NAMES[9]].note == "1 spacing after FILE__310"
+    assert [guess[NAMES[i]].direction for i in (0, 4, 9)] == [1, 1, -1]
+
+
+def test_the_end_guess_with_one_placed_line_steps_up_after_it_and_down_before_it():
+    placed = {NAMES[1]: _along_y(5.0)}
+    guess = guess_tape_rows(NAMES[:3], placed, G0)
+    assert guess[NAMES[2]].offset == pytest.approx(5.5)
+    assert guess[NAMES[0]].offset == pytest.approx(4.5)
+
+
+def test_a_neighbour_under_a_metre_long_gives_no_guess():
+    short = np.column_stack([np.full(3, 0.25), np.linspace(0.0, 0.5, 3)])
+    placed = {NAMES[0]: short, NAMES[2]: _along_y(1.25)}
+    assert guess_tape_rows(NAMES[:3], placed, G0) == {}

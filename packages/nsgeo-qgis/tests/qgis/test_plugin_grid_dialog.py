@@ -2806,7 +2806,7 @@ def test_dispose_is_idempotent_and_setters_then_do_nothing(session, project_crs,
 
 
 # ---- M17b Task 6: a proposed grid, and Fit a grid to these tracks -------------------
-PROPOSED = Grid("_", (500_010.0, 5_000_020.0), 12.5, 3.5, 17.0, "EPSG:32632", 0.5)
+PROPOSED = Grid("_", (500_010.0, 5_000_020.0), 12.5, 3.5, 17.0, "EPSG:32632", 0.7)
 
 
 def test_a_proposed_grid_fills_every_field_but_the_id(session):
@@ -2815,7 +2815,7 @@ def test_a_proposed_grid_fills_every_field_but_the_id(session):
     assert (d.origin_x.value(), d.origin_y.value()) == (500_010.0, 5_000_020.0)
     assert d.azimuth.value() == pytest.approx(12.5)
     assert (d.size_x.value(), d.size_y.value()) == (3.5, 17.0)
-    assert d.spacing.value() == 0.5
+    assert d.spacing.value() == pytest.approx(0.7)
     assert d.crs_widget.crs().authid() == "EPSG:32632"
     assert not d.ok_button.isEnabled()
     d.id_edit.setText("F1")
@@ -2883,5 +2883,34 @@ def test_fitting_one_track_proposes_the_default_spacing_and_one_spacing_of_width
     assert dialog.spacing.value() == 0.5
     assert dialog.size_x.value() == pytest.approx(0.5, abs=0.02)
     dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_these_tracks_with_a_grid_dialog_open_refuses_and_keeps_the_open_one(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.open_grid_dialog(None)
+    first = plugin._grid_dialog
+    plugin.fit_tracks(keys)
+    assert plugin._grid_dialog is first
+    assert shown == ["Close the open grid dialog first."]
+    first.id_edit.setText("X")
+    first.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32632"))
+    first.accept()  # the plain Add grid: it must not move the fit's lines
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {None}
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_no_tracks_says_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, _ = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.fit_tracks([])
+    assert shown == [] and plugin._grid_dialog is None
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()

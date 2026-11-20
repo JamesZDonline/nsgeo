@@ -99,6 +99,8 @@ class AddDataDialog(QDialog):
         self.overlay: GridOverlay | None = None if canvas is None else GridOverlay(canvas)
         self._gps_key: tuple[Path, ...] | None = None
         self._gps_count = 0
+        #: True once the Grid page holds the hand-on of files GPS could not place.
+        self._handed_on = False
         self.resize(900, 560)
         layout = QVBoxLayout(self)
 
@@ -170,6 +172,7 @@ class AddDataDialog(QDialog):
             src = self._page()
             self._mode = mode
             if carry:
+                self._handed_on = False  # the user chose a mode
                 self._page().set_files(src.paths())
         self._show_mode()
 
@@ -271,7 +274,9 @@ class AddDataDialog(QDialog):
         try:
             if not page.import_lines():
                 return
-            QgsSettings().setValue(MODE_KEY, self._mode)
+            if not self._handed_on:
+                # the hand-on's tape Import is not a choice of mode (decision 15)
+                QgsSettings().setValue(MODE_KEY, self._mode)
             self.imported.emit(list(page.messages))
             if self._mode == GPS and self._hand_on():
                 return
@@ -287,13 +292,18 @@ class AddDataDialog(QDialog):
         result = self.gps_page.last_import
         if result is None or not result.leftovers:
             return False
-        grid = self.session.grid(result.grid_id)
-        guesses = guess_tape_rows(result.order, result.placed, grid)
+        try:
+            grid = self.session.grid(result.grid_id)
+            guesses = guess_tape_rows(result.order, result.placed, grid)
+        except Exception:  # noqa: BLE001 -- the GPS import happened; rows start as Grid mode starts them
+            _log()
+            guesses = {}
         self.gps_page.set_files([])
         self.set_mode(GRID, carry=False)
         self.grid_page.hand_on(
             result.leftovers, result.grid_id, guesses, n_placed=len(result.placed)
         )
+        self._handed_on = True
         self._gps_key = None
         self._page_changed()
         return True

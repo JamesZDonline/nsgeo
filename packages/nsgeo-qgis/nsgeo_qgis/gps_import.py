@@ -20,6 +20,7 @@ import numpy as np
 from nsgeo.geometry import (
     ALONG_DEG,
     END_LIMIT_M,
+    MIN_VOTE_M,
     Bridge,
     Grid,
     ToXY,
@@ -288,6 +289,9 @@ class _Placed:
 def _placed_line(coords: np.ndarray, grid: Grid) -> _Placed:
     local = grid.to_local(np.asarray(coords, dtype=float))
     step = local[-1] - local[0]
+    if math.hypot(float(step[0]), float(step[1])) < MIN_VOTE_M:
+        # too short to say which way it runs (and atan2(0, 0) would say "along Y")
+        return _Placed(None, float(local[:, 0].mean()), 1)
     dev_y = math.degrees(math.atan2(abs(step[0]), abs(step[1])))
     if dev_y <= ALONG_DEG:
         axis: str | None = "y"
@@ -370,8 +374,5 @@ def guess_tape_rows(
         direction[i] = -direction[i + 1]
     out: dict[Path, TapeGuess] = {}
     for i, (axis, offset, note) in guesses.items():
-        # a neighbour before it that is a leftover without a guess breaks the chain
-        if i > idx[0] and i - 1 not in info and i - 1 not in guesses:
-            continue
         out[paths[i]] = TapeGuess(axis, offset, direction[i], note)
     return out

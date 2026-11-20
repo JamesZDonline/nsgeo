@@ -447,8 +447,9 @@ on the same grid, holding only those files. Each one's **Offset** and **Dir**
 are guessed from the GPS lines either side of it in file order and shown in
 amber, with a note in the **Note** column (for example *between FILE__003 and
 FILE__005*); **Direction** and **First line at** are hidden while they stand.
-Check them against your tapes and change any that are wrong (a changed cell
-stops being amber), then click **Import** to place them by the tapes, or
+Check them against your tapes and change any that are wrong (changing a row's
+**Offset** or **Dir** takes the amber and the note off both of that row's cells),
+then click **Import** to place them by the tapes, or
 **Cancel** to leave them out; the GPS lines stay either way. No guess is made
 when the lines either side do not run along one of the grid's axes.
 

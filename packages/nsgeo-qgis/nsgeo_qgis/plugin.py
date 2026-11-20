@@ -2749,6 +2749,12 @@ class NsgeoPlugin:
         assert self.session is not None
         if not self.session.is_open:
             return
+        if self._grid_dialog is not None and (proposed is not None or move_keys):
+            # Fit to these tracks while another grid dialog is open: showing the
+            # open one would drop this request, and its OK could then move the
+            # wrong lines. Refuse, and leave the open dialog's own request alone.
+            self.message("Close the open grid dialog first.", Qgis.MessageLevel.Warning)
+            return
         if self._grid_dialog is not None:
             # Modeless means the toolbar and dock stay clickable while
             # one is already open, unlike the old exec()'s
@@ -3287,7 +3293,9 @@ class NsgeoPlugin:
             assert self.session is not None
             crs = self.session.site_crs()
             tracks = [self.session.line_for_key(k).trace_coords({}) for k in keys]
-            if crs is None or not tracks:
+            if not tracks:
+                return
+            if crs is None:
                 self.message("Fit a grid: the site has no CRS yet", Qgis.MessageLevel.Critical)
                 return
             spacing = measure_spacing(tracks) or DEFAULT_SPACING
