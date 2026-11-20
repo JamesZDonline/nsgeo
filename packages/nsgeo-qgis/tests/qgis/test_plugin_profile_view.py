@@ -2210,6 +2210,15 @@ def _sampled(make_view):
     return v
 
 
+def _imaged(make_view):
+    """`_sampled` with a picture up: the read-out only shows over an image."""
+    v = _sampled(make_view)
+    img = QImage(200, 128, QImage.Format.Format_RGB32)
+    img.fill(QColor(0, 0, 0))
+    v.set_image(img)
+    return v
+
+
 def _click(v, button, pos):
     QTest.mousePress(v, button, Qt.KeyboardModifier.NoModifier, pos)
     QTest.mouseRelease(v, button, Qt.KeyboardModifier.NoModifier, pos)
@@ -2295,6 +2304,54 @@ def test_a_press_on_an_axis_strip_asks_for_its_menu_and_keeps_the_selection(make
     assert v._selection == (10, 40)
 
 
+def test_a_strip_press_in_velocity_mode_opens_the_menu_and_starts_no_gesture(make_view):
+    """Guard (spec 4.6): passes on the code as it stands; pins it before the
+    next plan edits `_handle_mouse_press`."""
+    v = _sampled(make_view)
+    v.set_velocity_fit_mode(True)
+    menus, points, boxes = [], [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.velocity_point_requested.connect(lambda tr, ns: points.append(tr))
+    v.velocity_box_drawn.connect(lambda *a: boxes.append(a))
+    QTest.mousePress(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(10, MARGIN_TOP + 50)
+    )
+    assert menus == ["left"]
+    assert v.velocity_box_rect() is None
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(10, MARGIN_TOP + 50)
+    )
+    assert points == [] and boxes == []
+
+
+def test_a_right_click_in_the_image_in_velocity_mode_still_discards_a_point(make_view):
+    """Guard (spec 4.6): passes on the code as it stands."""
+    v = _sampled(make_view)
+    v.set_velocity_fit_mode(True)
+    v.set_velocity_fit([(100, 10.0)], [])
+    menus, gone = [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.velocity_point_discarded.connect(gone.append)
+    t, r = v.transform, v.image_rect()
+    _click(
+        v,
+        Qt.MouseButton.RightButton,
+        QPoint(int(r.left() + t.x_of_trace(100.5)), int(r.top() + t.y_of_time(10.0))),
+    )
+    assert gone == [0] and menus == []
+
+
+def test_a_strip_press_in_pick_mode_opens_the_menu_and_requests_no_pick(make_view):
+    """Guard (spec 4.6): passes on the code as it stands."""
+    v = _sampled(make_view)
+    v.set_pick_mode(True)
+    menus, picks = [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.pick_requested.connect(lambda tr, ns: picks.append(tr))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(v.width() - 10, MARGIN_TOP + 50))
+    assert menus == ["right"] and picks == []
+
+
 def test_a_press_on_the_bottom_axis_still_clears_the_selection(make_view):
     v = _sampled(make_view)
     v.set_selection(10, 40)
@@ -2313,14 +2370,22 @@ def _hover_at(v, trace, sample):
     send_hover(v, QPoint(x, y))
 
 
-def test_the_readout_reads_the_sample_under_the_pointer(make_view):
+def test_the_readout_is_empty_while_there_is_no_image(make_view):
     v = _sampled(make_view)
+    assert v._image is None  # "loading..."
+    r = v.image_rect()
+    send_hover(v, QPoint(r.left() + r.width() // 2, r.top() + r.height() // 2))
+    assert v.readout_text() == ""
+
+
+def test_the_readout_reads_the_sample_under_the_pointer(make_view):
+    v = _imaged(make_view)
     _hover_at(v, 100, 40)
     assert v.readout_text() == "1.67 m along (trace 100) \u00b7 10.00 ns \u00b7 0.50 m deep"
 
 
 def test_the_readout_follows_the_axis_units(make_view):
-    v = _sampled(make_view)
+    v = _imaged(make_view)
     v.set_axis_units("sample", "m")
     _hover_at(v, 100, 40)
     assert v.readout_text() == "1.67 m along (trace 100) \u00b7 sample 40 \u00b7 0.50 m deep"
@@ -2334,6 +2399,7 @@ def test_the_readout_without_metres_or_velocity(make_view):
     v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     v.set_axes(200, 128, 0.0, 0.25)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
     _hover_at(v, 100, 40)
     assert v.readout_text() == "trace 100 \u00b7 10.00 ns"
 
@@ -2343,6 +2409,7 @@ def test_the_readout_leaves_depth_out_above_zero(make_view):
     v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     v.set_axes(200, 128, -2.0, 0.25, distance_along=np.arange(200) / 60.0)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
     v.set_velocity(VelocityModel.constant(0.1))
     t, r = v.transform, v.image_rect()
     send_hover(
@@ -2353,7 +2420,7 @@ def test_the_readout_leaves_depth_out_above_zero(make_view):
 
 
 def test_the_readout_clears_off_the_image(make_view):
-    v = _sampled(make_view)
+    v = _imaged(make_view)
     _hover_at(v, 100, 40)
     assert v.readout_text() != ""
     send_hover(v, QPoint(5, MARGIN_TOP + 40))  # the left axis strip
@@ -2367,7 +2434,7 @@ def test_the_readout_clears_off_the_image(make_view):
 
 
 def test_the_readout_is_painted_and_clears_when_the_pointer_leaves(make_view, message_log):
-    v = _sampled(make_view)
+    v = _imaged(make_view)
 
     def strip_has_ink():
         shot, r = v.grab_image(), v.image_rect()
@@ -2390,7 +2457,7 @@ def test_the_readout_is_painted_and_clears_when_the_pointer_leaves(make_view, me
 
 
 def test_the_readout_is_empty_after_the_view_shrinks(make_view):
-    v = _sampled(make_view)
+    v = _imaged(make_view)
     r = v.image_rect()
     send_hover(v, QPoint(r.right() - 5, r.bottom() - 5))
     assert v.readout_text() != ""
@@ -2411,7 +2478,7 @@ def test_a_mirrored_line_reads_its_own_metres(ruled):
 
 
 def test_the_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatch):
-    v = _sampled(make_view)
+    v = _imaged(make_view)
     monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(42.0))
     _hover_at(v, 100, 40)
     assert v.readout_text().startswith("42.00 m along")

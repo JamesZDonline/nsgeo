@@ -2,6 +2,12 @@
 through a ViewTransform, with axes, a cursor, a selection band, picks, a
 slice band and the draggable time-cutoff line.
 
+Each vertical axis shows its own unit (ns, samples or metres of depth;
+`set_axis_units`), and a press on either axis strip asks for the unit menu
+(`axis_menu_requested`) instead of starting any other gesture. While the
+pointer is over the image a read-out gives the position under it in those
+units (`readout_text`).
+
 Measured: drawing a sub-rectangle of the cached image costs about 3 ms per
 frame at any zoom, so pan and zoom never touch numpy.
 
@@ -620,10 +626,10 @@ class ProfileView(QWidget):
             painter.end()
 
     def readout_text(self) -> str:
-        """What is under the pointer, in the axes' units; "" off the image or
-        over blank ruler space."""
+        """What is under the pointer, in the axes' units; "" off the image, over
+        blank ruler space or while there is no image to point at."""
         t = self.transform
-        if t is None or self._hover is None:
+        if t is None or self._hover is None or self._image is None:
             return ""
         x, y = self._hover
         if not (0 <= x < t.width and 0 <= y < t.height):  # stale: the view has been resized
