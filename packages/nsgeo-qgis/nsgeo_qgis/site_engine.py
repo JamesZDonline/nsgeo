@@ -1206,6 +1206,38 @@ class SiteEngine(QObject):
             slices.extend(shown.values())
         return limit_of(slices, clip)
 
+    def fills_missing(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[str]:
+        """The ready grids, in `ready_grids` order, whose fill for this window's
+        covered cells is not held (#193): a draw at this window would build it.
+        Slices through `_sliced`, as the draw does anyway. A grid whose axis
+        misses the window builds nothing, so it is never missing."""
+        self._require_lattice()
+        _, binned = self._sliced(top_ns, thickness_ns)
+        return [
+            g for g in self.ready_grids if g in binned and not self._fill_held(g, binned, finish)
+        ]
+
+    def _fill_held(
+        self, grid_id: str, binned: Mapping[str, tuple[np.ndarray, np.ndarray]], finish: SliceFinish
+    ) -> bool:
+        return self._engines[grid_id].fill_held(binned[grid_id][1], finish)
+
+    def fill_jobs(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[FillJob]:
+        """One `FillJob` per missing grid, in `fills_missing` order. Making a job
+        drops that engine's held fill, as `_fill_for` does, so call this only
+        when the work will start."""
+        self._require_lattice()
+        _, binned = self._sliced(top_ns, thickness_ns)
+        return [
+            self._engines[g].fill_job(binned[g][1], finish)
+            for g in self.ready_grids
+            if g in binned and not self._fill_held(g, binned, finish)
+        ]
+
+    def fill_keys(self, grids: Sequence[str], finish: SliceFinish) -> tuple[Any, ...]:
+        """Each of `grids`' fill key for `finish`, in order."""
+        return tuple(self._engines[g].fill_key(finish) for g in grids)
+
     def stretch_job(
         self,
         thickness_ns: float,

@@ -51,6 +51,7 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_engine import PendingSolve
 from nsgeo_qgis.slices_plan import (
+    FILL_CANCELLED_NOTE,
     NO_TRANSFORM,
     TIME_BASE_MIXED,
     Resolution,
@@ -85,6 +86,7 @@ if TYPE_CHECKING:
     from nsgeo_qgis.session import SiteSession
     from nsgeo_qgis.site_engine import SiteEngine
     from nsgeo_qgis.ui.fill_flow import FillFlow
+    from nsgeo_qgis.ui.fill_picture import FillPicture
     from nsgeo_qgis.ui.finish_panel import FinishPanel
     from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
     from nsgeo_qgis.ui.slices_dock import ElidedLabel
@@ -133,6 +135,7 @@ class SlicesDockView(Protocol):
     #: The fill worker and the flow over it (#193): Whole site's fills run there too.
     fill_worker: Refiner
     fill_flow: FillFlow
+    fill_picture: FillPicture
     site_engine: SiteEngine
     session: SiteSession
     # Signals (a bound signal, as read off an instance).
@@ -590,6 +593,11 @@ def site_dt_floor(session: Any, included: Iterable[str]) -> float | None:
     return min(dts) if dts else None
 
 
+#: The owner Whole site's picture and latch are kept under (`FillPicture`): a
+#: tuple, so no grid id can equal it.
+SITE_OWNER = ("site",)
+
+
 class SiteScope:
     """The dock's Whole-site half: its state, and what its widgets do in it.
 
@@ -625,6 +633,9 @@ class SiteScope:
         self.cell_seeded_for: tuple[str, ...] | None = None
         #: The site's Resolution values when the dock last left it.
         self.spins: Spins | None = None
+        #: The limit the map layer has now (the last one `display_limit` gave),
+        #: kept until the stretch for the new picture lands (#193).
+        self.limit_shown: float | None = None
         #: Ruling T3-g: at most one tick per event-loop pass, latest values.
         self.tick = QTimer(dock)
         self.tick.setSingleShot(True)
@@ -679,7 +690,8 @@ class SiteScope:
         self.pending_top = top
         self.z_shown = None
         self.ready_handled = None
-        self.refine.stretch = None
+        self.drop_stretch()
+        self.limit_shown = None
         panel = dock.site_panel
         panel.set_transform(
             stored_transform(
@@ -717,10 +729,25 @@ class SiteScope:
         # The two scopes share the refiner: the site's list must not run on
         # under This grid, nor its rest fire there.
         self.refine.stop()
+        self.stop_fill_work()
         self.engine.cancel()
         self.slice = None
         self.window = None
         self.drawn_at = None
+        self.limit_shown = None
+
+    def stop_fill_work(self) -> None:
+        """The site's fills and stretch run on no longer (#193): the flow is
+        shared with This grid, so only the scope that owns it stops it. Its
+        latch and note go with it (a new request, in a later visit)."""
+        self.dock.fill_flow.stop()
+        self.dock.fill_picture.unlatch()
+
+    def drop_stretch(self) -> None:
+        """The held shared stretch is no longer for these grids or this
+        resolution: drop it, and cancel one measured over what it snapshotted."""
+        self.refine.stretch = None
+        self.dock.fill_flow.drop_stretch()
 
     def forget(self) -> None:
         """A different survey: nothing the last one's site view held applies,
@@ -731,6 +758,7 @@ class SiteScope:
         self.res_applied = None
         self.problem = None
         self.refine.stretch = None
+        self.limit_shown = None
         self.dock.site_finish.set_value(SliceFinish())
 
     def shown_top(self) -> float | None:
@@ -894,6 +922,8 @@ class SiteScope:
         hook, not by the panel's own guard."""
         try:
             if self.showing and self.session.is_open:
+                if field in ("method", "max_distance_spacings"):
+                    self.dock.fill_picture.unlatch()
                 self.session.remember_site_resolution(**{field: value})
                 self.refresh_rows()
                 self.finish_debounce.start()
@@ -1007,7 +1037,7 @@ class SiteScope:
         try:
             if resolution != self.res_applied:
                 self.res_applied = None
-                self.refine.stretch = None
+                self.drop_stretch()
                 self.engine.set_resolution(resolution)
                 self.res_applied = resolution
             self.problem = None
@@ -1060,7 +1090,7 @@ class SiteScope:
                 # below may be a full draw, which leaves a list alone (final
                 # review M-5).
                 self.ready_handled = ready
-                self.refine.stretch = None
+                self.drop_stretch()
                 self.refine.cancel()
                 if self.seed_z():
                     self.apply_resolution(refresh=False)
@@ -1104,6 +1134,8 @@ class SiteScope:
             dock.show_warnings()
             if not self.drawn:
                 self.refine.stop()  # nothing drawn: no refine is owed
+                self.stop_fill_work()
+                self._clear_shown()
                 self.slice = None
                 self.window = None
                 self.drawn_at = None
@@ -1125,10 +1157,13 @@ class SiteScope:
             finish = dock.site_finish.value()
             curvature = finish.method == "min_curvature"
             coverage = dock.coverage_check.isChecked()
+            span = thickness * z.dz_ns
+            dock.fill_picture.check_owner(SITE_OWNER)
+            if not coverage and not self._fills_ready(top, span, finish, z):
+                dock.show_refine()
+                return
             # A coverage tick finishes nothing, so builds nothing.
-            builds = not coverage and not self.engine.weights_cached(
-                finish, at=(top, thickness * z.dz_ns)
-            )
+            builds = not coverage and not self.engine.weights_cached(finish, at=(top, span))
             self.refine.before_draw(rebuilds=builds)
             # Building the weights, or the plans and their previews, takes
             # seconds at a fine cell: say so (interpolation spec §7).
@@ -1145,6 +1180,7 @@ class SiteScope:
             self.slice = shown
             self.window = window
             self.drawn_at = (top, thickness * z.dz_ns)
+            self._record_picture(finish)
             if shown.provisional:
                 self.refine.previewed((g.engine, g.key) for g in shown.previewed.values())
             else:
@@ -1162,6 +1198,8 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- reached from slots and timers
             # No preview stands, so no refine is owed (plan call 5).
             self.refine.stop()
+            self.dock.fill_flow.stop()
+            self._clear_shown()
             dock.status_label.setText(self.engine.status_text())
             dock.show_refine()
             self.slice = None
@@ -1173,6 +1211,102 @@ class SiteScope:
             dock.slice_changed.emit()
             dock.window_cleared.emit()
             dock.error.emit(str(exc))
+
+    # ---- #193: the fills and the stretch, worked out in the background --------
+    def _fills_ready(self, top: float, span: float, finish: SliceFinish, z: ZAxis) -> bool:
+        """Whether the tick draws now: every fill it needs is held, or lands
+        within the flow's budget. Otherwise the flow works them out on the fill
+        worker, grid after grid in `ready_grids` order, and then the shared
+        stretch; the map keeps its picture until `on_fill_done` draws. A latched
+        (cancelled) site starts nothing and draws nothing new."""
+        dock = self.dock
+        flow = dock.fill_flow
+        missing = self.engine.fills_missing(top, span, finish)
+        if not missing:
+            return True
+        if flow.latched:
+            return False
+        engine = self.engine
+        # A running refine list was made on the plans about to be dropped.
+        self.refine.before_draw(rebuilds=True)
+        key = (engine.lattice, tuple(missing), engine.fill_keys(missing, finish))
+        return flow.request(
+            key,
+            lambda: self._fill_jobs(top, span, finish, z),
+            stretch_key=self.stretch_key(z),
+        )
+
+    def _fill_jobs(self, top: float, span: float, finish: SliceFinish, z: ZAxis) -> list[Any]:
+        """The missing fills, then the shared stretch measured over them when
+        one applies. The fill jobs first: making one drops that grid's held
+        fill, and the stretch job reads each job's result (its docstring's
+        obligation: a job for EVERY grid whose fill is not held)."""
+        fills = self.engine.fill_jobs(top, span, finish)
+        jobs: list[Any] = list(fills)
+        if self._shared_stretch_wanted():
+            jobs.append(self._stretch_job(z, {job.grid_id: job for job in fills}))
+        return jobs
+
+    def _shared_stretch_wanted(self) -> bool:
+        dock = self.dock
+        return (
+            dock.stretch_combo.currentIndex() != 1  # not "this slice"
+            and not dock.own_colours_on()  # #180: no shared stretch to measure
+            and not dock.coverage_check.isChecked()
+        )
+
+    def _stretch_job(self, z: ZAxis, fills: Mapping[str, Any] | None = None) -> Any:
+        dock = self.dock
+        thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
+        clip: Any = UnipolarClip() if self.unipolar() else PercentileClip()
+        return self.engine.stretch_job(
+            thickness * z.dz_ns,
+            clip,
+            finish=dock.site_finish.value(),
+            method=dock.normalisation_panel.method(),
+            manual=self.gains(),
+            fills=fills,
+        )
+
+    def _record_picture(self, finish: SliceFinish) -> None:
+        res = self.res_applied
+        if res is not None and self.session.is_open:
+            self.dock.fill_picture.record(SITE_OWNER, res.cell, finish)
+
+    def _clear_shown(self) -> None:
+        """Nothing is drawn: no limit and no picture to go back to."""
+        self.limit_shown = None
+        self.dock.fill_picture.forget()
+
+    def on_fill_done(self) -> None:
+        """The last fill landed, handed over by the worker's poll timer (never
+        inside a draw, `FillFlow`): draw at whatever the panel says now."""
+        if self.showing:
+            self.refresh_slice()
+
+    def on_stretch_landed(self, key: Any, limit: float, final: bool) -> None:
+        """The shared stretch for `key` was measured. Kept, and the map redrawn
+        with it, only while `key` is still what the panel asks for."""
+        dock = self.dock
+        z = self.engine.site_z
+        if not self.showing or self.slice is None or z is None:
+            return
+        if key != self.stretch_key(z):
+            return
+        self.refine.land_stretch(key, limit, final)
+        self.limit_shown = limit
+        self.update_legend()
+        dock.show_refine()
+        dock.slice_changed.emit()
+
+    def on_fill_cancelled(self) -> None:
+        """Cancel was pressed while the site's fills were worked out
+        (`FillPicture`)."""
+        if self.showing:
+            self.dock.fill_picture.cancelled(SITE_OWNER)
+
+    def fill_record(self) -> dict[str, Any]:
+        return dict(self.session.site_resolution()) if self.session.is_open else {}
 
     def warnings(self) -> list[Entry]:
         """What stands in the way of the site, for the Warnings section: the
@@ -1186,6 +1320,8 @@ class SiteScope:
         exports at full detail, so it says nothing about the export."""
         engine = self.engine
         entries: list[Entry] = []
+        if self.dock.fill_picture.noted:
+            entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
         if self.drawn:
             if engine.preview_note:
                 entries.append(Entry(NOTE, engine.preview_note))
@@ -1360,25 +1496,25 @@ class SiteScope:
         z = self.engine.site_z
         if shown is None or z is None:
             return 1.0
-        thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
-        gains = self.gains()
-        method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
-
-        def measure() -> tuple[float, bool]:
-            # The stretch finishes every grid at up to twelve windows, so it
-            # builds for a grid the tick shown missed: say so too.
-            waiting = (
-                contextlib.nullcontext() if self.engine.weights_cached(finish) else busy_cursor()
-            )
-            with waiting:
-                return self.engine.stretch_limit(
-                    thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
-                )
-
-        return self.refine.stretch_limit(self.stretch_key(z), measure)
+        key = self.stretch_key(z)
+        held = self.refine.held_stretch(key)
+        if held is not None:
+            self.limit_shown = held
+            return held
+        # Measured on the fill worker (#193): the map keeps the limit it has
+        # until the stretch lands, and `on_stretch_landed` then re-emits
+        # `slice_changed`. Not before the fills it reads are held (or being
+        # worked out: the stretch follows them in the flow).
+        flow = self.dock.fill_flow
+        if flow.working or self.engine.weights_cached(finish):
+            flow.request_stretch(key, lambda: self._stretch_job(z))
+        if self.limit_shown is not None:
+            return self.limit_shown
+        return limit_over_slices((shown.array,), clip)
 
     def dispose(self) -> None:
         self.tick.stop()
         self.finish_debounce.stop()
         self.refine.stop()
+        self.stop_fill_work()

@@ -335,7 +335,7 @@ class SlicesDock(QgsDockWidget):
             self.fill_flow,
             read_record=self._fill_record,
             restore_record=self._restore_fill_record,
-            read_widgets=lambda: (self.cell_spin.value(), self.grid_finish.value()),
+            read_widgets=self._fill_widgets,
             set_widgets=self._set_fill_widgets,
             apply=self._apply_resolution,
             changed=self.show_warnings,
@@ -2696,6 +2696,8 @@ class SlicesDock(QgsDockWidget):
                 # site's own is `SiteScope._on_finish_edited`'s.
                 if not self.session.is_open:
                     return
+                if field == "cell":
+                    self.fill_picture.unlatch()
                 edited = self._edited_fields(field, value, self.session.site_resolution())
                 self.session.remember_site_resolution(**edited)
                 return
@@ -3170,19 +3172,32 @@ class SlicesDock(QgsDockWidget):
             self.fill_picture.record(grid_id, frame.cell, finish)
 
     # ---- FillPicture's wiring: This grid's record and widgets ---------------
+    # (Whole site's own are its record and its `site_finish`: Cancel is only ever
+    # pressed in the scope that is working, so each callback follows `_scope`.)
     def _fill_record(self) -> dict[str, Any]:
+        if self._scope == "site":
+            return self._site.fill_record()
         grid_id = self.grid_combo.currentText()
         return dict(self.session.slice_resolution(grid_id)) if grid_id else {}
 
     def _restore_fill_record(self, record: dict[str, Any] | None) -> None:
+        if self._scope == "site":
+            self.session.restore_site_resolution(record)
+            return
         self.session.restore_slice_resolution(self.grid_combo.currentText(), record)
+
+    def _fill_widgets(self) -> tuple[float, SliceFinish]:
+        panel = self.site_finish if self._scope == "site" else self.grid_finish
+        return self.cell_spin.value(), panel.value()
 
     def _set_fill_widgets(self, cell: float, finish: SliceFinish) -> None:
         """Show the fill settings again, quietly: nothing is remembered from a
         restore. Only the fill widgets change (`finish` carries the others as
         they are)."""
+        site = self._scope == "site"
         self._debounce.stop()
         self._finish_debounce.stop()
+        self._site.finish_debounce.stop()
         self._seeding += 1
         try:
             self.cell_spin.blockSignals(True)
@@ -3190,11 +3205,17 @@ class SlicesDock(QgsDockWidget):
                 self.cell_spin.setValue(cell)
             finally:
                 self.cell_spin.blockSignals(False)
-            self.grid_finish.set_value(finish)
-            self.grid_finish.set_spacing(self._grid_spacing())
+            if site:
+                self.site_finish.set_value(finish)
+            else:
+                self.grid_finish.set_value(finish)
+                self.grid_finish.set_spacing(self._grid_spacing())
         finally:
             self._seeding -= 1
-        self._update_included_label()
+        if site:
+            self._site.refresh_rows()  # the max distance tooltip's metres
+        else:
+            self._update_included_label()
 
     def _end_refine(self) -> bool:
         """No preview stands (nothing is drawn, the draw failed, or the site
@@ -3216,8 +3237,15 @@ class SlicesDock(QgsDockWidget):
         no state change re-lays out the scrolled panel under the user's wheel.
         Called wherever a flow's state can have changed."""
         if self._scope == "site":
-            text = self._site.refine.indicator(grids=True)
-            self.cancel_link.setVisible(False)
+            flow = self.fill_flow
+            res = self._site.res_applied
+            cell = res.cell if res is not None else self.cell_spin.value()
+            text = (
+                flow.progress_text(cell, grids=True)
+                if flow.working
+                else self._site.refine.indicator(grids=True) or flow.progress_text(cell, grids=True)
+            )
+            self.cancel_link.setVisible(flow.working)
         else:
             flow = self.fill_flow
             frame = self.engine.frame
@@ -3332,7 +3360,8 @@ class SlicesDock(QgsDockWidget):
         inside a draw, `FillFlow`): draw at whatever the panel says now, with the
         stretch held. A callback, so it guards its own body."""
         try:
-            if self._scope != "grid":
+            if self._scope == "site":
+                self._site.on_fill_done()
                 return
             self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- from the worker's poll timer
@@ -3343,8 +3372,11 @@ class SlicesDock(QgsDockWidget):
         with it, only while `key` is still what the panel asks for: a stretch
         for settings since changed is dropped (the next draw asks again)."""
         try:
+            if self._scope == "site":
+                self._site.on_stretch_landed(key, limit, final)
+                return
             window = self._window
-            if self._scope != "grid" or window is None:
+            if window is None:
                 return
             if key != self._stretch_key(window, self.grid_finish.value()):
                 return
@@ -3372,9 +3404,10 @@ class SlicesDock(QgsDockWidget):
     def _on_fill_cancelled(self) -> None:
         """Cancel was pressed while a fill was worked out (`FillPicture`)."""
         try:
-            if self._scope != "grid":
-                return
-            self.fill_picture.cancelled(self.grid_combo.currentText())
+            if self._scope == "site":
+                self._site.on_fill_cancelled()
+            else:
+                self.fill_picture.cancelled(self.grid_combo.currentText())
             self.show_refine()
         except Exception as exc:  # noqa: BLE001 -- reached from the Cancel link
             self.error.emit(f"could not cancel the fill: {exc}")

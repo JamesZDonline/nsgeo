@@ -127,6 +127,7 @@ def settle(dock) -> None:
     """Wait for the site to finish preparing, then let its coalesced tick run."""
     wait_for_site(dock.site_engine, 60_000)
     _events()
+    drawn(dock)  # #193: and the draw it asked for, when a fill went to the worker
 
 
 def whole_site(plugin):
@@ -1055,23 +1056,26 @@ def test_the_shared_stretch_is_measured_once_not_on_every_slider_move(plugin, mo
     is cached by what it measures over, never by the slider."""
     dock = whole_site(plugin)
     site = dock.site_engine
-    real = site.shared_limit
+    real = site.stretch_job
     calls: list[str] = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["method"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(site, "shared_limit", counted)
+    monkeypatch.setattr(site, "stretch_job", counted)
     for value in (3, 17, 40):
         dock.slice_slider.setValue(value)
         _events()
+    drawn(dock)
     assert calls == []
     dock.normalisation_panel.method_combo.setCurrentIndex(1)
     _events()
+    drawn(dock)
     assert calls == ["background"]
     dock.slice_slider.setValue(8)
     _events()
+    drawn(dock)
     assert calls == ["background"]
 
 
@@ -1084,21 +1088,23 @@ def test_a_velocity_edit_keeps_the_site_stretch_and_a_spacing_edit_re_measures_i
     dock = whole_site(plugin)
     session = plugin.session
     site = dock.site_engine
-    real = site.shared_limit
+    real = site.stretch_job
     calls: list[str] = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["method"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(site, "shared_limit", counted)
+    monkeypatch.setattr(site, "stretch_job", counted)
     assert dock.stretch_combo.currentIndex() == 0  # shared across the site
     session.set_grid_velocity("B", VelocityModel.constant(0.09))
     _events()
+    drawn(dock)
     assert calls == [], "a velocity edit re-measured the stretch"
     assert dock.current_site_slice() is not None
     session.replace_grid(dataclasses.replace(session.grid("B"), default_spacing=3.0))
     _events()
+    drawn(dock)
     assert calls == ["none"]
 
 
@@ -2546,6 +2552,8 @@ def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
         or scope.refine.rest.isActive()
         or scope.tick.isActive()
         or scope.finish_debounce.isActive()
+        or dock.fill_flow.working  # #193: the fills and the stretch run on a worker
+        or dock.fill_flow.stretching
     ):
         if time.monotonic() - start > timeout_s:
             pytest.fail("the refine did not finish")
@@ -2639,6 +2647,7 @@ def test_a_slow_site_tick_previews_then_refines(plugin):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.slice.provisional is True
     assert scope.provisional
     assert dock.refine_label.text() == PREVIEW_INDICATOR
@@ -2661,6 +2670,7 @@ def test_a_quick_site_tick_draws_minimum_curvature_at_once(plugin, monkeypatch):
     starts = _starts(dock, monkeypatch)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.slice.provisional is False
     assert not scope.provisional
     assert not scope.refine.rest.isActive()
@@ -2676,6 +2686,7 @@ def test_a_site_tick_by_another_method_stops_the_refine(plugin, monkeypatch):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional and scope.refine.rest.isActive()
     starts = _starts(dock, monkeypatch)
     _choose_method(dock.site_finish, "kriging")
@@ -2777,6 +2788,7 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
     try:
         dock.slice_slider.setValue(at)
         _events()
+        drawn(dock)
         first, *others = list(scope.slice.previewed)
         assert others
         _pump_until(lambda: list(scope.slice.previewed) == others and not scope.tick.isActive())
@@ -2876,6 +2888,7 @@ def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, solved):
     monkeypatch.setattr(SliceEngine, "window_solve", counted_window_solve)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional
     assert list(scope.slice.previewed) == (others if solved else [first, *others])
     _wait_for_refine(dock)
@@ -2923,11 +2936,13 @@ def test_a_max_distance_edit_cancels_the_site_list_before_rebuilding(plugin, mon
     try:
         dock.slice_slider.setValue(30)
         _events()
+        drawn(dock)
         _pump_until(lambda: dock.refiner.busy)  # rested; the first solve is held
         assert building == []
         spin = dock.site_finish.max_distance_spin
         spin.setValue(spin.value() + 0.5)
         _pump_until(lambda: not scope.finish_debounce.isActive() and not scope.tick.isActive())
+        drawn(dock)  # the rebuilt plans are worked out on the fill worker
         assert scope.provisional
         assert not dock.refiner.busy, "a list for the dropped plans ran on"
         assert scope.refine.rest.isActive()
@@ -2960,6 +2975,7 @@ def test_a_site_rest_during_a_finish_edits_pause_builds_nothing(plugin, monkeypa
     monkeypatch.setattr(slices_engine, "plan_fill", watching)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional and scope.refine.rest.isActive()
     spin = dock.site_finish.max_distance_spin
     spin.setValue(spin.value() + 0.5)  # the edit's tick now waits out its pause
@@ -3062,6 +3078,8 @@ def test_the_site_stretch_with_minimum_curvature_uses_twelve_windows(plugin, mon
     )
     _choose_method(dock.site_finish, "min_curvature")
     _pump_until(lambda: scope.provisional and not scope.tick.isActive())
+    # The shared stretch is measured on the fill worker: wait for it to land.
+    _pump_until(lambda: not dock.fill_flow.working and not dock.fill_flow.stretching)
     mc = dock.site_finish.value()
     args = {"finish": mc, "method": dock.normalisation_panel.method(), "manual": dock.site_gains()}
     assert site.stretch_solves(thickness_ns, mc) != []
@@ -3479,6 +3497,8 @@ def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, mo
             or dock.refiner.busy
             or scope.refine.rest.isActive()
             or scope.tick.isActive()
+            or dock.fill_flow.working
+            or dock.fill_flow.stretching
         ):
             break
         time.sleep(0.005)
@@ -3496,6 +3516,7 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert dock.refine_label.text() == PREVIEW_INDICATOR
     seen: list[str] = []
     deadline = time.monotonic() + 60.0
@@ -3511,6 +3532,8 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
             or scope.provisional
             or scope.refine.rest.isActive()
             or scope.tick.isActive()
+            or dock.fill_flow.working
+            or dock.fill_flow.stretching
         ):
             break
         time.sleep(0.002)

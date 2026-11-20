@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo_qgis.fill_jobs import FillJob
@@ -39,9 +40,9 @@ from plugin_testing import (
     spin_until,
     wait_for_site,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QTimer
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
 from qgis.PyQt.QtWidgets import QMessageBox
-from test_plugin_site_scope import _close, _open
+from test_plugin_site_scope import _close, _open, whole_site
 from test_plugin_slices_dock import (  # noqa: F401 -- fixture
     PRESET,
     _docked_with,
@@ -54,6 +55,12 @@ SLOW_CELL = 0.016
 QUICK_CELL = 0.1
 MID_CELL = 0.022
 MIN_SLOW_S = 1.0
+#: Whole site: the cell at which the three grids' fills together take about
+#: 2.5 s here (CI about 0.65 of that, 1.6 s). Measured per cell: 0.08 m 1.0 s,
+#: 0.06 m 2.5 s, 0.05 m 4.4 s, in the three grids' sum.
+SITE_SLOW_CELL = 0.06
+#: The floor: four times the gap limit, as MIN_SLOW_S.
+MIN_SLOW_SITE_S = 1.0
 GAP_LIMIT_S = 0.25
 
 _CALIBRATED: list[float] = []
@@ -761,6 +768,7 @@ def test_a_this_grid_preparation_under_the_site_never_cancels_the_sites_stretch(
         dock = plugin.slices_dock
         whole_site(plugin)
         assert dock.scope() == "site"
+        _wait_idle(dock)  # the site's own fills run on this worker too
         job = FakeStretch(1.0, pause=0.8)
         dock.fill_flow.request_stretch("site-key", job)
         assert dock.fill_flow.stretching
@@ -807,6 +815,315 @@ def test_a_failed_fill_is_reported_and_clears_the_state(flow_probe):
     assert flow.request("k", [Failing()], stretch_key="s") is False
     assert not flow.working
     assert ("error", "fill", "ValueError: no room") in log
+
+
+# ---- Whole site (#193) ------------------------------------------------------
+#: Not the site's seeded 0.1 m: a cell equal to the seed is not remembered as chosen.
+SITE_QUICK_CELL = 0.2
+
+
+def _site_cell(dock, cell: float) -> None:
+    """Edit the site's cell and apply it at once, as the debounce would."""
+    dock.cell_spin.setValue(cell)
+    dock.flush_debounce()
+
+
+def _applied_cell(dock) -> float:
+    return dock.site_engine._resolution.cell
+
+
+_SITE_CALIBRATED: list[float] = []
+
+
+def _picture_cell(dock) -> float | None:
+    """The cell of the picture on the map (the tick that draws it runs from the
+    event loop, after the edit has applied)."""
+    picture = dock.fill_picture._picture
+    return None if picture is None else picture[1]["cell"]
+
+
+def _assert_slow_site(dock) -> None:
+    """The three grids' fills, built one after another, take at least
+    MIN_SLOW_SITE_S at SITE_SLOW_CELL: the brief asked for 2 s on CI; this
+    loaded machine is calibrated to measure it, and a fast runner still fails
+    loudly rather than pass vacuously."""
+    if _SITE_CALIBRATED:
+        return
+    from nsgeo_qgis.slices_engine import build_fill
+
+    engine = dock.site_engine
+    previous = engine._resolution
+    engine.set_resolution(
+        Resolution(
+            cell=SITE_SLOW_CELL,
+            dz_ns=previous.dz_ns,
+            t0_ns=previous.t0_ns,
+            t1_ns=previous.t1_ns,
+        )
+    )
+    total = 0.0
+    try:
+        top = previous.t0_ns + 5.0
+        for grid_id in engine.ready_grids:
+            grid = engine._engines[grid_id]
+            window = engine._grid_window(grid_id, top, 3.0)
+            _, coverage = grid.slice_at(window)
+            started = time.perf_counter()
+            build_fill(coverage > 0, SITE_SLOW_CELL, grid.finish_settings(SliceFinish()))
+            total += time.perf_counter() - started
+    finally:
+        engine.set_resolution(previous)
+    assert total >= MIN_SLOW_SITE_S, f"the site's fills take {total:.2f} s together: shrunk"
+    _SITE_CALIBRATED.append(total)
+
+
+@pytest.fixture
+def site_quick(fake_iface, site3, answer_modal):
+    """The plugin on three grids, Whole site, a picture at a coarse cell."""
+    plugin = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        _site_cell(dock, SITE_QUICK_CELL)
+        assert spin_until(lambda: _picture_cell(dock) == SITE_QUICK_CELL, 60_000)
+        _wait_idle(dock)
+        assert dock.current_site_slice() is not None
+        assert _applied_cell(dock) == SITE_QUICK_CELL
+        yield plugin, dock
+    finally:
+        _close(plugin, answer_modal)
+
+
+@pytest.fixture
+def site_slow(site_quick):
+    plugin, dock = site_quick
+    _assert_slow_site(dock)
+    return plugin, dock
+
+
+def _watch_site(dock) -> list[tuple[float, int]]:
+    """`(applied cell, grids shown)` at each `slice_changed`."""
+    seen: list[tuple[float, int]] = []
+
+    def record() -> None:
+        shown = dock.current_site_slice()
+        seen.append((_applied_cell(dock), len(shown.windows) if shown is not None else 0))
+
+    dock.slice_changed.connect(record)
+    return seen
+
+
+def test_whole_site_never_blocks_the_gui_during_a_slow_fill(site_slow):
+    _, dock = site_slow
+    changed: list[int] = []
+    drawn_at: list[float] = []
+    dock.slice_changed.connect(lambda: changed.append(1))
+    dock.slice_changed.connect(lambda: drawn_at.append(_applied_cell(dock)))
+    gaps = Gaps()
+    gaps.start()
+    _site_cell(dock, SITE_SLOW_CELL)
+    at_edit = len(changed)
+    texts: list[str] = []
+    counts_while_working: list[int] = []
+    shown_before = dock.current_site_slice()
+
+    def landed() -> bool:
+        flow = _flow(dock)
+        texts.append(dock.refine_label.text())
+        if flow is not None and flow.working:
+            counts_while_working.append(len(changed))
+        # Done when the slow cell is on the map: the tick that asks for the fills
+        # runs from the event loop, so the flow is not working just yet.
+        return SITE_SLOW_CELL in drawn_at and not (flow is not None and flow.working)
+
+    assert spin_until(landed, 120_000)
+    spin_until(lambda: False, 60)  # let the timer report a gap that ended just now
+    gaps.stop()
+    assert gaps.largest < GAP_LIMIT_S, f"the GUI thread stood still for {gaps.largest:.2f} s"
+    first = FILL_WORKING_GRIDS_INDICATOR.format(cell=SITE_SLOW_CELL, n=1, total=3)
+    last = FILL_WORKING_GRIDS_INDICATOR.format(cell=SITE_SLOW_CELL, n=3, total=3)
+    assert first in texts, texts
+    assert last in texts, texts
+    assert texts.index(first) < texts.index(last)
+    assert counts_while_working, "the fill never showed as working"
+    assert set(counts_while_working) == {at_edit}, "the map changed before the fills landed"
+    assert len(changed) > at_edit
+    assert dock.current_site_slice() is not shown_before
+    assert _applied_cell(dock) == SITE_SLOW_CELL
+    _wait_idle(dock)
+
+
+def _spy_lands(monkeypatch) -> list[tuple[str, bool]]:
+    lands: list[tuple[str, bool]] = []
+    real = FillJob.land
+
+    def spy(self):
+        ok = real(self)
+        lands.append((self.grid_id, ok))
+        return ok
+
+    monkeypatch.setattr(FillJob, "land", spy)
+    return lands
+
+
+def _a_and_c_are_drawn(dock) -> None:
+    shown = dock.current_site_slice()
+    assert sorted(shown.windows) == ["A", "C"]
+    for grid_id in ("A", "C"):
+        lattice = shown.lattice
+        x0, x1 = {"A": (500.0, 506.0), "C": (512.0, 518.0)}[grid_id]
+        cols = slice(int((x0 - lattice.x0) / lattice.pixel), int((x1 - lattice.x0) / lattice.pixel))
+        assert np.isfinite(shown.array[:, cols]).any(), grid_id
+
+
+def test_a_grid_unticked_mid_fill_never_lands_and_the_rest_draws(site_slow, monkeypatch):
+    plugin, dock = site_slow
+    lands = _spy_lands(monkeypatch)
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: dock.fill_flow.working, 10_000)
+    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    _wait_idle(dock)
+    spin_until(lambda: False, 200)
+    _wait_idle(dock)
+    assert ("B", True) not in lands, lands
+    assert _applied_cell(dock) == SITE_SLOW_CELL
+    assert plugin.session.site_view()["grids"] == ["A", "C"]
+    _a_and_c_are_drawn(dock)
+    assert dock.site_engine.fills_missing(*dock._site.drawn_at, dock.site_finish.value()) == []
+
+
+def test_a_grid_removed_mid_fill_never_lands(site_slow, monkeypatch):
+    plugin, dock = site_slow
+    lands = _spy_lands(monkeypatch)
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: dock.fill_flow.working, 10_000)
+    plugin.session.remove_grid("B", with_lines=True)
+    _wait_idle(dock)
+    spin_until(lambda: False, 200)
+    _wait_idle(dock)
+    assert ("B", True) not in lands, lands
+    assert _applied_cell(dock) == SITE_SLOW_CELL
+    _a_and_c_are_drawn(dock)
+
+
+def test_cancel_with_a_picture_puts_the_site_back(site_slow):
+    plugin, dock = site_slow
+    session = plugin.session
+    before = session.site_resolution()
+    assert before["cell"] == SITE_QUICK_CELL
+    assert "max_distance_spacings" not in before
+    seen = _watch_site(dock)
+    dock.site_finish.max_distance_spin.setValue(0.9)  # a fill setting too
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: dock.fill_flow.working, 10_000)
+    assert "max_distance_spacings" in session.site_resolution()
+    assert dock.cancel_link.isVisibleTo(dock)
+    dock.cancel_link.linkActivated.emit("cancel")
+    assert dock.cell_spin.value() == SITE_QUICK_CELL
+    assert dock.site_finish.value() == SliceFinish()
+    assert session.site_resolution() == before, "key presence included"
+    assert _applied_cell(dock) == SITE_QUICK_CELL
+    assert not dock.fill_flow.latched
+    assert not dock.cancel_link.isVisibleTo(dock)
+    _wait_idle(dock)
+    dock.flush_debounce()
+    assert spin_until(lambda: bool(seen), 30_000), "going back redraws the picture"
+    _wait_idle(dock)
+    assert session.site_resolution() == before
+    assert dock.cell_spin.value() == SITE_QUICK_CELL
+    assert dock.site_finish.value() == SliceFinish()
+    assert seen and all(cell == SITE_QUICK_CELL for cell, _ in seen), seen
+    assert _notes(dock) == []
+
+
+def test_cancel_with_no_picture_latches_the_site(fake_iface, site3, answer_modal):
+    """Nothing drawn at all (a latch with no picture to go back to): the note,
+    no restart from a slider move, and a fill setting draws again."""
+    plugin = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = plugin.slices_dock
+        dock.set_scope("site")
+        wait_for_site(dock.site_engine, 60_000)
+        _assert_slow_site(dock)
+        dock.fill_flow.stop()
+        # No picture: forget it, as a survey with nothing drawn yet has none.
+        dock.fill_picture.forget()
+        dock.cell_spin.setValue(SITE_SLOW_CELL)
+        dock.flush_debounce()
+        assert spin_until(lambda: dock.fill_flow.working, 20_000)
+        dock.fill_picture.forget()
+        record = plugin.session.site_resolution()
+        dock.cancel_link.linkActivated.emit("cancel")
+        assert dock.fill_flow.latched
+        assert FILL_CANCELLED_NOTE in _notes(dock)
+        assert plugin.session.site_resolution() == record
+        assert dock.cell_spin.value() == SITE_SLOW_CELL
+        jobs: list[int] = []
+        real = dock.site_engine.fill_jobs
+        dock.site_engine.fill_jobs = lambda *a, **k: jobs.append(1) or real(*a, **k)
+        dock.slice_slider.setValue(min(dock.slice_slider.maximum(), dock.slice_slider.value() + 2))
+        spin_until(lambda: False, 300)
+        assert jobs == [] and not dock.fill_flow.working
+        dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
+        assert spin_until(lambda: len(jobs) == 1, 20_000), "a method edit draws again"
+        assert not dock.fill_flow.latched
+        assert FILL_CANCELLED_NOTE not in _notes(dock)
+        dock.fill_flow.stop()
+        dock.site_engine.fill_jobs = real
+    finally:
+        _close(plugin, answer_modal)
+
+
+def test_a_quick_site_fill_draws_in_the_same_tick(site_quick, monkeypatch):
+    from nsgeo_qgis.ui.fill_flow import FillFlow
+
+    _, dock = site_quick
+    seen: list[bool] = []
+    real = FillFlow.working
+    monkeypatch.setattr(
+        FillFlow, "working", property(lambda self: seen.append(real.fget(self)) or real.fget(self))
+    )
+    changes = _watch_site(dock)
+    dock.cell_spin.setValue(0.25)
+    dock._debounce.stop()
+    dock._apply_resolution()
+    dock._site.tick.stop()
+    dock._site.refresh_slice()
+    assert [cell for cell, _ in changes] == [0.25], "drawn once, inside the same call"
+    assert seen and not any(seen), "the flow was working, but a quick fill must not be"
+    assert "fill" not in dock.refine_label.text()
+    assert not dock.cancel_link.isVisibleTo(dock)
+    _wait_idle(dock)
+
+
+def test_the_site_stretch_lands_after_the_picture_and_redraws(site_slow):
+    plugin, dock = site_slow
+    legends: list[str] = []
+    dock.slice_changed.connect(lambda: legends.append(dock.legend_label.text()))
+    previous = dock.legend_label.text()
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: _applied_cell(dock) == SITE_SLOW_CELL and bool(legends), 60_000)
+    assert legends[0] == previous, "the first draw uses the previous limit"
+    site = dock._site
+    z = dock.site_engine.site_z
+    expected, _ = dock.site_engine.stretch_limit(
+        levels_ns(site, z),
+        UnipolarClip() if site.unipolar() else PercentileClip(),
+        finish=dock.site_finish.value(),
+        method=dock.normalisation_panel.method(),
+        manual=site.gains(),
+    )
+    assert f"{expected:.3g}" not in previous, "the fixture must move the stretch"
+    assert spin_until(lambda: f"{expected:.3g}" in dock.legend_label.text(), 30_000)
+    _wait_idle(dock)
+    assert len(legends) >= 2
+    assert dock.display_limit() == pytest.approx(expected)
+
+
+def levels_ns(site, z) -> float:
+    from nsgeo_qgis.ui.site_scope import levels
+
+    thickness, _ = levels(z, site.dock.thickness_spin.value(), site.dock.step_spin.value())
+    return thickness * z.dz_ns
 
 
 def test_a_failed_calibration_leaves_no_worker_threads(docked, monkeypatch):  # noqa: F811
