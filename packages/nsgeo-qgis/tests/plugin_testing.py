@@ -287,6 +287,14 @@ def spin_until(predicate, timeout_ms: int = 20_000) -> bool:
     return True
 
 
+def wait_for_site(site: Any, timeout_ms: int = 60_000) -> None:
+    """Wait for a SiteEngine to go idle; on timeout fail with what holds it (#166)."""
+    if not site.wait_until_idle(timeout_ms):
+        raise AssertionError(
+            f"the site did not finish preparing in {timeout_ms} ms\n{site.busy_report()}"
+        )
+
+
 # ---- driving a map tool (#63) -------------------------------------------------
 
 

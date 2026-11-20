@@ -83,6 +83,9 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     DEFAULT_CELL_M,
     DEFAULT_TRANSFORM,
+    FILL_CANCEL_LINK,
+    FILL_CANCELLED_NOTE,
+    FILL_THREAD_NAME_PREFIX,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
     MemoryEstimate,
@@ -100,8 +103,12 @@ from nsgeo_qgis.slices_plan import (
     no_break_note,
     old_cube_note,
     smallest_safe_cell,
+    snap_inside,
+    window_levels,
 )
 from nsgeo_qgis.ui import site_scope
+from nsgeo_qgis.ui.fill_flow import FillFlow
+from nsgeo_qgis.ui.fill_picture import FillPicture
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
 from nsgeo_qgis.ui.folds import remember_folds
 from nsgeo_qgis.ui.profile_dock import grid_velocity_label
@@ -119,26 +126,6 @@ class OwedShift:
     cube_id: str
     preset: str
     marked: bool  # False: a record from before #97, with no time_base
-
-
-def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
-    """`value` rounded to `decimals`, never ESCAPING the bound it describes.
-
-    A plain `round()` is wrong at a boundary: `QDoubleSpinBox.setValue`
-    rounds to the box's own precision, and rounding a lower bound DOWN (or
-    an upper bound UP) puts the spin a few ten-thousandths of a nanosecond
-    outside the range every prepared line actually covers -- which is
-    exactly the `CoverageError` the caller is clamping to avoid, now made
-    intermittent and dependent on the fourth decimal place of a header.
-    Rounds away from the forbidden side instead.
-    """
-    step = 10.0**-decimals
-    snapped = round(value, decimals)
-    if upper and snapped > value:
-        snapped -= step
-    elif not upper and snapped < value:
-        snapped += step
-    return round(snapped, decimals)
 
 
 COVERAGE_TIP = (
@@ -320,12 +307,44 @@ class SlicesDock(QgsDockWidget):
         #: both scopes. `plugin.unload` shuts it down, cancelling and joining
         #: its thread, before any engine is disposed.
         self.refiner = Refiner(self)
+        #: The interpolation fills built off the GUI thread (#193), on a worker
+        #: of their own so a long fill never queues behind a refine list.
+        #: `plugin.unload` shuts it down beside `refiner`.
+        self.fill_worker = Refiner(self, thread_name_prefix=FILL_THREAD_NAME_PREFIX)
         #: This grid's side of it (plan calls 5 and 7): its rest timer, its
         #: preview, the running list's progress, and its shared stretch,
         #: `(key, limit, final)` keyed by `_stretch_key`. Built here, with the
         #: refiner, because `refresh_slice` reaches both, its `except` branch
         #: included.
         self._grid_refine = RefineFlow(self, self.refiner, self._on_rest)
+        #: This grid's side of the fill worker (#193): the fill and then the
+        #: shared stretch worked out in the background, the working line, and
+        #: Cancel. The map keeps its last picture and stretch until they land.
+        self.fill_flow = FillFlow(
+            self,
+            self.fill_worker,
+            on_done=self._on_fill_done,
+            on_stretch=self._on_stretch_landed,
+            on_cancelled=self._on_fill_cancelled,
+            on_tick=self.show_refine,
+            on_error=self._on_fill_error,
+        )
+        #: The picture's fill settings, what Cancel takes back, and the latch (#193).
+        self.fill_picture = FillPicture(
+            self.fill_flow,
+            read_record=self._fill_record,
+            restore_record=self._restore_fill_record,
+            read_widgets=self._fill_widgets,
+            set_widgets=self._set_fill_widgets,
+            apply=self._apply_resolution,
+            changed=self.show_warnings,
+        )
+        #: The frame the picture was drawn at: `current_frame()` while a new
+        #: cell is still being worked out and the engine's frame has moved on.
+        self._shown_frame: CubeFrame | None = None
+        #: The limit the map layer has now (the last one `display_limit` gave),
+        #: kept until the stretch for the new picture lands.
+        self._limit_shown: float | None = None
         #: The previewed slice's `(values, coverage)` and solve key, for the
         #: refine the rest timer starts.
         self._refine_slice: tuple[np.ndarray, np.ndarray] | None = None
@@ -575,6 +594,19 @@ class SlicesDock(QgsDockWidget):
         )
         self.refine_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         readout_row.addWidget(self.refine_label, 1)
+        #: #193: while a fill is worked out, a link to take the edit back. Shown
+        #: only then; the row keeps its one-line height either way.
+        self.cancel_link = QLabel(f'<a href="cancel">{FILL_CANCEL_LINK}</a>')
+        self.cancel_link.setTextFormat(Qt.TextFormat.RichText)
+        self.cancel_link.setToolTip(
+            "Stop working out this fill. With a picture on screen its settings come back; "
+            "without one nothing is drawn until you change the cell or the interpolation."
+        )
+        # Its height is the row's, never a reason to grow it (W1).
+        self.cancel_link.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Ignored)
+        self.cancel_link.linkActivated.connect(self._on_cancel_link)
+        self.cancel_link.hide()
+        readout_row.addWidget(self.cancel_link, 0)
         position_layout.addLayout(readout_row)
 
         self.velocity_label = QLabel("")
@@ -1001,6 +1033,11 @@ class SlicesDock(QgsDockWidget):
             new_site = self.session.site is not self._site_seen
             if new_site:
                 self._drop_restore_pending()
+                # #193: another survey owns no fill work, latch or picture.
+                self.fill_flow.stop()
+                self.fill_picture.unlatch()
+                self.fill_picture.forget()
+                self._limit_shown = None
             self._updating += 1
             try:
                 site = self.session.site
@@ -1684,7 +1721,7 @@ class SlicesDock(QgsDockWidget):
             # runs before the conflict check that raises), so this is
             # never stale.
             self.save_button.setEnabled(self.engine.is_prepared)
-            self.export_button.setEnabled(self.engine.is_prepared)
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
             self.error.emit(message)
             # #103: nothing is prepared, so nothing may stay on the map --
             # neither the slice of the source before this one nor, on a
@@ -1773,7 +1810,7 @@ class SlicesDock(QgsDockWidget):
             self._site.update_export_button()
         else:
             self.save_button.setEnabled(self.engine.is_prepared)
-            self.export_button.setEnabled(self.engine.is_prepared)
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
         if self.engine.is_running:
             return
         choice = self.engine.choice
@@ -1968,8 +2005,8 @@ class SlicesDock(QgsDockWidget):
         if bounds is None:
             return False
         low, high = bounds
-        top = _snap_inside(low, self.z0_spin.decimals(), upper=False)
-        bottom = _snap_inside(high, self.z1_spin.decimals(), upper=True)
+        top = snap_inside(low, self.z0_spin.decimals(), upper=False)
+        bottom = snap_inside(high, self.z1_spin.decimals(), upper=True)
         z0, z1 = self.z0_spin.value(), self.z1_spin.value()
         new_z0 = top if z0 < low else z0
         new_z1 = bottom if z1 > high else z1
@@ -1995,6 +2032,8 @@ class SlicesDock(QgsDockWidget):
             if self._scope == "site":
                 # M12: the Resolution and Display widgets are the site's
                 # now; This grid's clamp and redraw run on the way back.
+                # Only This grid's held stretch: the site's own may be measuring
+                # on the shared flow, and this preparation is not its business.
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
@@ -2018,7 +2057,7 @@ class SlicesDock(QgsDockWidget):
             # successful preparation lands here, so clearing unconditionally
             # here is what actually keeps the stretch from outliving the data
             # it was measured over.
-            self._grid_refine.stretch = None
+            self._drop_stretch()
             self._update_included_label()
             self._refresh_source_status()
             # Spec 8's rule enforced here, not just described: the combo
@@ -2675,12 +2714,16 @@ class SlicesDock(QgsDockWidget):
                 # site's own is `SiteScope._on_finish_edited`'s.
                 if not self.session.is_open:
                     return
+                if field == "cell":
+                    self.fill_picture.unlatch()
                 edited = self._edited_fields(field, value, self.session.site_resolution())
                 self.session.remember_site_resolution(**edited)
                 return
             grid_id = self.grid_combo.currentText()
             if not grid_id or not self.session.is_open:
                 return
+            if field == "cell":
+                self.fill_picture.unlatch()
             edited = self._edited_fields(field, value, self.session.slice_resolution(grid_id))
             self.session.remember_slice_resolution(grid_id, **edited)
         except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
@@ -2746,6 +2789,10 @@ class SlicesDock(QgsDockWidget):
         return SliceWindow(k0, k1)
 
     def current_frame(self) -> CubeFrame | None:
+        """The frame `current_values()` is drawn on: the engine's, except while a
+        new cell's fill is still being worked out (#193)."""
+        if self._values is not None and self._shown_frame is not None:
+            return self._shown_frame
         return self.engine.frame
 
     def current_values(self) -> np.ndarray | None:
@@ -2789,6 +2836,8 @@ class SlicesDock(QgsDockWidget):
         try:
             self.grid_finish.set_spacing(self._grid_spacing())
             if not (self._updating or self._seeding or self._scope == "site"):
+                if field in ("method", "max_distance_spacings"):
+                    self.fill_picture.unlatch()
                 grid_id = self.grid_combo.currentText()
                 if grid_id and self.session.is_open:
                     self.session.remember_slice_resolution(grid_id, **{field: value})
@@ -2808,7 +2857,7 @@ class SlicesDock(QgsDockWidget):
         """`step_spin`'s nanoseconds, in levels of `z` -- at least 1, so a
         step spin box smaller than `dz_ns` still advances by something
         rather than stalling `step_slice`/the readout's index forever."""
-        return max(1, int(round(self.step_spin.value() / z.dz_ns)))
+        return window_levels(self.thickness_spin.value(), self.step_spin.value(), z.dz_ns)[1]
 
     def thickness_step_levels(self) -> tuple[int, int]:
         """`(thickness_levels, step_levels)`, in levels of the current z
@@ -2825,8 +2874,7 @@ class SlicesDock(QgsDockWidget):
         z = self.engine.z
         if z is None:
             raise RuntimeError("no slice geometry: choose a source and a resolution first")
-        thickness_levels = max(1, int(round(self.thickness_spin.value() / z.dz_ns)))
-        return thickness_levels, self._step_levels(z)
+        return window_levels(self.thickness_spin.value(), self.step_spin.value(), z.dz_ns)
 
     def step_slice(self, delta: int) -> None:
         """Move the slider by `delta` STEPS, not levels -- the unit a
@@ -2836,6 +2884,12 @@ class SlicesDock(QgsDockWidget):
         target = self.slice_slider.value() + delta * step_levels
         target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), target))
         self.slice_slider.setValue(target)
+
+    @property
+    def finish_debounce_ms(self) -> int:
+        """The pause, in ms, an Interpolation edit waits before it redraws: This grid's own,
+        and the Whole site's too (`SiteScope.finish_debounce`)."""
+        return int(self._finish_debounce.interval())
 
     def flush_debounce(self) -> None:
         """Apply a pending Resolution change immediately. Used by tests,
@@ -2917,7 +2971,7 @@ class SlicesDock(QgsDockWidget):
             # `_stretch_key` -- and a geometry change can only have moved
             # `n_levels` (the axis it is measured against changed), so there
             # is no cheaper way to know the old stretch is still good.
-            self._grid_refine.stretch = None
+            self._drop_stretch()
             # `engine.estimate.cube_bytes` depends on `frame`/`z`, both of
             # which `set_resolution` may just have moved.
             self._update_resident_check_label()
@@ -2954,8 +3008,10 @@ class SlicesDock(QgsDockWidget):
             window = self.current_window()
             if window is None or not self.engine.is_prepared:
                 self._end_refine()
+                self._stop_fill_work()
                 self.show_refine()
                 self._values = None
+                self._clear_shown()
                 # Fix round 1, Important 4: emitted here too. `set_source`
                 # empties the engine's lines SYNCHRONOUSLY, before any
                 # re-preparation even starts, so this is the only path
@@ -2974,8 +3030,17 @@ class SlicesDock(QgsDockWidget):
                 shown[coverage == 0] = np.nan
                 self._grid_refine.finished(stop=finish.method != "min_curvature")
             else:
-                shown = self._finished(values, coverage, finish)
+                maybe = self._finished(values, coverage, finish, window)
+                if maybe is None:
+                    # The fill is being worked out (or was cancelled): the map
+                    # keeps its picture, and the flow draws when it lands (#193).
+                    self.show_refine()
+                    return
+                shown = maybe
+                # A preview is a drawn array too: Cancel goes back to it (#193).
+                self._record_picture(finish)
             self._values = shown
+            self._shown_frame = self.engine.frame
             self._window = window
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
@@ -3010,8 +3075,10 @@ class SlicesDock(QgsDockWidget):
             # `_window`/`readout` are already reset here to avoid. And no
             # preview stands, so no refine is owed (plan call 5).
             self._end_refine()
+            self._stop_fill_work()
             self.show_refine()
             self._values = None
+            self._clear_shown()
             self._window = None
             self.readout.setText(f"error: {exc}")
             self.legend_label.setText("")
@@ -3020,10 +3087,16 @@ class SlicesDock(QgsDockWidget):
             self.error.emit(str(exc))
 
     def _finished(
-        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish
-    ) -> np.ndarray:
+        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish, window: SliceWindow
+    ) -> np.ndarray | None:
         """The finished slice This grid draws (interpolation spec §7, plan
-        call 5).
+        call 5), or None when it is not drawn now (#193).
+
+        A fill that is not held is worked out on the `nsgeo-fill` worker
+        (`FillFlow`): a quick one is waited for and drawn in this call, a slow
+        one answers None and the flow draws when it lands, so the map keeps its
+        last picture meanwhile. A cancelled fill with no picture latches: nothing
+        is started and nothing drawn until the cell or the interpolation changes.
 
         A draw that builds new weights or a new plan cancels a running refine
         first: it was made on the plan about to be dropped. A slow
@@ -3039,6 +3112,19 @@ class SlicesDock(QgsDockWidget):
         The slice is hashed once, here, and its key passed on: a hash costs
         about 7 ms at a million cells, and a draw needs it two or three times.
         """
+        flow = self.fill_flow
+        self.fill_picture.check_owner(self.grid_combo.currentText())
+        if not self.engine.fill_held(coverage, finish):
+            if flow.latched:
+                return None
+            # A running refine list was made on the plan about to be dropped.
+            self._grid_refine.before_draw(rebuilds=True)
+            if not flow.request(
+                self.engine.fill_key(finish),
+                lambda: self._fill_jobs(coverage, finish, window),
+                stretch_key=self._stretch_key(window, finish),
+            ):
+                return None
         curvature = finish.method == "min_curvature"
         key = solve_key(values) if curvature else None
         cached = self.engine.weights_cached(finish)
@@ -3056,6 +3142,100 @@ class SlicesDock(QgsDockWidget):
         self._refine_slice = None
         self._grid_refine.finished(stop=not curvature)
         return shown
+
+    def _fill_jobs(
+        self, coverage: np.ndarray, finish: SliceFinish, window: SliceWindow
+    ) -> list[Any]:
+        """The fill for these cells, then the shared stretch measured over it
+        when a shared stretch applies (#193). The fill job first: making it drops
+        the held fill, and the stretch job reads the fill job's result."""
+        fill = self.engine.fill_job(coverage, finish)
+        # The first north-up plan for this frame is built on the worker too (#193).
+        fill.warm_north_up = True
+        jobs: list[Any] = [fill]
+        if self._shared_stretch_wanted():
+            jobs.append(
+                self.engine.stretch_job(window.n_levels, self._stretch_clip(), finish, fill=fill)
+            )
+        return jobs
+
+    def _shared_stretch_wanted(self) -> bool:
+        return (
+            self.stretch_combo.currentText() != "this slice"
+            and not self.own_colours_on()  # #180: no shared stretch to measure
+            and not self.coverage_check.isChecked()
+        )
+
+    def _stretch_clip(self) -> Any:
+        return UnipolarClip() if self.engine.output_unipolar else PercentileClip()
+
+    def _stop_fill_work(self) -> None:
+        """Cancel the fill work for what is no longer drawn, keeping a latch."""
+        self.fill_flow.stop()
+
+    def _drop_stretch(self) -> None:
+        """The held shared stretch is no longer for this cube: drop it, and
+        cancel one being measured over what it snapshotted (#193)."""
+        self._grid_refine.stretch = None
+        self.fill_flow.drop_stretch()
+
+    def _clear_shown(self) -> None:
+        """Nothing is drawn: no frame, no limit and no picture to go back to."""
+        self._shown_frame = None
+        self._limit_shown = None
+        self.fill_picture.forget()
+
+    def _record_picture(self, finish: SliceFinish) -> None:
+        frame = self.engine.frame
+        grid_id = self.grid_combo.currentText()
+        if frame is not None and grid_id and self.session.is_open:
+            self.fill_picture.record(grid_id, frame.cell, finish)
+
+    # ---- FillPicture's wiring: This grid's record and widgets ---------------
+    # (Whole site's own are its record and its `site_finish`: Cancel is only ever
+    # pressed in the scope that is working, so each callback follows `_scope`.)
+    def _fill_record(self) -> dict[str, Any]:
+        if self._scope == "site":
+            return self._site.fill_record()
+        grid_id = self.grid_combo.currentText()
+        return dict(self.session.slice_resolution(grid_id)) if grid_id else {}
+
+    def _restore_fill_record(self, record: dict[str, Any] | None) -> None:
+        if self._scope == "site":
+            self.session.restore_site_resolution(record)
+            return
+        self.session.restore_slice_resolution(self.grid_combo.currentText(), record)
+
+    def _fill_widgets(self) -> tuple[float, SliceFinish]:
+        panel = self.site_finish if self._scope == "site" else self.grid_finish
+        return self.cell_spin.value(), panel.value()
+
+    def _set_fill_widgets(self, cell: float, finish: SliceFinish) -> None:
+        """Show the fill settings again, quietly: nothing is remembered from a
+        restore. Only the fill widgets change (`finish` carries the others as
+        they are)."""
+        site = self._scope == "site"
+        self._debounce.stop()
+        self._finish_debounce.stop()
+        self._site.finish_debounce.stop()
+        self._seeding += 1
+        try:
+            self.cell_spin.blockSignals(True)
+            try:
+                self.cell_spin.setValue(cell)
+            finally:
+                self.cell_spin.blockSignals(False)
+            if site:
+                self.site_finish.set_value(finish)
+            else:
+                self.grid_finish.set_value(finish)
+                self.grid_finish.set_spacing(self._grid_spacing())
+        finally:
+            self._seeding -= 1
+        if site:
+            self._site.refresh_rows()  # the max distance tooltip's metres
+        else:
+            self._update_included_label()
 
     def _end_refine(self) -> bool:
         """No preview stands (nothing is drawn, the draw failed, or the site
@@ -3077,9 +3257,28 @@ class SlicesDock(QgsDockWidget):
         no state change re-lays out the scrolled panel under the user's wheel.
         Called wherever a flow's state can have changed."""
         if self._scope == "site":
-            text = self._site.refine.indicator(grids=True)
+            flow = self.fill_flow
+            res = self._site.res_applied
+            cell = res.cell if res is not None else self.cell_spin.value()
+            text = (
+                flow.progress_text(cell, grids=True)
+                if flow.working
+                else self._site.refine.indicator(grids=True) or flow.progress_text(cell, grids=True)
+            )
+            self.cancel_link.setVisible(flow.working)
         else:
-            text = self._grid_refine.indicator()
+            flow = self.fill_flow
+            frame = self.engine.frame
+            cell = frame.cell if frame is not None else self.cell_spin.value()
+            # The fill's working line first, then the refine's own states; the
+            # stretch wording only when nothing else is said.
+            text = (
+                flow.progress_text(cell, grids=False)
+                if flow.working
+                else self._grid_refine.indicator() or flow.progress_text(cell, grids=False)
+            )
+            # Only the fill phase is a setting to take back, not the stretch.
+            self.cancel_link.setVisible(flow.working)
         self.refine_label.setText(text)
 
     def _stretch_key(self, window: SliceWindow, finish: SliceFinish) -> tuple[Any, ...]:
@@ -3174,6 +3373,64 @@ class SlicesDock(QgsDockWidget):
                 self.show_refine()
         except Exception:  # noqa: BLE001 -- from the refine worker's poll timer
             _log(f"could not report that minimum curvature failed: {message}")
+
+    # ---- #193: the fill and the stretch, worked out in the background ---------
+    def _on_fill_done(self) -> None:
+        """The last fill landed, handed over by the worker's poll timer (never
+        inside a draw, `FillFlow`): draw at whatever the panel says now, with the
+        stretch held. A callback, so it guards its own body."""
+        try:
+            if self._scope == "site":
+                self._site.on_fill_done()
+                return
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- from the worker's poll timer
+            self.error.emit(f"could not draw the slice: {exc}")
+
+    def _on_stretch_landed(self, key: Any, limit: float, final: bool) -> None:
+        """The shared stretch for `key` was measured. Kept, and the map redrawn
+        with it, only while `key` is still what the panel asks for: a stretch
+        for settings since changed is dropped (the next draw asks again)."""
+        try:
+            if self._scope == "site":
+                self._site.on_stretch_landed(key, limit, final)
+                return
+            window = self._window
+            if window is None:
+                return
+            if key != self._stretch_key(window, self.grid_finish.value()):
+                return
+            self._grid_refine.land_stretch(key, limit, final)
+            self._limit_shown = limit
+            self._update_legend_label()
+            self.show_refine()
+            self.slice_changed.emit()
+        except Exception as exc:  # noqa: BLE001 -- from the worker's poll timer
+            self.error.emit(f"could not apply the colour stretch: {exc}")
+
+    def _on_fill_error(self, what: str, message: str) -> None:
+        try:
+            self.show_refine()
+            self.error.emit(f"could not work out the {what}: {message}")
+        except Exception:  # noqa: BLE001 -- from the worker's poll timer
+            _log(f"could not report a failed fill: {message}")
+
+    def _on_cancel_link(self, _href: str = "") -> None:
+        try:
+            self.fill_flow.cancel()
+        except Exception as exc:  # noqa: BLE001 -- a slot on linkActivated
+            _log(f"could not cancel the fill: {exc}")
+
+    def _on_fill_cancelled(self) -> None:
+        """Cancel was pressed while a fill was worked out (`FillPicture`)."""
+        try:
+            if self._scope == "site":
+                self._site.on_fill_cancelled()
+            else:
+                self.fill_picture.cancelled(self.grid_combo.currentText())
+            self.show_refine()
+        except Exception as exc:  # noqa: BLE001 -- reached from the Cancel link
+            self.error.emit(f"could not cancel the fill: {exc}")
 
     def reannounce_window(self) -> None:
         """Re-emit the CURRENT window without recomputing the slice.
@@ -3349,7 +3606,12 @@ class SlicesDock(QgsDockWidget):
         their solves. A provisional limit already held arms it too, so a
         refine that failed or was cancelled is retried at the next draw.
         `_on_landed` drops the provisional limit once its list ends
-        (`RefineFlow.stretch_limit`).
+        (`RefineFlow.landed`).
+
+        The shared limit is measured on the fill worker (#193), never here: a
+        miss asks `FillFlow.request_stretch` and returns the limit the layer has
+        (`_limit_shown`), or the shown slice's own limit with nothing drawn; the
+        landing re-emits `slice_changed`.
         """
         if self._scope == "site":
             return self._site.display_limit()
@@ -3367,10 +3629,23 @@ class SlicesDock(QgsDockWidget):
         if window is None:
             return 1.0
         finish = self.grid_finish.value()
-        return self._grid_refine.stretch_limit(
-            self._stretch_key(window, finish),
-            lambda: self.engine.stretch_limit(window.n_levels, clip, finish),
-        )
+        key = self._stretch_key(window, finish)
+        held = self._grid_refine.held_stretch(key)
+        if held is not None:
+            self._limit_shown = held
+            return held
+        # Measured on the worker (#193): the map keeps the limit it has until the
+        # stretch lands, and the dock then re-emits `slice_changed`. Not before
+        # the fill it reads is held (or being worked out).
+        if self.engine.weights_cached(finish):
+            self.fill_flow.request_stretch(
+                key, lambda: self.engine.stretch_job(window.n_levels, clip, finish)
+            )
+        if self._limit_shown is not None:
+            return self._limit_shown
+        if self._values is None:
+            return 1.0
+        return limit_over_slices((self._values,), clip)
 
     def display_unipolar(self) -> bool:
         """Whether `current_values()` has no negative side, for the LUT
@@ -3479,6 +3754,8 @@ class SlicesDock(QgsDockWidget):
             else:
                 entries = [Entry(REFUSAL, self._grid_refusal)] if self._grid_refusal else []
                 entries += [Entry(NOTE, note) for note in self._grid_notes]
+                if self.fill_picture.noted:
+                    entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
             self.warnings_panel.set_entries(entries)
         except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
             _log(f"could not show the warnings: {exc}")
@@ -3504,6 +3781,10 @@ class SlicesDock(QgsDockWidget):
             # The scope being left applies its own pending change first.
             self._debounce.stop()
             self._apply_resolution()
+        # After that apply, which can start a fill: a scope switch ends the fill
+        # work and any latch (#193), so none runs on under the other scope.
+        self.fill_flow.stop()
+        self.fill_picture.unlatch()
         if self._scope == "site":
             top = self._site.shown_top()
         else:
@@ -3866,6 +4147,18 @@ class SlicesDock(QgsDockWidget):
     def site_velocities(self) -> dict[str, VelocityModel | None]:
         """Each ready grid's velocity, resolved as the This-grid readout does."""
         return self._site.velocities()
+
+    def update_export_button(self) -> None:
+        """The Export button by its scope's rule (`site_scope.offer_export`): the
+        plugin calls this when an export starts and when it ends."""
+        if self._scope == "site" and self.session.is_open:
+            self._site.update_export_button()
+        else:
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
+
+    def site_export_busy(self) -> bool:
+        """Whether an included grid is queued or preparing: the export button's rule (T4-a)."""
+        return self._site.export_busy() if self.session.is_open else False
 
     def site_left_out(self) -> list[str]:
         """Included grids no site file will hold: failed, or no lines (T4-a)."""

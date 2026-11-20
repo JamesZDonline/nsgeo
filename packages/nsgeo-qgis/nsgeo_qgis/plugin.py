@@ -891,6 +891,8 @@ class NsgeoPlugin:
                 self.cut_sections.dispose()
                 self.cut_sections = None
             self.slices_dock.refiner.shutdown()
+            self.slices_dock.fill_flow.stop()
+            self.slices_dock.fill_worker.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
             # -- so nothing it owns can start or outlive the teardown.
@@ -1848,11 +1850,19 @@ class NsgeoPlugin:
         assert self.session is not None and self.slices_dock is not None
         dock = self.slices_dock
         site = dock.site_engine
+        # The button's own rule (T4-a), which this is reachable without: an included
+        # grid still queued or preparing. Not `is_running`, which a grid left out whose
+        # cancelled read runs on also holds, while the button is enabled.
+        if dock.site_export_busy():
+            self.message(
+                "wait until the site's grids finish preparing, then export.",
+                Qgis.MessageLevel.Warning,
+            )
+            return
         if not site.ready_grids or site.lattice is None or site.site_z is None:
             self.message("prepare the site's grids before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        transform = dock.site_panel.transform()
         method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
         gains = dock.site_gains()
@@ -1878,7 +1888,6 @@ class NsgeoPlugin:
                 step_levels,
                 cell,
                 pixel,
-                transform=transform,
                 method=method,
                 finish=finish,
                 gains=gains,
@@ -2009,18 +2018,21 @@ class NsgeoPlugin:
         own_style = self._export_own_style(dock)
 
         def on_done(result: ExportResult) -> None:
-            self._finish_export(
-                result,
-                job,
-                epoch=epoch,
-                cell=choice.cell,
-                pixel=choice.pixel,
-                palette=palette,
-                unipolar=unipolar,
-                counts_palette=counts_palette,
-                removed=removed,
-                own_style=own_style,
-            )
+            try:
+                self._finish_export(
+                    result,
+                    job,
+                    epoch=epoch,
+                    cell=choice.cell,
+                    pixel=choice.pixel,
+                    palette=palette,
+                    unipolar=unipolar,
+                    counts_palette=counts_palette,
+                    removed=removed,
+                    own_style=own_style,
+                )
+            finally:
+                self._offer_export()
 
         task = ExportTask(
             f"Export {task_name}",
@@ -2040,10 +2052,23 @@ class NsgeoPlugin:
                 Qgis.MessageLevel.Warning,
             )
             return
+        self._offer_export()
         self.message(
             f"exporting {task_name}: you can keep working; "
             "it is in the task list at the bottom right."
         )
+
+    def _offer_export(self) -> None:
+        """Re-read the Export button's rule when an export starts or ends: it is
+        greyed while one runs (walkthrough, #193). Never raises: it runs in an
+        export's `on_done`."""
+        try:
+            if self.slices_dock is not None:
+                self.slices_dock.update_export_button()
+        except Exception as exc:  # noqa: BLE001 -- reached from a task's finished()
+            QgsMessageLog.logMessage(
+                f"could not update the Export button: {exc}", "nsgeo", Qgis.MessageLevel.Warning
+            )
 
     def _on_site_closed_for_export(self) -> None:
         try:

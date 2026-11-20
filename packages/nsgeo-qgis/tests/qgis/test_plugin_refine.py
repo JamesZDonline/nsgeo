@@ -488,3 +488,27 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     assert job.result is not None
     assert expected >= 10, "the solve is too quick to tell anything"
     assert len(ticks) >= 0.75 * expected
+
+
+def test_settle_drains_a_list_that_ends_in_time(refiner):
+    job, landed = Job("a"), []
+    refiner.start([job], landed.append, lambda m: None)
+    assert refiner.settle(5.0) is True
+    assert landed == [job], "settle drains before it returns"
+
+
+def test_settle_returns_false_while_the_list_runs(refiner):
+    gate = threading.Event()
+    job, landed = Job("a", gate=gate), []
+    refiner.start([job], landed.append, lambda m: None)
+    try:
+        assert job.started.wait(5)
+        assert refiner.settle(0.05) is False
+        assert landed == []
+    finally:
+        gate.set()
+    _pump_until(lambda: landed)
+
+
+def test_settle_with_nothing_started_is_true(refiner):
+    assert refiner.settle(0.01) is True

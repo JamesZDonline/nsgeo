@@ -52,16 +52,14 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
     QgsCoordinateTransformContext,
-    QgsPointXY,
     QgsProject,
     QgsRasterLayer,
 )
 
 from nsgeo_qgis.export_pipeline import ExportBand, ExportGrid, ExportSpec
 from nsgeo_qgis.site_engine import SiteEngine
+from nsgeo_qgis.site_geometry import transform_points
 from nsgeo_qgis.slice_export import apply_band_windows, write_north_up
 from nsgeo_qgis.slices_plan import SliceFinish, combined_time_base
 
@@ -136,7 +134,6 @@ def plan_site_export(
     *,
     cell: float,
     lattice: SiteLattice,
-    transform: str,
     method: str,
     finish: SliceFinish,
     gains: Mapping[str, float],
@@ -150,14 +147,26 @@ def plan_site_export(
     the file will not hold to its state (Ruling F-2); the caller knows what was
     included, the engine only what it was sent. GUI thread: it reads the live
     engines and the session.
+
+    The transform recorded is the one the ready grids were prepared with (no
+    transform as "none"), never the panel's: a RuntimeError names each grid's
+    if they differ.
     """
     site_z = site_engine.site_z
     ready = site_engine.ready_grids
     if site_z is None or not ready:
         raise RuntimeError("no site geometry: prepare the grids and set a resolution first")
     records = []
+    transforms: dict[str, str] = {}
+    axes: dict[str, ZAxis | None] = {}
     for grid_id in ready:
         engine = site_engine.engine_for(grid_id)
+        if engine is None or engine.choice is None:
+            raise RuntimeError(f"grid {grid_id} is not prepared")
+        # Records spell `NO_TRANSFORM` ("") as "none", as slice_export does; GDAL
+        # would drop an empty metadata item, and the key names are the format.
+        transforms[grid_id] = engine.choice.transform or "none"
+        axes[grid_id] = engine.z
         grid = site_engine.session.grid(grid_id)
         velocity = velocities.get(grid_id)
         records.append(
@@ -172,16 +181,20 @@ def plan_site_export(
                 time_base=time_base_of(engine.provenance().steps),
             )
         )
+    if len(set(transforms.values())) != 1:
+        named = ", ".join(f"{g} {t}" for g, t in transforms.items())
+        raise RuntimeError(f"the grids were prepared with different transforms: {named}")
+    transform = next(iter(transforms.values()))
     bands = []
     for window in plan_windows(site_z, thickness_levels, step_levels):
         top, thickness = band_window_ns(site_z, window)
         depths: dict[str, tuple[float, float] | None] = {}
         absent: set[str] = set()
         for grid_id in ready:
-            z = site_engine.engine_for(grid_id).z
+            z = axes[grid_id]
             grid_window = window_on(z, top, thickness) if z is not None else None
             velocity = velocities.get(grid_id)
-            if grid_window is None:
+            if z is None or grid_window is None:
                 depths[grid_id] = None
                 absent.add(grid_id)
             elif velocity is None:
@@ -234,16 +247,7 @@ def world_to_frame(
     """
 
     def move(points: np.ndarray) -> np.ndarray:
-        transform = QgsCoordinateTransform(
-            QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target), context
-        )
-        if not transform.isValid():
-            raise RuntimeError(f"no coordinate transform from {source} to {target}")
-        out = np.empty((len(points), 2), dtype=float)
-        for i, (x, y) in enumerate(np.asarray(points, dtype=float)):
-            moved = transform.transform(QgsPointXY(float(x), float(y)))
-            out[i] = (moved.x(), moved.y())
-        return out
+        return transform_points(points, source, target, context)
 
     return move
 
@@ -334,7 +338,6 @@ def site_export_job(
     cell: float,
     pixel: float,
     *,
-    transform: str,
     method: str,
     finish: SliceFinish,
     gains: Mapping[str, float],
@@ -355,7 +358,6 @@ def site_export_job(
         step_levels,
         cell=cell,
         lattice=lattice,
-        transform=transform,
         method=method,
         finish=finish,
         gains=gains,

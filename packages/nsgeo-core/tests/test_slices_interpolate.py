@@ -7,7 +7,7 @@ import tracemalloc
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
-from nsgeo.slices import CubeFrame, FillWeights, interpolate, plan_fill
+from nsgeo.slices import CubeFrame, FillWeights, SolveStopped, interpolate, plan_fill
 from nsgeo.slices.interpolate import (
     DISTANCE_TOL_M,
     METHODS,
@@ -376,6 +376,143 @@ def test_the_plan_does_not_depend_on_the_chunk_size(method, monkeypatch):
     assert np.array_equal(got.targets, want.targets)
     assert np.array_equal(got.sources, want.sources)
     assert np.array_equal(got.weights, want.weights)
+
+
+def _same_plan(got, want):
+    for name in ("targets", "sources", "weights", "populated", "reach", "domain", "coefficients"):
+        if hasattr(want, name):
+            assert np.array_equal(getattr(got, name), getattr(want, name)), name
+    if hasattr(want, "hierarchy"):
+        assert len(got.hierarchy.levels) == len(want.hierarchy.levels)
+        for a, b in zip(got.hierarchy.levels, want.hierarchy.levels):
+            assert np.array_equal(a.coefficients, b.coefficients)
+            assert np.array_equal(a.active, b.active)
+            assert np.array_equal(a.scale, b.scale)
+        assert np.array_equal(got.hierarchy.coarse_cells, want.hierarchy.coarse_cells)
+        assert np.array_equal(got.hierarchy.coarse_inverse, want.hierarchy.coarse_inverse)
+
+
+@ALL
+def test_a_plan_with_stop_and_progress_is_bit_identical(method):
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    want = plan_fill(pop, 0.1, method, 0.3, 0.6)
+    seen = []
+    got = plan_fill(pop, 0.1, method, 0.3, 0.6, should_stop=lambda: False, progress=seen.append)
+    _same_plan(got, want)
+    assert seen
+    assert all(0.0 <= f <= 1.0 for f in seen)
+    assert seen == sorted(seen)
+    assert seen[-1] == 1.0
+    inert = plan_fill(pop, 0.1, method, 0.3, 0.6, should_stop=None, progress=None)
+    _same_plan(inert, want)
+
+
+@ALL
+def test_the_reach_reports_progress_inside_its_tenth(method):
+    """At a fine cell the reach alone takes seconds: the line must move inside it
+    (0 to 0.1), without changing the plan."""
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    seen = []
+    got = plan_fill(pop, 0.1, method, 0.5, 1.0, progress=seen.append)
+    _same_plan(got, plan_fill(pop, 0.1, method, 0.5, 1.0))
+    inside = [f for f in seen if 0.0 < f < 0.1]
+    assert len(inside) >= 2, seen
+    assert seen == sorted(seen)
+
+
+@ALL
+def test_a_plan_stops_when_asked(method):
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    calls = []
+
+    def third_call_on():
+        calls.append(None)
+        return len(calls) >= 3
+
+    with pytest.raises(SolveStopped):
+        plan_fill(pop, 0.1, method, 0.3, 0.6, should_stop=third_call_on)
+    assert len(calls) >= 3
+
+
+@BOTH
+def test_a_plan_stops_inside_the_neighbour_search(method):
+    """The search is the long stage at a fine cell: a stop that waits for the
+    chunks after it would wait out the whole search. Progress reaches 0.1 when
+    the reach is done and the weights start at 0.6, so a stop raised with the
+    last report still below 0.6 came from inside the search.
+
+    `should_stop` turns True only once the search has reported past its second
+    report (offset 32), so the raise comes from a later check, not the first,
+    and it comes at the very next one: the search asks before every offset."""
+    pop = np.random.default_rng(5).random((80, 90)) < 0.05
+    total = len(interpolate._disc_offsets(1.0, 0.05)[0])
+    assert total > 64
+    second_report = 0.1 + 0.5 * (interpolate._PRUNE_EVERY / total)
+    seen = []
+    asked_after = []
+
+    def stop():
+        flipped = any(f >= second_report - 1e-12 for f in seen)
+        if flipped:
+            asked_after.append(None)
+        return flipped
+
+    with pytest.raises(SolveStopped):
+        plan_fill(pop, 0.05, method, 0.25, 1.0, should_stop=stop, progress=seen.append)
+    assert 0.1 < seen[-1] < 0.6
+    assert seen[-1] >= second_report - 1e-12
+    assert len(asked_after) == 1
+
+
+def test_a_reach_mask_stops_when_asked():
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    with pytest.raises(SolveStopped):
+        reach_mask(pop, 0.1, 0.3, should_stop=lambda: True)
+    assert np.array_equal(
+        reach_mask(pop, 0.1, 0.3, should_stop=lambda: False), reach_mask(pop, 0.1, 0.3)
+    )
+
+
+def test_the_neighbour_search_asks_before_every_offset():
+    """Between two progress reports of the search (32 offsets apart) it asked
+    32 times: at fine cells one offset is tens of milliseconds, so asking only
+    at the reports would let a stop wait a second."""
+    pop = np.random.default_rng(5).random((80, 90)) < 0.05
+    asked = [0]
+    at_report = []
+
+    def stop():
+        asked[0] += 1
+        return False
+
+    def report(fraction):
+        at_report.append((fraction, asked[0]))
+
+    plan_fill(pop, 0.05, "idw", 0.25, 1.0, should_stop=stop, progress=report)
+    # The search's first report repeats the reach's 0.1; keep the later ones.
+    search = [n for f, n in at_report if 0.1 < f < 0.6]
+    assert len(search) >= 3
+    assert {b - a for a, b in zip(search, search[1:])} == {interpolate._PRUNE_EVERY}
+
+
+def test_a_reach_mask_stops_at_the_very_next_offset():
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    asked = []
+
+    def stop():
+        asked.append(None)
+        return len(asked) >= 5
+
+    with pytest.raises(SolveStopped):
+        reach_mask(pop, 0.1, 0.3, should_stop=stop)
+    assert len(asked) == 5
+
+
+def test_solve_stopped_is_one_class_everywhere():
+    import nsgeo.slices
+    from nsgeo.slices import curvature, stopping
+
+    assert nsgeo.slices.SolveStopped is curvature.SolveStopped is stopping.SolveStopped
 
 
 @BOTH

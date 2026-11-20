@@ -121,7 +121,11 @@ def plain_export_error(raw: str | None) -> str:
             "the file could not be written; check that you may save there "
             "and that no other program has it open"
         )
-    if "no coordinate transform" in text:
+    if (
+        "no coordinate transform" in text
+        or "lie outside where" in text
+        or "could not transform points" in text
+    ):
         return "a grid's coordinate system cannot be converted to the site's"
     if "memory" in text or "unable to allocate" in text:
         return "it ran out of memory; try a larger export cell or pixel"

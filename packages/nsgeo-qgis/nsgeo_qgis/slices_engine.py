@@ -150,15 +150,16 @@ from nsgeo.slices import (
     covered_cells,
     finish_slice,
     limit_over_slices,
+    north_up_plans_nbytes,
     plan_fill,
     plan_line,
-    plan_windows,
     smooth,
     stream_slice,
 )
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis.fill_jobs import FillJob
 from nsgeo_qgis.line_edit import same_placement
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_plan import (
@@ -179,6 +180,7 @@ from nsgeo_qgis.slices_plan import (
     limit_windows,
     preset_transform_conflict,
 )
+from nsgeo_qgis.stretch_jobs import GridStretch, StretchJob, WindowSource, shared_windows
 
 #: How much of the previous redraw timing survives into the reported one.
 #: A plain last-value readout flickers between 2 ms and 9 ms on a drag and
@@ -201,6 +203,10 @@ _CANCEL_TIMEOUT_MS = 250
 #: (clearing the source), so `None` cannot double as "nothing queued" the
 #: way it usually would.
 _NOT_QUEUED = object()
+
+
+def _ignore() -> None:
+    """A detached engine's `on_grid_moved`: its moves no longer matter."""
 
 
 def solve_key(values: np.ndarray) -> bytes:
@@ -293,6 +299,48 @@ class PendingSolve:
         return self._engine._land(self._plan, self.key, self.solved, self.ms)
 
 
+#: The share of a minimum-curvature fill's progress that is the plan itself.
+CURVATURE_SHARE = 0.7
+
+
+def build_fill(
+    populated: np.ndarray,
+    cell: float,
+    settings: FinishSettings,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> tuple[SliceFill, FillWeights | None]:
+    """The one fill rule (plan call 5): the fill for these settings and, for
+    minimum curvature, the kriging stand-in at the same max distance and
+    search radius. Progress covers both: the plan to `CURVATURE_SHARE`, the
+    preview after it, ending at 1.0."""
+    md, sr = settings.max_distance_m, settings.search_radius_m
+    curvature = settings.method == "min_curvature"
+    share = CURVATURE_SHARE if curvature else 1.0
+
+    def first(part: float) -> None:
+        if progress is not None:
+            progress(part * share)
+
+    fill = plan_fill(
+        populated, cell, settings.method, md, sr, should_stop=should_stop, progress=first
+    )
+    preview: FillWeights | None = None
+    if isinstance(fill, CurvaturePlan):
+
+        def second(part: float) -> None:
+            if progress is not None:
+                progress(share + part * (1.0 - share))
+
+        built = plan_fill(
+            populated, cell, PREVIEW_METHOD, md, sr, should_stop=should_stop, progress=second
+        )
+        assert isinstance(built, FillWeights)  # kriging plans weights
+        preview = built
+    return fill, preview
+
+
 class SliceEngine(QObject):
     """Everything between a chosen source and a slice. Owns no widgets."""
 
@@ -363,6 +411,11 @@ class SliceEngine(QObject):
         #: the kriging weights built with it (plan call 5); for any other
         #: method `preview` is None.
         self._weights: tuple[tuple[Any, ...], SliceFill, FillWeights | None] | None = None
+        #: Counts every `_drop_fill`, so a `FillJob` made before a drop can tell
+        #: it must not land (#193). `_rebuild_geometry` puts it back when the
+        #: frame is unchanged (a dz edit moves nothing a fill depends on).
+        self._fill_epoch = 0
+        self._disposed = False
         #: Slices solved on that plan, unsmoothed, least recently used first
         #: (plan call 8), keyed by `solve_key`; at most `SOLVED_SLICES_KEPT`.
         #: Written on the GUI thread only, and dropped with the plan.
@@ -442,6 +495,16 @@ class SliceEngine(QObject):
         reading `is_running`, whose meaning is unchanged.
         """
         return self._running or bool(self._pending)
+
+    @property
+    def pending_tasks(self) -> int:
+        """How many of this engine's tasks have not run `finished` yet.
+
+        Only the `_pending` half of `has_live_task` (which is `_running or
+        bool(_pending)`), as a count, for a report that must name what
+        keeps the engine busy.
+        """
+        return len(self._pending)
 
     @property
     def line_count(self) -> int:
@@ -1098,6 +1161,7 @@ class SliceEngine(QObject):
         # The slices solved on a kept plan stay with it: a solve depends on the
         # plan and the values alone (plan call 8).
         held = (self._weights, self._solved, self._last_solve_ms)
+        old_frame, old_epoch = self._frame, self._fill_epoch
         self._plans = None
         self._covered = None
         self._cube = None
@@ -1117,6 +1181,10 @@ class SliceEngine(QObject):
             return
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
+        if old_frame == self._frame:
+            # Nothing a fill depends on moved (a z edit): a job in flight for
+            # this frame may still land. Any other change dropped for good.
+            self._fill_epoch = old_epoch
         if held[0] is not None and held[0][0][0] == self._frame:
             self._weights, self._solved, self._last_solve_ms = held
         self._choose_mode()
@@ -1392,6 +1460,51 @@ class SliceEngine(QObject):
         self._weights = None
         self._solved = OrderedDict()
         self._last_solve_ms = None
+        self._fill_epoch += 1
+
+    def fill_key(self, finish: SliceFinish) -> tuple[Any, ...]:
+        """The key a fill built for `finish` is held under."""
+        if self._frame is None:
+            raise RuntimeError("no frame: nothing to build a fill for")
+        return self._weights_key(self._frame, self.finish_settings(finish))
+
+    def fill_held(self, coverage: np.ndarray, finish: SliceFinish) -> bool:
+        """Whether a fill for `finish` over these cells is held, so a draw
+        would build nothing. False with no frame or no choice."""
+        if self._frame is None or self._choice is None or not self.session.is_open:
+            return False
+        held = self._held_fill(coverage > 0, self._frame, self.finish_settings(finish))
+        return held is not None
+
+    def fill_job(self, coverage: np.ndarray, finish: SliceFinish) -> FillJob:
+        """A job that builds this fill off the GUI thread (#193). The held fill
+        is dropped first, as `_fill_for` does, so the memory peak is the same;
+        the job lands only while nothing it was made for has moved."""
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        assert self._choice is not None
+        self._drop_fill()
+        return FillJob(
+            self,
+            (coverage > 0).copy(),
+            frame,
+            settings,
+            self._choice.grid_id,
+            self._weights_key(frame, settings),
+            self._fill_epoch,
+        )
+
+    def _land_fill(self, job: FillJob) -> bool:
+        """Hold what `job` built, if the engine still wants it."""
+        if (
+            self._disposed
+            or job.fill is None
+            or job.epoch != self._fill_epoch
+            or job.frame != self._frame
+        ):
+            return False
+        self._weights = (job.key, job.fill, job.preview)
+        return True
 
     def _held_fill(
         self, populated: np.ndarray, frame: CubeFrame, settings: FinishSettings
@@ -1420,13 +1533,7 @@ class SliceEngine(QObject):
         # the new ones are built would double the peak, about 0.9 GB more at
         # the cell cap (`MAX_FRAME_CELLS`).
         self._drop_fill()
-        md, sr = settings.max_distance_m, settings.search_radius_m
-        fill = plan_fill(populated, frame.cell, settings.method, md, sr)
-        preview: FillWeights | None = None
-        if isinstance(fill, CurvaturePlan):
-            built = plan_fill(populated, frame.cell, PREVIEW_METHOD, md, sr)
-            assert isinstance(built, FillWeights)  # kriging plans weights
-            preview = built
+        fill, preview = build_fill(populated, frame.cell, settings)
         self._weights = (self._weights_key(frame, settings), fill, preview)
         return fill, preview
 
@@ -1726,12 +1833,7 @@ class SliceEngine(QObject):
         slices (interpolation spec §7).
         """
         _, z = self._require_geometry()
-        if finish.method == "min_curvature":
-            windows = list(limit_windows(z, thickness_levels))
-        else:
-            windows = list(plan_windows(z, thickness_levels, thickness_levels))
-            if windows[-1].k1 < z.nz:
-                windows.append(SliceWindow(windows[-1].k1, z.nz))
+        windows = shared_windows(z, thickness_levels, finish.method == "min_curvature")
         draw = self.preview if preview else self.finish
         if self._mode == "resident":
             cube = self.cube()
@@ -1740,6 +1842,67 @@ class SliceEngine(QObject):
         else:
             slices = (draw(*self._slice(w), finish) for w in windows)
         return limit_over_slices(slices, clip)
+
+    def window_source(self) -> WindowSource:
+        """A frozen snapshot that slices as `_slice` does, for a job on a worker
+        (#193). Taken on the GUI thread: plans are made (and in resident mode
+        the cube built) here, so the worker only reads. Raises as `_slice`
+        does when no lines are prepared."""
+        frame, z = self._require_geometry()
+        if not self._lines:
+            raise RuntimeError("no lines are prepared")
+        plans = self._ensure_plans()
+        cube = self.cube() if self._mode == "resident" else None
+        return WindowSource(frame, z, cube=cube, lines=self._lines, plans=plans)
+
+    def stretch_parts(self, finish: SliceFinish, fill: FillJob | None = None) -> GridStretch:
+        """What this engine contributes to a stretch job: its snapshot, its
+        finish settings and cell, and the fill it will use, which is `fill`'s
+        result when a fill job is given, else what is held for these settings
+        (None when nothing is: the job builds). The solved cache is copied
+        only when the held plan is the one in use."""
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        held = None
+        solved: dict[bytes, np.ndarray] = {}
+        weights = self._weights
+        key = self._weights_key(frame, settings)
+        if fill is None and weights is not None and weights[0] == key:
+            held = (weights[1], weights[2])
+            solved = dict(self._solved)
+        return GridStretch(
+            self.window_source(), settings, frame.cell, fill_job=fill, held=held, solved=solved
+        )
+
+    def stretch_job(
+        self,
+        thickness_levels: int,
+        clip: Any,
+        finish: SliceFinish,
+        *,
+        fill: FillJob | None = None,
+    ) -> StretchJob:
+        """`stretch_limit` as a job for a worker (#193): the same windows and
+        the same arithmetic, so `job.limit` and `job.final` equal what
+        `stretch_limit` returns. Minimum curvature is final only when every
+        window is solved on the plan held; otherwise the kriging preview's
+        provisional limit.
+
+        Obligation: the caller passes a fill job for every grid whose fill is
+        not held for these settings. Otherwise the job builds that fill itself
+        on the worker while the engine still holds the old one, so the memory
+        peak is old plus new.
+        """
+        _, z = self._require_geometry()
+        curvature = finish.method == "min_curvature"
+        windows = shared_windows(z, thickness_levels, curvature)
+        return StretchJob(
+            {"": self.stretch_parts(finish, fill)},
+            [{"": w} for w in windows],
+            clip,
+            curvature=curvature,
+            site=False,
+        )
 
     def cube(self) -> SliceCube:
         """The resident cube, built on first use and cached.
@@ -1836,7 +1999,13 @@ class SliceEngine(QObject):
         )
 
     def status_text(self) -> str:
-        return format_status(self._mode, len(self._lines), self.estimate, self._redraw_ms)
+        return format_status(
+            self._mode,
+            len(self._lines),
+            self.estimate,
+            self._redraw_ms,
+            extra_bytes=north_up_plans_nbytes(),
+        )
 
     # ---- lifecycle --------------------------------------------------------
     def clear(self) -> None:
@@ -1898,6 +2067,7 @@ class SliceEngine(QObject):
         # applied by anything -- exactly right for an engine that is being
         # torn down and must dispatch nothing further.
         self._dispatching = True
+        self._disposed = True
         # nsgeo-qgis fix round 1 (M11, Task 3): stop any in-flight
         # preparation FIRST. Every caller of this method before Task 3's
         # SlicesDock always called wait_for_preparation() itself before
@@ -1940,6 +2110,33 @@ class SliceEngine(QObject):
         self.on_error = None
         self.on_progress = None
         self.on_grid_moved = None
+
+    def detach(self) -> None:
+        """Cut this engine off from the session and from its owner, and nothing more.
+
+        For an owner that has dropped the engine while its task still runs
+        (`SiteEngine._retire`): the engine must neither answer the session's
+        signals (a second cancel wait, a "no longer exists" report) nor call
+        back into the owner. It does NOT cancel, clear or touch `_pending`: a
+        running task still ends, and `has_live_task` turns False when its
+        `finished` has run. `on_grid_moved` becomes a no-op, not None: None
+        would bring back this engine's own re-preparation on a move. Safe to
+        call twice; disconnecting a slot that is not connected is ignored.
+        Called from inside this engine's own `wait_for_preparation`, that wait
+        later puts its owner's `on_prepared` back; the owner must then ignore
+        a callback for a grid it no longer prepares (`SiteEngine` does).
+        """
+        for signal, slot in (
+            (self.session.site_closed, self.clear),
+            (self.session.grids_changed, self._on_grids_changed),
+            (self.session.lines_changed, self._on_lines_changed),
+        ):
+            with contextlib.suppress(TypeError, RuntimeError):
+                signal.disconnect(slot)
+        self.on_error = None
+        self.on_prepared = None
+        self.on_progress = None
+        self.on_grid_moved = _ignore
 
     def wait_for_preparation(
         self,

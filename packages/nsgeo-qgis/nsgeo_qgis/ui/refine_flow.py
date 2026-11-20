@@ -241,16 +241,31 @@ class RefineFlow:
         stretch, held or just measured, arms the rest when nothing is on its
         way to finish it (a refine that failed, or one a failed draw
         cancelled), so the next rest queues its windows (plan call 7)."""
-        held = self.stretch
-        if held is not None and held[0] == key:
-            if not held[2]:
-                self._arm()
-            return held[1]
+        limit = self.held_stretch(key)
+        if limit is not None:
+            return limit
         value, final = measure()
-        self.stretch = (key, value, final)
+        self.land_stretch(key, value, final)
+        return value
+
+    def held_stretch(self, key: Any) -> float | None:
+        """The limit held for `key`, or None when the one held is for another
+        key (or none is): the caller then measures on a worker (#193). As
+        `stretch_limit` does, a held provisional limit arms the rest when
+        nothing is on its way to finish it."""
+        held = self.stretch
+        if held is None or held[0] != key:
+            return None
+        if not held[2]:
+            self._arm()
+        return held[1]
+
+    def land_stretch(self, key: Any, limit: float, final: bool) -> None:
+        """Hold a limit a job measured for `key`. A provisional one arms the
+        rest, as a provisional `stretch_limit` measurement does."""
+        self.stretch = (key, limit, final)
         if not final:
             self._arm()
-        return value
 
     def stretch_final(self, key: Any) -> bool:
         """Whether the stretch held is final for `key`. A rest then asks for

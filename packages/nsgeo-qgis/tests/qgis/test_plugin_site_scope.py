@@ -55,6 +55,7 @@ from plugin_testing import (
     slow_jobs,
     spin_until,
     wait_for_export,
+    wait_for_site,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtTest import QTest
@@ -73,6 +74,7 @@ def _open(fake_iface, site, answer_modal):
     # This grid's automatic first preparation (A), as on any survey open.
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     return plugin
 
 
@@ -108,6 +110,14 @@ def open_plugin(fake_iface, answer_modal):
         _close(p, answer_modal)
 
 
+def drawn(dock) -> None:
+    """Wait for This grid's background draw (#193): a fill over the budget is
+    drawn from the fill worker, not in the tick that asked for it. These tests
+    check what a switch or a preparation leaves on the map, not how long it takes."""
+    assert spin_until(lambda: not dock.fill_flow.working, 60_000), "the fill never landed"
+    QCoreApplication.processEvents()
+
+
 def _events(n: int = 5) -> None:
     for _ in range(n):
         QCoreApplication.processEvents()
@@ -115,8 +125,9 @@ def _events(n: int = 5) -> None:
 
 def settle(dock) -> None:
     """Wait for the site to finish preparing, then let its coalesced tick run."""
-    assert dock.site_engine.wait_until_idle(60_000), "the site did not finish preparing"
+    wait_for_site(dock.site_engine, 60_000)
     _events()
+    drawn(dock)  # #193: and the draw it asked for, when a fill went to the worker
 
 
 def whole_site(plugin):
@@ -267,6 +278,18 @@ def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
     drawn = []
     real = site.refresh_slice
     monkeypatch.setattr(site, "refresh_slice", lambda: drawn.append(1) or real())
+    # The fill requests the edits make (#193): a fill over the flow's budget goes
+    # to the worker and its landing draws once more, through the same
+    # `refresh_slice`. That landing redraw is allowed; a second REQUEST is not.
+    requests: list[bool] = []
+    flow = dock.fill_flow
+    real_request = flow.request
+
+    def counting(*args, **kwargs):
+        requests.append(real_request(*args, **kwargs))
+        return requests[-1]
+
+    monkeypatch.setattr(flow, "request", counting)
     spin = dock.site_finish.max_distance_spin
     spin.setValue(1.0)
     _events()
@@ -276,8 +299,14 @@ def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
     assert plugin.session.site_resolution()["max_distance_spacings"] == 1.25
     assert "A 1.88 m" in spin.toolTip()  # 1.25 x A's 1.5 m
     assert spin_until(lambda: drawn, 5_000)
-    spin_until(lambda: False, 300)  # long past another debounce
-    assert drawn == [1]
+    # Whichever way the fills ran (inside the budget, or on the worker), wait
+    # until they and any landing redraw are done, then long past another debounce.
+    assert spin_until(lambda: not flow.working and not flow.stretching, 60_000)
+    spin_until(lambda: False, 300)
+    assert len(requests) == 1, "the two edits re-planned more than once"
+    # One tick for the pause, plus the landing's own redraw when the fills went
+    # to the worker (the request answered False).
+    assert drawn == [1] * (1 if requests[0] else 2)
     assert dock.current_site_slice() is not None
 
 
@@ -309,6 +338,7 @@ def test_whole_site_draws_one_layer_covering_every_grid(plugin):
 
     # Both scopes drawn: switching renames the one layer in place.
     dock.grid_scope_button.click()
+    drawn(dock)
     assert plugin.slice_layer.layer.id() == layer.id()
     assert layer.name() == LAYER_NAME
     assert dock.current_site_slice() is None
@@ -353,6 +383,7 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
+    drawn(dock)
     text = dock.status_label.text()
     assert text == f"{dock.engine.status_text()} · +{format_bytes(held)} held by the site view"
 
@@ -526,6 +557,7 @@ def test_both_scopes_legends_name_the_transform_by_title(plugin):
     dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.legend_label.text().endswith("(Envelope)"), dock.legend_label.text()
     whole_site(plugin)
     dock.site_panel.transform_combo.set_value("amp_abs")
@@ -1042,23 +1074,26 @@ def test_the_shared_stretch_is_measured_once_not_on_every_slider_move(plugin, mo
     is cached by what it measures over, never by the slider."""
     dock = whole_site(plugin)
     site = dock.site_engine
-    real = site.shared_limit
+    real = site.stretch_job
     calls: list[str] = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["method"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(site, "shared_limit", counted)
+    monkeypatch.setattr(site, "stretch_job", counted)
     for value in (3, 17, 40):
         dock.slice_slider.setValue(value)
         _events()
+    drawn(dock)
     assert calls == []
     dock.normalisation_panel.method_combo.setCurrentIndex(1)
     _events()
+    drawn(dock)
     assert calls == ["background"]
     dock.slice_slider.setValue(8)
     _events()
+    drawn(dock)
     assert calls == ["background"]
 
 
@@ -1071,21 +1106,23 @@ def test_a_velocity_edit_keeps_the_site_stretch_and_a_spacing_edit_re_measures_i
     dock = whole_site(plugin)
     session = plugin.session
     site = dock.site_engine
-    real = site.shared_limit
+    real = site.stretch_job
     calls: list[str] = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["method"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(site, "shared_limit", counted)
+    monkeypatch.setattr(site, "stretch_job", counted)
     assert dock.stretch_combo.currentIndex() == 0  # shared across the site
     session.set_grid_velocity("B", VelocityModel.constant(0.09))
     _events()
+    drawn(dock)
     assert calls == [], "a velocity edit re-measured the stretch"
     assert dock.current_site_slice() is not None
     session.replace_grid(dataclasses.replace(session.grid("B"), default_spacing=3.0))
     _events()
+    drawn(dock)
     assert calls == ["none"]
 
 
@@ -1166,6 +1203,25 @@ def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_fac
     assert dock.cell_spin.value() == pytest.approx(0.35), "the remembered cell outlives the seed"
 
 
+def test_a_re_sent_included_set_never_seeds_the_resolution_again(site3_factory, open_plugin):
+    """#75: spec 4.4 seeds only when the included set changes. The same set sent again,
+    and a tick, seed nothing; a changed set seeds once."""
+    plugin = open_plugin(site3_factory())
+    dock = whole_site(plugin)
+    scope = dock._site
+    seeds: list[tuple[str, ...]] = []
+    real = scope.seed_resolution
+    scope.seed_resolution = lambda included: (seeds.append(included), real(included))[1]
+    current = scope.included()
+    dock.site_panel.included_changed.emit(current)  # the same set, sent again
+    scope.schedule_refresh()
+    settle(dock)
+    assert seeds == []
+    dock.site_panel.included_changed.emit(current[:-1])  # a changed set
+    settle(dock)
+    assert seeds == [current[:-1]]
+
+
 def test_a_remembered_site_cell_below_the_floor_is_clamped_up_to_it(site3_factory, open_plugin):
     """#71 (approved behaviour 4): a remembered cell still respects the size
     floor. A 40 m grid floors the cell above the box's own 0.01 m. Checked on
@@ -1195,13 +1251,13 @@ def _resolution_spins(dock) -> tuple[float, float, float, float]:
 
 def _snapped_ready_bounds(dock) -> tuple[float, float]:
     """The union of the ready grids' prepared bounds, as the z spins hold it."""
+    from nsgeo_qgis.slices_plan import snap_inside
     from nsgeo_qgis.ui.site_scope import ready_z_bounds
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
 
     low, high = ready_z_bounds(dock.site_engine)
     return (
-        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
-        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+        snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        snap_inside(high, dock.z1_spin.decimals(), upper=True),
     )
 
 
@@ -1480,6 +1536,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
@@ -1512,6 +1569,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.05)
     assert dock.current_values() is not None
@@ -1761,6 +1819,107 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     assert dock.export_button.isEnabled()
 
 
+def test_the_site_export_is_greyed_while_an_export_runs(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """Walkthrough (#193): Export stayed enabled while an export ran, and a click
+    answered "an export is already running". It is greyed and says why while one
+    runs, including through the site's own refreshes, and comes back after."""
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "site.tif")
+    assert dock.export_button.isEnabled()
+    dock.export_button.click()
+    gate.wait_entered()
+    try:
+        assert running_export() is not None
+        assert not dock.export_button.isEnabled()
+        assert "task list" in dock.export_button.toolTip()
+        dock._site.on_changed()  # what a grid's state change runs
+        _events()
+        assert not dock.export_button.isEnabled()
+    finally:
+        gate.release.set()
+        wait_for_export()
+    assert dock.export_button.isEnabled()
+    assert dock.export_button.toolTip() == ""
+
+
+def test_site_export_refuses_while_a_grid_prepares(
+    plugin, drive_dialog, message_log, fake_iface, monkeypatch
+):
+    """#75: the button is disabled while a grid prepares, but `_export_site` is reachable
+    without it (a menu, a script) and then wrote a file missing the grid. Refused, and no
+    export dialog opens."""
+    from nsgeo.model.survey import Line
+
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    try:
+        # B is moved, so it prepares again behind the gate; A and C stay ready.
+        plugin.session.replace_grid(
+            dataclasses.replace(plugin.session.grid("B"), origin=(506.0, 690.0))
+        )
+        assert spin_until(dock.site_export_busy), "B never started preparing"
+        assert site.ready_grids, "the test needs ready grids, or it asks the wrong question"
+        plugin._export_site()
+    finally:
+        release.set()
+    assert any("wait until the site's grids finish preparing" in m for m in message_log), (
+        message_log
+    )
+    assert "wait until the site's grids finish preparing, then export." in (
+        fake_iface.messageBar().currentItem().text()
+    )
+    assert shown == [], "an export dialog opened while a grid was still preparing"
+    settle(dock)
+
+
+def test_site_export_waits_only_for_the_included_grids(
+    plugin, drive_dialog, message_log, fake_iface, monkeypatch
+):
+    """Task 4 review: the refusal follows the button's rule (T4-a), not `is_running`.
+    A grid unticked while it prepares retires with its read still running; every
+    included grid is ready, so the button is enabled and Export opens its dialog. A
+    refusal here would outlast the button for as long as that read runs, or forever."""
+    from nsgeo.model.survey import Line
+
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    try:
+        grid = plugin.session.grid("C")
+        moved = (grid.origin[0] + 1.0, grid.origin[1])
+        plugin.session.replace_grid(dataclasses.replace(grid, origin=moved))
+        assert spin_until(lambda: site.grid_state("C").startswith("preparing"))
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
+        assert spin_until(lambda: dock.export_button.isEnabled())
+        assert site.is_running, "C's cancelled read still runs: the case this test is about"
+        plugin._export_site()
+    finally:
+        release.set()
+    assert not any("wait until the site's grids" in m for m in message_log), message_log
+    assert len(shown) == 1, "Export did not open its dialog though the button was enabled"
+    settle(dock)
+
+
 def test_the_export_message_names_a_grid_left_out(
     plugin, site3, drive_dialog, tmp_path, fake_iface
 ):
@@ -1863,7 +2022,8 @@ def test_editing_a_grid_in_site_scope_never_overlaps_preparations(plugin, monkey
     assert dock.engine.is_prepared
     assert dock.engine.frame is not None and dock.engine.frame.origin == (500.0, 690.0)
     _events()
-    assert dock.current_values() is not None, "This grid is drawn again"
+    # A fill over the budget is drawn from the fill worker (#193), not in this tick.
+    assert spin_until(lambda: dock.current_values() is not None), "This grid is drawn again"
 
 
 def test_flipping_scope_mid_preparation_never_overlaps_and_settles(plugin, monkeypatch):
@@ -2269,7 +2429,7 @@ def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_d
     """#71, Review Focus 1, on #70's owed path: `prepare()` is a no-op (the
     engine still holds A), so `_run_pending_grid_prepare`'s own clamp is the
     one that meets A's remembered range lying wholly past A's data."""
-    from nsgeo_qgis.ui.slices_dock import _snap_inside
+    from nsgeo_qgis.slices_plan import snap_inside
 
     dock, errors, _ = _in_wait_window(plugin, monkeypatch)
     assert dock.engine.choice.grid_id == "A"
@@ -2283,8 +2443,8 @@ def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_d
     dock.grid_scope_button.click()
     assert dock.engine.is_prepared and not dock.engine.is_running, "the no-op path"
     low, high = dock.engine.prepared_z_bounds()
-    assert dock.z0_spin.value() == _snap_inside(low, dock.z0_spin.decimals(), upper=False)
-    assert dock.z1_spin.value() == _snap_inside(high, dock.z1_spin.decimals(), upper=True)
+    assert dock.z0_spin.value() == snap_inside(low, dock.z0_spin.decimals(), upper=False)
+    assert dock.z1_spin.value() == snap_inside(high, dock.z1_spin.decimals(), upper=True)
     assert plugin.session.slice_resolution("A") == beyond
     _assert_a_slice_is_drawn_on_a(dock, errors)
 
@@ -2346,8 +2506,25 @@ def test_moving_this_grids_grid_while_a_site_task_outlives_its_cancel_never_over
     assert spin_until(lambda: counter.concurrent == 1)  # the site reads A's first line
     dock.grid_scope_button.click()
     assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    # The window is wall-clock time, and `replace_grid` runs the whole grid
+    # change on this thread: under load it can outlast the task's 0.8 s line,
+    # and This grid then starts, rightly, once the site's task has ended. So
+    # the hazard is asserted at the one place a preparation starts: This grid's
+    # `set_source` is never called while a site task is live (#166 loop, 6 of
+    # 36 copies failed a plain `not is_running` here).
+    started_beside_site_task: list[object] = []
+    real_set_source = dock.engine.set_source
+
+    def watched_set_source(choice):
+        if dock.site_engine.has_live_task:
+            started_beside_site_task.append(choice)
+        return real_set_source(choice)
+
+    monkeypatch.setattr(dock.engine, "set_source", watched_set_source)
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert not dock.engine.is_running, "This grid waits for the site's task"
+    assert not started_beside_site_task, "This grid started beside the site's task"
+    if dock.site_engine.has_live_task:  # nothing ran since the move: still the window
+        assert not dock.engine.is_running, "This grid waits for the site's task"
     assert spin_until(lambda: dock.engine.is_prepared, 30_000)
     assert counter.max_concurrent == 1, (
         f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
@@ -2419,6 +2596,8 @@ def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
         or scope.refine.rest.isActive()
         or scope.tick.isActive()
         or scope.finish_debounce.isActive()
+        or dock.fill_flow.working  # #193: the fills and the stretch run on a worker
+        or dock.fill_flow.stretching
     ):
         if time.monotonic() - start > timeout_s:
             pytest.fail("the refine did not finish")
@@ -2512,6 +2691,7 @@ def test_a_slow_site_tick_previews_then_refines(plugin):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.slice.provisional is True
     assert scope.provisional
     assert dock.refine_label.text() == PREVIEW_INDICATOR
@@ -2534,6 +2714,7 @@ def test_a_quick_site_tick_draws_minimum_curvature_at_once(plugin, monkeypatch):
     starts = _starts(dock, monkeypatch)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.slice.provisional is False
     assert not scope.provisional
     assert not scope.refine.rest.isActive()
@@ -2549,6 +2730,7 @@ def test_a_site_tick_by_another_method_stops_the_refine(plugin, monkeypatch):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional and scope.refine.rest.isActive()
     starts = _starts(dock, monkeypatch)
     _choose_method(dock.site_finish, "kriging")
@@ -2626,17 +2808,13 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
     """Move to slider `at`, every grid present there slow, and hold every
     solve but the first. The first grid's landing redraw still previews the
     others and must leave their solves running: one list, no rest restarted,
-    and no wait cursor, since nothing is rebuilt."""
+    and no fill built, since nothing is rebuilt (#193: the wait cursor is gone;
+    a rebuild is a fill request on the fill worker)."""
     site, scope = dock.site_engine, dock._site
     starts = _starts(dock, monkeypatch)
-    cursors: list[int] = []
-    real_cursor = site_scope_module.busy_cursor
-
-    def counting_cursor():
-        cursors.append(1)
-        return real_cursor()
-
-    monkeypatch.setattr(site_scope_module, "busy_cursor", counting_cursor)
+    rebuilds: list[int] = []
+    real_jobs = site.fill_jobs
+    monkeypatch.setattr(site, "fill_jobs", lambda *a, **k: rebuilds.append(1) or real_jobs(*a, **k))
     gate = threading.Event()
     real = site.pending_solves
 
@@ -2650,8 +2828,10 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
     try:
         dock.slice_slider.setValue(at)
         _events()
+        drawn(dock)
         first, *others = list(scope.slice.previewed)
         assert others
+        del rebuilds[:]  # the move's own fills are done; the landings build none
         _pump_until(lambda: list(scope.slice.previewed) == others and not scope.tick.isActive())
         assert dock.refiner.busy, "the first grid's redraw stopped the others' solves"
         assert scope.provisional
@@ -2660,7 +2840,7 @@ def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
         gate.set()
     _wait_for_refine(dock)
     assert len(starts) == 1
-    assert cursors == [], "a tick that builds nothing showed the wait cursor"
+    assert rebuilds == [], "a landing's redraw built fills"
     assert not scope.provisional
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
 
@@ -2749,6 +2929,7 @@ def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, solved):
     monkeypatch.setattr(SliceEngine, "window_solve", counted_window_solve)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional
     assert list(scope.slice.previewed) == (others if solved else [first, *others])
     _wait_for_refine(dock)
@@ -2796,11 +2977,13 @@ def test_a_max_distance_edit_cancels_the_site_list_before_rebuilding(plugin, mon
     try:
         dock.slice_slider.setValue(30)
         _events()
+        drawn(dock)
         _pump_until(lambda: dock.refiner.busy)  # rested; the first solve is held
         assert building == []
         spin = dock.site_finish.max_distance_spin
         spin.setValue(spin.value() + 0.5)
         _pump_until(lambda: not scope.finish_debounce.isActive() and not scope.tick.isActive())
+        drawn(dock)  # the rebuilt plans are worked out on the fill worker
         assert scope.provisional
         assert not dock.refiner.busy, "a list for the dropped plans ran on"
         assert scope.refine.rest.isActive()
@@ -2833,6 +3016,7 @@ def test_a_site_rest_during_a_finish_edits_pause_builds_nothing(plugin, monkeypa
     monkeypatch.setattr(slices_engine, "plan_fill", watching)
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert scope.provisional and scope.refine.rest.isActive()
     spin = dock.site_finish.max_distance_spin
     spin.setValue(spin.value() + 0.5)  # the edit's tick now waits out its pause
@@ -2935,6 +3119,8 @@ def test_the_site_stretch_with_minimum_curvature_uses_twelve_windows(plugin, mon
     )
     _choose_method(dock.site_finish, "min_curvature")
     _pump_until(lambda: scope.provisional and not scope.tick.isActive())
+    # The shared stretch is measured on the fill worker: wait for it to land.
+    _pump_until(lambda: not dock.fill_flow.working and not dock.fill_flow.stretching)
     mc = dock.site_finish.value()
     args = {"finish": mc, "method": dock.normalisation_panel.method(), "manual": dock.site_gains()}
     assert site.stretch_solves(thickness_ns, mc) != []
@@ -3008,7 +3194,8 @@ def test_entering_the_site_cancels_this_grids_refine(plugin, monkeypatch):
     _choose_method(dock.grid_finish, "min_curvature")  # a new plan's first draw is a preview
     dock._finish_debounce.stop()
     dock._on_finish_timeout()
-    assert dock.provisional
+    # The plan's fill is worked out on the fill worker (#193): wait for the preview.
+    _pump_until(lambda: dock.provisional)
     _pump_until(job.started.is_set)
     assert dock.refiner.busy
     dock.site_scope_button.click()  # no event is processed before the asserts
@@ -3351,6 +3538,8 @@ def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, mo
             or dock.refiner.busy
             or scope.refine.rest.isActive()
             or scope.tick.isActive()
+            or dock.fill_flow.working
+            or dock.fill_flow.stretching
         ):
             break
         time.sleep(0.005)
@@ -3368,6 +3557,7 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
     scope = dock._site
     dock.slice_slider.setValue(30)
     _events()
+    drawn(dock)
     assert dock.refine_label.text() == PREVIEW_INDICATOR
     seen: list[str] = []
     deadline = time.monotonic() + 60.0
@@ -3383,6 +3573,8 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
             or scope.provisional
             or scope.refine.rest.isActive()
             or scope.tick.isActive()
+            or dock.fill_flow.working
+            or dock.fill_flow.stretching
         ):
             break
         time.sleep(0.002)
@@ -4115,6 +4307,7 @@ def test_the_normalisation_section_folds_and_is_remembered(plugin):
         assert again_group.height() < 60 and again_group.maximumHeight() < 60
     finally:
         again.refiner.shutdown()
+        again.fill_worker.shutdown()
         again.site_engine.wait_until_idle(60_000)
         again.engine.wait_for_preparation(20_000)
         again.engine.dispose()

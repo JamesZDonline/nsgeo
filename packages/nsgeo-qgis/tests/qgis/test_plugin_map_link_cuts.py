@@ -93,6 +93,7 @@ def cutlink(qgis_app, tmp_path):
     link.dispose()
     sections.dispose()
     dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()

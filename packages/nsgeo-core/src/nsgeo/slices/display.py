@@ -18,15 +18,16 @@ Pure numpy, like the rest of the core.
 
 from __future__ import annotations
 
-import functools
 import math
-from collections.abc import Iterable
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from nsgeo.render import Normalizer
+from nsgeo.render import Normalizer, sample_stride
 from nsgeo.slices.cube import SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
@@ -143,7 +144,31 @@ def limit_over_slices(slices: Iterable[np.ndarray], clip: Normalizer) -> float:
         raise ValueError("limit_over_slices needs at least one slice")
     if all(part.size == 0 for part in finite):
         return clip.limit(np.array([], dtype=float))
-    return clip.limit(np.concatenate(finite))
+    return clip.limit(_what_the_clip_reads(finite, clip))
+
+
+def _what_the_clip_reads(parts: list[np.ndarray], clip: Normalizer) -> np.ndarray:
+    """The values `clip.limit` measures of the parts joined end to end.
+
+    A clip with a `max_samples` budget (`PercentileClip`, `UnipolarClip`) reads
+    only a strided subsample (`sample_stride`), so those values are taken from
+    each part where they fall rather than from one joined copy of every finite
+    value, which on a fine site was as large again as the parts themselves
+    (walkthrough, 0.02 m Whole site). What is handed over is within the budget,
+    so the clip strides by 1 and measures exactly these: the limit is unchanged.
+    Any other clip gets every value, joined.
+    """
+    budget = getattr(clip, "max_samples", None)
+    total = sum(part.size for part in parts)
+    if not isinstance(budget, int) or budget < 1 or total <= budget:
+        return np.concatenate(parts)
+    stride = sample_stride(total, budget)
+    picked = []
+    start = 0  # the joined index of this part's first value
+    for part in parts:
+        picked.append(part[(-start) % stride :: stride])
+        start += part.size
+    return np.concatenate(picked)
 
 
 def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> float:
@@ -260,19 +285,68 @@ def to_north_up(
 
 
 #: Frames whose north-up plan is kept. The preview and an export of it share
-#: one; the second slot keeps the grid just left. A plan is the frame's
-#: bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated 50 m
-#: grid at 0.05 m is tens of MB and a very large rotated frame of a few
-#: million pixels hundreds each, two plans together: hence two, not more.
+#: one; the second slot keeps the grid just left. A rotated frame's plan is
+#: its bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated
+#: 50 m grid at 0.05 m is tens of MB and a very large rotated frame of a few
+#: million pixels hundreds each, two plans together: hence two, not more. An
+#: exact plan (an axis-aligned frame) is `lean()` and holds 4 bytes a point.
 _NORTH_UP_PLANS = 2
 _NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
+_plans: OrderedDict[CubeFrame, _NorthUpPlan] = OrderedDict()
+# The GUI thread draws through here (`SliceLayer.update`) and the Slices fill
+# worker warms a new frame's plan (`warm_north_up_plan`); the GeoTIFF exports build
+# their own taps on their worker. The lock keeps the cache sound across them.
+_plans_lock = threading.Lock()
 
 
-@functools.lru_cache(maxsize=_NORTH_UP_PLANS)
 def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
-    """`_build_north_up_plan(frame)`, kept for the last few frames. A
-    `CubeFrame` is frozen, so equal frames share a plan."""
-    return _build_north_up_plan(frame)
+    """`_build_north_up_plan(frame)`, kept for the last two frames. A
+    `CubeFrame` is frozen, so equal frames share a plan. A plan built twice
+    by two threads at once is harmless: the second replaces the first."""
+    with _plans_lock:
+        plan = _plans.get(frame)
+        if plan is not None:
+            _plans.move_to_end(frame)
+            return plan
+    plan = _build_north_up_plan(frame)
+    with _plans_lock:
+        _plans[frame] = plan
+        _plans.move_to_end(frame)
+        while len(_plans) > _NORTH_UP_PLANS:
+            _plans.popitem(last=False)
+    return plan
+
+
+def warm_north_up_plan(frame: CubeFrame, should_stop: Callable[[], bool] | None = None) -> None:
+    """Build and keep `frame`'s north-up plan, so the first `to_north_up` on it
+    is one sample. Safe off the GUI thread (the cache is lock-guarded). The
+    build cannot be interrupted, so `should_stop` is asked once more after it:
+    a stopped warm inserts nothing, and never pushes a shown frame's plan out
+    of the two slots."""
+    with _plans_lock:
+        if frame in _plans:
+            _plans.move_to_end(frame)
+            return
+    plan = _build_north_up_plan(frame)
+    if should_stop is not None and should_stop():
+        return
+    with _plans_lock:
+        _plans[frame] = plan
+        _plans.move_to_end(frame)
+        while len(_plans) > _NORTH_UP_PLANS:
+            _plans.popitem(last=False)
+
+
+def north_up_plans_nbytes() -> int:
+    """Bytes the cached north-up plans hold, for the status line."""
+    with _plans_lock:
+        return sum(plan[0].nbytes for plan in _plans.values())
+
+
+def clear_north_up_plans() -> None:
+    """Drop every cached north-up plan."""
+    with _plans_lock:
+        _plans.clear()
 
 
 def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
@@ -327,4 +401,4 @@ def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     # reads -- the same reason `cell_index` has its own edge tolerance.
     taps = bilinear_taps(frame, lattice.pixel_centres())
     shape = (lattice.height, lattice.width)
-    return taps, shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)
+    return taps.lean(), shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)

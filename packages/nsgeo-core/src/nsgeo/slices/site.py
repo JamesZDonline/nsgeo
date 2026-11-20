@@ -280,12 +280,21 @@ def compose_footprints(
     for a window that is not on the lattice.
 
     `cells_per_pixel` is how many cells a pixel spans (a preview's 2**k).
-    Above 1, counts are first max-pooled (`max_pool_counts`) over enough
-    cells that every cell lies within some pixel's corners, so no line is
-    hidden between pixels; amplitudes are untouched.
+    Above 1, counts are first max-pooled (`max_pool_counts`) over
+    `max(ceil(cells_per_pixel / sqrt 2), cells_per_pixel - 1)` cells, so no
+    line is hidden between pixels; amplitudes are untouched. The first term
+    reaches every cell from some pixel's corners. The second keeps a grid's
+    first and last line: the lattice is anchored on a multiple of the pixel,
+    so its edge pixels can have centres up to a pixel from the line, and
+    the sweep over lattice phases (#157) missed 8 of 64 at 8x and 20 of 64
+    at 16x with the first term alone.
     """
     take = sample_counts if counts else sample
-    reach = math.ceil(cells_per_pixel / math.sqrt(2.0)) if counts and cells_per_pixel > 1 else 0
+    reach = (
+        max(math.ceil(cells_per_pixel / math.sqrt(2.0)), cells_per_pixel - 1)
+        if counts and cells_per_pixel > 1
+        else 0
+    )
     total = np.zeros((lattice.height, lattice.width), dtype=np.float32)
     count = np.zeros((lattice.height, lattice.width), dtype=np.uint8)
     for where, values in layers:

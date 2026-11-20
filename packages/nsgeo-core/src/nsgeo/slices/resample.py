@@ -63,8 +63,31 @@ class Taps:
     def nbytes(self) -> int:
         return int(self.nearest.nbytes + self.ids.nbytes + self.weights.nbytes)
 
+    def lean(self) -> Taps:
+        """These taps without the arrays an exact plan never reads.
+
+        Exact taps are read through `nearest` alone (`sample`,
+        `sample_counts`), so `ids` and `weights` are dropped: 4 bytes a point
+        instead of 52. Taps that are not exact are returned as they are.
+        Cut sections read `ids` and `weights`, so they keep full taps.
+        """
+        if not self.exact:
+            return self
+        return Taps(
+            self.nearest,
+            np.empty((4, 0), dtype=self.ids.dtype),
+            np.empty((4, 0), dtype=self.weights.dtype),
+            self.nx,
+            self.ny,
+            True,
+        )
+
     def take(self, index: np.ndarray) -> Taps:
         """The taps of a subset of the points, in the order given."""
+        if self.ids.size == 0 and self.exact:  # lean stays lean
+            nearest = self.nearest[index]
+            nearest.setflags(write=False)
+            return Taps(nearest, self.ids, self.weights, self.nx, self.ny, True)
         return _make(
             self.nearest[index], self.ids[:, index], self.weights[:, index], self.nx, self.ny
         )
@@ -205,6 +228,11 @@ def sample_counts(counts: np.ndarray, taps: Taps) -> np.ndarray:
     all the cells it would blend are empty.
     """
     flat = _flat32(counts, taps)
+    if taps.exact:
+        # Each point sits on one cell centre: its count is the nearest cell's.
+        v = flat[np.maximum(taps.nearest, 0)]
+        blank = ~(np.isfinite(v) & (v > 0.0)) | (taps.nearest < 0)
+        return np.where(blank, np.float32(np.nan), v).astype(np.float32, copy=False)
     v = flat[taps.ids]
     good = (taps.weights > 0.0) & np.isfinite(v) & (v > 0.0)
     largest = np.where(good, v, np.float32(-np.inf)).max(axis=0)

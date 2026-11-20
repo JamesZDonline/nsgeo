@@ -18,7 +18,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.slices_dock import SlicesDock, _OpensWideScrollArea
 from nsgeo_qgis.ui.warnings_panel import WARNING, Entry
-from plugin_testing import REAL_DZT, needs_real_data
+from plugin_testing import REAL_DZT, needs_real_data, wait_for_site
 from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtCore import QCoreApplication, QEvent
 from qgis.PyQt.QtWidgets import QApplication, QScrollArea
@@ -87,7 +87,7 @@ def _loaded_dock(session: SiteSession, scope: str):
         if scope == "site":
             dock.site_scope_button.click()
             assert dock.scope() == "site"
-            assert dock.site_engine.wait_until_idle(60_000)
+            wait_for_site(dock.site_engine, 60_000)
         _events()
         _carry_data_text(dock)
         dock.warnings_panel.set_entries([Entry(WARNING, LONG_WARNING)])
@@ -95,6 +95,7 @@ def _loaded_dock(session: SiteSession, scope: str):
         yield dock
     finally:
         dock.refiner.shutdown()
+        dock.fill_worker.shutdown()
         dock.dispose_site()
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()

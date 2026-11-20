@@ -5,10 +5,13 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from nsgeo.model.survey import Line
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     NORMALISATION_METHODS,
@@ -38,13 +41,14 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
 )
-from plugin_testing import LoadCounter, spin_until
+from plugin_testing import LoadCounter, spin_until, wait_for_site
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsPointXY,
     QgsProject,
 )
+from qgis.PyQt.QtCore import QCoreApplication, QEvent
 
 #: M11's test resolution, with the z range widened to hold the whole site.
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
@@ -57,28 +61,12 @@ TICK = {"finish": FINISH, "method": "none", "manual": {}}
 MC = SliceFinish(method="min_curvature", max_distance_spacings=1.5)
 
 
-@pytest.fixture
-def make_site():
-    """SiteEngines for one test, disposed (after any preparation ends) on teardown."""
-    made: list[SiteEngine] = []
-
-    def make(session, **kwargs) -> SiteEngine:
-        engine = SiteEngine(session, **kwargs)
-        made.append(engine)
-        return engine
-
-    yield make
-    for engine in made:
-        engine.wait_until_idle(20_000)
-        engine.dispose()
-
-
 def prepared(make_site, site3, source=None, resolution=RES, **kwargs):
     """A SiteEngine with every grid of `source` prepared and `resolution` set."""
     errors: list[str] = []
     site = make_site(site3.session, on_error=errors.append, **kwargs)
     site.set_source(source if source is not None else site3.source())
-    assert site.wait_until_idle(60_000), "the site did not finish preparing"
+    wait_for_site(site, 60_000)
     site.set_resolution(resolution)
     return site, errors
 
@@ -168,7 +156,7 @@ def test_two_engines_never_prepare_at_once(site3, make_site, monkeypatch):
         site = make_site(session, on_error=errors.append, exclusive_with=[peer])
         peer.set_source(site3.choice("A"))
         site.set_source(site3.source())  # the same moment
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
         assert peer.wait_for_preparation(20_000)
         assert counter.calls == 16
         assert [site.grid_state(g) for g in "ABC"] == ["ready"] * 3
@@ -181,7 +169,7 @@ def test_two_engines_never_prepare_at_once(site3, make_site, monkeypatch):
         assert not site.is_running
         assert site.grid_state("A") == "ready"
         site.set_source(site3.source(transform="amp_abs"))
-        assert site.wait_until_idle(60_000)
+        wait_for_site(site, 60_000)
 
         assert counter.max_concurrent == 1, (
             f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
@@ -215,7 +203,7 @@ def test_a_preparation_that_outlives_its_cancel_wait_holds_back_every_other(
     assert site.has_live_task and site.engine_for("A").has_live_task
 
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.max_concurrent == 1, (
         f"a grid started while a cancelled task still ran (max={counter.max_concurrent})"
     )
@@ -242,7 +230,7 @@ def test_a_dropped_grid_whose_preparation_outlives_its_cancel_wait_holds_back_ev
     site.set_source(site3.source("BC"))  # A dropped mid-preparation
     assert site.engine_for("A") is None
     assert site.has_live_task, "A's abandoned task is still reading a line"
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"a grid started beside a dropped grid's task (max={counter.max_concurrent})"
@@ -282,7 +270,7 @@ def test_a_retry_inside_a_dropped_grids_cancel_wait_does_not_re_dispatch_it(
 
     monkeypatch.setattr(engine_a, "cancel_preparation", cancel_then_retry)
     site.set_source(site3.source("BC"))  # A dropped
-    assert site.wait_until_idle(10_000), "the queue stalled behind the dropped grid"
+    wait_for_site(site, 10_000)
     assert site.ready_grids == ("B", "C")
     assert site.engine_for("A") is None and not site.has_live_task
     assert counter.max_concurrent == 1
@@ -305,7 +293,7 @@ def test_a_moved_grid_whose_preparation_outlives_its_cancel_wait_is_held_back(
     assert spin_until(lambda: counter.calls >= 1), "A's first line was never read"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"the moved grid re-prepared beside its own old task (max={counter.max_concurrent})"
@@ -330,7 +318,7 @@ def test_a_moved_grid_re_prepares_through_the_queue_never_alongside_another(
     assert site.grid_state("A") == "ready"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert counter.max_concurrent == 1, (
         f"the moved grid re-prepared beside another (max_concurrent={counter.max_concurrent})"
@@ -358,7 +346,7 @@ def test_a_grid_moved_while_it_prepares_is_re_queued_not_failed(site3, make_site
     assert site.grid_state("A") == "preparing"
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     assert not any(s.startswith("failed") for s in states), states
     assert site.grid_state("A") == "ready"
@@ -394,7 +382,7 @@ def test_closing_the_site_mid_preparation_clears_without_overlap(site3, make_sit
     session.open_site(site3.json_path)
     site.set_resolution(RES)
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.max_concurrent == 1
     assert site.ready_grids == ("A", "B", "C")
 
@@ -412,7 +400,7 @@ def test_grids_prepare_in_order_and_each_is_drawn_as_soon_as_ready(site3, make_s
     site.set_resolution(RES)
     seen.clear()
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     # (`on_changed` also fires as grids are queued and start: ready is still ().)
     assert list(dict.fromkeys(r for r in seen if r)) == [("A",), ("A", "B"), ("A", "B", "C")]
@@ -434,7 +422,7 @@ def test_changing_one_grids_preset_re_prepares_only_that_grid(site3, make_site, 
             grids=(site3.choice("A"), site3.choice("B", preset="raw"), site3.choice("C")),
         )
     )
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 16, f"{counter.calls - 12} lines read again, not B's four"
     assert site.engine_for("A").prepared_lines()[0] is a_line
     assert site.engine_for("B").choice.preset == "raw"
@@ -448,7 +436,7 @@ def test_dropping_a_grid_from_the_source_releases_it_and_keeps_the_rest(
     counter = LoadCounter(monkeypatch)
     site, _ = prepared(make_site, site3)
     site.set_source(site3.source("AB"))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 12
     assert site.ready_grids == ("A", "B")
     assert site.engine_for("C") is None
@@ -465,7 +453,7 @@ def test_each_grid_reports_its_progress_while_it_prepares(site3, make_site, monk
     site.set_source(site3.source())
     assert site.grid_progress("A") == (0, 4)
     assert site.grid_progress("B") is None  # queued
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
 
     preparing = [progress for state, progress in seen if state == "preparing"]
     assert preparing and preparing[0] == (0, 4), seen
@@ -495,7 +483,7 @@ def test_dropping_a_grid_or_emptying_its_lines_is_announced_even_before_it_is_re
     site.set_source(SiteSource(transform="amp_envelope", grids=(site3.choice("A"), no_lines)))
     assert changes, "dropping queued C and emptying queued B announced nothing"
     assert changes[-1].get("B") == "no lines" and "C" not in changes[-1]
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.ready_grids == ("A",)
 
 
@@ -507,7 +495,7 @@ def test_a_grid_with_no_lines_is_listed_and_skipped(site3, make_site, monkeypatc
         SiteSource(transform="amp_envelope", grids=(site3.choice("A"), site3.choice("B"), no_lines))
     )
     assert site.grid_state("C") == "no lines"
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert counter.calls == 8
     assert site.grid_state("C") == "no lines"
     assert site.ready_grids == ("A", "B")
@@ -530,7 +518,7 @@ def test_a_grid_that_cannot_be_prepared_is_failed_and_the_rest_continue(site3, m
             grids=(site3.choice("A"), site3.choice("B", preset="bad"), site3.choice("C")),
         )
     )
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.grid_state("B").startswith("failed: ")
     assert "Absolute value" in site.grid_state("B")  # by title, as the Processing list shows it
     assert site.ready_grids == ("A", "C")
@@ -966,6 +954,63 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     assert errors == [], errors
 
 
+def test_a_mixed_crs_site_gathers_the_same_after_the_move(site3_factory, make_site):
+    """C is declared in the next UTM zone: its gather's taps are those of the
+    footprint window's pixel centres, moved into C's CRS one point at a time."""
+    site3 = site3_factory(crs={"C": "EPSG:32615"})
+    site, errors = prepared(make_site, site3)
+    lattice = site.lattice
+    frame = site.engine_for("C").frame
+    assert frame.crs == "EPSG:32615" and lattice.crs == "EPSG:32616"
+    got = site._gather("C", lattice)
+    assert got.n_pixels > 50
+    p = lattice.pixel
+    cols = np.arange(got.col0, got.col1)
+    rows = np.arange(got.row0, got.row1)
+    xs = lattice.x0 + (cols + 0.5) * p
+    ys = lattice.y1 - (rows + 0.5) * p
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+    to_c = QgsCoordinateTransform(
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        QgsCoordinateReferenceSystem("EPSG:32615"),
+        QgsProject.instance(),
+    )
+    moved = np.array(
+        [(m.x(), m.y()) for m in (to_c.transform(QgsPointXY(x, y)) for x, y in centres)]
+    )
+    expected = bilinear_taps(frame, moved)
+    np.testing.assert_array_equal(got.taps.nearest, expected.nearest)
+    np.testing.assert_array_equal(got.taps.ids, expected.ids)
+    np.testing.assert_allclose(got.taps.weights, expected.weights, atol=1e-6)
+    assert errors == [], errors
+
+
+def test_a_preparation_that_reads_no_line_fails_with_the_first_error(site3, make_site, monkeypatch):
+    """The asynchronous failure path: B's lines cannot be read at all. Each line
+    fails with its own message, so the state can show it kept the first."""
+    real_load = Line.load
+    tried: list[str] = []
+
+    def load(self):
+        if self.placement.grid_id == "B":
+            tried.append(self.path.name)
+            raise OSError(f"disk gone at {self.path.name}")
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", load)
+    errors: list[str] = []
+    site = make_site(site3.session, on_error=errors.append)
+    site.set_source(site3.source())
+    wait_for_site(site, 60_000)
+    state = site.grid_state("B")
+    assert state.startswith("failed: ")
+    assert len(set(tried)) > 1, "the test needs B's lines to fail with different messages"
+    assert f"disk gone at {tried[0]}" in state, (tried, state)
+    assert f"disk gone at {tried[-1]}" not in state, (tried, state)
+    assert site.ready_grids == ("A", "C")
+
+
 def test_a_rotated_site_composes_each_grid_bilinearly(site3, make_site):
     """Each grid's taps are kept to its own window on the lattice and sampled
     there only. B laid at 30 degrees overlaps C at a corner, which must still
@@ -1036,7 +1081,7 @@ def far_site(site3, make_site, max_pixels):
     site.max_pixels = max_pixels
     site.max_covered = 10**9
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     return site, errors
 
 
@@ -1117,7 +1162,7 @@ def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):
     site.set_resolution(RES)
     assert site.is_preview
     site.set_source(site3.source("AB"))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     site.set_resolution(RES)
     assert not site.is_preview
     assert site.lattice.pixel == RES.cell
@@ -1160,7 +1205,7 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     assert before.lattice.x0 == 500.0
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(490.0, 700.0)))
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     assert site.grid_state("A") == "ready"
     assert site.engine_for("A").frame.origin == (490.0, 700.0)
 
@@ -1178,7 +1223,7 @@ def test_removing_a_grid_drops_it_from_the_site(site3, make_site):
     changes: list[tuple[str, ...]] = []
     site = make_site(session, on_changed=lambda: changes.append(site.ready_grids))
     site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
+    wait_for_site(site, 60_000)
     site.set_resolution(RES)
     changes.clear()
 
@@ -1202,7 +1247,7 @@ def test_a_velocity_edit_does_not_re_prepare_or_change_the_slice(site3, make_sit
     calls = counter.calls
 
     site3.session.set_grid_velocity("B", VelocityModel.constant(0.09))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert counter.calls == calls
     assert site.ready_grids == ("A", "B", "C")
     np.testing.assert_array_equal(site.slice_at(20.0, 5.0, **TICK).array, before.array)
@@ -1230,7 +1275,7 @@ def test_a_velocity_edit_keeps_every_other_grids_cube_and_every_cache(
     calls = counter.calls
 
     site3.session.set_grid_velocity("B", VelocityModel.constant(0.09))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert counter.calls == calls, "a velocity edit re-prepared"
     assert site.engine_for("A").has_cube and site.engine_for("C").has_cube
     assert not site.engine_for("B").has_cube, "Ruling Q: B's cube froze B's old velocity"
@@ -1250,7 +1295,7 @@ def test_a_spacing_edit_drops_the_seams_but_no_gather(site3, make_site):
     site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     gathers, seams = dict(site._gathers), site._seams
     session.replace_grid(dataclasses.replace(session.grid("C"), default_spacing=2.0))
-    assert site.wait_until_idle(5_000)
+    wait_for_site(site, 5_000)
     assert site._seams is None
     assert all(site._gathers.get(g) is gathers[g] for g in "ABC")
     site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
@@ -1268,3 +1313,283 @@ def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
     assert text.startswith(f"3 grids · 12 lines held in memory, {format_bytes(held)} · ")
     assert re.fullmatch(r".* · slices redraw in \d+ ms", text), text
+
+
+# ---- the dispatch gate and its neighbours (#166, #75) -------------------------
+
+
+def test_a_peer_that_starts_during_the_preparing_notify_holds_the_dispatch(
+    site3, make_site, monkeypatch
+):
+    """The gate ran before the "preparing 0 of n" notify, and the notify is a
+    callback into the dock: a peer (the dock's This grid engine) that starts a
+    task in there was not seen, and the grid started beside it (trap 1). The
+    gate is run again after the notify; the dispatch is undone and the grid
+    waits, queued, at the head."""
+    session = site3.session
+    peer = SimpleNamespace(has_live_task=False)
+    site = make_site(session, exclusive_with=[peer])
+    started: list[str] = []
+    fired: list[bool] = []
+
+    def on_changed() -> None:
+        if fired or site._states.get("A") != "preparing":
+            return
+        fired.append(True)
+        peer.has_live_task = True  # the dock's engine starts, inside the notify
+        engine = site.engine_for("A")
+        real = engine.set_source
+
+        def counting(choice):
+            started.append(site.grid_state("A"))
+            return real(choice)
+
+        monkeypatch.setattr(engine, "set_source", counting)
+
+    site.on_changed = on_changed
+    site.set_source(site3.source())
+    assert fired, "A never read as preparing"
+    assert spin_until(lambda: False, 300) is False  # about 300 ms of pumping
+    assert started == [], "A's engine started while the peer's task was live"
+    assert site.grid_state("A") == "queued"
+    assert site.grid_progress("A") is None
+    assert site._preparing is None
+    assert site._queue[0] == "A"
+    assert not site.engine_for("A").is_running
+
+    peer.has_live_task = False
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("A", "B", "C")
+    assert len(started) == 1
+
+
+def test_a_grid_moved_during_the_preparing_notify_still_prepares(site3, make_site):
+    """A move that arrives inside the "preparing" notify reaches an engine that
+    has no choice yet, so it hands nothing over; the engine is then given the
+    source at the new place. The registration captured before the notify was
+    the old place, so the engine's `prepared` was ignored forever as "moved
+    under it" and the site never went idle."""
+    session = site3.session
+    site = make_site(session)
+    site.set_resolution(RES)
+    grid_a = session.grid("A")
+    new_origin = (grid_a.origin[0] + 1.0, grid_a.origin[1])
+    moved: list[bool] = []
+
+    def on_changed() -> None:
+        if moved or site._states.get("A") != "preparing":
+            return
+        moved.append(True)
+        session.replace_grid(dataclasses.replace(grid_a, origin=new_origin))
+
+    site.on_changed = on_changed
+    site.set_source(site3.source())
+    assert moved
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("A", "B", "C")
+    assert site.engine_for("A").frame.origin == new_origin
+
+
+def test_the_progress_total_never_shifts(site3, make_site):
+    """A choice that carries a key the engine skips (it sits on another grid
+    now) starts at "0 of 5" and the engine counts its four jobs: the total
+    must stay 5, a skipped key counting as done, and never go backwards."""
+    session = site3.session
+    choice_a = dataclasses.replace(
+        site3.choice("A"), line_keys=(*site3.keys("A"), site3.keys("B")[0])
+    )
+    source = SiteSource(transform="amp_envelope", grids=(choice_a,))
+    seen: list[tuple[int, int]] = []
+    site = make_site(session, on_error=lambda _m: None)
+    site.on_changed = lambda: (
+        seen.append(site.grid_progress("A")) if site.grid_progress("A") else None
+    )
+    site.set_source(source)
+    wait_for_site(site, 20_000)
+    assert len(seen) >= 3, seen
+    assert {total for _, total in seen} == {5}, seen
+    dones = [done for done, _ in seen]
+    assert dones == sorted(dones), seen
+    assert dones[0] == 0
+
+
+def test_a_retiring_engine_neither_reports_nor_waits_again(site3, make_site, monkeypatch):
+    """An engine parked as retiring has been dropped from the site: it is
+    detached from the session and silent, so the grid's removal costs one
+    bounded cancel wait and one message, not two waits and a "no longer
+    exists" report from the engine's own `grids_changed` slot."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    release = threading.Event()
+    held = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        held.set()
+        release.wait(30)  # ignores the cancel
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    # Counted per engine: `detach` also silences `on_error`, so messages alone
+    # cannot show the retiring engine's own slot stayed disconnected.
+    waits: list[int] = []
+    real_wait = SliceEngine.wait_for_preparation
+
+    def counted_wait(self, *args, **kwargs):
+        waits.append(id(self))
+        return real_wait(self, *args, **kwargs)
+
+    monkeypatch.setattr(SliceEngine, "wait_for_preparation", counted_wait)
+    errors: list[str] = []
+    site = make_site(site3.session, on_error=errors.append)
+    try:
+        site.set_source(site3.source())
+        assert spin_until(held.is_set), "A's first line was never read"
+        engine_a = site.engine_for("A")
+        site3.session.remove_grid("A", with_lines=True)
+        assert waits.count(id(engine_a)) == 1, "the retiring engine waited again"
+        assert engine_a.choice is not None, "its own grids_changed slot still ran"
+        stopped = [m for m in errors if "did not stop in time" in m]
+        assert len(stopped) == 1, errors
+        assert not [m for m in errors if "no longer exists" in m], errors
+        assert len(site._retiring) == 1
+    finally:
+        release.set()
+    wait_for_site(site, 20_000)
+    assert site.ready_grids == ("B", "C")
+    assert spin_until(lambda: not site._retiring), "the retiring engine was never reaped"
+    # The reaper deletes what it disposes, as `_drop_engine` does.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(site.findChildren(SliceEngine)) == 2
+
+
+def test_disposed_engines_do_not_pile_up_as_children(site3, make_site):
+    """A grid toggled in and out of the source disposes its engine each time;
+    a disposed engine stays a child of the site until it is deleted."""
+    site = make_site(site3.session)
+    site.set_source(site3.source())
+    wait_for_site(site, 20_000)
+    for _ in range(10):
+        site.set_source(site3.source("AC"))
+        wait_for_site(site, 20_000)
+        site.set_source(site3.source())
+        wait_for_site(site, 20_000)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(site.findChildren(SliceEngine)) == 3
+    assert site.ready_grids == ("A", "B", "C")
+
+
+def test_a_timed_out_wait_names_what_holds_the_site(site3, make_site, monkeypatch):
+    release = threading.Event()
+    real_load = Line.load
+
+    def held_load(self):
+        release.wait(30)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", held_load)
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="AB"))
+    try:
+        with pytest.raises(AssertionError) as caught:
+            wait_for_site(site, 300)
+    finally:
+        release.set()
+    message = str(caught.value)
+    assert "the site did not finish preparing in 300 ms" in message
+    assert "active: True · preparing: 'A' · queue: ['B']" in message
+    assert "engine A: running True · live task True" in message
+    assert "grid A: preparing (0 of 4)" in message
+    assert "grid B: queued" in message
+    wait_for_site(site)  # released: it finishes
+
+
+def test_the_busy_report_never_raises_on_a_disposed_site(site3, make_site):
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="A"))
+    wait_for_site(site)
+    site.dispose()
+    report = site.busy_report()
+    assert report.startswith("active: False · preparing: None · queue: []")
+
+
+def test_the_busy_report_reports_a_failing_probe_instead_of_raising(site3, make_site, monkeypatch):
+    site = make_site(site3.session)
+    site.set_source(site3.source(grids="A"))
+    wait_for_site(site)
+
+    def broken(self):
+        raise RuntimeError("probe broke")
+
+    monkeypatch.setattr(SliceEngine, "pending_tasks", property(broken))
+    report = site.busy_report()
+    assert isinstance(report, str)
+    assert report.startswith("could not describe the site: probe broke")
+
+
+def _footprint_job(site, grid_id):
+    job = next(j for j in site.footprint_jobs() if j.grid_id == grid_id)
+    job.run(lambda: False)
+    assert job.footprint is not None
+    return job
+
+
+def test_footprints_missing_lists_ready_grids_without_a_gather_in_order(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    assert site.footprints_missing(site.lattice) == ["A", "B", "C"]
+    assert [j.grid_id for j in site.footprint_jobs()] == ["A", "B", "C"]
+    site.slice_at(20.0, 5.0, **TICK)
+    assert site.footprints_missing(site.lattice) == []
+    del site._gathers["C"], site._gathers["A"]
+    assert site.footprints_missing(site.lattice) == ["A", "C"]
+    other = dataclasses.replace(site.lattice, pixel=site.lattice.pixel * 2)
+    assert site.footprints_missing(other) == []
+
+
+def test_a_footprint_lands_when_nothing_has_moved(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "B")
+    assert job.land() is True
+    assert site._gathers["B"] is job.footprint
+
+
+def test_a_footprint_for_another_lattice_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "B")
+    # The lattice alone: frames and readiness stay as they were.
+    site._lattice = dataclasses.replace(site.lattice, pixel=site.lattice.pixel * 2)
+    assert site.engine_for("B").frame == job.frame
+    assert job.land() is False
+    assert job.footprint is None
+    assert "B" not in site._gathers
+
+
+def test_a_footprint_for_a_grid_no_longer_ready_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "C")
+    # Readiness alone: the lattice and the frames stay as they were.
+    lattice = site.lattice
+    site._states["C"] = "preparing"
+    assert "C" not in site.ready_grids
+    assert site.lattice is lattice
+    assert site.engine_for("C").frame == job.frame
+    assert job.land() is False
+    assert job.footprint is None
+    assert "C" not in site._gathers
+
+
+def test_a_footprint_for_a_frame_that_moved_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "A")
+    engine = site.engine_for("A")
+    engine._frame = dataclasses.replace(engine.frame, origin=(engine.frame.origin[0] + 1.0, 0.0))
+    assert job.land() is False
+    assert job.footprint is None
+    assert "A" not in site._gathers
+
+
+def test_a_footprint_for_a_disposed_engine_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "A")
+    site.dispose()
+    assert job.land() is False
+    assert job.footprint is None

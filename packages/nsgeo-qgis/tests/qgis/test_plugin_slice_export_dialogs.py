@@ -869,21 +869,31 @@ def test_the_live_view_stays_usable_while_the_export_is_held(
 def test_a_second_export_while_one_runs_is_refused_plainly(
     plugin, tmp_path, drive_dialog, monkeypatch, message_log
 ):
+    """Walkthrough (#193): the button stayed enabled while an export ran and a click
+    answered with a message. It is greyed and says why; the entry still refuses."""
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
     gate = ExportGate(monkeypatch)
     shown = drive_export_dialog(drive_dialog, path=tmp_path / "slices" / "cube.tif")
+    assert dock.export_button.isEnabled()
     dock.export_button.click()
     gate.wait_entered()
     try:
+        assert not dock.export_button.isEnabled()
+        assert "task list" in dock.export_button.toolTip()
+        dock.refresh_slice()  # a tick re-reads the button's rule and keeps it off
+        QCoreApplication.processEvents()
+        assert not dock.export_button.isEnabled()
         before = len(shown)
-        dock.export_button.click()
+        plugin.export_geotiff()  # the entry, reachable without the button
         assert len(shown) == before, "no second dialog opens"
         assert any("already running" in m for m in message_log)
     finally:
         gate.release.set()
         wait_for_export()
+    assert dock.export_button.isEnabled(), "the button comes back when the export ends"
+    assert dock.export_button.toolTip() == ""
 
 
 def test_a_cancelled_export_leaves_no_file_and_adds_no_layer(

@@ -757,6 +757,28 @@ def test_a_preview_shows_every_one_cell_line_of_coverage(ratio, offset, phase):
     assert _lines_seen(ratio, offset, phase) == (40, 40)
 
 
+@pytest.mark.parametrize("ratio", [8, 16])
+def test_a_coarse_preview_never_misses_a_grids_edge_line(ratio):
+    cell, n = 0.05, 400
+    pixel = cell * ratio
+    misses = []
+    for k in range(64):  # the lattice phase, across one whole pixel
+        offset = k * pixel / 64
+        frame = CubeFrame((offset, offset), 0.0, cell, n, n, CRS)
+        lat = SiteLattice.covering([slice_extent(frame)], pixel, CRS)
+        where = footprint(bilinear_taps(frame, lat.pixel_centres()), lat.height, lat.width)
+        for axis, index in (("col", 0), ("col", n - 1), ("row", 0), ("row", n - 1)):
+            one = np.full((n, n), np.nan, dtype=np.float32)
+            if axis == "col":
+                one[:, index] = 1.0
+            else:
+                one[index, :] = 1.0
+            out = compose_footprints(lat, [(where, one)], counts=True, cells_per_pixel=ratio)
+            if not np.isfinite(out).any():
+                misses.append((k, axis, index))
+    assert misses == []
+
+
 def test_max_pool_counts_takes_the_window_maximum_and_ignores_blanks():
     counts = np.full((7, 9), np.nan, dtype=np.float32)
     counts[3, 4] = 2.0

@@ -165,6 +165,7 @@ several grids' slices into one site view.
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
 | `build_surface` | Follow the reflection a set of picks names, leave holes where it fades, and report the fit. |
+| `clear_north_up_plans` | Drop every cached north-up plan. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
@@ -184,6 +185,7 @@ several grids' slices into one site view.
 | `load_cube` | Read a cube written by `save_cube`. |
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
+| `north_up_plans_nbytes` | Bytes the cached north-up plans hold, for the status line. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
 | `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
@@ -193,7 +195,7 @@ several grids' slices into one site view.
 | `plan_windows` | Every window of a thickness, at a step. |
 | `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
-| `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
+| `sample_counts` | The largest corner count at each tap (the nearest cell's, for exact taps), so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
 | `column_distances` | Distances of a section's columns along a path: 0, step, ... and the length. |
@@ -212,6 +214,7 @@ several grids' slices into one site view.
 | `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
+| `warm_north_up_plan` | Build and keep a frame's north-up plan, so its first `to_north_up` is one sample (safe off the GUI thread). |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |
@@ -246,6 +249,7 @@ Amplitude to pixels, with no Qt.
 | `display_range` | The colour range for an array by one of QGIS's computed rules: minimum and maximum, cumulative cut, or mean ± standard deviations. |
 | `gradient_stops` | The fewest colour stops that redraw a lookup table by straight-line blending, for a GIS gradient editor. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
+| `sample_stride` | The step of the strided subsample a clip measures a large array by; `limit_over_slices` takes the same values without joining its slices. |
 | `section_rgba8` | A section's values to (H, W, 4) uint8, transparent wherever blank, in either polarity. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
 | `to_index8_unipolar` | Map 0..limit to 0..255. |

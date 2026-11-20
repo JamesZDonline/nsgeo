@@ -145,3 +145,24 @@ def test_a_rest_queues_each_solve_once_telling_grids_apart_by_engine(flow):
     assert flow.rested(current, stretch, lambda job: None, lambda message: None) is False
     assert refiner.started == [[current[0], current[1], stretch[1]]]
     assert flow.total == 3
+
+
+def test_a_landed_stretch_is_held_for_its_key_only(flow):
+    flow, refiner = flow
+    assert flow.held_stretch("k") is None
+    flow.land_stretch("k", 2.5, True)
+    assert flow.held_stretch("k") == 2.5
+    assert flow.stretch_final("k")
+    assert flow.held_stretch("other") is None
+    assert not flow.rest.isActive()
+
+
+def test_a_provisional_landed_stretch_arms_the_rest(flow):
+    flow, refiner = flow
+    flow.land_stretch("k", 2.5, False)
+    assert flow.rest.isActive()
+    flow.rest.stop()
+    assert not flow.stretch_final("k")
+    # A held provisional limit arms the rest again when nothing is running.
+    assert flow.held_stretch("k") == 2.5
+    assert flow.rest.isActive()

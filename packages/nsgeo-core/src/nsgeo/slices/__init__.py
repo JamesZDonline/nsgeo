@@ -16,14 +16,17 @@ from nsgeo.slices.binning import (
     stream_slice,
 )
 from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
-from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
+from nsgeo.slices.curvature import CurvaturePlan, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
+    clear_north_up_plans,
     frame_lattice,
     limit_over_slices,
+    north_up_plans_nbytes,
     plan_windows,
     shared_limit,
     to_north_up,
+    warm_north_up_plan,
     window_depths_m,
     window_label,
     window_times_ns,
@@ -79,6 +82,7 @@ from nsgeo.slices.site import (
     window_on,
 )
 from nsgeo.slices.smooth import smooth
+from nsgeo.slices.stopping import SolveStopped
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 from nsgeo.slices.surface import (
     FIT_CLOSE_M,
@@ -157,6 +161,7 @@ __all__ = [
     "bilinear_taps",
     "build_cube",
     "build_surface",
+    "clear_north_up_plans",
     "column_distances",
     "compose_footprints",
     "covered_cells",
@@ -177,6 +182,7 @@ __all__ = [
     "load_cube",
     "max_pool_counts",
     "normalise",
+    "north_up_plans_nbytes",
     "npz_path",
     "picks_span_an_area",
     "plan_curvature",
@@ -204,6 +210,7 @@ __all__ = [
     "surface_volume",
     "to_north_up",
     "uses_crops",
+    "warm_north_up_plan",
     "window_depths_m",
     "window_label",
     "window_on",
