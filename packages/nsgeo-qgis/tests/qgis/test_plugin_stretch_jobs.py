@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import SliceWindow, SolveStopped, plan_fill
+from nsgeo_qgis import slices_engine, stretch_jobs
 from nsgeo_qgis.slices_plan import SliceFinish
 from test_plugin_site_engine import FINISH, MC, prepared
 from test_plugin_slices_engine import _prepare, sourced  # noqa: F401 -- fixture
+
+
+def _count_builds(monkeypatch) -> list[int]:
+    """Count every `build_fill`, the one fill rule, from any thread."""
+    calls: list[int] = []
+    real = slices_engine.build_fill
+    monkeypatch.setattr(
+        slices_engine, "build_fill", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    return calls
+
 
 THICKNESS = 5  # levels: does not divide the 56-level axis, so a tail window is measured
 
@@ -23,7 +38,7 @@ def _slice_cases():
 
 
 @pytest.mark.parametrize(("method", "resident", "solve"), _slice_cases())
-def test_this_grids_stretch_job_equals_stretch_limit(sourced, method, resident, solve):  # noqa: F811
+def test_this_grids_stretch_job_equals_stretch_limit(sourced, monkeypatch, method, resident, solve):  # noqa: F811
     engine, session, _, _ = sourced
     _prepare(engine, session)
     engine.set_always_resident(resident)
@@ -36,8 +51,15 @@ def test_this_grids_stretch_job_equals_stretch_limit(sourced, method, resident, 
         for job in engine.stretch_solves(THICKNESS, finish):
             job.run(lambda: False)
             assert job.land()
+    if not solve:  # hold the fill alone: nothing solved, so the preview stays provisional
+        _, cov = engine.slice_at(SliceWindow(0, 1))
+        held = engine.fill_job(cov, finish)
+        held.run(lambda: False)
+        assert held.land() is True
+    builds = _count_builds(monkeypatch)
     warm = engine.stretch_job(THICKNESS, clip, finish)
     warm.run(lambda: False)
+    assert builds == [], "a warm job must reuse the held fill, never build one"
     expected_limit, expected_final = engine.stretch_limit(THICKNESS, clip, finish)
     assert expected_final is (method != "min_curvature" or solve)
     assert warm.limit == expected_limit
@@ -108,7 +130,7 @@ def test_a_window_with_other_covered_cells_gets_its_own_fill(sourced):  # noqa: 
     assert (job.limit, job.final) == expected
 
 
-def test_a_stretch_job_reads_its_fill_jobs_results(site3, make_site):
+def test_a_stretch_job_reads_its_fill_jobs_results(site3, make_site, monkeypatch):
     site, _ = prepared(make_site, site3)
     clip = UnipolarClip()
     tick = {"finish": FINISH, "method": "background", "manual": {}}
@@ -120,8 +142,10 @@ def test_a_stretch_job_reads_its_fill_jobs_results(site3, make_site):
     engine_b._drop_fill()
     fill_job = engine_b.fill_job(cov, FINISH)
     stretch = site.stretch_job(2.0, clip, **tick, fills={"B": fill_job})
-    for job in (fill_job, stretch):
-        job.run(lambda: False)
+    fill_job.run(lambda: False)
+    builds = _count_builds(monkeypatch)
+    stretch.run(lambda: False)
+    assert builds == [], "B's fill is the fill job's, the others' are held"
     assert fill_job.land() is True
     expected = site.stretch_limit(2.0, clip, **tick)
     assert (stretch.limit, stretch.final) == expected
@@ -160,3 +184,93 @@ def test_a_stretch_job_leaves_its_inputs_alone(sourced):  # noqa: F811
     job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
     job.run(lambda: False)
     assert all(np.array_equal(b, line.data) for b, line in zip(before, engine._lines))
+
+
+def test_a_cold_job_builds_the_fill_it_lacks(sourced, monkeypatch):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    builds = _count_builds(monkeypatch)
+    job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
+    job.run(lambda: False)
+    assert builds == [1]  # one mask, built once
+    assert engine._weights is None  # and never installed
+
+
+@pytest.mark.parametrize("method", ["idw", "min_curvature"])
+def test_a_stretch_job_uses_its_fill_jobs_fill_without_building(sourced, monkeypatch, method):  # noqa: F811
+    """Reads `fill` (and, for minimum curvature, `preview`) from the fill job."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    finish = SliceFinish(method=method)
+    _, cov = engine.slice_at(SliceWindow(0, 1))
+    fill_job = engine.fill_job(cov, finish)
+    stretch = engine.stretch_job(THICKNESS, PercentileClip(), finish, fill=fill_job)
+    fill_job.run(lambda: False)
+    builds = _count_builds(monkeypatch)
+    stretch.run(lambda: False)
+    assert builds == []
+    assert fill_job.land() is True
+    expected = engine.stretch_limit(THICKNESS, PercentileClip(), finish)
+    assert (stretch.limit, stretch.final) == expected
+
+
+def test_this_grids_stretch_job_streams_its_windows(sourced, monkeypatch):  # noqa: F811
+    """Peak memory as today's `shared_limit`: one finished window alive at a time."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    finish = SliceFinish(method="idw")
+    drawn: list[int] = []
+    real = stretch_jobs.draw_window
+    monkeypatch.setattr(
+        stretch_jobs, "draw_window", lambda *a, **k: drawn.append(1) or real(*a, **k)
+    )
+    ahead: list[int] = []
+    real_limit = stretch_jobs.limit_over_slices
+
+    def watching(slices, clip):
+        assert not isinstance(slices, (list, tuple))
+        consumed = 0
+
+        def counted():
+            nonlocal consumed
+            for item in slices:
+                consumed += 1
+                ahead.append(len(drawn) - consumed)
+                yield item
+
+        return real_limit(counted(), clip)
+
+    monkeypatch.setattr(stretch_jobs, "limit_over_slices", watching)
+    job = engine.stretch_job(THICKNESS, PercentileClip(), finish)
+    job.run(lambda: False)
+    assert len(ahead) > 3
+    assert max(ahead) == 0, "a window was finished before the last was consumed"
+    assert job.limit == engine.shared_limit(THICKNESS, PercentileClip(), finish)
+
+
+def test_a_finished_stretch_job_lets_go_of_what_it_captured(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    finish = SliceFinish(method="idw")
+    _, cov = engine.slice_at(SliceWindow(0, 1))
+    hold = engine.fill_job(cov, finish)
+    hold.run(lambda: False)
+    assert hold.land() is True
+    job = engine.stretch_job(THICKNESS, PercentileClip(), finish)
+    ref = weakref.ref(engine._weights[1])
+    job.run(lambda: False)
+    assert job.limit is not None
+    engine._drop_fill()
+    del hold
+    gc.collect()
+    assert ref() is None, "the finished job still holds the fill it captured"
+    assert job.land() is True
+
+
+def test_a_stopped_stretch_job_lets_go_too(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
+    with pytest.raises(SolveStopped):
+        job.run(lambda: True)
+    assert job._grids == {}

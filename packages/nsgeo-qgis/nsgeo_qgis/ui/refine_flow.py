@@ -241,15 +241,11 @@ class RefineFlow:
         stretch, held or just measured, arms the rest when nothing is on its
         way to finish it (a refine that failed, or one a failed draw
         cancelled), so the next rest queues its windows (plan call 7)."""
-        held = self.stretch
-        if held is not None and held[0] == key:
-            if not held[2]:
-                self._arm()
-            return held[1]
+        limit = self.held_stretch(key)
+        if limit is not None:
+            return limit
         value, final = measure()
-        self.stretch = (key, value, final)
-        if not final:
-            self._arm()
+        self.land_stretch(key, value, final)
         return value
 
     def held_stretch(self, key: Any) -> float | None:

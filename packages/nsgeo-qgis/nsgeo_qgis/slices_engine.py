@@ -1886,7 +1886,13 @@ class SliceEngine(QObject):
         the same arithmetic, so `job.limit` and `job.final` equal what
         `stretch_limit` returns. Minimum curvature is final only when every
         window is solved on the plan held; otherwise the kriging preview's
-        provisional limit."""
+        provisional limit.
+
+        Obligation: the caller passes a fill job for every grid whose fill is
+        not held for these settings. Otherwise the job builds that fill itself
+        on the worker while the engine still holds the old one, so the memory
+        peak is old plus new.
+        """
         _, z = self._require_geometry()
         curvature = finish.method == "min_curvature"
         windows = shared_windows(z, thickness_levels, curvature)

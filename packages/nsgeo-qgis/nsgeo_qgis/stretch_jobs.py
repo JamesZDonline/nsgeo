@@ -15,8 +15,9 @@ is one implementation of what a stretch measures.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -108,11 +109,15 @@ def shown_window(
     return shown, factors
 
 
-def limit_of(slices: Sequence[np.ndarray], clip: Any) -> float:
-    """`clip`'s limit over `slices`; the empty site's limit when there are none."""
-    if not slices:
+def limit_of(slices: Iterable[np.ndarray], clip: Any) -> float:
+    """`clip`'s limit over `slices`; the empty site's limit when there are none.
+    An iterable is consumed one slice at a time, so a generator streams."""
+    items = iter(slices)
+    try:
+        first = next(items)
+    except StopIteration:
         return float(clip.limit(np.array([], dtype=float)))
-    return limit_over_slices(slices, clip)
+    return limit_over_slices(chain([first], items), clip)
 
 
 class _Unsolved(Exception):
@@ -237,8 +242,18 @@ class StretchJob:
         self.fraction = 0.0
 
     def run(self, should_stop: Callable[[], bool]) -> None:
-        """Worker thread. Raises `SolveStopped` when stopped."""
+        """Worker thread. Raises `SolveStopped` when stopped. Whatever happens,
+        everything captured is released at the end: `land` needs only `limit`
+        and `final`."""
         self.limit, self.final, self.fraction = None, False, 0.0
+        try:
+            self._measure(should_stop)
+        finally:
+            self._grids = {}
+            self._steps = []
+            self._seams = ()
+
+    def _measure(self, should_stop: Callable[[], bool]) -> None:
         fills: dict[str, _Fills] = {}
         for grid_id, grid in self._grids.items():
             fill, preview = None, None
@@ -254,16 +269,19 @@ class StretchJob:
         total = len(self._steps) * (2 if self._curvature else 1)
         done = 0
 
-        def pass_(mode: str) -> float:
+        def windows(mode: str) -> Iterator[np.ndarray]:
             nonlocal done
-            slices: list[np.ndarray] = []
             for step in self._steps:
                 if should_stop():
                     raise SolveStopped
-                slices.extend(self._window(step, fills, mode))
+                yield from self._window(step, fills, mode)
                 done += 1
                 self.fraction = done / total
-            return limit_of(slices, self._clip)
+
+        def pass_(mode: str) -> float:
+            # The slice scope streams, as `SliceEngine.shared_limit` does; the
+            # site lists its slices, as `SiteEngine._measure` does.
+            return limit_of(windows(mode) if not self._site else list(windows(mode)), self._clip)
 
         if not self._curvature:
             self.limit, self.final = pass_("fill"), True
@@ -276,7 +294,7 @@ class StretchJob:
 
     def _window(
         self, step: Mapping[str, SliceWindow | None], fills: Mapping[str, _Fills], mode: str
-    ) -> list[np.ndarray]:
+    ) -> Iterator[np.ndarray]:
         binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for grid_id, window in step.items():
             if window is not None:
@@ -289,9 +307,9 @@ class StretchJob:
             )
 
         if not self._site:
-            return [draw(grid_id, *pair) for grid_id, pair in binned.items()]
+            return (draw(grid_id, *pair) for grid_id, pair in binned.items())
         shown, _ = shown_window(binned, self._method, self._seams, self._manual, draw)
-        return list(shown.values())
+        return iter(shown.values())
 
     def land(self) -> bool:
         """GUI thread: the scope stores `limit` and `final`."""

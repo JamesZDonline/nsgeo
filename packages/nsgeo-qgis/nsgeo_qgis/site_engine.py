@@ -1221,7 +1221,13 @@ class SiteEngine(QObject):
         every measured time, its finish settings, its held fill or the fill job
         in `fills` (by grid id), a copy of its solved cache and, for edge
         normalisation, the seams. `job.limit` and `job.final` equal what
-        `stretch_limit` returns."""
+        `stretch_limit` returns.
+
+        Obligation: the caller passes a fill job in `fills` for every grid whose fill is
+        not held for these settings. Otherwise the job builds that fill itself
+        on the worker while the engine still holds the old one, so the memory
+        peak is old plus new.
+        """
         self._require_lattice()
         times = self._limit_windows_ns(thickness_ns)
         seams = self._site_seams() if method == "edge" else ()
