@@ -130,6 +130,13 @@ release's notes list everything in it.
   view and Export for ParaView… move into one drop-down after Cut, and
   ParaView… leaves the Slices panel. Design approved and plan written; being
   built.
+- **The profile: axes, zoom and time zero by eye** ([#131], [#5], [#11],
+  [#14], [#158], and the last part of [#163]). A button that hides the slice
+  band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
+  true scale; each vertical axis shows ns, samples or m, with a cursor
+  read-out; a time zoom stays put when Time zero changes; and Time zero set
+  by dragging its line on the profile. Designed with you; the written design
+  is next.
 
 ### Next, in order
 
@@ -181,11 +188,9 @@ Grouped by area. The order within a group is not a priority.
   ([#195]); warn when a grid's velocity from fits is on another clock than its
   slices ([#201]); the hyperbola tracer's known limits on layered ground and
   on very wide boxes ([#209]) and its review follow-ups ([#212]).
-- **Processing and the profile:** hide the slice band ([#131]); set time zero by eye, dragging it on the profile
-  ([#158]); a Time zero mode on the tracer's edge, so traced fits and the
-  clock share one rule ([#210]); the profile no longer jumps when the velocity
-  strip appears ([#211]); a frequency profile
-  ([#34]); configurable axes ([#11]); deconvolution,
+- **Processing and the profile:** a Time zero mode on the tracer's edge, so
+  traced fits and the clock share one rule ([#210]); a frequency profile
+  ([#34]); deconvolution,
   with ways to see whether a real reflection hides in a multiple ([#214]).
 - **Sites and the Survey panel:** opening a site zooms the map to it
   ([#205]); more than one site in a QGIS project
@@ -224,10 +229,12 @@ Grouped by area. The order within a group is not a priority.
   milestone; first find out whether anything can be installed on the tablet
   and whether its DZT files can be reached ([#232]).
 
+[#5]: https://github.com/JamesZDonline/nsgeo/issues/5
 [#8]: https://github.com/JamesZDonline/nsgeo/issues/8
 [#9]: https://github.com/JamesZDonline/nsgeo/issues/9
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
 [#13]: https://github.com/JamesZDonline/nsgeo/issues/13
+[#14]: https://github.com/JamesZDonline/nsgeo/issues/14
 [#16]: https://github.com/JamesZDonline/nsgeo/issues/16
 [#17]: https://github.com/JamesZDonline/nsgeo/issues/17
 [#33]: https://github.com/JamesZDonline/nsgeo/issues/33
@@ -270,6 +277,7 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#166]: https://github.com/JamesZDonline/nsgeo/issues/166
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
@@ -297,7 +305,6 @@ Grouped by area. The order within a group is not a priority.
 [#205]: https://github.com/JamesZDonline/nsgeo/issues/205
 [#209]: https://github.com/JamesZDonline/nsgeo/issues/209
 [#210]: https://github.com/JamesZDonline/nsgeo/issues/210
-[#211]: https://github.com/JamesZDonline/nsgeo/issues/211
 [#212]: https://github.com/JamesZDonline/nsgeo/issues/212
 [#214]: https://github.com/JamesZDonline/nsgeo/issues/214
 [#215]: https://github.com/JamesZDonline/nsgeo/issues/215
