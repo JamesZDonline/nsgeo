@@ -110,6 +110,7 @@ release's notes list everything in it.
 | | The Processing panel: a step that can't run stays marked under the step list until it is fixed, and opening a line whose steps can't run says so instead of showing the last picture; the gain strip stops at ±120 dB, reaches every point, fits its caption and gets a Reset; the Difference view follows a dragged step; the panel names its line ([#197], [#49], [#8], [#9], [#13], [#48], [#33], [#224]) | next release |
 | | Lines in bulk and at import: choose a processing preset when importing lines (remembered per grid; the first import into an empty grid sets its Slices preset too); a selection of lines on the map selects them in the Survey panel and back; apply a preset, the open line's steps or a velocity to a selection at once; removing lines says what processing, velocity and saved fits go with them; a comma in a number box is refused, not read as a decimal point ([#129], [#57], [#58], [#221], [#16], [#17], [#225]) | next release |
 | M16 | Cuts in 3-D, M16's fourth and last plan: picks made on a cut join surfaces, the ParaView export's picks and the 3-D view, on the clock the cut was made on; deleting a cut marks its surfaces stale and a rebuild says which picks it left out. Walls in the ParaView export were built and dropped at the walkthrough ([#229]) | next release |
+| M17b | Add data and GPS grids, M17's second plan: one Add data ▾ ▸ GPR… dialog with a Grid / GPS switch; GPS lines go into an existing grid or a new one fitted around their tracks, holding every trace and previewed on the map; files GPS cannot place are handed on to Grid mode with their direction and first line guessed; GPS lines in Edit lines, Move to grid and Fit to these tracks; a site with only GPS lines hides them when you zoom out ([#222], [#233]) | next release |
 
 ### In progress
 
@@ -125,13 +126,6 @@ release's notes list everything in it.
   plans: Plan A, the engine, is built (one moved-grid hang found and fixed;
   the local loop never reproduced #166). Plan B, the fill and then the
   shared colour stretch worked out in the background, is being built.
-- **M17b: Add data and GPS grids** ([#134]). One **Add data ▾ ▸ GPR…**
-  dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
-  new one fitted around their tracks, previewed on the map; files GPS cannot
-  place are handed on to Grid mode with their offsets guessed; GPS lines in
-  Edit lines, Move to grid and Fit to these tracks. Walked through (a fitted
-  grid now grows to hold every trace, and GPS mode from the toolbar starts on
-  a new grid; both re-checked); [#233] awaits merge.
 
 ### Next, in order
 
@@ -140,12 +134,12 @@ than reworking M16–M17 afterwards.
 
 1. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Designed, in four parts: GPS lines placed
-   along their track (M17a, merged above); **M17b**, one **Add data** menu,
-   with GPS lines going into an existing grid or a new one fitted around them;
-   **M17c**, profiles at true distance, with GPS lines drawn on their grid's
-   ruler (reversed lines mirrored, as tape lines are) and their destagger
-   measured, both moved up from M17d at the M17b walkthrough; and **M17d**,
-   outlines with holes and Place by GPS. M17b is in progress (above).
+   along their track (M17a) and one **Add data** menu with GPS lines going
+   into grids (M17b), both merged above; **M17c**, profiles at true distance,
+   with GPS lines drawn on their grid's ruler (reversed lines mirrored, as
+   tape lines are) and their destagger measured, both moved up from M17d at
+   the M17b walkthrough; and **M17d**,
+   outlines with holes and Place by GPS. M17c is next.
 2. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 3. **M19: magnetometer data.** The first instrument other than GPR:
