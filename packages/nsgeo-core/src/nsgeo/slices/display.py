@@ -269,7 +269,9 @@ def to_north_up(
 _NORTH_UP_PLANS = 2
 _NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
 _plans: OrderedDict[CubeFrame, _NorthUpPlan] = OrderedDict()
-# An export calls `to_north_up` on a worker thread beside the GUI's preview.
+# Today only the GUI thread draws through here (`SliceLayer.update`); the GeoTIFF
+# exports build their own taps on their worker. The lock keeps the cache sound if a
+# caller off the GUI thread ever appears.
 _plans_lock = threading.Lock()
 
 

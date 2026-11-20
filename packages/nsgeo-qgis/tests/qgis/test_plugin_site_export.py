@@ -681,3 +681,20 @@ def test_a_uniform_site_records_its_one_time_base(site3, make_site, tmp_path, op
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     assert ds.GetMetadata()["NSGEO_SITE_TIME_BASE"] == "time_zero"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "no coordinate transform from EPSG:32616 to EPSG:4326",
+        "3 of 1000 points lie outside where EPSG:32616 is defined; check each grid's"
+        " coordinate system (EPSG:4326)",
+        "could not transform points from EPSG:32616 to EPSG:27700",
+    ],
+)
+def test_a_coordinate_failure_reads_as_one_in_the_export_message(raw):
+    """Final review (Plan A): the export checks the whole site lattice against each
+    grid's CRS, so Task 5's refusal can reach the bar there. It names the cause."""
+    from nsgeo_qgis.export_flow import plain_export_error
+
+    assert plain_export_error(raw) == "a grid's coordinate system cannot be converted to the site's"

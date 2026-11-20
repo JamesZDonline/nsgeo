@@ -36,6 +36,7 @@ from plugin_testing import (
     Dock,
     needs_real_data,
     spin_until,
+    wait_for_site,
 )
 
 
@@ -305,7 +306,7 @@ def test_the_standalone_engine_holds_both_dock_engines_back(synth_site, monkeypa
             assert len(started_tasks) == started + 1  # only the export's own engine started
             assert own.wait_for_preparation(60_000)
         # No deadlock: what was held runs now, and finishes.
-        assert dock.site_engine.wait_until_idle(60_000)
+        wait_for_site(dock.site_engine, 60_000)
         assert spin_until(lambda: dock.engine.is_prepared, 60_000)
         assert dock.site_engine.grid_state("Grid A") == "ready"
         assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
@@ -345,7 +346,7 @@ def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_ba
         assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
         assert own.wait_for_preparation(60_000)
         assert spin_until(lambda: own not in dock._foreign, 20_000)
-        assert dock.site_engine.wait_until_idle(60_000)
+        wait_for_site(dock.site_engine, 60_000)
         assert spin_until(lambda: dock.engine.is_prepared, 60_000)
     finally:
         own.dispose()

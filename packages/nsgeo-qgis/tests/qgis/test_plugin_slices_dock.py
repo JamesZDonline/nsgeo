@@ -50,6 +50,7 @@ from plugin_testing import (
     needs_real_data,
     slow_jobs,
     synthetic_dzt,
+    wait_for_site,
     wheel_event,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
@@ -4244,7 +4245,7 @@ def test_a_restore_note_goes_when_the_cube_is_left(docked_zeroed, leave):
         assert dock.cube_combo.currentText() == "(unsaved)"
     else:
         dock.set_scope("site")
-        assert dock.site_engine.wait_until_idle(60_000)
+        wait_for_site(dock.site_engine, 60_000)
         dock.set_scope("grid")
 
     assert _notes(dock) == []
@@ -5223,7 +5224,7 @@ def test_the_dz_floor_travels_with_the_scope(docked_fine_b):
     assert before == pytest.approx(_first_dt(session, "A"), abs=1e-4)
     dock.site_scope_button.click()
     assert dock.scope() == "site"
-    assert dock.site_engine.wait_until_idle(60_000)
+    wait_for_site(dock.site_engine, 60_000)
     QCoreApplication.processEvents()
     assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the site's floor"
     dock.grid_scope_button.click()
