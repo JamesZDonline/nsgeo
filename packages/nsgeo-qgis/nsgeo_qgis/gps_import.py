@@ -186,3 +186,9 @@ def import_messages(rows: Sequence[GpsRow], imported: int) -> list[str]:
         if r.refusal is not None:
             out.append(f"not imported: {r.path.name} ({r.refusal})")
     return out
+
+
+def count_with_gps(paths: Sequence[Path]) -> int:
+    """How many of the DZT files in `paths` have a DZG beside them that holds
+    at least one RTK fix with a position (the Add data dialog's GPS note)."""
+    return sum(1 for p in paths if first_fixed_lonlat(p) is not None)

@@ -5786,16 +5786,17 @@ def test_the_panel_ignores_its_own_writes_other_grids_and_other_fields(
 def test_an_import_into_the_shown_empty_grid_prepares_with_the_imports_preset_once(
     docked_empty_grid, monkeypatch
 ):
-    from nsgeo_qgis.ui.import_dialog import ImportDialog
+    from nsgeo_qgis.ui.add_data_dialog import GRID, AddDataDialog
 
     dock, session, tmp_path = docked_empty_grid
     assert dock.engine.wait_for_preparation(20_000)
     choices = _record_set_source(dock, monkeypatch)
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=60) for i in (1, 2)]
-    d = ImportDialog(session, grid_id="A")
+    dlg = AddDataDialog(session, grid_id="A", mode=GRID)
+    d = dlg.grid_page
     d.add_files(files)
     d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("p"))
-    d.accept()
+    dlg.accept()
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.preset_combo.currentText() == "p"
     with_lines = [c for c in choices if c.line_keys]

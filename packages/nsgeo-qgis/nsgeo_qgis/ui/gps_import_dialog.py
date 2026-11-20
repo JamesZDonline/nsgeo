@@ -1,9 +1,7 @@
-"""Import GPS lines: DZT files with a DZG beside them, each placed along its
-RTK track (M17a, #134; P10, P11).
-
-Modeless and single-instance, shaped like ImportDialog (plugin.py's
-open_gps_import_dialog is the pattern; read the module docstring there for
-why every slot guards its own body). Nothing here needs a grid.
+"""The GPS page of Add data: DZT files with a DZG beside them, each placed along
+its RTK track (M17a, #134; P10, P11). AddDataDialog owns the window, the switch
+and the buttons; read plugin.py's module docstring for why every slot guards
+its own body. Nothing here needs a grid yet.
 
 Rows are planned when files are added, and again whenever the set of files
 changes, because the first readable file decides the coordinates when the
@@ -29,12 +27,10 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -100,20 +96,22 @@ def lonlat_to_xy(crs: QgsCoordinateReferenceSystem) -> Any:
     return to_xy
 
 
-class GpsImportDialog(QDialog):
+class GpsImportPage(QWidget):
+    #: The title, the Import button's text or its enabled state may have moved.
+    changed = pyqtSignal()
+
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.session = session
         # Which site accept() may write into (see the module docstring).
         self._opened_against = session.json_path
-        self.paths: list[Path] = []
+        self._paths: list[Path] = []
         self.rows: list[GpsRow] = []
         self.imported_keys: list[str] = []
-        self.messages: list[str] = []
+        #: What the last import_lines() has to say: (text, is_warning).
+        self.messages: list[tuple[str, bool]] = []
         self._crs: QgsCoordinateReferenceSystem = QgsProject.instance().crs()
         self._note = ""
-        self.setWindowTitle("Import GPS lines")
-        self.resize(900, 420)
         layout = QVBoxLayout(self)
 
         buttons_row = QHBoxLayout()
@@ -158,20 +156,30 @@ class GpsImportDialog(QDialog):
         layout.addLayout(form)
 
         self.status = QLabel(EMPTY_STATUS)
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.import_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.import_button.setText("Import")
-        self.import_button.setEnabled(False)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        footer = QHBoxLayout()
-        footer.addWidget(self.status, 1)
-        footer.addWidget(self.buttons)
-        layout.addLayout(footer)
+        layout.addWidget(self.status)
         self._decide_crs()  # the coordinates the import will use, before any file
         self._refresh()
+
+    # ---- the page's face to the dialog ----------------------------------------
+    def title(self) -> str:
+        return "Add GPR data"
+
+    def import_text(self) -> str:
+        return "Import"
+
+    def can_import(self) -> bool:
+        return self.n_ready > 0
+
+    def paths(self) -> list[Path]:
+        return list(self._paths)
+
+    def set_files(self, paths: list[Path]) -> None:
+        """Make the page hold exactly `paths` (rows are planned afresh, they hold
+        no edits). No-op when the same files are here already."""
+        if {Path(p).resolve() for p in paths} == {p.resolve() for p in self._paths}:
+            return
+        self._paths = sort_files(list(paths))
+        self._replan()
 
     # ---- the site -------------------------------------------------------------
     def _site_crs(self) -> str | None:
@@ -201,7 +209,7 @@ class GpsImportDialog(QDialog):
             self.status.setText(f"could not add the files: {exc}")
 
     def add_files(self, paths: list[Path]) -> None:
-        known = {p.resolve() for p in self.paths}
+        known = {p.resolve() for p in self._paths}
         fresh: list[Path] = []
         for p in paths:
             resolved = Path(p).resolve()
@@ -209,14 +217,14 @@ class GpsImportDialog(QDialog):
                 known.add(resolved)
                 fresh.append(Path(p))
         if fresh:
-            self.paths = sort_files([*self.paths, *fresh])
+            self._paths = sort_files([*self._paths, *fresh])
             self._replan()
 
     def remove_selected(self) -> None:
         try:
             gone = {i.row() for i in self.table.selectedIndexes()}
             if gone:
-                self.paths = [p for i, p in enumerate(self.paths) if i not in gone]
+                self._paths = [p for i, p in enumerate(self._paths) if i not in gone]
                 self._replan()
         except Exception as exc:  # noqa: BLE001 -- a slot (clicked): see plugin.py's module docstring
             self.status.setText(f"could not remove the files: {exc}")
@@ -227,7 +235,7 @@ class GpsImportDialog(QDialog):
         site_authid = self._site_crs()
         site = None if site_authid is None else QgsCoordinateReferenceSystem(site_authid)
         lonlat = None
-        for p in self.paths:
+        for p in self._paths:
             lonlat = first_fixed_lonlat(p)
             if lonlat is not None:
                 break
@@ -260,7 +268,7 @@ class GpsImportDialog(QDialog):
         def usable(lon: float, lat: float) -> bool:
             return usable_at(crs, QgsPointXY(lon, lat))[0] is None
 
-        self.rows = plan_gps_rows(self.paths, lonlat_to_xy(crs), crs.authid(), is_taken, usable)
+        self.rows = plan_gps_rows(self._paths, lonlat_to_xy(crs), crs.authid(), is_taken, usable)
         self._refresh()
 
     # ---- table ----------------------------------------------------------------
@@ -304,28 +312,29 @@ class GpsImportDialog(QDialog):
         self.crs_label.setText(self._crs.authid())
         self.note_label.setText(self._note)
         n = self.n_ready
-        self.import_button.setEnabled(n > 0)
         if not self.rows:
             self.status.setText(EMPTY_STATUS)
         else:
             self.status.setText(f"{n} of {len(self.rows)} file(s) ready to import.")
+        self.changed.emit()
 
-    # ---- accept ---------------------------------------------------------------
-    def accept(self) -> None:
-        # Reached from buttons.accepted (a signal) as well as called
-        # directly, so every failure reports through `status` and returns.
+    # ---- import ---------------------------------------------------------------
+    def import_lines(self) -> bool:
+        """The old accept(): True once the lines were added. Every failure
+        reports through `status` and returns False."""
         try:
-            self._accept()
-        except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
+            return self._import()
+        except Exception as exc:  # noqa: BLE001 -- AddDataDialog.accept() is a slot: see plugin.py's module docstring
             self.status.setText(f"could not import: {exc}")
+            return False
 
-    def _accept(self) -> None:
+    def _import(self) -> bool:
         if not self._same_site():
             self.status.setText(SITE_CHANGED)
-            return
+            return False
         if self.n_ready == 0:
             self.status.setText("Nothing to import: no file is ready.")
-            return
+            return False
         in_force = self._site_crs()
         if in_force is not None and in_force != self._crs.authid():
             # A grid arrived while the dialog was open and the site now has a
@@ -335,37 +344,36 @@ class GpsImportDialog(QDialog):
                 f"The site's coordinates are now {in_force}; the table was planned again. "
                 + self.status.text()
             )
-            return
+            return False
         # Built from the planned rows, never re-read here: a file that went
         # unreadable since planning must not leave the site pinned with no lines.
         lines = shifted_lines(self.rows, self.shift.value())
         chosen = self.preset_box.chosen()
         if chosen is not None and chosen not in self.session.preset_names():
             self.status.setText(PRESET_GONE.format(name=chosen))
-            return
+            return False
         new_keys = [self.session.line_key(ln) for ln in lines]
         taken = set(self.session.keys())
         clash = [k for k in new_keys if k in taken]
         if clash:
             self.status.setText(f"line {clash[0]!r} is already in the site")
-            return
+            return False
         if in_force is None:
             self.session.set_site_crs(self._crs.authid())
         try:
             self.session.add_lines(lines)
         except ValueError as exc:  # a key already in the site, or a CRS mismatch
             self.status.setText(str(exc))
-            return
+            return False
         self.imported_keys = new_keys  # the lines are in the site whatever follows
-        self.messages = import_messages(self.rows, len(lines))
+        self.messages = [(t, i > 0) for i, t in enumerate(import_messages(self.rows, len(lines)))]
         try:
             if chosen is not None:
                 self.session.apply_preset_to(chosen, new_keys)
             if self.preset_box.is_choice():
                 self.session.remember_import_preset(None, chosen)
         except Exception as exc:  # noqa: BLE001 -- the import happened; say what did not
-            self.messages.append(
-                f"the lines were imported, but the preset could not be applied: {exc}"
-            )
-            self.status.setText(self.messages[-1])
-        super().accept()
+            notice = f"the lines were imported, but the preset could not be applied: {exc}"
+            self.messages.append((notice, True))
+            self.status.setText(notice)
+        return True

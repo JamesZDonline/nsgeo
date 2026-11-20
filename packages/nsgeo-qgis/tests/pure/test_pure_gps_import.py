@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from nsgeo.geometry import END_LIMIT_M, TrackPlacement
 from nsgeo_qgis.gps_import import (
+    count_with_gps,
     first_fixed_lonlat,
     import_messages,
     plan_gps_rows,
@@ -209,3 +210,14 @@ def test_the_crs_is_asked_before_anything_is_projected(tmp_path):
 
     (row,) = plan_gps_rows([path], failing_to_xy, CRS, never, lambda lon, lat: False)
     assert row.refusal == f"outside what {CRS} can place"
+
+
+def test_count_with_gps_counts_the_files_whose_dzg_holds_an_rtk_fix(tmp_path):
+    with_fix = make(tmp_path, "FILE__001.DZT")
+    float_only = synthetic_gps_dzt(
+        tmp_path, "FILE__002.DZT", [fix(t, 5) for t in (25, 75)], traces_per_metre=10.0
+    )
+    bare = synthetic_dzt(tmp_path, "FILE__003.DZT")
+    assert count_with_gps([with_fix, float_only, bare]) == 1
+    assert count_with_gps([with_fix, make(tmp_path, "FILE__004.DZT")]) == 2
+    assert count_with_gps([]) == 0

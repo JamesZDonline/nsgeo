@@ -1,4 +1,6 @@
-"""Import DZT files into a grid, with a correction table.
+"""The Grid page of Add data: DZT files placed into a grid by its tapes, with a
+correction table (M17b: this was the Import DZT dialog; AddDataDialog owns
+the window, the switch and the buttons now, this page everything else).
 
 The guess (Task 7's plan_import) is vendor-neutral and the table is the
 real mechanism: Include, Label, Offset, and Dir are editable; Start
@@ -31,14 +33,12 @@ from typing import Any
 
 from nsgeo.geometry import Grid
 from nsgeo.project import ProjectError
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -110,7 +110,13 @@ HEADERS = [
 EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR}
 
 
-class ImportDialog(QDialog):
+NO_GRID = "This site has no grid yet. Add one with Add grid…, or place the lines by GPS."
+
+
+class GridImportPage(QWidget):
+    #: The title, the Import button's text or its enabled state may have moved.
+    changed = pyqtSignal()
+
     def __init__(
         self, session: SiteSession, grid_id: str | None = None, parent: QWidget | None = None
     ) -> None:
@@ -122,14 +128,13 @@ class ImportDialog(QDialog):
         self._opened_against = session.json_path
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
-        self.preset_notice = ""  # set when the import stood but its preset did not apply
+        #: What the last import_lines() has to say: (text, is_warning).
+        self.messages: list[tuple[str, bool]] = []
         self._updating = 0
         # #69: whether "First line at" holds a value the user gave it, and
         # so no longer follows the spacing (see _follow_spacing).
         self._first_offset_own = False
         self._following = 0
-        self.setWindowTitle("Import DZT files")
-        self.resize(900, 520)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -220,14 +225,6 @@ class ImportDialog(QDialog):
 
         self.status = QLabel("")
         layout.addWidget(self.status)
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.import_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.import_button.setText("Import")
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
 
         self.grid_combo.currentIndexChanged.connect(self._grid_changed)
         self.spacing.valueChanged.connect(self._follow_spacing)
@@ -275,8 +272,42 @@ class ImportDialog(QDialog):
         # #61: the target named where it is hard to miss, in the title and
         # on the Import button (see _refresh_table).
         gid = self.grid_combo.currentData()
-        self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
         self.preset_box.set_grid(gid or None)
+        if not gid and not self.status.text():
+            self.status.setText(NO_GRID)
+        elif gid and self.status.text() == NO_GRID:
+            self.status.setText("")
+        self._replan()
+
+    # ---- the page's face to the dialog ---------------------------------------
+    def title(self) -> str:
+        gid = self.grid_combo.currentData()
+        return f"Add GPR data into {gid}" if gid else "Add GPR data"
+
+    def _n_ready(self) -> int:
+        return sum(1 for r in self.rows if r.include and r.placeable)
+
+    def import_text(self) -> str:
+        n = self._n_ready()
+        gid = self.grid_combo.currentData()
+        return f"Import {n} line(s) into {gid}" if gid else f"Import {n} line(s)"
+
+    def can_import(self) -> bool:
+        return bool(self.grid_combo.currentData()) and self._n_ready() > 0
+
+    def paths(self) -> list[Path]:
+        return [r.path for r in self.rows]
+
+    def set_files(self, paths: list[Path]) -> None:
+        """Make the rows hold exactly `paths`: the rows already here keep their
+        edits, the others are dropped, new files are planned. No-op when the
+        same files are here already."""
+        want = {Path(p).resolve() for p in paths}
+        have = {r.path.resolve() for r in self.rows}
+        if want == have:
+            return
+        self.rows = [r for r in self.rows if r.path.resolve() in want]
+        self.add_files([p for p in paths if Path(p).resolve() not in have])
         self._replan()
 
     def _follow_spacing(self, *_: Any) -> None:
@@ -473,14 +504,9 @@ class ImportDialog(QDialog):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     self.table.setItem(r, col, item)
             self.table.resizeColumnsToContents()
-            n = sum(1 for r in self.rows if r.include and r.placeable)
-            gid = self.grid_combo.currentData()
-            self.import_button.setText(
-                f"Import {n} line(s) into {gid}" if gid else f"Import {n} line(s)"
-            )
-            self.import_button.setEnabled(n > 0)
         finally:
             self._updating -= 1
+        self.changed.emit()
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating:
@@ -542,16 +568,15 @@ class ImportDialog(QDialog):
             self.set_direction(r, 1)
 
     # ---- accept -----------------------------------------------------------
-    def accept(self) -> None:
-        # accept() is reached via buttons.accepted (a signal-connected
-        # slot) as well as by calling it directly; every failure below
-        # must report through `status` and return rather than raise, both
-        # for the signal path (an uncaught exception would be swallowed --
-        # see the module docstring) and so a duplicate import or a stale
+    def import_lines(self) -> bool:
+        # The old accept(): True once the lines were added. AddDataDialog
+        # reaches it from its own accept() (a signal-connected slot, guarded
+        # there); every failure below reports through `status` and returns
+        # False rather than raising, so a duplicate import or a stale
         # site/grid never *looks* like it succeeded.
         if not self.session.is_open:
             self.status.setText("no site is open; nothing was imported")
-            return
+            return False
         if self.session.json_path != self._opened_against:
             # Modeless means the site this dialog was opened against can
             # be closed or replaced by a different one while it is still
@@ -562,17 +587,17 @@ class ImportDialog(QDialog):
             self.status.setText(
                 "a different site was opened while the import dialog was open; nothing was imported"
             )
-            return
+            return False
         gid = self.grid_combo.currentData()
         if gid and self._grid() is None:
             # The grid itself vanished (e.g. "Remove grid" in the dock,
             # which has no guard against an import still in flight) while
             # this dialog stayed open on it.
             self.status.setText(f"grid {gid!r} no longer exists; nothing was imported")
-            return
+            return False
         if not gid:
             self.status.setText("choose a target grid")
-            return
+            return False
         opts = self.options()
         # Re-derive against the *current* options right before writing --
         # a concurrent edit to this same grid (a GridDialog open at the
@@ -587,20 +612,20 @@ class ImportDialog(QDialog):
             # a file can become unreadable (deleted, permissions, a bad
             # header) between planning and clicking Import.
             self.status.setText(f"could not read a file: {exc}")
-            return
+            return False
         if not lines:
             self.status.setText("nothing to import: no included, placeable rows")
-            return
+            return False
         chosen = self.preset_box.chosen()
         if chosen is not None and chosen not in self.session.preset_names():
             self.status.setText(PRESET_GONE.format(name=chosen))
-            return
+            return False
         new_keys = [self.session.line_key(ln) for ln in lines]
         taken = set(self.session.keys())
         clash = [k for k in new_keys if k in taken]
         if clash:
             self.status.setText(f"line {clash[0]!r} is already in the site")
-            return
+            return False
         # §2.4: the first import into an empty grid also sets its Slices
         # preset, written before the lines so they are prepared once.
         sets_slices = chosen is not None and self.session.import_sets_slice_preset(gid)
@@ -612,16 +637,16 @@ class ImportDialog(QDialog):
             if sets_slices:
                 self.session.set_slice_preset(gid, None)
             self.status.setText(str(exc))
-            return
+            return False
         self.imported_keys = new_keys  # the lines are in the site whatever follows
+        self.messages = [(f"imported {len(new_keys)} line(s)", False)]
         try:
             if chosen is not None:
                 self.session.apply_preset_to(chosen, new_keys)
             if self.preset_box.is_choice():
                 self.session.remember_import_preset(gid, chosen)
         except Exception as exc:  # noqa: BLE001 -- the import happened; say what did not
-            self.preset_notice = (
-                f"the lines were imported, but the preset could not be applied: {exc}"
-            )
-            self.status.setText(self.preset_notice)
-        super().accept()
+            notice = f"the lines were imported, but the preset could not be applied: {exc}"
+            self.messages.append((notice, True))
+            self.status.setText(notice)
+        return True

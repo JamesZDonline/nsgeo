@@ -31,8 +31,8 @@ down any state the dialog armed, deleteLater()) moved onto dialog.finished
 rather than living after a blocking call, and a single `self._grid_dialog`
 tracking slot so a second one isn't opened on top of the first.
 
-Task 11's ImportDialog copies the same show()/finished pattern
-(`self._import_dialog`) even though nothing in its own flow needs the
+Task 11's import dialog (now Add data's pages) copies the same show()/finished pattern
+(`self._add_data_dialog`) even though nothing in its own flow needs the
 canvas or anything else mid-dialog: an application-modal exec() would have
 blocked the toolbar and dock for as long as it was open, which would have
 been a real (if accidental) way to avoid the races below rather than one
@@ -41,7 +41,7 @@ for every dialog, so a stray exec() staying modal by oversight is not a
 failure mode reachable here -- and modeless does mean the site can be
 closed or replaced, or the very grid an open import is targeting can be
 removed (the dock's "Remove grid" has no guard against an import in
-flight), before Import is clicked. ImportDialog's own accept() re-checks
+flight), before Import is clicked. the import pages' own import_lines() re-check
 all three before writing anything (see its module docstring) rather than
 lean on exec() to make them unreachable.
 """
@@ -151,12 +151,11 @@ from nsgeo_qgis.surface_plan import (
     write_failure_text,
 )
 from nsgeo_qgis.surfaces import Surfaces
+from nsgeo_qgis.ui.add_data_dialog import AddDataDialog, opening_mode
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
-from nsgeo_qgis.ui.gps_import_dialog import GpsImportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
-from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
@@ -169,7 +168,7 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
-IMPORT_GPS_TIP = "Imports DZT files with a DZG beside them, each placed along its RTK GPS track."
+ADD_DATA_TIP = "Add survey data to the site: GPR lines placed by a grid's tapes or by GPS."
 VELOCITY_TIP = (
     "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
     "or drag a box around it to trace it. Right-click a point to remove it. "
@@ -308,8 +307,11 @@ class NsgeoPlugin:
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
-        self.act_import: QAction | None = None
-        self.act_import_gps: QAction | None = None
+        #: The toolbar's Add data button (its own action for it), and the
+        #: menu entry GPR… it drops down. See `_build_add_data_button`.
+        self.act_add_data: QAction | None = None
+        self.act_add_gpr: QAction | None = None
+        self.add_data_menu: QMenu | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
@@ -327,8 +329,7 @@ class NsgeoPlugin:
         #: The running map pick's instruction in the message bar, if any.
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
-        self._import_dialog: ImportDialog | None = None
-        self._gps_import_dialog: GpsImportDialog | None = None
+        self._add_data_dialog: AddDataDialog | None = None
         self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -393,9 +394,7 @@ class NsgeoPlugin:
         self.act_save = self._toolbar_action("Save site", self.save_with_prompt)
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
-        self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
-        self.act_import_gps = self._toolbar_action("Import GPS lines…", self.open_gps_import_dialog)
-        self.act_import_gps.setToolTip(IMPORT_GPS_TIP)
+        self._build_add_data_button()
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -423,7 +422,7 @@ class NsgeoPlugin:
         self.survey_dock = SurveyDock(self.session, main)
         self.survey_dock.add_grid_requested.connect(lambda: self.open_grid_dialog(None))
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
-        self.survey_dock.import_requested.connect(self.open_import_dialog)
+        self.survey_dock.import_requested.connect(self._add_data_from_survey)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_velocity_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
@@ -626,6 +625,22 @@ class NsgeoPlugin:
                 f"could not tab the Slices and Surfaces panels: {exc}", Qgis.MessageLevel.Warning
             )
 
+    def _build_add_data_button(self) -> None:
+        """The toolbar's Add data button, after Add grid…: an instant-popup menu
+        (the Panels button's pattern) holding GPR…, with room for the
+        magnetometer's entry (M19a) beside it."""
+        menu = QMenu(self.iface.mainWindow())
+        self.act_add_gpr = menu.addAction("GPR…")
+        self.act_add_gpr.triggered.connect(self._add_data_from_toolbar)
+        button = QToolButton(self.toolbar)
+        button.setText("Add data")
+        button.setToolTip(ADD_DATA_TIP)
+        button.setMenu(menu)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.act_add_data = self.toolbar.addWidget(button)
+        self.toolbar_actions.append(self.act_add_data)
+        self.add_data_menu = menu
+
     def _build_panels_menu(self) -> None:
         """#84: the toolbar's Panels button -- each panel by name, then
         three layouts.
@@ -782,16 +797,13 @@ class NsgeoPlugin:
         # work in exactly the state its own feature creates.
         if self._grid_dialog is not None:
             self._grid_dialog.reject()
-        # Same reasoning as GridDialog just above: ImportDialog is
-        # modeless too, so it can still be open here, and reject() (not
-        # close(), for the same hidden-dialog reason) is what runs its
-        # finished-signal cleanup instead of leaving it dangling with a
-        # reference to a session this method is about to tear down.
-        if self._import_dialog is not None:
-            self._import_dialog.reject()
-        # And the GPS import, for the same reason.
-        if self._gps_import_dialog is not None:
-            self._gps_import_dialog.reject()
+        # Same reasoning as GridDialog just above: Add data is modeless
+        # too, so it can still be open here, and reject() (not close(), for
+        # the same hidden-dialog reason) is what runs its finished-signal
+        # cleanup instead of leaving it dangling with a reference to a
+        # session this method is about to tear down.
+        if self._add_data_dialog is not None:
+            self._add_data_dialog.reject()
         # Same reasoning again: Edit lines tables are modeless too, one per
         # grid, and reject() (not close()) runs each one's finished-signal
         # cleanup instead of leaving it dangling with a reference to a
@@ -880,8 +892,9 @@ class NsgeoPlugin:
         self.act_open = None
         self.act_save = None
         self.act_add_grid = None
-        self.act_import = None
-        self.act_import_gps = None
+        self.act_add_data = None
+        self.act_add_gpr = None
+        self.add_data_menu = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
@@ -963,8 +976,7 @@ class NsgeoPlugin:
             for act in (
                 self.act_save,
                 self.act_add_grid,
-                self.act_import,
-                self.act_import_gps,
+                self.act_add_data,
                 self.act_surface,
                 self.act_view3d,
             ):
@@ -3105,108 +3117,85 @@ class NsgeoPlugin:
         else:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 
-    def _import_from_toolbar(self) -> None:
-        # #61: into the grid the Survey panel points at, not always the
-        # first one. None when it points at none, and the dialog then
-        # falls back to the first grid.
-        dock = self.survey_dock
-        self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
+    def _add_data_from_toolbar(self, *_: Any) -> None:
+        # A slot (triggered). #61: into the grid the Survey panel points at,
+        # not always the first one; the mode is the remembered one.
+        try:
+            dock = self.survey_dock
+            self.open_add_data_dialog(dock.target_grid_id() if dock is not None else None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
-    def open_gps_import_dialog(self, *_: Any) -> None:
-        """Import GPS lines…: modeless and single-instance, open_import_dialog()'s
-        shape. It needs an open site and no grid."""
+    def _add_data_from_survey(self, grid_id: str) -> None:
+        # A slot (the Survey panel's import_requested): that grid, in the mode
+        # its lines point to (decision 15).
         try:
             assert self.session is not None
-            if not self.session.is_open:
-                return
-            if self._gps_import_dialog is not None:
-                self._gps_import_dialog.show()
-                self._gps_import_dialog.raise_()
-                self._gps_import_dialog.activateWindow()
-                return
-            dialog = GpsImportDialog(self.session, parent=self.iface.mainWindow())
+            self.open_add_data_dialog(grid_id, opening_mode(self.session, grid_id))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
-            def finished(result: int) -> None:
-                # A slot on dialog.finished: see the module docstring.
-                # GpsImportDialog.accept() already wrote the site, and left
-                # the words to say in dialog.messages.
-                try:
-                    if result == QDialog.DialogCode.Accepted:
-                        # The count is plain news; everything after it
-                        # (a bridge, a long end run, a refusal) is a warning.
-                        for i, text in enumerate(dialog.messages):
-                            self.message(
-                                text,
-                                Qgis.MessageLevel.Info if i == 0 else Qgis.MessageLevel.Warning,
-                            )
-                except Exception as exc:  # noqa: BLE001 -- see the module docstring
-                    self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
-                finally:
-                    dialog.deleteLater()
-                    self._gps_import_dialog = None
-
-            def clear_if_current() -> None:
-                # See open_grid_dialog()'s clear_if_current.
-                if self._gps_import_dialog is dialog:
-                    self._gps_import_dialog = None
-
-            dialog.finished.connect(finished)
-            dialog.destroyed.connect(clear_if_current)
-            self._gps_import_dialog = dialog
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-        except Exception as exc:  # noqa: BLE001 -- a slot (triggered): see the module docstring
-            self.message(f"could not open the GPS import: {exc}", Qgis.MessageLevel.Warning)
-
-    def open_import_dialog(self, grid_id: str | None) -> None:
-        # Modeless -- see the module docstring and open_grid_dialog() above,
-        # whose shape this copies: single-instance tracking on
-        # self._import_dialog, lifecycle on dialog.finished rather than
-        # after a blocking exec(), deleteLater() plus a destroyed() guard
-        # against a dialog torn down some other way.
+    def open_add_data_dialog(self, grid_id: str | None = None, mode: str | None = None) -> None:
+        """Add data ▸ GPR…: modeless and single-instance, open_grid_dialog()'s
+        shape. An open dialog is raised, retargeted (only while its page has no
+        files) and switched to `mode` when one is asked for."""
+        # Modeless -- see the module docstring and open_grid_dialog() above:
+        # single-instance tracking on self._add_data_dialog, lifecycle on
+        # dialog.finished rather than after a blocking exec(), deleteLater()
+        # plus a destroyed() guard against a dialog torn down some other way.
         assert self.session is not None
         if not self.session.is_open:
             return
-        if not (self.session.site and self.session.site.grids):
-            self.message("Add a grid before importing lines.", Qgis.MessageLevel.Warning)
-            return
-        if self._import_dialog is not None:
+        if self._add_data_dialog is not None:
             if grid_id is not None:
-                self._import_dialog.retarget(grid_id)
-            self._import_dialog.show()
-            self._import_dialog.raise_()
-            self._import_dialog.activateWindow()
+                self._add_data_dialog.retarget(grid_id)
+            if mode is not None:
+                self._add_data_dialog.set_mode(mode)
+            self._add_data_dialog.show()
+            self._add_data_dialog.raise_()
+            self._add_data_dialog.activateWindow()
             return
-        dialog = ImportDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+        dialog = AddDataDialog(
+            self.session,
+            grid_id=grid_id,
+            mode=mode,
+            canvas=self.iface.mapCanvas(),
+            parent=self.iface.mainWindow(),
+        )
+
+        def imported(batch: list[tuple[str, bool]]) -> None:
+            # A slot on dialog.imported (a pyqtSignal): see the module
+            # docstring. The first item of a batch is plain news; the rest are
+            # warnings when flagged.
+            try:
+                for i, (text, warning) in enumerate(batch):
+                    warn = warning and i > 0
+                    self.message(
+                        text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info
+                    )
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
 
         def finished(result: int) -> None:
-            # `finished` is a slot on dialog.finished (a pyqtSignal): an
-            # uncaught exception here would be swallowed by Qt (see the
-            # module docstring). ImportDialog.accept() already did the
-            # actual session write (and its own identity/grid re-checks --
-            # see its module docstring) before emitting Accepted, so there
-            # is nothing left to guard here beyond reporting the count.
+            # A slot on dialog.finished: see the module docstring. The page
+            # already did the session write (and its own identity re-checks).
             try:
-                if result == QDialog.DialogCode.Accepted:
-                    self.message(f"imported {len(dialog.imported_keys)} line(s)")
-                    if dialog.preset_notice:
-                        self.message(dialog.preset_notice, Qgis.MessageLevel.Warning)
-            finally:
                 dialog.deleteLater()
-                self._import_dialog = None
+            finally:
+                self._add_data_dialog = None
 
         def clear_if_current() -> None:
             # Same reasoning as open_grid_dialog()'s clear_if_current: only
             # compare identity, never touch `dialog` (already gone by the
             # time destroyed() fires), and only clear the tracker if it
             # still points at *this* dialog.
-            if self._import_dialog is dialog:
-                self._import_dialog = None
+            if self._add_data_dialog is dialog:
+                self._add_data_dialog = None
 
+        dialog.imported.connect(imported)
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
-        self._import_dialog = dialog
+        self._add_data_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -3220,7 +3209,7 @@ class NsgeoPlugin:
             self.message(f"could not open Edit lines: {exc}", Qgis.MessageLevel.Critical)
 
     def _open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
-        # Modeless, one table per grid -- open_import_dialog()'s shape: a
+        # Modeless, one table per grid -- open_add_data_dialog()'s shape: a
         # second request for the same grid raises the open table and selects
         # the lines asked for (line editing spec §4.1).
         assert self.session is not None
@@ -3480,7 +3469,7 @@ class NsgeoPlugin:
         dialog on top of the first; the result is committed on `finished`
         rather than after a blocking call, and the dock is re-read then
         rather than captured now, because the site can change while this
-        is open. Follows `open_import_dialog` exactly -- fix round 1, M4:
+        is open. Follows `open_add_data_dialog` exactly -- fix round 1, M4:
         an earlier version of this method omitted `destroyed.connect(...)`
         (a dialog destroyed some other way then leaves
         `self._line_choice_dialog` pointing at a dead wrapper, wedging the
@@ -3551,7 +3540,7 @@ class NsgeoPlugin:
                     self._line_choice_dialog = None
 
             def clear_if_current() -> None:
-                # Same reasoning as open_grid_dialog()/open_import_dialog()'s
+                # Same reasoning as open_grid_dialog()/open_add_data_dialog()'s
                 # own clear_if_current: only compare identity, never touch
                 # `dialog` (already gone by the time destroyed() fires), and
                 # only clear the tracker if it still points at THIS dialog.

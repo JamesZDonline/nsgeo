@@ -106,8 +106,7 @@ stay exactly where they are.
 | **Open site…** | Opens an existing site by its `survey.nsgeo.json` file. |
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
-| **Import DZT…** | Imports DZT files into a grid. |
-| **Import GPS lines…** | Imports DZT files that have a DZG beside them, each placed along its RTK GPS track (see [Step 3a](#step-3a-import-gps-lines)). |
+| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: DZT files placed by a grid's tapes (see [Step 3](#step-3-import-dzt-files)), or placed along their RTK GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
@@ -115,7 +114,7 @@ stay exactly where they are.
 | **3D view** | Opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…**, **Import GPS lines…**, **Cut**, **Surface from
+**Save site**, **Add grid…**, **Add data**, **Cut**, **Surface from
 picks…** and **3D view** stay greyed out until a site is open, and **Pick** and **Velocity** until a
 line is open.
 
@@ -126,7 +125,7 @@ any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
   Click a line to open it. Right-click a grid for **Edit grid…**, **Edit
-  lines…**, **Import DZT files…**, **Set velocity…** and **Remove grid**, which
+  lines…**, **Add GPR data…**, **Set velocity…** and **Remove grid**, which
   removes the grid along with its lines. **Edit lines…** is greyed out while the
   grid has no lines. Right-click a line for **Open**, **Edit line…**, **Set
   velocity override…**, **Move to grid** and **Remove line from site**. To work
@@ -305,10 +304,13 @@ you move the group, it stays where you put it.
 
 ### Step 3: Import DZT files
 
-Click **Import DZT…** (or right-click the grid, then **Import DZT files…**).
-The toolbar button opens on the grid selected in **nsgeo Survey**, or the grid
-of the selected lines, or the grid of the line that is open. The dialog's title
-and its **Import** button name the grid the lines will go into.
+Click **Add data ▾**, then **GPR…** (or right-click the grid, then **Add GPR
+data…**), and leave **Place lines by** on **Grid**. The toolbar button opens on
+the grid selected in **nsgeo Survey**, or the grid of the selected lines, or the
+grid of the line that is open. The dialog's title and its **Import** button name
+the grid the lines will go into. On a site with no grid yet the page says so;
+add a grid first, or place the lines by GPS. When some of the files have a GPS
+log beside them, a note under the switch says how many.
 
 1. Choose the **Target grid**, and say which way **Lines run along** (the grid's
    Y or X axis).
@@ -408,7 +410,9 @@ Some surveys were walked with an RTK GPS on the cart. The radar then writes a
 trace being recorded when it arrived. If your lines have DZG files, you can
 place them by where the cart really went instead of by tapes and a grid.
 
-Click **Import GPS lines…**. It needs an open site; a grid is not needed.
+Click **Add data ▾**, then **GPR…**, and switch **Place lines by** to **GPS**. It
+needs an open site; a grid is not needed. Switching keeps the files you have
+added, so you do not add them again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
    with the same name. A row shows the number of traces, how many fixes were RTK
@@ -443,8 +447,8 @@ cannot yet measure the destagger from GPS lines; that comes with GPS areas.
 **Edit line…** and **Move to grid** are also for tape-placed lines only, for now.
 
 A line is placed either by tapes or by GPS, not both. To switch a tape-placed
-line to its GPS track, remove it and import it again with **Import GPS lines…**.
-**Import DZT…** keeps placing by the tapes, even when a DZG sits beside the
+line to its GPS track, remove it and import it again with **Place lines by:
+GPS**. The **Grid** page keeps placing by the tapes, even when a DZG sits beside the
 file.
 
 ### Step 4: Open a line and use the map
