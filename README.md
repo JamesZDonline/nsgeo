@@ -115,9 +115,9 @@ release's notes list everything in it.
 - **M16: 3-D**, in four plans. **Plan A, Export for ParaView** ([#190]),
   **Plan B, surfaces from picks** ([#202]) and **Plan C, the QGIS 3-D view**
   ([#217]) are merged (above). **Plan D, cuts in 3-D:** picks on cuts join
-  surfaces, picks.vtp and the 3-D view. The walkthrough passed except the
-  walls in the ParaView export, which added little over the cut and are
-  dropped; a short second walkthrough awaits.
+  surfaces, picks.vtp and the 3-D view. Walked through (the walls in the
+  ParaView export added little over the cut and are dropped); [#229] awaits
+  merge.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
@@ -220,7 +220,8 @@ Grouped by area. The order within a group is not a priority.
   line whose time zero can't be read is not re-read on every 3-D view refresh
   ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]);
   a 3D Analysis drop-down on the toolbar for Surface from picks, the 3D view
-  and the ParaView export, which leaves the Slices panel ([#227]).
+  and the ParaView export, which leaves the Slices panel ([#227]); Plan D's
+  tidy-ups: cut-pick reasons, one time-base reader, the outlier cursor ([#228]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -309,6 +310,8 @@ Grouped by area. The order within a group is not a priority.
 [#219]: https://github.com/JamesZDonline/nsgeo/issues/219
 [#220]: https://github.com/JamesZDonline/nsgeo/issues/220
 [#227]: https://github.com/JamesZDonline/nsgeo/issues/227
+[#228]: https://github.com/JamesZDonline/nsgeo/issues/228
+[#229]: https://github.com/JamesZDonline/nsgeo/pull/229
 [#208]: https://github.com/JamesZDonline/nsgeo/pull/208
 [#221]: https://github.com/JamesZDonline/nsgeo/issues/221
 [#222]: https://github.com/JamesZDonline/nsgeo/issues/222
