@@ -425,7 +425,13 @@ class ProfileDock(QgsDockWidget):
         self.fit_height_action.setToolTip("The whole record down; keeps the zoom along the line")
         self.fit_button.setMenu(self.fit_menu)
         # Not remembered between sessions: a new dock starts with Fit.
-        self.fit_button.setDefaultAction(self.fit_all_action)
+        # The button's width follows its default action's text, so a pick would
+        # move the buttons after it. Give it the width of its widest state now.
+        widest = 0
+        for action in (self.fit_height_action, self.fit_width_action, self.fit_all_action):
+            self.fit_button.setDefaultAction(action)
+            widest = max(widest, self.fit_button.sizeHint().width())
+        self.fit_button.setMinimumWidth(widest)
         self.one_to_one_button = QToolButton()
         self.one_to_one_button.setText("1:1")
         bar.addWidget(self.fit_button)

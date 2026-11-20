@@ -26,7 +26,7 @@ from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QMessageBox, QStyle
+from qgis.PyQt.QtWidgets import QLabel, QMessageBox, QStyle
 from tests.real_data import CAMPUS_LINES, GPS_LINES
 
 GRID = Grid(
@@ -545,10 +545,10 @@ def test_switching_lines_clears_the_cursor_and_selection(opened):
 
 
 def test_fit_button_restores_the_full_extent_after_a_zoom(opened):
-    """I2: `fit_button.clicked` is wired straight to `ProfileView.fit`, but
-    nothing in the suite ever clicked it -- deleting the `connect()` call
-    survived. Zooms in first so `fit_button.click()` has something to
-    visibly undo.
+    """I2: a click on `fit_button` runs its default action (Fit, until another
+    is picked), which is wired to `ProfileView.fit`; nothing in the suite ever
+    clicked it -- deleting the `connect()` call survived. Zooms in first so
+    `fit_button.click()` has something to visibly undo.
     """
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
@@ -715,11 +715,13 @@ def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
 
     Re-pinned for spec section 4.1: the Slice band button took the row to
     766px, then the velocity label became an eliding one (it asks for no
-    width) and Fit became a split button; measured now 684px, so the bound
-    is 690 (the measurement rounded up to the next 10px)."""
+    width) and Fit became a split button; measured then 684px. The Fit button
+    now holds the width of its widest label ("Fit height"), so a pick never
+    moves the buttons after it: measured now 740px, so the bound is 740 (the
+    measurement rounded up to the next 10px)."""
     session = SiteSession()
     dock = ProfileDock(session)
-    assert dock.minimumSizeHint().width() <= 690
+    assert dock.minimumSizeHint().width() <= 740
     dock.hide()
     dock.deleteLater()
 
@@ -2578,14 +2580,35 @@ def test_a_new_dock_starts_with_fit(opened):
 def test_the_toolbar_fits_the_users_panel_in_the_worst_case(opened):
     # 1361 px wide, a long Difference label and a velocity label naming its fits.
     session, dock, key, line = opened
+    # The widest Fit button text ("Fit height") is picked first.
+    dock.fit_height_action.trigger()
     dock.resize(1361, 448)
+    full = "v = 0.100 m/ns (Grid A, average of 6 fits)"
     dock.difference_label.setText("Difference: Background removal (sliding)")
-    dock.velocity_label.setText("v = 0.100 m/ns (Grid A, average of 6 fits)")
+    dock.velocity_label.setText(full)
     QTest.qWait(50)
     assert dock.widget().minimumSizeHint().width() <= 1361
     for b in (dock.fit_button, dock.one_to_one_button, dock.slice_band_button):
         assert b.geometry().right() < dock.widget().width()
-    assert dock.velocity_label.text() == "v = 0.100 m/ns (Grid A, average of 6 fits)"
+    # `ElidedLabel.text()` is always the full text, so ask the plain QLabel for
+    # what it paints: the whole text when there is room, else the tooltip.
+    painted = QLabel.text(dock.velocity_label)
+    assert painted == full or dock.velocity_label.toolTip() == full
+
+
+def test_picking_a_fit_does_not_move_the_buttons_after_it(opened):
+    session, dock, key, line = opened
+    dock.resize(1361, 448)
+    QTest.qWait(50)
+    before = (dock.fit_button.width(), dock.one_to_one_button.x(), dock.slice_band_button.x())
+    for action in (dock.fit_width_action, dock.fit_height_action, dock.fit_all_action):
+        action.trigger()
+        QTest.qWait(50)
+        assert (
+            dock.fit_button.width(),
+            dock.one_to_one_button.x(),
+            dock.slice_band_button.x(),
+        ) == before
 
 
 def test_the_axis_menu_sets_a_unit_and_remembers_it(opened):
