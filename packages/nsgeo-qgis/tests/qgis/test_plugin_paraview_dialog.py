@@ -1,5 +1,6 @@
-"""The ParaView export dialog and its wiring (M16 A, Task 4): the Slices panel's button, the
-dialog's size and refusals, what is remembered, launching ParaView, and cancelling."""
+"""The ParaView export dialog and its wiring (M16 A, Task 4): the 3D Analysis menu's Export for
+ParaView… entry (#227), the dialog's size and refusals, what is remembered, launching ParaView,
+and cancelling."""
 
 from __future__ import annotations
 
@@ -57,9 +58,10 @@ def plugin(fake_iface, tmp_path, answer_modal):
 
 
 def _open_dialog(plugin_obj, drive_dialog, driver):
-    """Click the panel's button with `driver` answering the dialog; the dialogs shown."""
+    """Choose the 3D Analysis menu's Export for ParaView… with `driver` answering the dialog;
+    the dialogs shown."""
     calls = drive_dialog(QDialog, "exec", driver)
-    plugin_obj.slices_dock.paraview_button.click()
+    plugin_obj.act_paraview.trigger()
     return calls
 
 
@@ -71,19 +73,27 @@ def _make_dialog(plugin_obj):
     )
 
 
-# ---- the button and the dialog ---------------------------------------------------------------
+# ---- the menu entry and the dialog -----------------------------------------------------------
 
 
-def test_the_button_is_on_whenever_a_site_is_open_in_either_scope(plugin):
+def test_the_menu_entry_is_on_whenever_a_site_is_open_in_either_scope(plugin, drive_dialog):
     plugin_obj, _s = plugin
-    dock = plugin_obj.slices_dock
-    assert dock.paraview_button.text() == "ParaView…"
-    assert dock.paraview_button.isEnabled()
-    dock.set_scope("site")
-    assert dock.paraview_button.isEnabled()
+    entry = plugin_obj.act_paraview
+    assert entry.text() == "Export for ParaView…"
+    assert entry.isEnabled()
+    plugin_obj.slices_dock.set_scope("site")
+    assert entry.isEnabled()
+    seen: list[bool] = []
+
+    def driver(d):
+        seen.append(isinstance(d, ParaViewExportDialog))
+        d.reject()
+
+    calls = _open_dialog(plugin_obj, drive_dialog, driver)
+    assert len(calls) == 1 and seen == [True]
 
 
-def test_the_button_opens_the_dialog_on_the_panels_grid(plugin, drive_dialog):
+def test_the_entry_opens_the_dialog_on_the_panels_grid(plugin, drive_dialog):
     plugin_obj, s = plugin
     shown: list[tuple] = []
 
@@ -437,7 +447,7 @@ def test_paraview_really_starts_in_the_parent_with_the_scene_dir_in_its_environm
     assert scene_dir == str(folder) and arg == f"--script={folder / 'open_scene.py'}"
 
 
-def test_the_button_refuses_while_a_geotiff_export_runs(
+def test_the_entry_refuses_while_a_geotiff_export_runs(
     plugin, drive_dialog, message_log, monkeypatch
 ):
     plugin_obj, s = plugin
