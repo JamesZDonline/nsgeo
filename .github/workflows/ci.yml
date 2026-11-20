@@ -1,5 +1,17 @@
 name: CI
-on: [push, pull_request]
+# Push only. Every pull request here comes from a branch of this repository,
+# whose push has already run CI on the same commit; `pull_request` as well ran
+# everything twice. Plans, specs and SDD ledgers change no code or tested doc.
+on:
+  push:
+    paths-ignore:
+      - "docs/superpowers/**"
+
+# A newer push to a branch cancels that branch's run still going. main and tags
+# are never cancelled: each merge and each release gets a whole run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' }}
 
 # Read-only by default; only `release` asks for more.
 permissions:
@@ -72,7 +84,10 @@ jobs:
             packages/nsgeo-qgis/nsgeo_qgis/line_edit.py \
             packages/nsgeo-qgis/nsgeo_qgis/export_pipeline.py \
             packages/nsgeo-qgis/nsgeo_qgis/destagger_job.py \
-            packages/nsgeo-qgis/nsgeo_qgis/mag_engine.py
+            packages/nsgeo-qgis/nsgeo_qgis/mag_engine.py \
+            packages/nsgeo-qgis/nsgeo_qgis/gps_import.py \
+            packages/nsgeo-qgis/nsgeo_qgis/surface_plan.py \
+            packages/nsgeo-qgis/nsgeo_qgis/scene3d_plan.py
 
   build-zip:
     runs-on: ubuntu-24.04

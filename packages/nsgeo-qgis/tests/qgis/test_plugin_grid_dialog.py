@@ -601,6 +601,115 @@ def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, answer_mo
     plugin.unload()
 
 
+def _grid_record(v: float) -> Any:
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+
+    member = SourceFit("raw/FILE__001.DZT", "fit-1", "t", "FILE__001", 20.0, v, 0.002, 0.0)
+    return VelocitySource.from_fits([member], applied_at="2026-11-12T00:00:00Z")
+
+
+@pytest.fixture
+def grid_plugin(fake_iface, tmp_path, answer_modal, message_log):
+    """`make(velocity, record)`: a plugin on a new site with grid A, unloaded
+    after the test even when it fails. The log is cleared once the site is
+    made (OGR names the new GeoPackage's layers it cannot find yet), so a
+    test's `message_log` holds only what its own slots logged."""
+    import nsgeo_qgis
+
+    made = []
+
+    def make(velocity: Any, record: Any = None) -> Any:
+        plugin = nsgeo_qgis.classFactory(fake_iface)
+        plugin.initGui()
+        made.append(plugin)
+        plugin.session.new_site(tmp_path)
+        plugin.session.add_grid(
+            Grid(
+                "A",
+                (1.0, 2.0),
+                45.0,
+                3.0,
+                4.0,
+                "EPSG:32616",
+                0.25,
+                velocity=velocity,
+                velocity_source=record,
+            )
+        )
+        message_log.clear()
+        return plugin
+
+    yield make
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    for plugin in made:
+        plugin.unload()
+
+
+def test_edit_grid_ok_with_the_velocity_untouched_keeps_the_grids_record(grid_plugin, message_log):
+    record = _grid_record(0.0912345)
+    model = VelocityModel.constant(record.v_m_ns)
+    plugin = grid_plugin(model, record)
+
+    dialog = _open(plugin, "A")
+    assert dialog.velocity_unchanged()
+    dialog.azimuth.setValue(46.0)
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.azimuth == pytest.approx(46.0)
+    assert grid.velocity == model and grid.velocity_source == record
+    assert message_log == []
+
+
+def test_edit_grid_ok_with_the_velocity_untouched_keeps_a_velocity_set_meanwhile(
+    grid_plugin, message_log
+):
+    plugin = grid_plugin(VelocityModel.constant(0.1))
+    dialog = _open(plugin, "A")
+    # Edit grid is modeless: the grid velocity dialog (or the strip's Apply to
+    # grid) sets a velocity and its record while it is still open.
+    record = _grid_record(0.0912345)
+    plugin.session.apply_grid_velocity("A", VelocityModel.constant(record.v_m_ns), record)
+    dialog.azimuth.setValue(46.0)
+    assert dialog.velocity_unchanged()  # the box still shows what it opened with
+
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.azimuth == pytest.approx(46.0)
+    assert grid.velocity == VelocityModel.constant(0.0912345)
+    assert grid.velocity_source == record
+    assert message_log == []
+
+
+def test_edit_grid_ok_with_a_changed_velocity_writes_it_and_drops_the_record(
+    grid_plugin, message_log
+):
+    record = _grid_record(0.0912345)
+    plugin = grid_plugin(VelocityModel.constant(record.v_m_ns), record)
+    dialog = _open(plugin, "A")
+    dialog.velocity.setValue(0.085)
+    assert not dialog.velocity_unchanged()
+
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.velocity == VelocityModel.constant(0.085)
+    assert grid.velocity_source is None
+    assert message_log == []
+
+
+def test_velocity_unchanged_compares_the_box_to_its_opening_value_to_four_places(session):
+    session.add_grid(dataclasses.replace(SITE, velocity=VelocityModel.constant(0.08012345678)))
+    d = GridDialog(session, grid=session.grid("S"))
+    assert d.velocity_unchanged()
+    d.velocity.setValue(0.0802)
+    assert not d.velocity_unchanged()
+    d.velocity.setValue(0.0801)
+    assert d.velocity_unchanged()
+    assert GridDialog(session).velocity_unchanged()  # a new grid's box opens unset
+
+
 def test_a_grid_length_edit_says_its_reversed_lines_moved(
     fake_iface, tmp_path, answer_modal, message_log
 ):
@@ -2767,3 +2876,123 @@ def test_switching_the_instrument_after_a_fit_keeps_the_measured_size(session):
     assert (d.size_x.value(), d.size_y.value()) == pytest.approx((20.0, 20.0), abs=1e-6)
     d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("gpr"))
     assert (d.size_x.value(), d.size_y.value()) == pytest.approx((20.0, 20.0), abs=1e-6)
+
+
+# ---- M17b Task 6: a proposed grid, and Fit a grid to these tracks -------------------
+PROPOSED = Grid("_", (500_010.0, 5_000_020.0), 12.5, 3.5, 17.0, "EPSG:32632", 0.7)
+
+
+def test_a_proposed_grid_fills_every_field_but_the_id(session):
+    d = GridDialog(session, proposed=PROPOSED)
+    assert d.id_edit.text() == "" and d.id_edit.isEnabled()
+    assert (d.origin_x.value(), d.origin_y.value()) == (500_010.0, 5_000_020.0)
+    assert d.azimuth.value() == pytest.approx(12.5)
+    assert (d.size_x.value(), d.size_y.value()) == (3.5, 17.0)
+    assert d.spacing.value() == pytest.approx(0.7)
+    assert d.crs_widget.crs().authid() == "EPSG:32632"
+    assert not d.ok_button.isEnabled()
+    d.id_edit.setText("F1")
+    assert d.ok_button.isEnabled()
+
+
+def _fit_plugin(fake_iface, tmp_path, n=3):
+    import nsgeo_qgis
+    from plugin_testing import M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.set_site_crs("EPSG:32632")
+    dlon = 0.5 / (M_PER_DEG * 0.7036)
+    lines = []
+    for i in range(n):
+        track = [(t, 45.2 + t * 0.1 / M_PER_DEG, 10.5 + i * dlon, 4) for t in (25, 75, 125, 175)]
+        p = synthetic_gps_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", track, traces_per_metre=10.0)
+        lines.append(open_gps(p, "EPSG:32632"))
+    plugin.session.add_lines(lines)
+    keys = [plugin.session.line_key(ln) for ln in lines]
+    return plugin, keys
+
+
+def test_fit_to_these_tracks_opens_the_grid_dialog_and_ok_moves_the_lines(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    before = [plugin.session.line_for_key(k).trace_coords({}) for k in keys]
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.fit_tracks(keys)
+    dialog = plugin._grid_dialog
+    assert dialog is not None
+    assert dialog.id_edit.text() == "" and dialog.spacing.value() == pytest.approx(0.5, abs=0.02)
+    assert dialog.size_x.value() == pytest.approx(1.5, abs=0.05)  # 3 lines, 0.5 m apart
+    dialog.id_edit.setText("F1")
+    dialog.accept()
+    assert plugin.session.grid("F1").default_spacing == pytest.approx(0.5, abs=0.02)
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {"F1"}
+    after = [plugin.session.line_for_key(k).trace_coords({}) for k in keys]
+    assert all(np.array_equal(a, b) for a, b in zip(before, after))
+    assert shown == ["moved 3 GPS line(s) into F1"]
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_cancelling_fit_to_these_tracks_adds_and_moves_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    plugin.fit_tracks(keys)
+    plugin._grid_dialog.reject()
+    assert plugin.session.site.grids == []
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {None}
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fitting_one_track_proposes_the_default_spacing_and_one_spacing_of_width(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path, n=1)
+    plugin.fit_tracks(keys)
+    dialog = plugin._grid_dialog
+    assert dialog.spacing.value() == 0.5
+    assert dialog.size_x.value() == pytest.approx(0.5, abs=0.02)
+    dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_these_tracks_with_a_grid_dialog_open_refuses_and_keeps_the_open_one(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.open_grid_dialog(None)
+    first = plugin._grid_dialog
+    plugin.fit_tracks(keys)
+    assert plugin._grid_dialog is first
+    assert shown == ["Close the open grid dialog first."]
+    first.id_edit.setText("X")
+    first.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32632"))
+    first.accept()  # the plain Add grid: it must not move the fit's lines
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {None}
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_no_tracks_says_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, _ = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.fit_tracks([])
+    assert shown == [] and plugin._grid_dialog is None
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_a_proposed_grid_is_a_gpr_grid_and_its_instrument_is_fixed(session):
+    """Fit to these tracks proposes a grid for GPS lines, which never join a
+    magnetometer grid (M17b decision 15)."""
+    d = GridDialog(session, proposed=PROPOSED, instrument="mag")
+    assert d.instrument == "gpr" and not d.instrument_combo.isEnabled()
+    assert not d.velocity.isHidden()
+    assert (d.size_x.value(), d.size_y.value()) == (3.5, 17.0)

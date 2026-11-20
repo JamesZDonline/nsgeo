@@ -1,7 +1,7 @@
 # Walkthrough results — placement corrections (#3, #47)
 
 Run by the user on 2026-11-11, profile `ns_geo_placement`, page https://claude.ai/artifact/UqkaRx9zTNJ4mRQhqyPHQt (db `results`).
-Result: 24 of 24 pass. Data: `~/nsgeo-placement-check/` (campus ten, the 60-line with-dzg survey, a copy of the Nashville City Cemetery site).
+Result: 24 of 24 pass. Data: `~/nsgeo-placement-check/` (campus ten, the 60-line with-dzg survey, a copy of the GPS survey site).
 
 | Check | Result | Note |
 |---|---|---|

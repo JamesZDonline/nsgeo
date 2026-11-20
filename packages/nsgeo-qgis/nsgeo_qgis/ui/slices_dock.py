@@ -32,12 +32,14 @@ the scope left.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import retime_ns, sets_time_zero
+from nsgeo.processing import TIME_BASE_RADAR, retime_ns, time_base_of
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
@@ -50,7 +52,7 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from qgis.gui import QgsDockWidget
+from qgis.gui import QgsCollapsibleGroupBox, QgsDockWidget
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -88,20 +90,35 @@ from nsgeo_qgis.slices_plan import (
     SiteSource,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
+    clock_change_note,
     default_cell,
     depth_scroll_steps,
     estimate_memory,
     format_bytes,
     frame_cells,
+    no_break_note,
     old_cube_note,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
-from nsgeo_qgis.ui.profile_dock import velocity_source
+from nsgeo_qgis.ui.folds import remember_folds
+from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, Entry, WarningsPanel
+
+
+@dataclass(frozen=True)
+class OwedShift:
+    """A restored record's range, still on the clock it was saved on (#162)."""
+
+    to: str  # the clock it moves onto: TIME_BASE_TIME_ZERO or TIME_BASE_RADAR
+    cube_id: str
+    preset: str
+    marked: bool  # False: a record from before #97, with no time_base
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -122,6 +139,15 @@ def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
     elif not upper and snapped < value:
         snapped += step
     return round(snapped, decimals)
+
+
+COVERAGE_TIP = (
+    "Shows how many traces fell in each cell, instead of the amplitude.\n"
+    "Use it to see where your lines ran and where there is no data: blank cells had no line "
+    "through them.\n"
+    "In a Whole site preview each pixel shows the largest count among the cells under it, so "
+    "lines look wider than they are."
+)
 
 
 class ElidedLabel(QLabel):
@@ -196,12 +222,73 @@ class ElidedLabel(QLabel):
             self.setToolTip(self._hint if self.full_text else "")
 
 
+#: dz's minimum before any line gives a sample interval (spec 3.2).
+GENERIC_DZ_MIN = 0.001
+
+#: The note beside dz while it sits on its floor (walkthrough D1).
+DZ_FLOOR_NOTE = "(sample interval)"
+DZ_FLOOR_TIP = (
+    "dz can't go below the radar's sample interval (in Whole site, the finest "
+    "grid's). A finer dz only adds levels between the same two readings: no new "
+    "information, only a deeper cube."
+)
+
+
+class _DzSpinBox(QDoubleSpinBox):
+    """dz's box: shows `note` while dz sits on a sample-interval floor.
+
+    Seeds and restores set dz and its minimum with signals blocked, so the
+    Python setters update the note as well as `valueChanged`."""
+
+    def __init__(self, note: QLabel) -> None:
+        super().__init__()
+        self._note = note
+        self.valueChanged.connect(self._sync_note)
+
+    def setValue(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setValue(value)
+        self._sync_note()
+
+    def setMinimum(self, value: float) -> None:  # noqa: N802 -- Qt override
+        super().setMinimum(value)
+        self._sync_note()
+
+    def setRange(self, low: float, high: float) -> None:  # noqa: N802 -- Qt override
+        super().setRange(low, high)
+        self._sync_note()
+
+    def _sync_note(self, *_args: object) -> None:
+        try:
+            floor = self.minimum()
+            self._note.setVisible(floor > GENERIC_DZ_MIN and self.value() <= floor)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot
+            _log(f"could not show dz's floor: {exc}")
+
+
+class _OpensWideScrollArea(QScrollArea):
+    """A scroll area whose `sizeHint` adds the vertical bar's width (#50).
+
+    The stock hint does not include the bar, so a dock opening at it shows the
+    bar and then scrolls sideways by the bar's width."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        try:
+            hint = super().sizeHint()
+            bar = self.verticalScrollBar().sizeHint().width()
+            return QSize(hint.width() + bar, hint.height())
+        except Exception as exc:  # noqa: BLE001 -- a Qt virtual
+            _log(f"could not size the Slices panel: {exc}")
+            return QSize(0, 0)
+
+
 class SlicesDock(QgsDockWidget):
     #: Ask the plugin to open `LineChoiceDialog` (spec 9.1's one dialog).
     #: A request, not the dialog itself -- the dock owns no dialogs, the
     #: same split `SurveyDock`/`ProfileDock` already use for grid/import.
     choose_lines_requested = pyqtSignal()
     error = pyqtSignal(str)
+    #: The scope changed ("grid" or "site"); emitted once per real change.
+    scope_changed = pyqtSignal(str)
     #: Emitted at the end of `refresh_slice()`, whenever `current_values()`
     #: /`current_frame()`/`display_limit()` are worth reading again --
     #: `plugin.py` connects this to redraw `SliceLayer` (Task 4).
@@ -213,6 +300,7 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    paraview_requested = pyqtSignal()
     #: #180: open the slice layer's Symbology page (the plugin has `iface`).
     symbology_requested = pyqtSignal()
 
@@ -259,19 +347,32 @@ class SlicesDock(QgsDockWidget):
             parent=self,
         )
         #: This grid's values while the site shows: its Resolution spins (and
-        #: the grid they were captured on), palette and remembered source,
-        #: and the top time carried back.
+        #: the grid they were captured on), palette and remembered source.
         self._grid_spins: site_scope.Spins | None = None
         self._grid_spins_for: str | None = None
         self._grid_palette = ""
         self._grid_record_at_entry: tuple[Any, Any] | None = None
+        #: The top time carried back from the site, until This grid's axis places it (#70).
+        #: A site opening or closing drops it (spec §2, `rebuild_source`).
         self._pending_top_ns: float | None = None
         #: R-P5: a This-grid preparation owed once the site has stopped, and
         #: This grid's `_on_prepared` arriving while the site showed.
         self._grid_prepare_pending = False
         self._grid_prepared_away = False
-        #: #70: a grid switch left the engine on the grid that was left; its
-        #: resolution is the spins' to apply once the new grid is prepared.
+        #: Preparations that are not this dock's (the ParaView export's engine): held
+        #: against like the site's, for the span of `foreign_preparation`.
+        self._foreign: list[Any] = []
+        #: Foreign engines whose span ended with a task still alive: kept registered (as the
+        #: site engine keeps its `_retiring`) until `_reap_foreign` sees the task end.
+        self._foreign_retiring: list[Any] = []
+        self._foreign_reaper = QTimer(self)
+        self._foreign_reaper.setSingleShot(True)
+        self._foreign_reaper.setInterval(50)
+        self._foreign_reaper.timeout.connect(self._reap_foreign)
+        #: #70, #200: a grid switch, or a restore whose preparation waits for a
+        #: site task, left the engine on the grid that was left; its resolution
+        #: is the spins' to apply once the new grid is prepared.
+        #: A site opening or closing drops it (spec §2, `rebuild_source`).
         self._resolution_owed = False
         #: The finish, in metres, at the last successful This-grid draw, a
         #: coverage draw included, so a line spacing edit that moves it (#72,
@@ -350,9 +451,13 @@ class SlicesDock(QgsDockWidget):
         #: applied by `apply_view` before `prepare()` would otherwise be
         #: silently overwritten the moment the async preparation completes.
         #: Consumed and cleared by `_on_prepared` every time it runs
-        #: (restore-triggered or not), and cleared early by
-        #: `_on_source_changed`/`set_included` too, so a manual change made
-        #: while a restore is still preparing cannot inherit its palette.
+        #: (restore-triggered or not), and dropped early (spec §2,
+        #: `_drop_restore_pending`) by a new site and by a source change -- by
+        #: hand (`_on_source_changed`, `set_included`), from the site list
+        #: (`_switch_resumed_grid`), or a grid the combo fell back to on its
+        #: own (`_sync_included`) -- so neither a change made while a restore
+        #: is still preparing nor the next survey can inherit its palette.
+        #: Never by a refresh that keeps the source (#162 item 2).
         #: Fix round 1, Minor: ALSO cleared right after `restore_cube`'s
         #: own `prepare()` call when that call turns out to have been a
         #: no-op (`self.engine.is_running` still `False` afterwards) --
@@ -363,13 +468,21 @@ class SlicesDock(QgsDockWidget):
         #: reselecting the SAME cube). Without this, a value stashed here
         #: would sit unconsumed until some LATER, unrelated preparation's
         #: `_on_prepared` fires and applies a palette that restore no
-        #: longer has anything to do with.
+        #: longer has anything to do with. A restore whose preparation is
+        #: owed (R-P5, #200) keeps it for that preparation instead, and
+        #: `_run_pending_grid_prepare` clears it when that one turns out a
+        #: no-op too.
         self._pending_palette: str | None = None
-        #: A restored record from before the time-zero clock, whose preset now
-        #: sets one: `_on_prepared` moves its z range by the median zero and
-        #: says so. Consumed by every `_on_prepared` (which also covers a preparation
-        #: with failed lines), and cleared by a manual source change.
-        self._pending_z_shift = False
+        #: A restored record whose range is on another clock than its preset is
+        #: now (spec §4): one from before the time-zero clock whose preset sets
+        #: one, or a marked one whose preset has gained or lost Time zero since.
+        #: `_settle_z` moves its z range onto the preset's clock and says so
+        #: (`_shift_z_to_clock`). Consumed by every `_on_prepared` (which also
+        #: covers a preparation with failed lines). Dropped (spec §2,
+        #: `_drop_restore_pending`) by a new site and by a source change -- by
+        #: hand, from the site list, or a grid the combo fell back to on its
+        #: own -- and never by a refresh that keeps the source (#162 item 2).
+        self._pending_z_shift: OwedShift | None = None
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -400,6 +513,13 @@ class SlicesDock(QgsDockWidget):
         self.cube_combo = QComboBox()
         self.grid_combo = QComboBox()
         self.preset_combo = QComboBox()
+        # Names come from the data: a long one is cut off, never a floor on the
+        # panel's width (#121). The popup still lists the whole name.
+        for combo in (self.cube_combo, self.grid_combo, self.preset_combo):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(12)
         self.transform_combo = TransformCombo()
         form.addRow("Cube", self.cube_combo)
         form.addRow("Grid", self.grid_combo)
@@ -409,6 +529,7 @@ class SlicesDock(QgsDockWidget):
 
         included_row = QHBoxLayout()
         self.included_label = QLabel("")
+        self.included_label.setWordWrap(True)  # the over-budget suffix is long (#121)
         self.choose_button = QPushButton("Choose…")
         included_row.addWidget(self.included_label, 1)
         included_row.addWidget(self.choose_button)
@@ -457,19 +578,12 @@ class SlicesDock(QgsDockWidget):
         readout_row.addWidget(self.refine_label, 1)
         position_layout.addLayout(readout_row)
 
-        # Whole site only: the preview note, or why nothing is drawn. One
-        # elided line of fixed height (as `refine_label`), the full text in
-        # its tooltip, so a long reason never widens the dock or moves the
-        # scrolled panel.
-        self.site_note = ElidedLabel("")
-        self.site_note.setVisible(False)
-        position_layout.addWidget(self.site_note)
-
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
         velocity_font.setPointSizeF(max(1.0, velocity_font.pointSizeF() * 0.85))
         self.velocity_label.setFont(velocity_font)
         self.velocity_label.setStyleSheet("color: palette(mid);")
+        self.velocity_label.setWordWrap(True)  # the source label comes from the data (#121)
         position_layout.addWidget(self.velocity_label)
 
         # M12 spec 4.3: each grid's depth through its own velocity, in the
@@ -506,10 +620,23 @@ class SlicesDock(QgsDockWidget):
 
         outer.addWidget(self.position_group)
 
+        # What stands in the way, in full: a refusal that outlasts its toast,
+        # the clock warning, the Whole site preview note. Hidden when empty.
+        self.warnings_panel = WarningsPanel()
+        #: This grid's standing refusal (`_apply_resolution`), or None.
+        self._grid_refusal: str | None = None
+        #: Spec §8: what the restore of the cube on show said, as ⓘ notes (its
+        #: clock shift, the lines it left out). They go when the Cube box
+        #: leaves that cube (an edit, `_mark_cube_unsaved`; any later restore,
+        #: refused or not), or the source, grid, scope or site changes
+        #: (`_drop_restore_pending`, `set_scope`).
+        self._grid_notes: list[str] = []
+        outer.addWidget(self.warnings_panel)
+
         # ---- Resolution: the binning geometry, debounced (44 ms a
         # rebuild, spec 7.2 and trap 4) so a slider dragged through five
         # cell sizes in a second rebuilds once, not five times.
-        self.resolution_group = QGroupBox("Resolution")
+        self.resolution_group = QgsCollapsibleGroupBox("Resolution")
         resolution_form = QFormLayout(self.resolution_group)
 
         self.cell_spin = QDoubleSpinBox()
@@ -533,8 +660,13 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("Cell size", self.cell_spin)
 
-        self.dz_spin = QDoubleSpinBox()
-        self.dz_spin.setRange(0.001, 100.0)
+        self.dz_floor_note = QLabel(DZ_FLOOR_NOTE)
+        self.dz_floor_note.setToolTip(DZ_FLOOR_TIP)
+        _keep = self.dz_floor_note.sizePolicy()
+        _keep.setRetainSizeWhenHidden(True)  # dz keeps its width at and off the floor
+        self.dz_floor_note.setSizePolicy(_keep)
+        self.dz_spin = _DzSpinBox(self.dz_floor_note)
+        self.dz_spin.setRange(GENERIC_DZ_MIN, 100.0)
         self.dz_spin.setDecimals(4)
         self.dz_spin.setSuffix(" ns")
         self.dz_spin.setValue(1.0)
@@ -545,10 +677,15 @@ class SlicesDock(QgsDockWidget):
         self.dz_spin.setSingleStep(0.05)
         self.dz_spin.setToolTip(
             "Vertical spacing of the cube's levels, in two-way time.\n"
-            "Defaults to the file's own sample interval; §7.2 measured that "
-            "decimating buys nothing, so there is rarely a reason to coarsen it."
+            "Defaults to the file's own sample interval, and can't go below it; "
+            "§7.2 measured that decimating buys nothing, so there is rarely a "
+            "reason to coarsen it."
         )
-        resolution_form.addRow("dz", self.dz_spin)
+        dz_row = QHBoxLayout()
+        dz_row.setContentsMargins(0, 0, 0, 0)
+        dz_row.addWidget(self.dz_spin, 1)
+        dz_row.addWidget(self.dz_floor_note)
+        resolution_form.addRow("dz", dz_row)
 
         self.z0_spin = QDoubleSpinBox()
         self.z0_spin.setRange(-1_000.0, 100_000.0)
@@ -628,7 +765,7 @@ class SlicesDock(QgsDockWidget):
         # ---- Display: how the slice is coloured and stretched, never
         # what it contains -- spec 8's comparability-by-default,
         # legibility-on-demand split.
-        self.display_group = QGroupBox("Display")
+        self.display_group = QgsCollapsibleGroupBox("Display")
         display_form = QFormLayout(self.display_group)
 
         # #180: the plugin's palette and stretch, or the user's own QGIS
@@ -656,16 +793,7 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow("Palette", self.palette_combo)
 
         self.coverage_check = QCheckBox("Show coverage")
-        # Round 2, W6: "Don't know what this is doing." The view is the
-        # whole reason the cube stores a count alongside the mean (spec
-        # 6.2), and it is unreadable without being told what the numbers
-        # are.
-        self.coverage_check.setToolTip(
-            "Shows how many traces fell in each cell instead of the amplitude.\n"
-            "Cells no line crossed are left blank, so an empty bin is "
-            "distinguishable from a real zero reflection -- which is the "
-            "whole point of recording a count."
-        )
+        self.coverage_check.setToolTip(COVERAGE_TIP)
         display_form.addRow(self.coverage_check)
 
         # Ruling AN (M11 final review): the settings override spec 9.2
@@ -680,15 +808,19 @@ class SlicesDock(QgsDockWidget):
         self.resident_check = QCheckBox("Keep the volume in memory")
         display_form.addRow(self.resident_check)
 
-        self.legend_label = QLabel("")
-        # Wraps, because a QLabel's minimum width is its text width and a
-        # dock's minimum width is a hard floor on the QGIS main window's
-        # -- the same mechanism that made this dock force a 556 px window
-        # in round 1. The coverage legend is the longest string here.
-        self.legend_label.setWordWrap(True)
+        # One line, elided with the full text in the tooltip: a QLabel's minimum
+        # width is its text width (round 1's 556 px window), and a wrapped one
+        # changes height with its text as the stretch moves, which shifts the
+        # panel under the wheel (#121). The coverage legend is the longest string.
+        self.legend_label = ElidedLabel("")
         display_form.addRow("Legend", self.legend_label)
 
         outer.addWidget(self.display_group)
+        # Folding, wired once all four panels exist (#157 item 6).
+        remember_folds("resolution", [self.resolution_group])
+        remember_folds("interpolation", [self.grid_finish, self.site_finish])
+        remember_folds("normalisation", [self.normalisation_panel.group])
+        remember_folds("display", [self.display_group])
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -704,8 +836,13 @@ class SlicesDock(QgsDockWidget):
         self.export_button = QPushButton("Export GeoTIFF…")
         self.save_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        # The 3-D export prepares its own volume (it needs no prepared source), so it is
+        # on whenever a site is open, in either scope.
+        self.paraview_button = QPushButton("ParaView\u2026")
+        self.paraview_button.setEnabled(session.is_open)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.export_button)
+        button_row.addWidget(self.paraview_button)
         outer.addLayout(button_row)
 
         outer.addStretch(1)
@@ -717,11 +854,13 @@ class SlicesDock(QgsDockWidget):
         # from the M11 walkthrough as "it messes up the width/height of
         # the window". A scroll area's own minimum is small, so the dock
         # can be any size the user wants and scrolls to the rest.
-        scroll = QScrollArea(self)
+        scroll = _OpensWideScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)
         self.setWidget(scroll)
+        # The Resolution boxes keep Qt's wheel (walkthrough W1: the author
+        # tried the click-first rule and chose folding the section instead).
 
         # A palette is always offered, even before any source is chosen
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
@@ -752,6 +891,7 @@ class SlicesDock(QgsDockWidget):
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
         self.export_button.clicked.connect(lambda: self.export_requested.emit())
+        self.paraview_button.clicked.connect(lambda: self.paraview_requested.emit())
         self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
@@ -761,6 +901,7 @@ class SlicesDock(QgsDockWidget):
         session.grids_changed.connect(self.rebuild_source)
         session.lines_changed.connect(self.rebuild_source)
         session.presets_changed.connect(self.rebuild_source)
+        session.slice_sources_changed.connect(self._follow_remembered_preset)
 
         # Position is cheap (0.6-4 ms, the module docstring's own figure):
         # every tick redraws directly, with no debounce.
@@ -860,8 +1001,13 @@ class SlicesDock(QgsDockWidget):
         for why one was rejected.
         """
         try:
-            # A restore's owed shift belongs to the site it was made in.
-            self._pending_z_shift = False
+            # Spec §2: what a restore owes belongs to the site it was made in.
+            # A new site (opened or closed) is checked once, here, and its
+            # values dropped before anything below can use one. A refresh on
+            # the same site keeps them: the source is as it was (#162 item 2).
+            new_site = self.session.site is not self._site_seen
+            if new_site:
+                self._drop_restore_pending()
             self._updating += 1
             try:
                 site = self.session.site
@@ -881,6 +1027,7 @@ class SlicesDock(QgsDockWidget):
             # nothing to choose lines FROM without a site open.
             self.choose_button.setEnabled(self.session.is_open)
             self.site_scope_button.setEnabled(self.session.is_open)
+            self.paraview_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared
@@ -917,6 +1064,29 @@ class SlicesDock(QgsDockWidget):
                 # (interpolation spec §8). Direct, like the sliders: no
                 # resolution change to debounce.
                 self.refresh_slice()
+            elif (
+                self._scope == "grid"
+                and self.engine.is_prepared
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and self._values is not None
+                and (window := self.current_window()) is not None
+            ):
+                # A grid Apply (or a line edit) can change the velocity the
+                # label and the readout's metres state, never the slice
+                # itself: relabel depths only, as Whole site's
+                # `on_session_changed` does. Export reads the live velocity
+                # through `_resolved_velocity`, so a stale label here would
+                # name a different one.
+                # A hand-edited survey's spacing <= 0 (`SliceFinish.in_metres`,
+                # via the legend's limit) raises ValueError after the readout
+                # and the velocity label are already written, as
+                # `_finish_moved` reads it. Any ValueError is logged, never
+                # swallowed: a header dielectric <= 0 raises one too.
+                try:
+                    self._update_readout(window)
+                except ValueError as exc:
+                    _log(f"could not relabel the slice after a velocity change: {exc}")
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -924,9 +1094,23 @@ class SlicesDock(QgsDockWidget):
                     self._site.on_session_changed()
                 else:
                     self.set_scope("grid")  # the survey closed under the site
-            if self.session.site is not self._site_seen:
+            if new_site:
                 self._site_seen = self.session.site
                 self._site.forget()
+                # #102: the switch back to This grid just above, when the survey
+                # closed under the site, carried the site's time over and can
+                # owe a resolution. Both were the closed survey's, and so is
+                # the slider's index: with no axis to carry a time from,
+                # `_apply_resolution` keeps it (its range only clamps it), so
+                # the next survey would open at the old one's slice. Blocked,
+                # as every other placement of the slider is.
+                self._pending_top_ns = None
+                self._resolution_owed = False
+                self.slice_slider.blockSignals(True)
+                try:
+                    self.slice_slider.setValue(0)
+                finally:
+                    self.slice_slider.blockSignals(False)
         except Exception as exc:  # noqa: BLE001 -- a slot on five session signals
             _log(f"could not rebuild the slice source controls: {exc}")
 
@@ -965,6 +1149,11 @@ class SlicesDock(QgsDockWidget):
         picking that very cube and dispatch a whole redundant
         `restore_cube` (and its ~0.9 s re-preparation) of the state that
         is already on screen.
+
+        A `select` also takes the last restore's notes down (spec §8): the
+        Cube box leaves the restored cube for the record just saved, which
+        those notes do not describe. A refill with no `select` keeps the
+        Cube box where it was, and its notes with it.
         """
         try:
             self._updating += 1
@@ -972,8 +1161,12 @@ class SlicesDock(QgsDockWidget):
             cube_ids = sorted(site.cubes) if site is not None else []
             items = ["(unsaved)", *cube_ids]
             self._refill(self.cube_combo, items)
-            if select is not None and select in items:
-                self.cube_combo.setCurrentText(select)
+            if select is not None:
+                if select in items:
+                    self.cube_combo.setCurrentText(select)
+                if self._grid_notes:
+                    self._grid_notes = []
+                    self.show_warnings()
         finally:
             self._updating -= 1
 
@@ -988,7 +1181,7 @@ class SlicesDock(QgsDockWidget):
             if getattr(self.session.line_for_key(key).placement, "grid_id", None) == grid_id
         )
 
-    def _sync_included(self) -> None:
+    def _sync_included(self, *, by_hand: bool = False) -> None:
         """Reset the inclusion set when the selected grid actually
         changed; otherwise read the grid's line record again
         (`_read_remembered_lines`, the site's reading, #100) while the set
@@ -1027,10 +1220,32 @@ class SlicesDock(QgsDockWidget):
         `_included` itself is already retried for the same reason -- once
         successfully seeded for a grid it does not re-run for that grid
         again, so a value the user later chooses is never clobbered.
+
+        #152 (spec §5): a grid change not made `by_hand` is the combo moving
+        on its own -- the selected grid was removed, or a site opened. That
+        grid opens on the preset Whole site draws it with
+        (`site_scope.default_preset`, as #106 does for a switch from the site
+        list), selected inside the `_updating` guard and written to no
+        record. It is a source change, so a restore's pending values go too
+        (spec §2). A grid picked by hand (`_on_source_changed`) keeps the
+        preset showing, and `_remember_source` then records it.
         """
         grid_id = self.grid_combo.currentText() or None
         if grid_id != self._last_grid_id:
             self._last_grid_id = grid_id
+            if not by_hand:
+                self._drop_restore_pending()
+                preset = (
+                    site_scope.default_preset(self.session, grid_id)
+                    if grid_id is not None and self.session.is_open
+                    else None
+                )
+                if preset is not None and self.preset_combo.findText(preset) >= 0:
+                    self._updating += 1
+                    try:
+                        self.preset_combo.setCurrentText(preset)
+                    finally:
+                        self._updating -= 1
             self._included = self._default_included(grid_id)
             self._included_is_default = True
             self._dz_z_seeded_for = None
@@ -1084,6 +1299,30 @@ class SlicesDock(QgsDockWidget):
             finally:
                 self._updating -= 1
         self._read_remembered_lines(grid_id)
+
+    def _follow_remembered_preset(self, grid_id: str) -> None:
+        """#129: a preset written for the grid This grid shows (an import's
+        first lines) is a choice made elsewhere; switch the combo to it as a
+        hand choice would (restore-pending values dropped, preparation re-run),
+        so the new lines are prepared with it and `_remember_source` does not
+        write the first preset by name back over it. Does nothing in Whole site
+        scope, for another grid, while the panel refills its own widgets (its
+        own writes), or when the remembered preset is missing or already shown."""
+        try:
+            if self._scope != "grid" or self._updating or not self.session.is_open:
+                return
+            if grid_id != self.grid_combo.currentText():
+                return
+            preset = (self.session.slice_source(grid_id) or {}).get("preset")
+            if (
+                not preset
+                or preset == self.preset_combo.currentText()
+                or self.preset_combo.findText(preset) < 0
+            ):
+                return
+            self.preset_combo.setCurrentText(preset)
+        except Exception as exc:  # noqa: BLE001 -- a slot on slice_sources_changed
+            _log(f"could not follow a remembered preset: {exc}")
 
     def _read_remembered_lines(self, grid_id: str | None) -> None:
         """This grid's reading of the grid's remembered lines, the one
@@ -1305,8 +1544,7 @@ class SlicesDock(QgsDockWidget):
         # own docstring for why a manual change clears it here and in
         # `_on_source_changed` rather than leaving `_on_prepared` to apply
         # a palette this choice has nothing to do with.
-        self._pending_palette = None
-        self._pending_z_shift = False
+        self._drop_restore_pending()
         self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
@@ -1354,13 +1592,13 @@ class SlicesDock(QgsDockWidget):
             # this question is answered, not assuming its callers can
             # never change.
             #
-            # KeyError (final review, Minor 6): provenance() also raises
-            # this once the FIRST prepared line has been removed from the
-            # session -- see `_resolved_velocity`'s own docstring, which
-            # widens the identical catch for the identical reason. A
-            # "does not match" answer here is conservative and safe either
-            # way: both callers already treat a mismatch as "stale, not
-            # unprepared".
+            # KeyError (final review, Minor 6): provenance() resolves the
+            # grid's velocity through `grid_depth_velocity`, which raises
+            # KeyError when the grid has neither a velocity nor a line, but
+            # provenance() suppresses that and records no velocity. The
+            # catch stays as a defensive one. A "does not match" answer here
+            # is conservative and safe either way: both callers already
+            # treat a mismatch as "stale, not unprepared".
             return False
         return self._live_preset_steps(preset_name) == prepared_steps
 
@@ -1425,7 +1663,7 @@ class SlicesDock(QgsDockWidget):
         # is showing, nor while a site task may still run (a cancel whose
         # bounded wait gave up): two preparations at once segfault (trap 1).
         # The preparation is owed, and run by `_run_pending_grid_prepare`.
-        if self._scope == "site" or self.site_engine.has_live_task:
+        if self._scope == "site" or self.site_engine.has_live_task or self._foreign_live():
             self._grid_prepare_pending = True
             if self._scope == "grid":
                 self._grid_retry.start()
@@ -1483,10 +1721,11 @@ class SlicesDock(QgsDockWidget):
             # `_pending_palette`'s own docstring for why this must not
             # inherit a palette a still-preparing `restore_cube` owes a
             # DIFFERENT preparation.
-            self._pending_palette = None
-            self._pending_z_shift = False
+            self._drop_restore_pending()
+            self._grid_refusal = None
+            self.show_warnings()
             self._mark_cube_unsaved()
-            self._sync_included()
+            self._sync_included(by_hand=True)
             self._remember_source()
             self._update_included_label()
             self.prepare()
@@ -1577,29 +1816,44 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
-    def _shift_z_by_median_zero(self) -> bool:
-        """Move both z spins to the time-zero clock for a restored old record.
+    def _shift_z_to_clock(self, owed: OwedShift) -> bool:
+        """Move both z spins onto the clock a restored record's preset is on now
+        (spec §4, #162 item 1).
 
-        The record's range was on the radar clock; `retime_ns(t, 0.0, median)`
-        puts a time on the clock of a line whose zero is `median` (the
-        median of the prepared lines' zeros). With nothing prepared there is
-        no median, so nothing moves and nothing is said. Signal-blocked
-        writes, as `_clamp_z_to_prepared` does, so the caller must push the
-        result at the engine (`_apply_resolution`) when this returns True."""
-        median = self.engine.median_zero()
+        - **To time zero** (a record on the radar's clock): `retime_ns(t, 0.0,
+          median)` puts a time on the clock of a line whose zero is `median`,
+          the median of the prepared lines' zeros. The range moves by -median.
+        - **To radar** (the preset has lost Time zero): each prepared line's
+          zero reads 0.0, so the median first break stands in for it
+          (`engine.median_first_break`), and `retime_ns(t, median, 0.0)` moves
+          the range by +median, the reverse.
+
+        With nothing prepared there is nothing to measure: nothing moves and
+        nothing is said. With prepared lines but no first break on any, the
+        range is left as saved and a note says so (Review Focus 5). Said as a
+        note in Warnings (spec §8), not a toast. Signal-blocked writes, as
+        `_clamp_z_to_prepared` does, so the caller must push the result at the
+        engine (`_apply_resolution`); `_settle_z` is the one caller. Returns
+        whether the range moved."""
+        to_radar = owed.to == TIME_BASE_RADAR
+        median = self.engine.median_first_break() if to_radar else self.engine.median_zero()
         if median is None:
+            if self.engine.is_prepared:
+                self._add_grid_note(no_break_note(owed.cube_id, owed.preset))
             return False
+        from_zero, to_zero = (median, 0.0) if to_radar else (0.0, median)
+        shift = retime_ns(0.0, from_zero, to_zero)
         self._updating += 1
         try:
             for spin in (self.z0_spin, self.z1_spin):
                 spin.blockSignals(True)
                 try:
-                    spin.setValue(retime_ns(spin.value(), 0.0, median))
+                    spin.setValue(retime_ns(spin.value(), from_zero, to_zero))
                 finally:
                     spin.blockSignals(False)
         finally:
             self._updating -= 1
-        # The grid remembers the shifted range, not the record's radar-clock
+        # The grid remembers the shifted range, not the record's saved-clock
         # one (the spins were written with signals blocked, so nothing else
         # would re-remember it). Remembered before the caller's clamp, as
         # every restore remembers its record's range: the clamp is no edit
@@ -1609,21 +1863,72 @@ class SlicesDock(QgsDockWidget):
             self.session.remember_slice_resolution(
                 grid_id, t0_ns=self.z0_spin.value(), t1_ns=self.z1_spin.value()
             )
-        self.error.emit(old_cube_note(-median))
+        self._add_grid_note(
+            clock_change_note(owed.cube_id, owed.preset, owed.to, shift)
+            if owed.marked
+            else old_cube_note(shift)
+        )
         return True
 
-    def _apply_owed_z_shift(self) -> None:
-        """After a `prepare()` that dispatched nothing: apply a shift a restore owes.
+    def _add_grid_note(self, text: str) -> None:
+        """Show `text` as an ⓘ note of the restore in This grid's Warnings
+        (spec §8), once: a note already there by that text is not added again."""
+        if text not in self._grid_notes:
+            self._grid_notes.append(text)
+        self.show_warnings()
 
-        A preparation that IS running consumes the flag in `_on_prepared`
-        instead, so the shift lands exactly once either way."""
-        if self.engine.is_running or not self._pending_z_shift:
+    def _drop_restore_pending(self) -> None:
+        """Forget what a restore still owes: its depth shift and its palette,
+        and the notes it showed (spec §8).
+
+        Spec §2: they belong to the site and source the restore was made for.
+        Called when a site opens or closes (`rebuild_source`) and on a source
+        change: by hand (`_on_source_changed`, `set_included`), from the site
+        list (`_switch_resumed_grid`, through `_sync_included`), or a grid the
+        combo fell back to on its own (`_sync_included`). Never on a refresh
+        that keeps the source."""
+        self._pending_z_shift = None
+        self._pending_palette = None
+        if self._grid_notes:
+            self._grid_notes = []
+            self.show_warnings()
+
+    def _settle_z(self) -> bool:
+        """Bring the z spins to what This grid's engine can take: shift, then clamp.
+
+        Spec §3: every path that brings a restored or owed range to the engine
+        settles it here first, so no range is pushed before its owed shift.
+        The shift a restore owes is consumed and applied only when no
+        preparation is running; a running one's `_on_prepared` settles it, so
+        it lands exactly once. Then the clamp to what every prepared line
+        covers (`_clamp_z_to_prepared`): a shifted end can run past it (lines
+        whose zeros differ by a sample).
+
+        Both write with signals blocked, so this returns whether the caller
+        must push (`_apply_resolution`): a shift was owed, or the clamp moved
+        a spin. The checks (frame cap, level limit) are the push's own."""
+        owed = False
+        if self._pending_z_shift and not self.engine.is_running:
+            pending, self._pending_z_shift = self._pending_z_shift, None
+            # Pushed whether or not it moved: the restore stopped its debounce
+            # for this settle, so its range has not reached the engine yet.
+            self._shift_z_to_clock(pending)
+            owed = True
+        clamped = self._clamp_z_to_prepared()
+        return owed or clamped
+
+    def _settle_and_push(self) -> None:
+        """Settle the z range (`_settle_z`), then push it at the engine. For
+        the paths no `_on_prepared` follows: a restore whose source the engine
+        already holds, and `_run_pending_grid_prepare` when its `prepare()`
+        dispatched nothing.
+
+        Steps aside entirely while a preparation runs with a shift owed: the
+        range is still on the clock it was saved on, and that preparation's
+        `_on_prepared` shifts, clamps and pushes it (spec §3)."""
+        if self._pending_z_shift and self.engine.is_running:
             return
-        self._pending_z_shift = False
-        self._shift_z_by_median_zero()
-        # The shifted end can run past the new prepared bound (lines whose
-        # zeros differ by a sample); clamp as `_on_prepared` does, then push.
-        self._clamp_z_to_prepared()
+        self._settle_z()
         self._apply_resolution()
 
     def line_zero_in_cube(self, key: str) -> float | None:
@@ -1701,14 +2006,14 @@ class SlicesDock(QgsDockWidget):
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
-            # Consumed only on This grid: a switch to Whole site within the
-            # preparation window leaves the flag for This grid's preparation.
-            owed_shift, self._pending_z_shift = self._pending_z_shift, False
-            shifted = self._shift_z_by_median_zero() if owed_shift else False
-            # Before anything asks the engine for a slice: the seeded z
-            # range was read off a raw DZT header, and a preset that crops
-            # the sample axis makes that range uncoverable. See the method.
-            clamped = self._clamp_z_to_prepared() or shifted or owed_shift
+            # Settled only on This grid: a switch to Whole site within the
+            # preparation window leaves an owed shift for This grid's
+            # preparation. Before anything asks the engine for a slice: the
+            # seeded z range was read off a raw DZT header, and a preset that
+            # crops the sample axis makes that range uncoverable (see
+            # `_clamp_z_to_prepared`); a restored record's range is on the clock
+            # it was saved on until it is shifted (spec §3, §4).
+            settled = self._settle_z()
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
@@ -1756,12 +2061,12 @@ class SlicesDock(QgsDockWidget):
             # exactly as `refresh_slice()`'s own early return last left
             # them -- `None` -- until the user happens to touch a control.
             #
-            # `_apply_resolution()` rather than `refresh_slice()` when the
-            # clamp moved a spin: the engine is still holding the ZAxis
-            # built from the UNcorrected range, and the spins' own
-            # debounce was blocked along with their signals, so nothing
-            # else would ever push the correction through.
-            if clamped:
+            # `_apply_resolution()` rather than `refresh_slice()` when a
+            # shift was owed or the clamp moved a spin: the engine is still
+            # holding the ZAxis built from the UNcorrected range, and the
+            # spins' own debounce was blocked along with their signals, so
+            # nothing else would ever push the correction through.
+            if settled:
                 self._apply_resolution()
             else:
                 self.refresh_slice()
@@ -1783,7 +2088,9 @@ class SlicesDock(QgsDockWidget):
         not change the array, so moving only those leaves the combo's
         claim still true; the Source combos and the four `Resolution`
         geometry spins do, and are wired to call this (see their own
-        connections and `_on_source_changed`/`set_included`).
+        connections and `_on_source_changed`/`set_included`). The restore's
+        notes go with it (spec §8), even when the box already read
+        "(unsaved)": a note that landed after an earlier edit goes at the next.
 
         Gated on `self._updating` for the same reason `_on_source_changed`
         is: `restore_cube` sets these same widgets itself while restoring,
@@ -1795,6 +2102,14 @@ class SlicesDock(QgsDockWidget):
                 return
             if self.cube_combo.currentText() != "(unsaved)":
                 self.cube_combo.setCurrentText("(unsaved)")
+            if self._grid_notes:
+                # Spec §8: the restore's notes were about the cube just left.
+                # Whatever the box reads: a shift owed to a preparation still
+                # running lands after an edit has marked the cube unsaved, and
+                # its note says why the edited range moved; the next edit takes
+                # it down (review I2-1).
+                self._grid_notes = []
+                self.show_warnings()
         except Exception as exc:  # noqa: BLE001 -- reached directly from valueChanged
             _log(f"could not update the cube combo: {exc}")
 
@@ -1973,6 +2288,15 @@ class SlicesDock(QgsDockWidget):
         `recipe.resolution`/`recipe.view` being `None` leaves the
         corresponding widgets exactly where they were -- `CubeRecipe`'s
         own contract for an old-format record.
+
+        What the restore changed on the way -- a range moved onto the clock its
+        preset is on now (spec §4: a record from before the time-zero clock, or
+        a preset that has gained or lost Time zero since the save), lines left
+        out because they moved grid -- is said as ⓘ notes in Warnings, not
+        toasts (spec §8). The range reaches the engine through one settle
+        sequence, shift then clamp then push (spec §3, `_settle_z`), and a
+        restore whose preparation waits for a site task owes its resolution
+        rather than applying it to the grid still prepared (#200).
         """
         try:
             record = self.session.site.cubes[cube_id]
@@ -2019,6 +2343,9 @@ class SlicesDock(QgsDockWidget):
                     f"cube {cube_id!r} refers to {', '.join(missing)}, "
                     "no longer present in this site"
                 )
+            # Spec §8: the notes are this restore's; the last one's are gone
+            # (shown again below, with the refusal cleared).
+            self._grid_notes = []
             self._updating += 1
             try:
                 if recipe.view is not None:
@@ -2027,8 +2354,13 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
-                self._pending_z_shift = recipe.time_base is None and sets_time_zero(
-                    self.session.site.presets.get(recipe.choice.preset, [])
+                # Spec §4: a record with no clock is from before #97, so radar.
+                saved = recipe.time_base or TIME_BASE_RADAR
+                now = time_base_of(self._live_preset_steps(recipe.choice.preset))
+                self._pending_z_shift = (
+                    OwedShift(now, cube_id, recipe.choice.preset, recipe.time_base is not None)
+                    if now != saved
+                    else None
                 )
                 # A line moved to another grid since the cube was saved is left
                 # out: its key still names a line, but it is no longer this
@@ -2053,6 +2385,15 @@ class SlicesDock(QgsDockWidget):
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)
                 self.preset_combo.setCurrentText(recipe.choice.preset)
                 self.transform_combo.set_value(transform_text)
+                # The cube's grid's floor, as a grid change sets it, whether
+                # or not the record has a resolution (spec 6.1).
+                self._set_cell_floor(recipe.choice.grid_id)
+                # As `_seed_dz_z_defaults` reads it: the first included line still
+                # in the site. A key no longer there is `set_source`'s to name.
+                live = set(self.session.keys())
+                first = next((k for k in self._included if k in live), None)
+                if first is not None:
+                    site_scope.set_dz_floor(self, self.session.line_for_key(first).header.dt_ns)
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
@@ -2093,13 +2434,35 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
-            if self._pending_z_shift:
-                # An old record's range is still on the radar clock: nothing
-                # is pushed at the engine until the shift has been applied.
+            # A refusal belonged to the grid that was showing.
+            self._grid_refusal = None
+            self.show_warnings()
+            # Prepared first, so the apply below is checked against the cube's
+            # own grid (`set_source` has already moved the engine's choice),
+            # not the one the restore left: its level limit and frame cap are
+            # that grid's. The spin restores above armed the debounce: stop
+            # it so set_source's nested cancel loop cannot fire an apply
+            # against the old grid.
+            self._debounce.stop()
+            self.prepare()
+            deferred = self._grid_prepare_pending
+            if deferred:
+                # #200: R-P5 owes the preparation (a site task is still live),
+                # so the engine still holds the grid that was showing, and an
+                # apply now would be checked against that grid's level limit
+                # and frame cap. The resolution is owed instead:
+                # `_run_pending_grid_prepare` settles and pushes it once the
+                # cube's grid is prepared, as it does for a grid opened from
+                # the site list in the same window (#70).
+                self._resolution_owed = True
+                self._debounce.stop()
+            elif self._pending_z_shift or not self.engine.is_running:
+                # Nothing is pushed before an owed shift is applied (spec §3):
+                # a running preparation's `_on_prepared` settles and pushes it,
+                # and with none running `_settle_and_push` below is the one push.
                 self._debounce.stop()
             else:
                 self.flush_debounce()
-            self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
             # the preset's live steps still match -- reachable by
@@ -2110,19 +2473,20 @@ class SlicesDock(QgsDockWidget):
             # fires and applies a palette that restore no longer has
             # anything to do with -- exactly the staleness this field's
             # own docstring otherwise claims cannot happen.
-            if not self.engine.is_running:
-                self._pending_palette = None
+            if not self.engine.is_running and not deferred:
                 # No preparation is coming. If the engine already holds this
                 # source (the usual case: the restored source was the
-                # remembered one), the shift is applied here; a preparation
-                # still owed (R-P5) keeps the flag for its `_on_prepared`.
-                if not self._grid_prepare_pending:
-                    self._apply_owed_z_shift()
+                # remembered one), the range is settled and pushed here. A
+                # preparation still owed (R-P5, #200) is coming: its
+                # `_on_prepared` applies the palette, and
+                # `_run_pending_grid_prepare` settles and pushes the range.
+                self._pending_palette = None
+                self._settle_and_push()
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
                 )
-                self.error.emit(
+                self._add_grid_note(
                     f"cube {cube_id!r}: {len(moved)} line(s) moved to another grid "
                     f"since it was saved and were left out: {labels}"
                 )
@@ -2130,6 +2494,11 @@ class SlicesDock(QgsDockWidget):
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)
             self.error.emit(message)
+            # The combo leaves the cube it named just below, so that cube's
+            # notes go too, whether the restore was refused at its checks or
+            # failed past them (review I2-1).
+            self._grid_notes = []
+            self.show_warnings()
             # Fix round 1, Minor: a refused restore must not leave
             # `cube_combo` naming a cube the dock did not actually
             # restore -- `currentTextChanged` does not re-fire for the
@@ -2151,7 +2520,7 @@ class SlicesDock(QgsDockWidget):
         `_resume_grid`, #71), so an unrelated session signal never
         overwrites a value the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and #81's 0.2 m cell and the interpolation defaults -- both
+        spacing", and #81's default cell and the interpolation defaults -- both
         need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.
@@ -2173,8 +2542,7 @@ class SlicesDock(QgsDockWidget):
             # `smallest_safe_cell` is well under the spin's own 0.01 m and
             # this changes nothing; it only bites where the arithmetic really
             # does run away (walkthrough round 2, W7).
-            floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
-            self.cell_spin.setMinimum(floor)
+            floor = self._set_cell_floor(grid_id)
             self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
             # Quiet: a seed is not an edit, and a grid change re-prepares and
             # `refresh_slice` reads the panel live, so no debounce either.
@@ -2186,6 +2554,15 @@ class SlicesDock(QgsDockWidget):
             self._restore_remembered_resolution(grid_id)
         finally:
             self._seeding -= 1
+
+    def _set_cell_floor(self, grid_id: str) -> float:
+        """Raise `cell_spin`'s minimum to the finest cell `grid_id` can afford
+        (walkthrough round 2, W7). The box only: a remembered resolution or a
+        cube record is never changed, so a floor that moves back lets it return."""
+        grid = self.session.grid(grid_id)
+        floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
+        self.cell_spin.setMinimum(floor)
+        return floor
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
         """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
@@ -2214,10 +2591,16 @@ class SlicesDock(QgsDockWidget):
         In Whole site the spins are the site's (#71), so the seed stays owed,
         `_dz_z_seeded_for` unmarked, and `_resume_grid` retries it.
         """
-        if self._dz_z_seeded_for == grid_id or self._scope == "site":
+        if self._scope == "site":
             return
         included = self._default_included(grid_id)
         if not included:
+            # No line, no interval (spec 3.2): back to the generic minimum, so
+            # an earlier grid's or site's floor neither binds dz nor puts
+            # "(sample interval)" beside it.
+            site_scope.set_dz_floor(self, GENERIC_DZ_MIN)
+            return
+        if self._dz_z_seeded_for == grid_id:
             return
         header = self.session.line_for_key(included[0]).header
         # #71: a seed, not an edit (see `_seed_resolution_defaults`).
@@ -2229,6 +2612,8 @@ class SlicesDock(QgsDockWidget):
             # (walkthrough round 2, W7).
             for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
                 _spin.setSingleStep(header.dt_ns)
+            # #177: dz cannot go below the sample interval, before it is set.
+            site_scope.set_dz_floor(self, header.dt_ns)
             self.dz_spin.setValue(header.dt_ns)
             self.z0_spin.setValue(header.position_ns)
             self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
@@ -2478,6 +2863,8 @@ class SlicesDock(QgsDockWidget):
                 # applying them to it now would only draw B's settings onto
                 # A's lines (a spurious "does not cover" error).
                 return
+            # What is refused is decided afresh by this apply.
+            self._grid_refusal = None
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
@@ -2497,6 +2884,7 @@ class SlicesDock(QgsDockWidget):
             except ValueError as exc:
                 # __post_init__'s own validation (e.g. z1 <= z0) -- a
                 # refusal the user can read, not a crash from a QTimer slot.
+                self.show_warnings()
                 self.error.emit(str(exc))
                 return
             # Defence in depth behind `cell_spin`'s own floor: a
@@ -2514,13 +2902,25 @@ class SlicesDock(QgsDockWidget):
                 cells = frame_cells(grid_now.size_x, grid_now.size_y, resolution.cell)
                 if cells > MAX_FRAME_CELLS:
                     safe = smallest_safe_cell(grid_now.size_x, grid_now.size_y)
-                    self.error.emit(
-                        f"a {resolution.cell:g} m cell over grid "
-                        f"{grid_now.id!r} is {cells:,} cells, too many to "
-                        f"draw; use {safe:g} m or coarser"
+                    frame = self.engine.frame
+                    still = f" Still showing {frame.cell:g} m." if frame is not None else ""
+                    self._grid_refusal = (
+                        f"Cell {resolution.cell:g} m refused: grid {grid_now.id} would be "
+                        f"{cells:,} cells, too many to draw.{still} "
+                        f"Use {safe:g} m or coarser."
                     )
+                    self.show_warnings()
                     return
-            self.engine.set_resolution(resolution)
+            self._grid_refusal = None
+            try:
+                self.engine.set_resolution(resolution)
+            except TooManyLevels as exc:
+                # #177: refused before the engine stored anything, so the map
+                # stays as it was. The reason stands in Warnings, not a toast.
+                self._grid_refusal = str(exc)
+                self.show_warnings()
+                return
+            self.show_warnings()
             # Keyed on `(n_levels, choice, mode, finish settings)` -- see
             # `_stretch_key` -- and a geometry change can only have moved
             # `n_levels` (the axis it is measured against changed), so there
@@ -2550,6 +2950,8 @@ class SlicesDock(QgsDockWidget):
                 self.slice_slider.blockSignals(False)
             self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            # A refusal shown for the last apply is not this apply's: one place.
+            self.show_warnings()
             self.error.emit(str(exc))
 
     def refresh_slice(self) -> None:
@@ -2824,7 +3226,7 @@ class SlicesDock(QgsDockWidget):
         two-argument call here had simply never passed one, so the
         readout stated ns only. `_resolved_velocity()` is the one place
         that resolves it, shared with `velocity_label` so the two always
-        describe the same line's velocity.
+        describe the same grid velocity (`grid_depth_velocity`).
 
         Final review, Minor 5: `plan_windows` is called with `thickness_
         step_levels()[0]` (the SAME unclamped thickness `export_geotiff`
@@ -2849,47 +3251,42 @@ class SlicesDock(QgsDockWidget):
         # it degrades gracefully to "the last slice" there rather than
         # raising.
         index = min(len(windows) - 1, window.k0 // step_levels)
-        key, velocity = self._resolved_velocity()
+        grid_id, velocity = self._resolved_velocity()
         label = window_label(z, window, velocity)  # falls back to ns-only when velocity is None
         self.readout.setText(f"slice {index + 1} / {len(windows)} · {label}")
-        self._update_velocity_label(key, velocity)
+        self._update_velocity_label(grid_id, velocity)
         self._update_legend_label()
 
     def _resolved_velocity(self) -> tuple[str | None, VelocityModel | None]:
-        """The line key and the velocity resolved against it, shared by
-        the readout (spec 9.2's ns-and-m format) and `velocity_label`
-        (spec 9.2's "provenance, not state") so the two never describe
-        two different lines. `None, None` before anything is prepared.
+        """The grid id and the grid's depth velocity, shared by the readout
+        (spec 9.2's ns-and-m format) and `velocity_label` (spec 9.2's
+        "provenance, not state") so the two never describe two different
+        velocities. A slice takes its grid's velocity, never a line's
+        override (grid velocity spec 10). `None, None` before anything is
+        prepared.
 
-        Final review, Minor 6: also `None, None` when `engine.provenance()`
-        raises `KeyError`, not just `RuntimeError` -- `provenance()`
-        resolves velocity against the FIRST prepared line's key, and that
-        raises `KeyError` once that line has been removed from the session
-        (a contributing line can be deleted while a source stays prepared;
-        the cube's own arrays are still entirely correct). Before this,
-        deleting any such line blanked an otherwise still-valid slice --
-        `refresh_slice()`'s broad `except` caught the `KeyError` escaping
-        from here, reported `error: '<key>'`, and cleared the map -- for a
-        reason that has nothing to do with whether the slice itself is
-        still good.
+        Also `None, None` when the grid is gone (`KeyError`) or the engine
+        has no source (`RuntimeError`): a contributing line can be deleted
+        while a source stays prepared, and that must not blank a
+        still-valid slice.
         """
-        try:
-            keys = self.engine.provenance().line_keys
-        except (RuntimeError, KeyError):
+        choice = self.engine.choice
+        if choice is None:
             return None, None
-        if not keys:
-            return None, None
-        key = keys[0]
         try:
-            return key, self.session.resolved_velocity(key)
+            return choice.grid_id, self.session.grid_depth_velocity(choice.grid_id)
         except (KeyError, RuntimeError):
             return None, None
 
-    def _update_velocity_label(self, key: str | None, velocity: VelocityModel | None) -> None:
-        if key is None or velocity is None:
+    def _update_velocity_label(self, grid_id: str | None, velocity: VelocityModel | None) -> None:
+        if grid_id is None or velocity is None:
             self.velocity_label.setText("")
             return
-        source = velocity_source(self.session, key)
+        try:
+            source = grid_velocity_label(self.session, grid_id)
+        except (KeyError, RuntimeError):
+            self.velocity_label.setText("")
+            return
         self.velocity_label.setText(f"v = {velocity.surface_velocity:.3f} m/ns ({source})")
 
     def _update_legend_label(self) -> None:
@@ -3080,6 +3477,20 @@ class SlicesDock(QgsDockWidget):
         """`"grid"` (This grid, M11's dock) or `"site"` (Whole site)."""
         return self._scope
 
+    def show_warnings(self) -> None:
+        """Fill the Warnings section: the site's in Whole site, otherwise This
+        grid's standing refusal and the restore's notes (spec §8). A slot's
+        body, so it guards itself."""
+        try:
+            if self._scope == "site":
+                entries = self._site.warnings()
+            else:
+                entries = [Entry(REFUSAL, self._grid_refusal)] if self._grid_refusal else []
+                entries += [Entry(NOTE, note) for note in self._grid_notes]
+            self.warnings_panel.set_entries(entries)
+        except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
+            _log(f"could not show the warnings: {exc}")
+
     def set_scope(self, scope: str) -> None:
         """Switch scope, keeping the window's time (spec 4.1).
 
@@ -3095,6 +3506,8 @@ class SlicesDock(QgsDockWidget):
         if scope == "site" and not self.session.is_open:
             site_scope.show_scope_widgets(self)
             raise RuntimeError("open a survey before showing the whole site")
+        self._grid_refusal = None
+        self._grid_notes = []  # spec §8: a scope change leaves the restored cube
         if self._debounce.isActive():
             # The scope being left applies its own pending change first.
             self._debounce.stop()
@@ -3134,7 +3547,9 @@ class SlicesDock(QgsDockWidget):
             site_scope.show_scope_widgets(self)
             self._sync_colours()
             self._resume_grid(top)
+        self.show_warnings()
         self.show_refine()
+        self.scope_changed.emit(scope)
 
     def _on_scope_clicked(self, scope: str) -> None:
         try:
@@ -3228,15 +3643,14 @@ class SlicesDock(QgsDockWidget):
 
         It opens on the preset the site drew the grid with (#106): its
         remembered one, else the first (`site_scope.default_preset`), not
-        whatever This grid's preset combo showed for the grid it left."""
-        self._pending_palette = None  # a source change, not a restore
-        self._pending_z_shift = False
+        whatever This grid's preset combo showed for the grid it left. That,
+        and dropping a restore's pending values (a source change, not a
+        restore), is `_sync_included`'s rule for a grid the combo did not move
+        by hand: `_last_grid_id` still names the grid left, so the call below
+        takes its grid-changed branch."""
         self._updating += 1
         try:
             self.grid_combo.setCurrentText(grid_id)
-            preset = site_scope.default_preset(self.session, grid_id)
-            if preset is not None:
-                self.preset_combo.setCurrentText(preset)
         finally:
             self._updating -= 1
         self._mark_cube_unsaved()
@@ -3295,6 +3709,76 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- called from a grids_changed slot
             _log(f"could not mark the slice source stale: {exc}")
 
+    def _foreign_live(self) -> bool:
+        return any(e.has_live_task for e in self._foreign)
+
+    @property
+    def foreign_preparing(self) -> bool:
+        """Whether an engine registered through `foreign_preparation` may still be running
+        (a span that ended with its task alive included): a caller must not start another."""
+        return self._foreign_live()
+
+    @contextlib.contextmanager
+    def refining_paused(self) -> Iterator[None]:
+        """The ParaView export's cover: no refine runs inside it, and the scope redraws after.
+
+        That export fills every level itself on the GUI thread (M16 A), so the refine
+        worker is stopped first, through the active scope's flow, not a bare
+        `refiner.cancel()`: a flow that still believed a list ran, and a status line still
+        saying "Refining...", would outlive the cancel. Afterwards, whatever the outcome
+        (done, cancelled, failed), the scope is redrawn once, so a preview that still
+        stands arms its rest again. That redraw is logged if it fails, never raised:
+        raised here, it would replace the export's own outcome. (The GeoTIFF exports
+        stopped needing this when they moved to a background task, #175.)
+        """
+        if self._scope == "site":
+            self._site.refine.stop()
+        else:
+            self._end_refine()
+        self.show_refine()
+        try:
+            yield
+        finally:
+            try:
+                self.refresh_slice()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring
+                _log(f"could not redraw the slice after the export: {exc}")
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine: Any) -> Iterator[None]:
+        """For the span of a preparation made by an engine this dock does not own, hold both
+        of its own engines back (two real preparations at once segfault). Work held meanwhile
+        runs through the existing retry timers once the engine has no live task."""
+        self._foreign.append(engine)
+        self.site_engine.add_exclusive(engine)
+        try:
+            yield
+        finally:
+            if engine.has_live_task:
+                # An abandoned task may still be reading: stay registered until it ends.
+                self._foreign_retiring.append(engine)
+                self._foreign_reaper.start()
+            else:
+                self._unregister_foreign(engine)
+
+    def _unregister_foreign(self, engine: Any) -> None:
+        self.site_engine.remove_exclusive(engine)
+        if engine in self._foreign:
+            self._foreign.remove(engine)
+        if self._grid_prepare_pending and self._scope == "grid":
+            self._grid_retry.start()
+
+    def _reap_foreign(self) -> None:
+        """The reaper timer's slot: unregister retired foreign engines whose task has ended."""
+        try:
+            for engine in [e for e in self._foreign_retiring if not e.has_live_task]:
+                self._foreign_retiring.remove(engine)
+                self._unregister_foreign(engine)
+            if self._foreign_retiring:
+                self._foreign_reaper.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            _log(f"could not release a foreign preparation: {exc}")
+
     def _run_pending_grid_prepare(self) -> None:
         """Run the owed This-grid preparation once no site task is live, else
         retry in 50 ms. Never blocks. Also the retry timer's slot.
@@ -3306,7 +3790,7 @@ class SlicesDock(QgsDockWidget):
         try:
             if self._scope != "grid":
                 return
-            if self.site_engine.has_live_task:
+            if self.site_engine.has_live_task or self._foreign_live():
                 self._grid_retry.start()
                 return
             self.engine.on_grid_moved = None  # R-P5: M11's self re-preparation again
@@ -3317,17 +3801,28 @@ class SlicesDock(QgsDockWidget):
             # would make This grid ignore every later resolution edit.
             owed, self._resolution_owed = self._resolution_owed, False
             self.prepare()
-            if owed and self.engine.is_prepared:
-                # `prepare()` was a no-op: the engine already holds this
-                # grid's lines, so `_on_prepared`'s clamp will not run, and
-                # the re-seeded z range would reach lines it does not cover.
-                self._clamp_z_to_prepared()
-            if (owed or self.engine.z is None) and self.engine.choice is not None:
-                # A moved grid's engine was cleared, resolution and all; and a
-                # grid opened from the site list (#70) still holds the left
-                # grid's, whatever the spins' own change signals did.
-                self._apply_resolution()
-            self._apply_owed_z_shift()  # a restore made while this was owed
+            if not self.engine.is_running:
+                # No `_on_prepared` is coming: a palette a waiting restore held
+                # for it stands as `apply_view` set it, and must not wait for a
+                # later, unrelated preparation (as in `restore_cube`).
+                self._pending_palette = None
+            # A moved grid's engine was cleared, resolution and all; and a grid
+            # opened from the site list (#70), or a restore made while this was
+            # owed (#200), still holds the left grid's, whatever the spins' own
+            # change signals did. So the resolution is pushed, after any shift
+            # a restore owes (spec §3, #162 item 3).
+            if self.engine.choice is not None:
+                if self.engine.is_running:
+                    # The preparation's `_on_prepared` settles: it shifts and
+                    # clamps, then pushes. Only with no shift owed does the
+                    # resolution go now, so the axis is the new grid's meanwhile.
+                    if not self._pending_z_shift and (owed or self.engine.z is None):
+                        self._apply_resolution()
+                elif owed or self.engine.z is None or self._pending_z_shift:
+                    # `prepare()` was a no-op: the engine already holds this
+                    # grid's lines, so no `_on_prepared` will shift or clamp,
+                    # and the z range would reach lines it does not cover.
+                    self._settle_and_push()
             self._sync_grid_slider()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not prepare the slice source: {exc}")

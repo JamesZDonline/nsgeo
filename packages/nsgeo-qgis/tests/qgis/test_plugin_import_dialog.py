@@ -6,8 +6,11 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.add_data_dialog import GRID as MODE_GRID
+from nsgeo_qgis.ui.add_data_dialog import AddDataDialog
 from nsgeo_qgis.ui.import_dialog import (
     COL_DIR,
     COL_INCLUDE,
@@ -15,16 +18,22 @@ from nsgeo_qgis.ui.import_dialog import (
     COL_NOTE,
     COL_OFFSET,
     COL_START,
-    ImportDialog,
 )
+from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
+from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 GRID_B = Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 GRID_C = Grid("C", (700.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+
+
+def grid_dialog(session, grid_id="A"):
+    """An Add data dialog on its Grid page, aimed at `grid_id`."""
+    return AddDataDialog(session, grid_id=grid_id, mode=MODE_GRID)
 
 
 @pytest.fixture
@@ -52,7 +61,8 @@ def _flush_deferred_deletes(qgis_app):
 
 def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=60) for i in (2, 1, 3)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     assert d.table.rowCount() == 3
     assert [d.table.item(r, COL_LABEL).text() for r in range(3)] == [
@@ -75,7 +85,8 @@ def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
 
 def test_remove_and_reorder(session, tmp_path):
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2, 3)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     d.table.selectRow(2)
     d.move_selected(-1)
@@ -90,10 +101,11 @@ def test_remove_and_reorder(session, tmp_path):
 def test_accept_adds_lines_and_fills_the_layer(session, tmp_path):
     layers = SiteLayers(session)
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2, 3)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     d.set_include(1, False)
-    d.accept()
+    d_dlg.accept()
     assert d.imported_keys == ["raw/FILE__001.DZT", "raw/FILE__003.DZT"]
     assert session.keys() == d.imported_keys
     assert layers.feature_count("lines") == 2
@@ -102,18 +114,21 @@ def test_accept_adds_lines_and_fills_the_layer(session, tmp_path):
 
 def test_duplicate_import_is_reported_not_raised(session, tmp_path):
     files = [synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
-    d.accept()
-    d2 = ImportDialog(session, grid_id="A")
+    d_dlg.accept()
+    d2_dlg = grid_dialog(session, grid_id="A")
+    d2 = d2_dlg.grid_page
     d2.add_files(files)
-    d2.accept()
+    d2_dlg.accept()
     assert "already" in d2.status.text()
-    assert d2.result() != d2.DialogCode.Accepted
+    assert d2_dlg.result() != d2_dlg.DialogCode.Accepted
 
 
 def test_axis_and_spacing_options_come_from_the_widgets(session, tmp_path):
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.axis_combo.setCurrentIndex(d.axis_combo.findData("x"))
     d.spacing.setValue(0.25)
     d.first_offset.setValue(1.0)
@@ -132,12 +147,13 @@ def test_axis_and_spacing_options_come_from_the_widgets(session, tmp_path):
 
 @needs_real_data
 def test_real_files_import_into_the_grid(session):
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(REAL_DZT)
     assert d.table.rowCount() == 10
     assert "exceeds" in d.table.item(7, COL_NOTE).text()  # FILE__008, 11.10 m
     assert d.table.item(0, COL_INCLUDE).checkState() == Qt.CheckState.Checked
-    d.accept()
+    d_dlg.accept()
     assert len(session.keys()) == 10
 
 
@@ -153,7 +169,8 @@ def test_start_along_is_derived_not_hand_editable(session, tmp_path):
     # 1, Finding 2), there is no direction_edited-style fix that makes
     # this one safe to expose, so it stays read-only, with a header
     # tooltip explaining why (fix round 1, Finding 4).
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     assert not d.table.item(0, COL_START).flags() & Qt.ItemFlag.ItemIsEditable
     header = d.table.horizontalHeaderItem(COL_START)
@@ -166,7 +183,8 @@ def test_hand_edited_direction_survives_a_later_replan(session, tmp_path):
     # covers) must survive an unrelated later edit -- and start_along
     # must follow the hand-set direction, not the mode's original one.
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     assert d.table.item(1, COL_DIR).text() == "−1"  # alternate's default for slot 1
     # Fix round 2, Finding 1: the previous version of this test drove the
@@ -193,7 +211,8 @@ def test_dir_edit_recognises_a_leading_minus_and_reports_unrecognised_text(sessi
     # not a valid direction; "" and "reverse" do not parse) must be
     # reported and reverted, the same as COL_OFFSET does, not silently
     # pinned forward.
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     assert d.rows[0].direction == 1  # alternate's default for slot 0
 
@@ -217,7 +236,8 @@ def test_status_is_not_cleared_by_a_label_or_direction_edit(session, tmp_path):
     # clear a standing status message left by something else -- otherwise
     # a real warning (e.g. add_files' own failure message) silently
     # disappears on the next unrelated keystroke.
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     d.status.setText("a standing message")
     d.table.item(0, COL_LABEL).setText("renamed")
@@ -238,7 +258,8 @@ def test_dialog_methods_stay_safe_when_the_site_closes_under_it(session, tmp_pat
     # remove_selected() specifically: it deletes from self.rows, then
     # raised evaluating self.options() before _refresh_table() ever ran.
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2, 3)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     session.close_site()
 
@@ -258,14 +279,16 @@ def test_add_files_ignores_a_file_already_in_the_table(session, tmp_path):
     # (e.g. the native dialog remembers the last folder) must not add a
     # second row for it.
     path = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files([path])
     d.add_files([path])
     assert d.table.rowCount() == 1
 
 
 def test_bad_offset_entry_is_reported_and_reverted_not_crashed(session, tmp_path):
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     d.table.item(0, COL_OFFSET).setText("not-a-number")  # must not raise
     assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited  # untouched
@@ -280,7 +303,8 @@ def test_hand_edited_label_survives_a_later_replan(session, tmp_path):
     # directly, which test_pure_lookup.py already covers), then a later,
     # unrelated edit (here: excluding a different row) must not discard it.
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)]
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(files)
     d.table.item(0, COL_LABEL).setText("line 6a")
     assert d.rows[0].label == "line 6a" and d.rows[0].label_edited
@@ -294,9 +318,9 @@ def test_import_dialog_exec_is_guarded_by_default(session):
     # one fails fast instead of hanging under QT_QPA_PLATFORM=offscreen.
     # ImportDialog never calls its own exec() (see the module docstring),
     # but the guard patches QDialog itself, so this holds for any subclass.
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
     with pytest.raises(AssertionError):
-        d.exec()
+        d_dlg.exec()
 
 
 def test_add_files_button_is_guarded_by_default(session):
@@ -304,7 +328,8 @@ def test_add_files_button_is_guarded_by_default(session):
     # signal swallows an exception raised inside a connected slot (the
     # standing signal/slot hazard), so pytest.raises around .click() would
     # never see the guard's AssertionError propagate at all.
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     with pytest.raises(AssertionError):
         d._choose_files()
 
@@ -312,7 +337,8 @@ def test_add_files_button_is_guarded_by_default(session):
 def test_add_files_button_adds_the_chosen_files(session, tmp_path, answer_modal):
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)]
     calls = answer_modal(QFileDialog, "getOpenFileNames", ([str(p) for p in files], ""))
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d._choose_files()
     assert d.table.rowCount() == 2
     assert len(calls) == 1
@@ -321,8 +347,8 @@ def test_add_files_button_adds_the_chosen_files(session, tmp_path, answer_modal)
 # ---- plugin wiring -----------------------------------------------------------
 
 
-def _open(plugin: Any, grid_id: str | None = None) -> ImportDialog:
-    """Call open_import_dialog() and return the ImportDialog it just showed.
+def _open(plugin: Any, grid_id: str | None = None) -> AddDataDialog:
+    """Call open_add_data_dialog() and return the AddDataDialog it just showed.
 
     Modeless (see plugin.py's module docstring and open_grid_dialog()'s
     own `_open` in test_plugin_grid_dialog.py, which this copies): no
@@ -335,8 +361,8 @@ def _open(plugin: Any, grid_id: str | None = None) -> ImportDialog:
     monkeypatch never runs a real event loop, so it cannot observe an
     application-modal dialog freezing the toolbar/dock).
     """
-    plugin.open_import_dialog(grid_id)
-    dialog = plugin._import_dialog
+    plugin.open_add_data_dialog(grid_id, MODE_GRID)
+    dialog = plugin._add_data_dialog
     assert dialog is not None
     return dialog
 
@@ -356,7 +382,7 @@ def test_open_import_dialog_accepts_and_reports_through_the_message_bar(
     dialog.add_files(files)
     dialog.accept()
 
-    assert plugin._import_dialog is None  # finished() cleared it
+    assert plugin._add_data_dialog is None  # finished() cleared it
     item = fake_iface.messageBar().currentItem()
     assert item is not None and "imported 2 line(s)" in item.text()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
@@ -376,22 +402,25 @@ def test_open_import_dialog_cancel_leaves_the_session_untouched(fake_iface, tmp_
     dialog.reject()
 
     assert plugin.session.keys() == []
-    assert plugin._import_dialog is None
+    assert plugin._add_data_dialog is None
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
-def test_open_import_dialog_refuses_without_a_grid(fake_iface, tmp_path):
+def test_the_grid_page_on_a_site_without_a_grid_says_so_and_cannot_import(fake_iface, tmp_path):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     plugin.session.new_site(tmp_path)
 
-    plugin.open_import_dialog(None)  # no grids yet
-    assert plugin._import_dialog is None
-    item = fake_iface.messageBar().currentItem()
-    assert item is not None and "grid" in item.text().lower()
+    dialog = _open(plugin, None)  # no grids yet: the page still opens
+    assert dialog.grid_page.status.text() == (
+        "This site has no grid yet. Add one with Add grid…, or place the lines by GPS."
+    )
+    assert not dialog.import_button.isEnabled()
+    assert dialog.windowTitle() == "Add GPR data"
+    dialog.reject()
     plugin.unload()
 
 
@@ -406,8 +435,8 @@ def test_open_import_dialog_does_not_open_a_second_dialog_while_one_is_open(
     plugin.session.add_grid(GRID)
 
     first = _open(plugin, "A")
-    plugin.open_import_dialog("A")
-    assert plugin._import_dialog is first  # no second dialog created
+    plugin.open_add_data_dialog("A", MODE_GRID)
+    assert plugin._add_data_dialog is first  # no second dialog created
 
     first.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
@@ -426,7 +455,7 @@ def test_unload_closes_a_visible_import_dialog(fake_iface, tmp_path, answer_moda
     assert dialog.isVisible()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
-    assert plugin._import_dialog is None
+    assert plugin._add_data_dialog is None
 
 
 def test_unload_closes_a_hidden_import_dialog(fake_iface, tmp_path, answer_modal):
@@ -452,7 +481,7 @@ def test_unload_closes_a_hidden_import_dialog(fake_iface, tmp_path, answer_modal
     assert dialog.isHidden()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
-    assert plugin._import_dialog is None  # only true if finished() actually ran
+    assert plugin._add_data_dialog is None  # only true if finished() actually ran
 
 
 def test_open_import_dialog_recovers_from_a_dialog_destroyed_outside_finished(
@@ -479,11 +508,11 @@ def test_open_import_dialog_recovers_from_a_dialog_destroyed_outside_finished(
     dialog.deleteLater()
     QApplication.sendPostedEvents(dialog, QEvent.Type.DeferredDelete)
 
-    assert plugin._import_dialog is None  # cleared by destroyed(), not finished()
+    assert plugin._add_data_dialog is None  # cleared by destroyed(), not finished()
 
     # And a later open/unload must not raise or wedge.
-    plugin.open_import_dialog("A")
-    assert plugin._import_dialog is not None and plugin._import_dialog is not dialog
+    plugin.open_add_data_dialog("A", MODE_GRID)
+    assert plugin._add_data_dialog is not None and plugin._add_data_dialog is not dialog
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()  # must not raise
 
@@ -509,9 +538,9 @@ def test_accept_refuses_when_the_site_closed_under_the_dialog(fake_iface, tmp_pa
 
     dialog.accept()  # must not raise
 
-    assert "no site is open" in dialog.status.text().lower()
+    assert "no site is open" in dialog.grid_page.status.text().lower()
     assert dialog.result() != dialog.DialogCode.Accepted
-    assert plugin._import_dialog is dialog  # still open -- nothing to clean up yet
+    assert plugin._add_data_dialog is dialog  # still open -- nothing to clean up yet
     dialog.reject()
     plugin.unload()
 
@@ -543,7 +572,7 @@ def test_accept_refuses_when_a_different_site_was_opened_under_the_dialog(
 
     dialog.accept()  # OK, still believing it is importing into site A
 
-    assert "different site" in dialog.status.text().lower()
+    assert "different site" in dialog.grid_page.status.text().lower()
     assert plugin.session.keys() == []  # site B's own grid A untouched
     dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
@@ -570,7 +599,7 @@ def test_accept_refuses_when_the_target_grid_was_removed_under_the_dialog(
 
     dialog.accept()  # must not raise
 
-    assert "no longer exists" in dialog.status.text().lower()
+    assert "no longer exists" in dialog.grid_page.status.text().lower()
     assert plugin.session.keys() == []
     dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
@@ -582,15 +611,16 @@ def test_accept_refuses_when_the_target_grid_was_removed_under_the_dialog(
 
 def test_the_target_grid_is_named_in_the_title_and_on_the_import_button(session, tmp_path):
     session.add_grid(GRID_B)
-    d = ImportDialog(session, grid_id="B")
+    d_dlg = grid_dialog(session, grid_id="B")
+    d = d_dlg.grid_page
     d.add_files([synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)])
-    assert d.windowTitle() == "Import DZT files into B"
-    assert d.import_button.text() == "Import 2 line(s) into B"
+    assert d_dlg.windowTitle() == "Add GPR data into B"
+    assert d_dlg.import_button.text() == "Import 2 line(s) into B"
 
     d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
 
-    assert d.windowTitle() == "Import DZT files into A"
-    assert d.import_button.text() == "Import 2 line(s) into A"
+    assert d_dlg.windowTitle() == "Add GPR data into A"
+    assert d_dlg.import_button.text() == "Import 2 line(s) into A"
 
 
 @pytest.fixture
@@ -610,8 +640,8 @@ def three_grids(fake_iface, tmp_path, answer_modal):
         lines.append(Line.open(p, GridPlacement(grid_id, "y", i * 0.5, 0.0, 1, p.stem)))
     plugin.session.add_lines(lines)
     yield plugin
-    if plugin._import_dialog is not None:
-        plugin._import_dialog.reject()
+    if plugin._add_data_dialog is not None:
+        plugin._add_data_dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
@@ -629,39 +659,39 @@ def _select(plugin, *rows):
     assert len(tree.selectedItems()) == len(rows)
 
 
-def _import_from_toolbar(plugin) -> ImportDialog:
-    plugin.act_import.trigger()
-    dialog = plugin._import_dialog
+def _import_from_toolbar(plugin) -> AddDataDialog:
+    plugin.act_add_gpr.trigger()
+    dialog = plugin._add_data_dialog
     assert dialog is not None
     return dialog
 
 
 def test_toolbar_import_targets_the_grid_selected_in_the_survey_panel(three_grids):
     _select(three_grids, ("grid", "B"))
-    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+    assert _import_from_toolbar(three_grids).grid_page.grid_combo.currentData() == "B"
 
 
 def test_toolbar_import_targets_the_grid_the_selected_lines_share(three_grids):
     _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__002.DZT"))
-    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+    assert _import_from_toolbar(three_grids).grid_page.grid_combo.currentData() == "B"
 
 
 def test_toolbar_import_prefers_a_selected_grid_row_over_selected_lines(three_grids):
     # #61's order: a selected grid row first, the selected lines' grid second.
     _select(three_grids, ("grid", "C"), ("line", "raw/FILE__001.DZT"))
-    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+    assert _import_from_toolbar(three_grids).grid_page.grid_combo.currentData() == "C"
 
 
 def test_toolbar_import_falls_back_to_the_open_lines_grid(three_grids):
     three_grids.session.open_line("raw/FILE__003.DZT")
     _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__003.DZT"))
-    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+    assert _import_from_toolbar(three_grids).grid_page.grid_combo.currentData() == "C"
 
 
 def test_toolbar_import_falls_back_to_the_first_grid_rather_than_guess(three_grids):
     # A selection across two grids names neither, and no line is open.
     _select(three_grids, ("line", "raw/FILE__002.DZT"), ("line", "raw/FILE__003.DZT"))
-    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "A"
+    assert _import_from_toolbar(three_grids).grid_page.grid_combo.currentData() == "A"
 
 
 def test_an_open_import_dialog_with_no_files_follows_a_new_target(three_grids):
@@ -670,9 +700,9 @@ def test_an_open_import_dialog_with_no_files_follows_a_new_target(three_grids):
     _select(three_grids, ("grid", "C"))
 
     assert _import_from_toolbar(three_grids) is first
-    assert first.grid_combo.currentData() == "C"
+    assert first.grid_page.grid_combo.currentData() == "C"
     three_grids.survey_dock.import_requested.emit("A")  # a grid's own "Import DZT files…"
-    assert first.grid_combo.currentData() == "A"
+    assert first.grid_page.grid_combo.currentData() == "A"
 
 
 def test_an_open_import_dialog_with_files_keeps_its_grid(three_grids, tmp_path):
@@ -682,8 +712,8 @@ def test_an_open_import_dialog_with_files_keeps_its_grid(three_grids, tmp_path):
     _select(three_grids, ("grid", "C"))
 
     assert _import_from_toolbar(three_grids) is first
-    assert first.grid_combo.currentData() == "B"
-    assert len(first.rows) == 1
+    assert first.grid_page.grid_combo.currentData() == "B"
+    assert len(first.grid_page.rows) == 1
 
 
 def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opened(three_grids):
@@ -693,8 +723,8 @@ def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opene
     _select(three_grids, ("grid", "D"))
 
     assert _import_from_toolbar(three_grids) is first
-    assert first.grid_combo.currentData() == "D"
-    assert first.windowTitle() == "Import DZT files into D"
+    assert first.grid_page.grid_combo.currentData() == "D"
+    assert first.windowTitle() == "Add GPR data into D"
 
 
 # ---- #69: "First line at" starts at half the line spacing ------------------
@@ -702,7 +732,8 @@ def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opene
 
 def test_first_line_at_starts_at_half_the_grids_line_spacing(session):
     # Centred in its strip, like every line after it: 0.25 m at 0.5 m spacing.
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     assert d.spacing.value() == 0.5
     assert d.first_offset.value() == 0.25
     assert d.options().first_offset == 0.25
@@ -710,7 +741,8 @@ def test_first_line_at_starts_at_half_the_grids_line_spacing(session):
 
 def test_first_line_at_follows_the_spacing_until_the_user_sets_it(session):
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 1.0))
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.spacing.setValue(0.4)
     assert d.first_offset.value() == 0.2
     d.grid_combo.setCurrentIndex(d.grid_combo.findData("B"))  # spacing 1.0 from the grid
@@ -727,22 +759,24 @@ def test_retarget_to_an_unknown_grid_keeps_the_dialogs_own_grid(session):
     # The refill that finds newly added grids must not drop the dialog onto
     # the first grid when the id is not there at all (#61's own failure).
     session.add_grid(GRID_B)
-    d = ImportDialog(session, grid_id="B")
+    d_dlg = grid_dialog(session, grid_id="B")
+    d = d_dlg.grid_page
     d.retarget("no-such-grid")
     assert d.grid_combo.currentData() == "B"
-    assert d.windowTitle() == "Import DZT files into B"
+    assert d_dlg.windowTitle() == "Add GPR data into B"
 
 
 @needs_real_data
 def test_the_fit_checkbox_imports_fitted_lines_and_is_off_by_default(session):
-    d = ImportDialog(session, grid_id="A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
     d.add_files(REAL_DZT)
     assert not d.fit_to_grid.isChecked()
     assert "exceeds" in d.table.item(7, COL_NOTE).text()
     d.fit_to_grid.setChecked(True)
     assert d.options().fit_to_grid
     assert "fitted to the grid's 11.00 m" in d.table.item(7, COL_NOTE).text()
-    d.accept()
+    d_dlg.accept()
     keys = session.keys()
     scales = [session.line_for_key(k).placement.scale for k in keys]
     assert [round(r.scale, 6) for r in d.rows] == [round(s, 6) for s in scales]
@@ -751,7 +785,8 @@ def test_the_fit_checkbox_imports_fitted_lines_and_is_off_by_default(session):
 
 def test_ticking_fit_greys_out_start_along_and_fits_the_rows(session, tmp_path):
     files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=720) for i in (1, 2)]
-    d = ImportDialog(session, grid_id="A")  # grid A is 11 m along y
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page  # grid A is 11 m along y
     d.add_files(files)
     assert d.start_along.isEnabled()
     d.fit_to_grid.setChecked(True)
@@ -762,3 +797,369 @@ def test_ticking_fit_greys_out_start_along_and_fits_the_rows(session, tmp_path):
     assert d.start_along.isEnabled()
     assert all("fitted" not in d.table.item(r, COL_NOTE).text() for r in (0, 1))
     assert all(r.scale == 1.0 for r in d.rows)
+
+
+# ---- #129: the Processing preset box -------------------------------------------------
+
+
+def _with_presets(session, tmp_path, *names):
+    """Save each named preset (a dewow of a different window) from a line on a side grid."""
+    session.add_grid(Grid("S", (900.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp_path / "side", "SIDE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))])
+    key = "side/SIDE__001.DZT"
+    for i, name in enumerate(names):
+        session.append_step(key, build_step("dewow", window_ns=10.0 + i))
+        session.save_preset(name, key)
+        session.remove_step(key, 0)
+
+
+def _files(tmp_path, numbers):
+    return [synthetic_dzt(tmp_path / "raw", f"FILE__{i:03d}.DZT", n_traces=60) for i in numbers]
+
+
+def _choose(d, name):
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData(name))
+
+
+def test_the_preset_box_is_the_last_form_row(session):
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    form = d.findChildren(QFormLayout)[0]
+    assert form.itemAt(form.rowCount() - 1, QFormLayout.ItemRole.FieldRole).widget() is d.preset_box
+    assert form.labelForField(d.preset_box).text() == "Processing preset"
+
+
+def test_import_with_a_preset_changes_only_the_new_lines(session, tmp_path):
+    _with_presets(session, tmp_path, "Plain")
+    d1_dlg = grid_dialog(session, grid_id="A")
+    d1 = d1_dlg.grid_page
+    d1.add_files(_files(tmp_path, (1, 2)))
+    d1_dlg.accept()
+    for k in d1.imported_keys:
+        session.append_step(k, build_step("dewow", window_ns=33.0))
+    before = {k: session.stack_for(k).to_dicts() for k in d1.imported_keys}
+    d2_dlg = grid_dialog(session, grid_id="A")
+    d2 = d2_dlg.grid_page
+    d2.add_files(_files(tmp_path, (3, 4)))
+    _choose(d2, "Plain")
+    d2_dlg.accept()
+    for k in d1.imported_keys:
+        assert session.stack_for(k).to_dicts() == before[k]
+    assert len(d2.imported_keys) == 2
+    for k in d2.imported_keys:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+
+
+def test_the_box_starts_on_the_grid_choice_then_the_sites_and_cancel_remembers_nothing(
+    session, tmp_path
+):
+    _with_presets(session, tmp_path, "One", "Two")
+    session.add_grid(GRID_B)
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d_dlg.reject()
+    assert session.import_preset("A") is None  # cancel remembered nothing
+    d_dlg.accept()
+    assert session.import_preset("A") == "One"
+    d2_dlg = grid_dialog(session, grid_id="A")
+    d2 = d2_dlg.grid_page
+    assert d2.preset_box.chosen() == "One"  # the grid's choice
+    d2.grid_combo.setCurrentIndex(d2.grid_combo.findData("B"))
+    assert d2.preset_box.chosen() == "One"  # B has none: the site's last
+    _choose(d2, "Two")
+    d2.add_files(_files(tmp_path, (2,)))
+    d2.grid_combo.setCurrentIndex(d2.grid_combo.findData("A"))
+    assert d2.preset_box.chosen() == "One"  # back to A's own
+
+
+def test_a_greyed_box_remembers_nothing(session, tmp_path):
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    assert not d.preset_box.is_choice()
+    d_dlg.accept()
+    assert session.site.import_presets == {}
+
+
+def test_the_first_import_into_an_empty_grid_sets_its_slices_preset_and_later_ones_do_not(
+    session, tmp_path
+):
+    _with_presets(session, tmp_path, "One", "Two")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d_dlg.accept()
+    assert session.slice_source("A") == {"preset": "One"}
+    d2_dlg = grid_dialog(session, grid_id="A")
+    d2 = d2_dlg.grid_page
+    d2.add_files(_files(tmp_path, (2,)))
+    _choose(d2, "Two")
+    d2_dlg.accept()
+    assert session.slice_source("A") == {"preset": "One"}  # later imports never touch it
+    # not for None: an entry with other fields but no preset, where the rule would apply
+    session.add_grid(GRID_B)
+    session.remember_slice_resolution("B", cell=0.4)
+    assert session.import_sets_slice_preset("B")
+    changed: list[str] = []
+    session.slice_sources_changed.connect(changed.append)
+    d3_dlg = grid_dialog(session, grid_id="B")
+    d3 = d3_dlg.grid_page
+    d3.add_files(_files(tmp_path, (3,)))
+    _choose(d3, None)  # the box started on the site's last; None is chosen by hand
+    d3_dlg.accept()
+    assert "preset" not in (session.slice_source("B") or {})
+    assert "B" not in changed
+    # not when a Slices preset already exists
+    session.add_grid(GRID_C)
+    session.set_slice_preset("C", "Two")
+    d4_dlg = grid_dialog(session, grid_id="C")
+    d4 = d4_dlg.grid_page
+    d4.add_files(_files(tmp_path, (4,)))
+    _choose(d4, "One")
+    d4_dlg.accept()
+    assert session.slice_source("C") == {"preset": "Two"}
+
+
+def test_a_refused_import_puts_the_slices_preset_back(session, tmp_path, monkeypatch):
+    _with_presets(session, tmp_path, "One")
+    session.remember_slice_resolution("A", cell=0.4)  # an entry with no preset
+    before = session.slice_source("A")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    seen: list[Any] = []
+
+    def refusing(lines):
+        seen.append(session.slice_source("A"))
+        raise ValueError("refused")
+
+    monkeypatch.setattr(session, "add_lines", refusing)
+    d_dlg.accept()
+    assert seen == [{**before, "preset": "One"}]  # written before add_lines
+    assert d.status.text() == "refused"
+    assert session.slice_source("A") == before  # and put back
+    assert session.keys_on_grid("A") == []
+    assert session.site.import_presets == {}
+
+
+def test_a_key_already_in_the_site_writes_nothing(session, tmp_path):
+    _with_presets(session, tmp_path, "One")
+    files = _files(tmp_path, (1,))
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(files)
+    d_dlg.accept()
+    session.add_grid(GRID_B)
+    d2_dlg = grid_dialog(session, grid_id="B")
+    d2 = d2_dlg.grid_page
+    d2.add_files(files)
+    _choose(d2, "One")
+    d2_dlg.accept()
+    assert "already in the site" in d2.status.text()
+    assert session.slice_source("B") is None
+    assert "B" not in session.site.import_presets.get("grids", {})
+
+
+def test_a_preset_deleted_under_the_dialog_imports_nothing(session, tmp_path):
+    _with_presets(session, tmp_path, "One")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+    d.preset_box._on_presets_changed = lambda *a: None  # the race: the box missed the news
+    del session.site.presets["One"]
+    d_dlg.accept()
+    assert d.status.text() == PRESET_GONE.format(name="One")
+    assert session.keys_on_grid("A") == []
+
+
+@pytest.mark.skipif(len(GRID2_LINES) < 6, reason="needs Grid 2 in tests/data/local/grid2")
+def test_real_grid2_lines_import_with_a_preset_only_the_new_ones_change(session, tmp_path):
+    _with_presets(session, tmp_path, "Plain")
+    d1_dlg = grid_dialog(session, grid_id="A")
+    d1 = d1_dlg.grid_page
+    d1.add_files(list(GRID2_LINES[:3]))
+    d1_dlg.accept()
+    assert len(d1.imported_keys) == 3
+    d2_dlg = grid_dialog(session, grid_id="A")
+    d2 = d2_dlg.grid_page
+    d2.add_files(list(GRID2_LINES[3:6]))
+    _choose(d2, "Plain")
+    d2_dlg.accept()
+    for k in d1.imported_keys:
+        assert session.stack_for(k).to_dicts() == []
+    assert len(d2.imported_keys) == 3
+    for k in d2.imported_keys:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Plain"]
+
+
+# ---- #17 one rule for decimal input, #16 guards as depth counters -----------
+
+
+@pytest.mark.parametrize("typed", ["1,000", "1,5", "nan", "inf"])
+def test_an_offset_typed_with_a_comma_is_refused_like_paramform(session, tmp_path, typed):
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    d.table.item(0, COL_OFFSET).setText(typed)
+    assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited
+    assert d.status.text() == f"{typed!r} is not a number; offset unchanged"
+    assert d.table.item(0, COL_OFFSET).text() == "0.25"
+
+
+def test_paramform_and_the_import_dialog_refuse_the_same_inputs(session, tmp_path, qgis_app):
+    from nsgeo_qgis.ui.param_form import ParamForm
+
+    f = ParamForm()
+    f.set_step("dewow")
+    errors: list[str] = []
+    f.error.connect(errors.append)
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    for typed in ["1,000", "1,5", "nan", "inf"]:
+        errors.clear()
+        f.set_value("window_ns", typed)
+        f.commit()
+        assert errors, typed
+        d.table.item(0, COL_OFFSET).setText(typed)
+        assert d.rows[0].offset == 0.25 and "not a number" in d.status.text(), typed
+
+
+def test_a_reentrant_refresh_does_not_clear_the_guard_early(session, tmp_path):
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    seen: list[bool] = []
+    real = d.table.resizeColumnsToContents
+    state = {"first": True}
+
+    def nested() -> None:
+        if state["first"]:
+            state["first"] = False
+            d._refresh_table()  # the inner call returns while the outer is open
+            seen.append(bool(d._updating))
+            # an edit delivered now must still be ignored by the outer block
+            d._on_item_changed(d.table.item(0, COL_LABEL))
+        real()
+
+    d.table.resizeColumnsToContents = nested  # type: ignore[method-assign]
+    d.rows[0].label = "kept"
+    d._refresh_table()
+    assert seen == [True]
+    assert d.rows[0].label == "kept"
+    assert not d._updating
+
+
+def test_a_reentrant_follow_spacing_does_not_clear_its_guard_early(session):
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    seen: list[bool] = []
+    real = d.first_offset.setValue
+    state = {"first": True}
+
+    def nested(v: float) -> None:
+        if state["first"]:
+            state["first"] = False
+            d._follow_spacing()
+            seen.append(bool(d._following))
+            d._first_offset_changed()  # must still read as our own write
+        real(v)
+
+    d.first_offset.setValue = nested  # type: ignore[method-assign]
+    d._first_offset_own = False
+    d._follow_spacing()
+    assert seen == [True]
+    assert not d._first_offset_own
+    assert not d._following
+
+
+def test_a_preset_that_cannot_be_applied_is_reported_and_the_import_stands(
+    session, tmp_path, monkeypatch
+):
+    _with_presets(session, tmp_path, "One")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files(_files(tmp_path, (1,)))
+    _choose(d, "One")
+
+    def boom(*a, **k):
+        raise RuntimeError("no disk")
+
+    monkeypatch.setattr(session, "apply_preset_to", boom)
+    d_dlg.accept()
+    assert d_dlg.result() == d_dlg.DialogCode.Accepted
+    assert len(session.keys_on_grid("A")) == 1
+    assert d.imported_keys == session.keys_on_grid("A")
+    assert "could not be applied" in d.status.text()
+    assert "no disk" in d.status.text()
+
+
+# ---- final review F2: only a grid somebody chose can be "lost" ----------------
+
+
+def _gridless(qgis_app, tmp_path):
+    s = SiteSession()
+    s.new_site(tmp_path)
+    return s
+
+
+def test_a_grid_the_combo_filled_in_by_itself_and_lost_again_is_not_a_loss(qgis_app, tmp_path):
+    # The GPS page's add_grid() on a gridless site fills this page's empty
+    # combo; its rollback removes the grid again. Nothing was ever chosen.
+    s = _gridless(qgis_app, tmp_path)
+    dlg = AddDataDialog(s, grid_id=None, mode=MODE_GRID)
+    page = dlg.grid_page
+    s.add_grid(GRID)
+    assert page.grid_combo.currentData() == "A"
+    s.remove_grid("A")
+    assert page._lost is None
+    s.add_grid(GRID_B)
+    assert page._lost is None
+    page.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    page.import_lines()
+    assert "no longer exists" not in page.status.text()
+
+
+def test_last_grid_removed_then_a_new_one_added_does_not_refuse_naming_the_old(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    s.add_grid(GRID)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    s.add_grid(GRID_B)
+    assert page.grid_combo.currentData() == "B"
+    assert page._lost is None
+    page.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    assert page.import_lines() is True
+
+
+def test_a_user_pick_clears_the_loss(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    for g in (GRID, GRID_B, GRID_C):
+        s.add_grid(g)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    page.grid_combo.activated.emit(page.grid_combo.findData("C"))
+    page.grid_combo.setCurrentIndex(page.grid_combo.findData("C"))
+    assert page._lost is None
+
+
+def test_a_retarget_clears_the_loss(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    for g in (GRID, GRID_B):
+        s.add_grid(g)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    page.retarget("B")
+    assert page._lost is None

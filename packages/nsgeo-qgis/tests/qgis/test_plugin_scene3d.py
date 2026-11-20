@@ -1,0 +1,792 @@
+"""M16 C Task 2: `Scene3D` shows a grid's picks at depth and its surfaces in a (fake) 3-D view.
+
+The real `createNewMapCanvas3D` hangs offscreen, so every test goes through `FakeIface`'s fake
+canvas. Synthetic lines on a real GeoPackage, so these run on CI."""
+
+from __future__ import annotations
+
+import re
+import types
+
+import numpy as np
+import pytest
+from nsgeo.geometry import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
+from nsgeo.slices import SurfaceSettings
+from nsgeo_qgis.scene3d import Scene3D
+from nsgeo_qgis.scene3d_plan import (
+    BUTTON_TIP,
+    NO_GRID,
+    VIEW_FAILED,
+    VIEW_NAME,
+    VIEW_REFUSED,
+    view_title,
+)
+from nsgeo_qgis.surface_layers import SurfaceLayers
+from plugin_testing import GRID, spin_until, synthetic_dzt
+from qgis.core import QgsProject, QgsReadWriteContext
+from qgis.PyQt.QtXml import QDomDocument
+from test_plugin_surface_build import PICKS, _noop, _pick, _surface
+
+A = GRID.id
+B = "Grid B"
+
+
+def _vertical_scale(layer):
+    """The layer's 3-D mesh symbol's `vertical-scale`, or None when it has no renderer."""
+    renderer = layer.renderer3D()
+    if renderer is None:
+        return None
+    doc = QDomDocument()
+    root = doc.createElement("r")
+    doc.appendChild(root)
+    renderer.writeXml(root, QgsReadWriteContext())
+    (found,) = re.findall(r'vertical-scale="([^"]+)"', doc.toString())
+    return float(found)
+
+
+def _all_rows(layers):
+    picks = layers.layers["picks"]
+    return layers.pick_rows(picks.dataProvider().allFeatureIds())
+
+
+def _depths_of(scene, grid_id):
+    """`pick_depths` for every saved pick on `grid_id`, the Nones dropped."""
+    _, session, surfaces, _, _, export = scene
+    rows = [(r.pick.line_key, r.pick) for r in _all_rows(surfaces.layers)]
+    return [d for d in export.pick_depths(grid_id, rows) if d is not None]
+
+
+def _z(scene):
+    return sorted(f.geometry().constGet().z() for f in scene[0].picks_layer.getFeatures())
+
+
+@pytest.fixture
+def scene(built_site, tmp_path, fake_iface):
+    """`(scene3d, session, surfaces, surface_layers, iface, export)`: grid A with a built
+    surface, grid B (a line, four picks) with another, both shown on the map."""
+    session, _, export, layers, surfaces = built_site
+    project = QgsProject.instance()
+    record_a, _ = _surface(built_site, "Bowl A")
+    surfaces.build([record_a.feature_id], progress=_noop)
+    session.add_grid(Grid(B, (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    paths = [synthetic_dzt(tmp_path / "rawb", f"B__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    session.add_lines(
+        [Line.open(p, GridPlacement(B, "y", 0.5 + i, 0.0, 1, p.stem)) for i, p in enumerate(paths)]
+    )
+    keys = session.keys_on_grid(B)
+    for line, trace, time_ns in PICKS:
+        layers.write_pick(_pick(keys[line], trace, time_ns))
+    fids = sorted(f.id() for f in layers.layers["picks"].dataProvider().getFeatures())[-4:]
+    record_b = surfaces.create("Bowl B", fids, SurfaceSettings(strength=0.0))
+    surfaces.build([record_b.feature_id], progress=_noop)
+    sl = SurfaceLayers(session, layers, surfaces, project=project)
+    sl.sync()
+    state = types.SimpleNamespace(scope="grid", grid=A)
+    dock = types.SimpleNamespace(
+        scope=lambda: state.scope,
+        grid_combo=types.SimpleNamespace(currentText=lambda: state.grid),
+        state=state,
+    )
+    s3d = Scene3D(session, layers, surfaces, sl, lambda: export, dock, fake_iface, project=project)
+    s3d.dock_state = state
+    yield s3d, session, surfaces, sl, fake_iface, export
+    s3d.dispose()
+    sl.dispose()
+
+
+def test_open_shows_the_scene_grids_picks_and_surfaces(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    session._set_dirty(False)
+    s3d.open()
+    assert s3d.is_open() and s3d.grid_id == A
+    shown = surface_layers.layers_by_feature()
+    assert len(shown) == 2
+    for rec in surfaces.records():
+        expect = 3.0 if rec.grid_id == A else None
+        assert _vertical_scale(shown[rec.feature_id]) == expect
+    pts = list(s3d.picks_layer.getFeatures())
+    depths = _depths_of(scene, A)
+    assert len(depths) == 4 and len(pts) == 4
+    assert sorted(f.geometry().constGet().z() for f in pts) == pytest.approx(
+        sorted(-d * 3.0 for d in depths)
+    )
+    settings = iface.canvases3d[VIEW_NAME].mapSettings()
+    assert settings.terrainRenderingEnabled() is False
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
+    assert len(iface.canvases3d[VIEW_NAME].cameraController().poses) == 1
+    assert session.dirty is False
+    # QGIS resets the view to the map's layers in the tick it opens; the 0 ms re-set from the
+    # layer tree puts the picks layer back (the fake alone copies at creation and would pass)
+    settings.setLayers([])
+    assert spin_until(lambda: s3d.picks_layer.id() in [lyr.id() for lyr in settings.layers()])
+
+
+def test_opening_again_reuses_the_view_and_brings_it_forward(scene):
+    s3d, _, _, _, iface, _ = scene
+    s3d.open()
+    dialog = iface.dialogs3d[VIEW_NAME]
+    before = dialog.raised
+    s3d.open()
+    assert iface.created3d == 1 and s3d.is_open()
+    assert dialog.raised == before + 1
+
+
+def test_a_view_closed_by_hand_cleans_up_and_opens_again(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    session._set_dirty(False)
+    s3d.open()
+    picks_id = s3d.picks_layer.id()
+    iface.closeMapCanvas3D(VIEW_NAME)
+    assert not s3d.is_open()
+    assert QgsProject.instance().mapLayer(picks_id) is None and s3d.picks_layer is None
+    assert all(lyr.renderer3D() is None for lyr in surface_layers.layers_by_feature().values())
+    assert session.dirty is False
+    s3d.open()
+    assert iface.created3d == 2 and s3d.is_open()
+    s3d.close()
+    assert not s3d.is_open() and iface.canvases3d == {}
+    assert all(lyr.renderer3D() is None for lyr in surface_layers.layers_by_feature().values())
+    assert session.dirty is False
+
+
+def test_a_new_pick_and_a_rebuild_show_without_reopening(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    session._set_dirty(False)
+    s3d.open()
+    n = len(list(s3d.picks_layer.getFeatures()))
+    keys = session.keys_on_grid(A)
+    surfaces.layers.write_pick(_pick(keys[0], 30, 10.2))
+    session.picks_changed.emit()  # as the picks layer's edits announce a pick
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == n + 1)
+    # a rebuild puts a new layer on the map; the listener gives it the renderer
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    old = surface_layers.layers_by_feature()[record.feature_id].id()
+    surfaces.set_settings(record.feature_id, SurfaceSettings(strength=0.0, window_m=0.03))
+    surfaces.build([record.feature_id], progress=_noop)
+    surface_layers.sync()
+    new = surface_layers.layers_by_feature()[record.feature_id]
+    assert new.id() != old
+    assert spin_until(lambda: _vertical_scale(new) == 3.0)
+    assert session.dirty is False
+
+
+def test_the_stretch_restretches_picks_and_surfaces(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    depths = _depths_of(scene, A)
+    session.set_view_stretch(A, 2.0)
+    s3d.refresh()
+    assert _z(scene) == pytest.approx(sorted(-d * 2.0 for d in depths))
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    assert _vertical_scale(surface_layers.layers_by_feature()[record.feature_id]) == 2.0
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
+    assert "×2" in iface.dialogs3d[VIEW_NAME].windowTitle()
+
+
+def test_the_exports_stretch_no_longer_moves_the_view(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    depths = _depths_of(scene, A)
+    session.remember_volume(A, stretch=7.0)  # the ParaView export's own setting
+    s3d.refresh()
+    assert _z(scene) == pytest.approx(sorted(-d * 3.0 for d in depths))
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
+
+
+def _record_renderer_clears(layer, project, log):
+    layer.renderer3DChanged.connect(
+        lambda: log.append((project.mapLayer(layer.id()) is not None, layer.renderer3D() is None))
+    )
+
+
+def test_a_surface_layer_loses_its_3d_renderer_before_it_is_deleted(scene):
+    """The view's scene keeps a raw pointer to each layer it draws: a layer deleted with its
+    renderer on crashed QGIS (walkthrough L2)."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    layer_id = layer.id()
+    assert layer.renderer3D() is not None
+    log: list = []
+    _record_renderer_clears(layer, QgsProject.instance(), log)
+    QgsProject.instance().removeMapLayer(layer_id)
+    assert (True, True) in log
+
+
+def test_a_rebuild_clears_the_old_layers_renderer_while_it_is_still_in_the_project(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    old = surface_layers.layers_by_feature()[record.feature_id]
+    log: list = []
+    _record_renderer_clears(old, QgsProject.instance(), log)
+    surfaces.set_settings(record.feature_id, SurfaceSettings(strength=0.0, window_m=0.03))
+    surfaces.build([record.feature_id], progress=_noop)
+    surface_layers.sync()
+    assert (True, True) in log
+
+
+def test_a_layer_only_the_view_applied_a_renderer_to_is_cleared_too(scene):
+    """The view does not depend on SurfaceLayers' bookkeeping order (review C1)."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    assert layer.id() in s3d._applied
+    surface_layers._shown.pop(record.feature_id)  # SurfaceLayers has already forgotten it
+    assert layer.id() not in [x.id() for x in surface_layers.layers_by_feature().values()]
+    s3d._on_layers_will_be_removed([layer.id()])
+    assert layer.renderer3D() is None
+
+
+def test_surface_layers_keep_a_surface_until_its_layer_is_removed(scene):
+    """A deleted surface is still listed while QGIS announces its layer's removal."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer_id = surface_layers.layers_by_feature()[record.feature_id].id()
+    seen: list = []
+    QgsProject.instance().layersWillBeRemoved.connect(
+        lambda ids: seen.append(
+            layer_id in ids
+            and layer_id in [x.id() for x in surface_layers.layers_by_feature().values()]
+        )
+    )
+    surfaces.delete(record.feature_id)
+    surface_layers.sync()
+    assert seen == [True]
+
+
+def test_deleting_a_surface_with_the_view_open_clears_its_renderer_first(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    log: list = []
+    _record_renderer_clears(layer, QgsProject.instance(), log)
+    surfaces.delete(record.feature_id)
+    surface_layers.sync()
+    assert (True, True) in log
+
+
+def test_a_layer_the_view_does_not_manage_keeps_its_renderer_when_removed(scene):
+    from nsgeo_qgis.scene3d import _picks_renderer
+    from qgis.core import QgsVectorLayer
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    other = QgsVectorLayer("PointZ?crs=EPSG:32616", "other", "memory")
+    other.setRenderer3D(_picks_renderer())
+    QgsProject.instance().addMapLayer(other, False)
+    log: list = []
+    other.renderer3DChanged.connect(lambda: log.append(1))
+    QgsProject.instance().removeMapLayer(other.id())
+    assert log == []
+
+
+def test_the_scene_gives_up_the_removal_handler_on_dispose(scene):
+    from nsgeo_qgis.scene3d import _picks_renderer
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    s3d.dispose()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    layer = surface_layers.layers_by_feature()[record.feature_id]
+    layer.setRenderer3D(_picks_renderer())
+    log: list = []
+    layer.renderer3DChanged.connect(lambda: log.append(1))
+    QgsProject.instance().removeMapLayer(layer.id())
+    assert log == []
+
+
+def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    poses = iface.canvases3d[VIEW_NAME].cameraController().poses
+    assert len(poses) == 1
+    s3d.dock_state.grid = B
+    s3d.refresh()
+    assert s3d.grid_id == B
+    for rec in surfaces.records():
+        expect = 3.0 if rec.grid_id == B else None
+        assert _vertical_scale(surface_layers.layers_by_feature()[rec.feature_id]) == expect
+    assert len(poses) == 2 and poses[1][0].x() > 15.0  # framed on grid B
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(B, 3.0, 0)
+    s3d.dock_state.scope = "site"
+    s3d.dock_state.grid = A
+    s3d.refresh()
+    assert s3d.grid_id == B and len(poses) == 2
+
+
+def test_a_stale_surface_is_counted_in_the_title(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    (record,) = [r for r in surfaces.records() if r.grid_id == A]
+    surfaces.set_settings(record.feature_id, SurfaceSettings(strength=0.0, window_m=0.03))
+    s3d.refresh()
+    title = iface.dialogs3d[VIEW_NAME].windowTitle()
+    assert title == view_title(A, 3.0, 1) and title.endswith("1 surface stale")
+
+
+def test_an_empty_grid_opens_an_empty_scene_with_its_title(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    session.add_grid(Grid("Grid C", (40.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    s3d.dock_state.grid = "Grid C"
+    s3d.open()
+    assert s3d.grid_id == "Grid C" and list(s3d.picks_layer.getFeatures()) == []
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title("Grid C", 3.0, 0)
+    assert len(iface.canvases3d[VIEW_NAME].cameraController().poses) == 1
+
+
+def test_a_picks_layer_removed_by_hand_comes_back(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    first = s3d.picks_layer.id()
+    # let open()'s own 0 ms layer re-set fire first, or it would also serve the refresh below
+    settings = iface.canvases3d[VIEW_NAME].mapSettings()
+    assert spin_until(lambda: not s3d._layers_timer.isActive())
+    # a handler connected after the fake's own copy empties the view's layers as the picks
+    # layer is added, standing in for QGIS's same-tick miss
+    miss = lambda *_: settings.setLayers([])  # noqa: E731
+    QgsProject.instance().layersAdded.connect(miss)
+    QgsProject.instance().removeMapLayer(first)
+    s3d.refresh()  # the picks layer is recreated here, and the view's layers re-set on a turn
+    QgsProject.instance().layersAdded.disconnect(miss)
+    assert s3d.picks_layer is not None and s3d.picks_layer.id() != first
+    assert QgsProject.instance().mapLayer(s3d.picks_layer.id()) is not None
+    assert len(list(s3d.picks_layer.getFeatures())) == 4
+    assert s3d.picks_layer.id() not in [lyr.id() for lyr in settings.layers()]
+    assert spin_until(lambda: s3d.picks_layer.id() in [lyr.id() for lyr in settings.layers()])
+
+
+def test_a_cleared_project_forgets_the_scene_layers(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    QgsProject.instance().clear()
+    assert s3d.picks_layer is None
+    s3d.close()
+    s3d.open()
+    assert s3d.is_open() and s3d.picks_layer is not None
+
+
+def _no_scene_layers_left(s3d, surface_layers):
+    assert s3d.picks_layer is None
+    assert not any(
+        lyr.name() == "Picks at depth (3D view)"
+        for lyr in QgsProject.instance().mapLayers().values()
+    )
+    assert all(lyr.renderer3D() is None for lyr in surface_layers.layers_by_feature().values())
+
+
+def test_a_leftover_view_of_the_same_name_is_closed_and_a_fresh_one_opens(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    old = iface.createNewMapCanvas3D(VIEW_NAME)  # as a view restored with a saved project
+    assert old is not None
+    s3d.open()
+    assert s3d.is_open() and iface.created3d == 2
+    assert iface.canvases3d[VIEW_NAME] is not old
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0)
+
+
+def test_a_refused_view_raises_and_leaves_nothing_behind(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.refuse3d = True
+    with pytest.raises(RuntimeError, match="3-D view"):
+        s3d.open()
+    assert not s3d.is_open() and s3d.grid_id is None
+    _no_scene_layers_left(s3d, surface_layers)
+    iface.refuse3d = False
+    s3d.open()  # a later open works
+    assert s3d.is_open()
+
+
+def test_a_docked_view_is_retitled_and_a_swapped_holder_still_is(scene):
+    from qgis.PyQt.QtWidgets import QDockWidget
+
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.dock3d = True
+    s3d.open()
+    holder = iface.dialogs3d[VIEW_NAME]
+    assert isinstance(holder, QDockWidget)
+    assert holder.windowTitle() == view_title(A, 3.0, 0)
+    before = holder.raised
+    s3d.open()
+    assert holder.raised == before + 1
+    iface.swap_holder3d(VIEW_NAME)
+    assert not isinstance(iface.dialogs3d[VIEW_NAME], QDockWidget)
+    session.set_view_stretch(A, 2.0)
+    s3d.refresh()
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 2.0, 0)
+
+
+def test_a_dock_toggle_retitles_the_new_holder_without_another_refresh(scene):
+    """QGIS re-applies the view's creation name to the holder a dock toggle builds, so the
+    stretch must come back on its own (the old holder going is the cue)."""
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    iface.swap_holder3d(VIEW_NAME)
+    assert iface.dialogs3d[VIEW_NAME].windowTitle() == VIEW_NAME
+    assert spin_until(lambda: iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0))
+    iface.swap_holder3d(VIEW_NAME)  # and back, the new holder is hooked too
+    assert spin_until(lambda: iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(A, 3.0, 0))
+
+
+def _settle(s3d):
+    assert spin_until(lambda: not s3d._layers_timer.isActive() and not s3d._timer.isActive())
+
+
+def _count_3d_updates(layer):
+    seen = []
+    layer.request3DUpdate.connect(lambda: seen.append(1))
+    return seen
+
+
+def test_picks_update_in_the_open_scene_after_a_new_pick_a_stretch_and_a_grid_switch(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    seen = _count_3d_updates(s3d.picks_layer)
+    s3d.refresh()  # nothing changed: no rebuild of the entities (flicker)
+    assert seen == []
+    surfaces.layers.write_pick(_pick(session.keys_on_grid(A)[0], 30, 10.2))
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(seen) == 1)
+    session.set_view_stretch(A, 2.0)
+    s3d.refresh()
+    assert len(seen) == 2
+    s3d.dock_state.grid = B
+    s3d.refresh()
+    assert len(seen) == 3
+    s3d.refresh()
+    assert len(seen) == 3
+
+
+def test_a_frame_rebuilds_the_views_layers_in_its_new_crs(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    settings = iface.canvases3d[VIEW_NAME].mapSettings()
+    full = sorted(lyr.id() for lyr in settings.layers())
+    assert s3d.picks_layer.id() in full
+    seen = []
+    settings.layersChanged.connect(
+        lambda: seen.append(sorted(lyr.id() for lyr in settings.layers()))
+    )
+    s3d.dock_state.grid = B  # a grid change frames the view again
+    s3d.refresh()
+    _settle(s3d)
+    assert seen == [[], full]
+
+
+def test_a_moved_grid_is_framed_again(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    _settle(s3d)
+    poses = iface.canvases3d[VIEW_NAME].cameraController().poses
+    s3d.refresh()
+    assert len(poses) == 1  # nothing moved
+    before = iface.canvases3d[VIEW_NAME].mapSettings().origin().x()
+    g = session.grid(A)
+    session.replace_grid(
+        Grid(
+            A,
+            (g.origin[0] + 50.0, g.origin[1]),
+            g.azimuth,
+            g.size_x,
+            g.size_y,
+            g.crs,
+            g.default_spacing,
+        )
+    )
+    s3d.refresh()
+    assert len(poses) == 2 and poses[1][0].x() == pytest.approx(poses[0][0].x() + 50.0)
+    after = iface.canvases3d[VIEW_NAME].mapSettings().origin().x()
+    assert after == pytest.approx(before + 50.0)
+
+
+def test_the_scene_extent_has_a_margin_round_the_grid(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.open()
+    ext = iface.canvases3d[VIEW_NAME].mapSettings().extent()
+    g = session.grid(A)
+    assert ext.width() >= g.size_x + 2.0 and ext.height() >= g.size_y + 2.0
+
+
+def test_a_3_40_camera_without_a_map_point_call_is_framed_with_reset_view(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    iface.legacy_camera3d = True
+    s3d.open()
+    assert s3d.is_open()
+    resets = iface.canvases3d[VIEW_NAME].cameraController().resets
+    assert len(resets) == 1 and resets[0] > 0
+
+
+def test_a_failed_frame_closes_the_real_view_and_leaves_nothing(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+
+    def boom(grid):
+        raise RuntimeError("no corners")
+
+    s3d._corners = boom
+    with pytest.raises(RuntimeError, match="no corners"):
+        s3d.open()
+    assert iface.created3d == 1 and iface.canvases3d == {}
+    assert not s3d.is_open()
+    _no_scene_layers_left(s3d, surface_layers)
+
+
+def test_the_picks_layer_is_marked_temporary_hidden_from_identify_and_drawn_as_spheres(scene):
+    from qgis.core import Qgis, QgsMapLayer, QgsNullSymbolRenderer
+
+    s3d, *_ = scene
+    s3d.open()
+    layer = s3d.picks_layer
+    assert layer.customProperty("skipMemoryLayersCheck") == 1
+    assert not (layer.flags() & QgsMapLayer.LayerFlag.Identifiable)
+    assert isinstance(layer.renderer(), QgsNullSymbolRenderer)
+    assert layer.renderer3D().symbol().shape() == Qgis.Point3DShape.Sphere
+
+
+def test_the_picks_layer_declares_its_depth_field_without_a_crs(scene):
+    s3d, *_ = scene
+    s3d.layers.crs = lambda: None
+    s3d.open()
+    assert "true_depth_m" in s3d.picks_layer.fields().names()
+    assert len(list(s3d.picks_layer.getFeatures())) == 4
+
+
+def test_a_picks_layer_in_a_subgroup_still_gets_the_scene_layer_beside_it(scene):
+    s3d, *_ = scene
+    group = s3d.layers.group
+    picks = s3d.layers.layers["picks"]
+    node = group.findLayer(picks.id())
+    sub = group.addGroup("sub")
+    sub.addChildNode(node.clone())
+    group.removeChildNode(node)
+    s3d.open()
+    assert s3d.is_open()
+    assert s3d.project.layerTreeRoot().findLayer(s3d.picks_layer.id()) is not None
+    s3d.close()
+    assert not _scene_layers_in_project()
+
+
+def test_removing_the_scene_grid_in_whole_site_falls_back_to_the_panels_grid(scene):
+    s3d, session, surfaces, surface_layers, iface, _ = scene
+    s3d.dock_state.grid = B
+    s3d.open()
+    s3d.dock_state.scope = "site"
+    s3d.dock_state.grid = A
+    session.remove_grid(B, with_lines=True)
+    s3d.refresh()
+    assert s3d.grid_id == A
+    assert iface.dialogs3d[VIEW_NAME].windowTitle().startswith(view_title(A, 3.0, 0))
+
+
+def test_a_missing_mesh_renderer_is_logged_not_silent(scene, monkeypatch):
+    from nsgeo_qgis import scene3d
+
+    logged = []
+    monkeypatch.setattr(scene3d, "_log", logged.append)
+    registry = scene3d.QgsApplication.renderer3DRegistry()
+    monkeypatch.setattr(type(registry), "rendererMetadata", lambda self, name: None, raising=False)
+    monkeypatch.setattr("qgis._3d.Qgs3D.initialize", staticmethod(lambda: None), raising=False)
+    s3d, *_ = scene
+    s3d.open()
+    assert any("mesh 3-D renderer" in line for line in logged)
+
+
+# ---- Task 3: the plugin's 3D view button ----------------------------------------------------
+
+
+def _scene_layers_in_project():
+    return [
+        lyr for lyr in QgsProject.instance().mapLayers().values() if "Picks at depth" in lyr.name()
+    ]
+
+
+def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin):
+    plugin = surface_plugin
+    assert plugin.act_view3d.text() == "3D view"
+    assert plugin.act_view3d.toolTip() == BUTTON_TIP
+    plugin.act_view3d.trigger()
+    assert plugin.scene3d.is_open()
+    assert plugin.scene3d.grid_id == plugin.slices_dock.grid_combo.currentText() == GRID.id
+    assert VIEW_NAME in plugin.iface.canvases3d
+
+
+def test_a_scope_change_reaches_the_scene(surface_plugin):
+    plugin = surface_plugin
+    seen = []
+    plugin.slices_dock.scope_changed.connect(seen.append)
+    plugin.slices_dock.set_scope("site")
+    assert seen == ["site"]
+    plugin.slices_dock.set_scope("site")
+    assert seen == ["site"]
+    plugin.slices_dock.set_scope("grid")
+    assert seen == ["site", "grid"]
+
+
+def test_a_scope_change_schedules_a_refresh_of_an_open_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.open_view3d()
+    refreshed = []
+    real = plugin.scene3d.refresh
+    plugin.scene3d.refresh = lambda: (refreshed.append(1), real())
+    plugin.slices_dock.set_scope("site")
+    assert plugin.scene3d._timer.isActive()
+    assert spin_until(lambda: refreshed)
+    assert plugin.scene3d.grid_id == GRID.id
+
+
+def test_the_scene_follows_the_combo_through_repeat_switches_and_keeps_its_grid_in_site(
+    surface_plugin, tmp_path
+):
+    plugin = surface_plugin
+    session = plugin.session
+    session.add_grid(Grid(B, (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    paths = [synthetic_dzt(tmp_path / "rawb", f"B__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    session.add_lines(
+        [Line.open(p, GridPlacement(B, "y", 0.5 + i, 0.0, 1, p.stem)) for i, p in enumerate(paths)]
+    )
+    combo = plugin.slices_dock.grid_combo
+    assert combo.findText(B) >= 0
+    plugin.open_view3d()
+    assert plugin.scene3d.grid_id == GRID.id
+    for want in (B, A, B, A):
+        combo.setCurrentText(want)
+        assert spin_until(lambda want=want: plugin.scene3d.grid_id == want), want
+    plugin.slices_dock.set_scope("site")
+    combo.setCurrentText(B)
+    spin_until(lambda: False, timeout_ms=500)
+    assert plugin.scene3d.grid_id == A
+
+
+def test_an_unexpected_failure_opening_the_view_is_reported_not_raised(surface_plugin):
+    plugin = surface_plugin
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+
+    def boom():
+        raise OSError("disk gone")
+
+    plugin.scene3d.open = boom
+    plugin.open_view3d()
+    assert messages == [VIEW_FAILED.format(error=OSError("disk gone"))]
+
+
+def test_open_with_no_grid_warns_in_the_message_bar_and_does_not_raise(surface_plugin):
+    plugin = surface_plugin
+    plugin.slices_dock.grid_combo.clear()
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+    plugin.open_view3d()
+    assert messages == [NO_GRID] and not plugin.scene3d.is_open()
+
+
+def test_a_refused_view_warns_in_the_message_bar(surface_plugin):
+    plugin = surface_plugin
+    plugin.iface.refuse3d = True
+    messages = []
+    plugin.message = lambda text, level=None, *a, **k: messages.append(text)
+    plugin.open_view3d()
+    assert messages == [VIEW_REFUSED] and not plugin.scene3d.is_open()
+
+
+def test_closing_the_site_closes_the_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.surfaces.create("Bowl", plugin.pick_fids, SurfaceSettings(strength=0.0))
+    (record,) = plugin.surfaces.records()
+    plugin.surfaces.build([record.feature_id], progress=_noop)
+    plugin.surface_layers.sync()
+    plugin.open_view3d()
+    assert plugin.scene3d.is_open() and _scene_layers_in_project()
+    shown = list(plugin.surface_layers.layers_by_feature().values())
+    assert shown and all(lyr.renderer3D() is not None for lyr in shown)
+    log: list = []
+    project = QgsProject.instance()
+    for lyr in [*shown, plugin.scene3d.picks_layer]:
+        _record_renderer_clears(lyr, project, log)
+    plugin.session.close_site()
+    assert log.count((True, True)) == len(shown) + 1
+    assert not plugin.scene3d.is_open()
+    assert not _scene_layers_in_project()
+    assert all(lyr.renderer3D() is None for lyr in shown if _alive(lyr))
+    assert not plugin.surface_layers.layers_by_feature()
+
+
+def _alive(layer):
+    from qgis.PyQt import sip
+
+    return not sip.isdeleted(layer)
+
+
+def test_a_failing_close_does_not_escape_the_site_closed_slot(surface_plugin):
+    plugin = surface_plugin
+
+    def boom():
+        raise RuntimeError("boom")
+
+    real = plugin.scene3d.close
+    plugin.scene3d.close = boom
+    try:
+        plugin._close_view3d()  # logs, never raises
+    finally:
+        plugin.scene3d.close = real
+
+
+def test_unload_closes_the_view(surface_plugin):
+    plugin = surface_plugin
+    plugin.open_view3d()
+    iface = plugin.iface
+    plugin.unload()
+    assert VIEW_NAME not in iface.canvases3d
+    assert not _scene_layers_in_project()
+    assert plugin.scene3d is None
+
+
+def test_the_3d_view_shows_the_grids_cut_picks(scene):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+
+    s3d, session, surfaces, _, _, export = scene
+    s3d.open()
+    before = list(s3d.picks_layer.getFeatures())
+    assert len(before) == 4
+    cut_key = _cut_along_line_0(session)
+    _write_cut_picks(surfaces.layers, cut_key, [(3.0, 10.4)])
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 5)
+    (cut_depth,) = [
+        d
+        for r in _all_rows(surfaces.layers)
+        for d in export.pick_depths(A, [(r.pick.line_key, r.pick)])
+        if d is not None and r.pick.line_key == cut_key
+    ]
+    # the point sits at -depth * stretch (3.0), exactly one more than before
+    assert cut_depth > 0.0
+    assert sorted(_z(scene)) == pytest.approx(
+        sorted([f.geometry().constGet().z() for f in before] + [-cut_depth * 3.0])
+    )
+    # and its x/y are the cut's point at the stored distance, through the grid
+    cut = session.cut_for_key(cut_key)
+    want = session.grid(A).to_world(np.asarray([cut.point_at(3.0)], dtype=float))[0]
+    (spot,) = [
+        f.geometry().constGet()
+        for f in s3d.picks_layer.getFeatures()
+        if abs(f.geometry().constGet().z() + cut_depth * 3.0) < 1e-6
+    ]
+    assert (spot.x(), spot.y()) == pytest.approx((float(want[0]), float(want[1])))
+
+
+def test_deleting_a_cut_takes_its_picks_out_of_the_3d_view(scene):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+
+    s3d, session, surfaces, _, _, _ = scene
+    s3d.open()
+    cut_key = _cut_along_line_0(session)
+    _write_cut_picks(surfaces.layers, cut_key, [(3.0, 10.4)])
+    session.picks_changed.emit()
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 5)
+    session.remove_cut(cut_key)  # emits cuts_changed only
+    assert spin_until(lambda: len(list(s3d.picks_layer.getFeatures())) == 4)

@@ -65,6 +65,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import SiteRow
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class Spins:
 
     cell: float
     cell_min: float
+    dz_min: float
     dz: float
     z0: float
     z1: float
@@ -181,39 +183,25 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
     return SiteSource(transform=transform, grids=tuple(grids))
 
 
-def _then(text: str, sentence: str) -> str:
-    """`sentence` after `text` as its own sentence (a full stop is added if `text` has none)."""
-    if text and not text.endswith((".", "!", "?")):
-        text += "."
-    return f"{text} {sentence}".strip()
-
-
-def grid_time_bases(
-    session: Any, source: SiteSource, site_engine: Any | None = None
-) -> dict[str, str]:
+def grid_time_bases(session: Any, source: SiteSource, site_engine: Any) -> dict[str, str]:
     """Each grid's clock, as the picture and the export have it (#97, ruling R15).
 
     A ready grid is read from the steps its preparation captured
-    (`provenance().steps`), which a later save over the preset does not
+    (`prepared_steps`), which a later save over the preset does not
     change. A grid still queued or preparing has no cubes yet, so its live
     preset stands in. A grid with no lines or a failed preparation is not
-    drawn or exported, so it is left out. Without `site_engine` every grid
-    is read from its live preset.
+    drawn or exported, so it is left out.
     """
     out: dict[str, str] = {}
     for choice in source.grids:
-        steps: Any = None
-        if site_engine is not None:
-            state = state_text(site_engine, choice.grid_id)
-            engine = site_engine.engine_for(choice.grid_id)
-            if state == "ready" and engine is not None:
-                steps = engine.provenance().steps
-            elif state in ("queued", "waiting") or state.startswith("preparing"):
-                steps = None
-            else:
-                continue
-        if steps is None:
+        state = state_text(site_engine, choice.grid_id)
+        engine = site_engine.engine_for(choice.grid_id)
+        if state == "ready" and engine is not None:
+            steps: Any = engine.prepared_steps
+        elif state in ("queued", "waiting") or state.startswith("preparing"):
             steps = session.site.presets.get(choice.preset, [])
+        else:
+            continue
         out[choice.grid_id] = time_base_of(steps)
     return out
 
@@ -304,24 +292,30 @@ def seed_cell(session: Any, included: Iterable[str]) -> tuple[float, float] | No
     return floor, default_cell(finest, floor)
 
 
-def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float, float] | None:
-    """`(dz, z0, z1)` from the included grids' first lines' headers, before any is prepared.
+def first_headers(session: Any, grids: Iterable[str]) -> list[Any]:
+    """Each grid's first source line's header, for the grids that have a line."""
+    headers = []
+    by_grid = keys_by_grid(session)
+    for grid_id in grids:
+        keys = source_keys(session, grid_id, by_grid)
+        if keys:
+            headers.append(session.line_for_key(keys[0]).header)
+    return headers
+
+
+def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float] | None:
+    """`(z0, z1)` from the included grids' first lines' headers, before any is prepared.
 
     The union of what the headers record; replaced by the prepared bounds
     once a grid is ready (`ready_z_bounds`), as M11 corrects its own
     header-seeded range once its lines are prepared.
     """
-    headers = []
-    by_grid = keys_by_grid(session)
-    for grid_id in included:
-        keys = source_keys(session, grid_id, by_grid)
-        if keys:
-            headers.append(session.line_for_key(keys[0]).header)
+    headers = first_headers(session, included)
     if not headers:
         return None
     lo = min(h.position_ns for h in headers)
     hi = max(h.position_ns + (h.n_samples - 1) * h.dt_ns for h in headers)
-    return headers[0].dt_ns, lo, hi
+    return lo, hi
 
 
 def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
@@ -335,16 +329,6 @@ def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
     if not spans:
         return None
     return min(s[0] for s in spans), max(s[1] for s in spans)
-
-
-def ready_dt(site_engine: Any) -> float | None:
-    """The sample interval of the first ready grid's prepared lines."""
-    for grid_id in site_engine.ready_grids:
-        engine = site_engine.engine_for(grid_id)
-        lines = engine.prepared_lines() if engine is not None else ()
-        if lines:
-            return float(lines[0].dt_ns)
-    return None
 
 
 def levels(z: ZAxis, thickness_ns: float, step_ns: float) -> tuple[int, int]:
@@ -361,18 +345,16 @@ def readout(z: ZAxis, window: SliceWindow, thickness_levels: int, step_levels: i
 
 
 def grid_velocity(session: Any, engine: Any) -> VelocityModel | None:
-    """A grid's velocity, resolved as M11's `_resolved_velocity` resolves it."""
+    """A grid's depth velocity: the one rule cuts and slices share
+    (`SiteSession.grid_depth_velocity`), never a line's override."""
     if engine is None:
         return None
     try:
-        keys = engine.provenance().line_keys
+        choice = engine.choice
+        if choice is None:
+            return None
+        return session.grid_depth_velocity(choice.grid_id)
     except (RuntimeError, KeyError):
-        return None
-    if not keys:
-        return None
-    try:
-        return session.resolved_velocity(keys[0])
-    except (KeyError, RuntimeError):
         return None
 
 
@@ -432,7 +414,6 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
-    dock.site_note.setVisible(site)
     dock.grid_finish.setVisible(not site)
     dock.site_finish.setVisible(site)
     # Residency stays per grid and automatic in the site (spec 4.8).
@@ -455,6 +436,7 @@ def capture_spins(dock: Any) -> Spins:
     return Spins(
         cell=dock.cell_spin.value(),
         cell_min=dock.cell_spin.minimum(),
+        dz_min=dock.dz_spin.minimum(),
         dz=dock.dz_spin.value(),
         z0=dock.z0_spin.value(),
         z1=dock.z1_spin.value(),
@@ -471,6 +453,10 @@ def set_spins_quietly(dock: Any, **values: float) -> bool:
     for name, value in values.items():
         spin = spins[name]
         before = spin.value()
+        if value == before:
+            continue
+        if spin.hasFocus() and spin.cleanText() != spin.textFromValue(before):
+            continue  # half-typed: the user's text is not ours to overwrite
         spin.blockSignals(True)
         try:
             spin.setValue(value)
@@ -481,6 +467,7 @@ def set_spins_quietly(dock: Any, **values: float) -> bool:
 
 
 def restore_spins(dock: Any, spins: Spins) -> None:
+    set_dz_floor(dock, spins.dz_min)
     set_cell_floor(dock, spins.cell_min)
     for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
         spin.setSingleStep(spins.time_step)
@@ -493,6 +480,29 @@ def set_cell_floor(dock: Any, floor: float) -> None:
         dock.cell_spin.setMinimum(floor)
     finally:
         dock.cell_spin.blockSignals(False)
+
+
+def set_dz_floor(dock: Any, floor: float) -> None:
+    """Raise `dz_spin`'s minimum to the sample interval (#177). The box only: a
+    remembered resolution or a cube record is never changed.
+
+    `setMinimum` re-renders the box's text only when it clamps the value, which
+    would lose a half-typed value (#105); it is called only when the floor
+    differs, so a tick that changes nothing never reaches it."""
+    spin = dock.dz_spin
+    if spin.minimum() == round(floor, spin.decimals()):
+        return
+    spin.blockSignals(True)
+    try:
+        spin.setMinimum(floor)
+    finally:
+        spin.blockSignals(False)
+
+
+def site_dt_floor(session: Any, included: Iterable[str]) -> float | None:
+    """The finest sample interval among each included grid's first line, or None."""
+    dts = [float(h.dt_ns) for h in first_headers(session, included)]
+    return min(dts) if dts else None
 
 
 class SiteScope:
@@ -517,6 +527,8 @@ class SiteScope:
         self.res_applied: Resolution | None = None
         #: Why the last resolution was refused (None when it was applied).
         self.problem: str | None = None
+        #: Whether the last tick drew the site (the Warnings section reads it).
+        self.drawn = False
         #: The ready grids the last tick was set up for.
         self.ready_handled: tuple[str, ...] | None = None
         #: `(top_ns, thickness_ns)` of the last tick, as `slice_at` took them:
@@ -857,22 +869,32 @@ class SiteScope:
         if bounds is not None:
             low = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
             high = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
-            dt = ready_dt(self.engine)
         else:
             header = header_z_seed(self.session, included) if included else None
             if header is None:
                 return False
-            dt, low, high = header
+            low, high = header
+        # The default dz is the coarsest included interval from the headers
+        # at all times, ready or not (prepared dt equals the header's), so it
+        # does not flip as the grids become ready (#177).
+        dts = [h.dt_ns for h in first_headers(self.session, included or self.included())]
+        dt = max(dts) if dts else None
+        floor = site_dt_floor(self.session, included if included else self.included())
+        if floor is not None:
+            set_dz_floor(dock, floor)
         remembered = self.session.site_resolution()
         z0 = max(remembered["t0_ns"], low) if "t0_ns" in remembered else low
         z1 = min(remembered["t1_ns"], high) if "t1_ns" in remembered else high
         if z1 <= z0:
             z0, z1 = low, high
         values = {"z0": z0, "z1": z1}
-        if dt is not None:
-            # One sample per arrow click, whatever dz the user chose.
+        step = floor if floor is not None else dt
+        if step is not None:
+            # One finest sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                spin.setSingleStep(dt)
+                # A set re-renders the box's text, losing a half-typed value (#105).
+                if spin.singleStep() != step:
+                    spin.setSingleStep(step)
         if "dz_ns" in remembered:
             values["dz"] = remembered["dz_ns"]
         elif dt is not None:
@@ -902,9 +924,8 @@ class SiteScope:
             self.problem = None
         except Exception as exc:  # noqa: BLE001 -- e.g. a resolution or transform the engine
             # refuses; a size never is one (a big site is drawn as a preview). The
-            # reason is kept for the panel, where it outlasts the toast.
+            # reason stands in the Warnings section, so it is not also a toast.
             self.problem = str(exc)
-            dock.error.emit(str(exc))
         try:
             self.sync_slider()
             if refresh:
@@ -983,8 +1004,16 @@ class SiteScope:
         dock = self.dock
         try:
             z = self.engine.site_z
-            self.show_note(drawn=self.showing and z is not None and self.engine.lattice is not None)
-            if not self.showing or z is None or self.engine.lattice is None:
+            # A rebuild that failed leaves no geometry to draw, whatever the
+            # engine still holds.
+            self.drawn = (
+                self.showing
+                and z is not None
+                and self.engine.lattice is not None
+                and self.engine.geometry_problem is None
+            )
+            dock.show_warnings()
+            if not self.drawn:
                 self.refine.stop()  # nothing drawn: no refine is owed
                 self.slice = None
                 self.window = None
@@ -1056,33 +1085,32 @@ class SiteScope:
             dock.window_cleared.emit()
             dock.error.emit(str(exc))
 
-    def show_note(self, *, drawn: bool) -> None:
-        """The site note: the preview note while drawn, the reason when nothing
-        is drawn and one is known, else empty. The tooltip carries the full
-        text. A preview site still exports at full detail, so it says nothing
-        about the export.
-
-        When the drawn grids are not all on one clock (some have no Time zero
-        step) the note ends with `mixed_clock_note`, as its own sentence, in
-        the text and the tooltip alike; a site wholly on the radar clock says
-        nothing, since its grids still line up."""
-        note = self.dock.site_note
+    def warnings(self) -> list[Entry]:
+        """What stands in the way of the site, for the Warnings section: the
+        preview note while drawn, the reason when nothing is drawn, and the
+        clock warning when the site's grids are not all on one clock (some have
+        no Time zero step; a site wholly on the radar clock says nothing, since
+        its grids still line up). The grids counted are those the site draws or
+        will draw (`grid_time_bases`): a ready grid by the steps it was
+        prepared with, a queued or preparing one by its preset; a grid with no
+        lines or a failed preparation is left out. A preview site still
+        exports at full detail, so it says nothing about the export."""
         engine = self.engine
-        text = hint = ""
-        if drawn and engine.preview_note:
-            text = hint = engine.preview_note
-        elif not drawn and self.problem:
-            text = hint = f"Not drawn: {self.problem}"
+        entries: list[Entry] = []
+        if self.drawn:
+            if engine.preview_note:
+                entries.append(Entry(NOTE, engine.preview_note))
+        else:
+            reason = self.problem or engine.geometry_problem
+            if reason:
+                entries.append(Entry(REFUSAL, f"Not drawn: {reason}"))
         source = self.source_sent or self.source()
         if source is not None:
             bases = grid_time_bases(self.session, source, engine)
             radar = [g for g, base in bases.items() if base == TIME_BASE_RADAR]
             if bases and combined_time_base(bases.values()) == TIME_BASE_MIXED:
-                mixed = mixed_clock_note(radar)
-                text = _then(text, mixed)
-                hint = _then(hint, mixed)
-        note.set_hint(hint, whole=True)
-        note.setText(text)
+                entries.append(Entry(WARNING, mixed_clock_note(radar)))
+        return entries
 
     # ---- minimum curvature's refine ---------------------------------------------------
     def status_text(self) -> str:

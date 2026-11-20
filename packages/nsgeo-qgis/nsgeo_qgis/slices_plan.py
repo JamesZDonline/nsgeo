@@ -26,19 +26,22 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nsgeo.processing import get_step, grouped_steps
+from nsgeo.processing import TIME_BASE_TIME_ZERO, get_step, grouped_steps
 from nsgeo.slices import (
     METHODS,
     NEIGHBOURS_PER_QUADRANT,
     FinishSettings,
     SliceWindow,
+    VolumeSettings,
     ZAxis,
     plan_windows,
 )
+from nsgeo.vtkxml import image_data_bytes
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -202,14 +205,45 @@ class Resolution:
             raise ValueError(f"t1_ns must exceed t0_ns, got {self.t0_ns}..{self.t1_ns}")
 
 
+#: #177: a cube may hold this many levels per sample of its deepest line. The
+#: wheel once took dz to 0.001 ns, a cube 200 times deeper than any record.
+LEVELS_PER_SAMPLE = 2
+
+
+class TooManyLevels(ValueError):
+    """A resolution whose z axis is past `LEVELS_PER_SAMPLE` times the samples."""
+
+
+def level_limit_problem(resolution: Resolution, samples: Sequence[int]) -> str | None:
+    """Why `resolution` makes too many levels for lines of `samples` samples, or None.
+
+    No lines, no limit."""
+    if not samples:
+        return None
+    nz = ZAxis.from_range(resolution.t0_ns, resolution.t1_ns, resolution.dz_ns).nz
+    deepest = max(samples)
+    limit = LEVELS_PER_SAMPLE * deepest
+    if nz <= limit:
+        return None
+    if len(set(samples)) == 1:
+        why = f"twice the {deepest:,} samples in each line"
+    else:
+        why = f"twice the {deepest:,} samples in its deepest line"
+    return (
+        f"Too many levels: dz {resolution.dz_ns:.4g} ns from {resolution.t0_ns:,g} to "
+        f"{resolution.t1_ns:,g} ns makes {nz:,} levels; this cube allows {limit:,} ({why}). "
+        "Narrow z0\u2013z1 or raise dz."
+    )
+
+
 #: What a grid is finished with unless the user says otherwise (interpolation
 #: spec §8): kriging, out to three quarters of a line spacing (the user's
 #: decision of 2026-11-03, interpolation spec §5.2). Half a spacing was the
 #: first default and striped nominal gaps: binning moves each line up to half
 #: a cell, so a gap's middle cell can be ceil(spacing / cell) * cell / 2 from
 #: data, at most (spacing + cell) / 2, which 0.75 covers for any cell up to
-#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.2 m
-#: cell its middle rows are 0.4 m from data.
+#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.1 m
+#: cell its middle rows are about 0.5 m from data, past the 0.375 m reach.
 DEFAULT_METHOD = "kriging"
 DEFAULT_MAX_DISTANCE_SPACINGS = 0.75
 #: The neighbour search reaches at least this many line spacings (plan call 1).
@@ -422,6 +456,33 @@ def old_cube_note(shift_ns: float) -> str:
     )
 
 
+def clock_change_note(cube_id: str, preset: str, to: str, shift_ns: float) -> str:
+    """The one line said when a cube saved on one clock is rebuilt on the other
+    because its preset has gained or lost Time zero since (#162 item 1). `to` is
+    the clock it moved onto. `old_cube_note` stays for a record with no clock."""
+    if to == TIME_BASE_TIME_ZERO:
+        return (
+            f"Cube {cube_id!r} was saved on the radar's clock, and preset {preset!r} now has "
+            "Time zero. It was rebuilt from each line's first break, with its range moved by "
+            f"{shift_ns:+.2f} ns (the median line zero)."
+        )
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        f"It was rebuilt on the radar's clock, with its range moved by {shift_ns:+.2f} ns, "
+        "the median first break as Time zero finds it by default."
+    )
+
+
+def no_break_note(cube_id: str, preset: str) -> str:
+    """Said when a cube's preset has lost Time zero and no prepared line has a
+    first break to move its range by: the range stays as saved, on the wrong
+    clock, and this says so rather than leave it unsaid."""
+    return (
+        f"Cube {cube_id!r} was saved with Time zero, and preset {preset!r} no longer has it. "
+        "No line has a first break to move it by, so its range was left as saved."
+    )
+
+
 #: A site whose grids are not all on one clock (a site-level notion; the two
 #: clocks themselves are the core's `TIME_BASE_TIME_ZERO` and `TIME_BASE_RADAR`).
 TIME_BASE_MIXED = "mixed"
@@ -473,12 +534,13 @@ def preview_note(
 ) -> str:
     """Why the site is drawn coarser than its grids, and what would draw it in full."""
     note = (
-        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail. "
+        f"Preview at {pitch:g} m pixels: the site ({width_m:.0f} \u00d7 {height_m:.0f} m) "
+        f"is too big to draw at {cell:g} m. "
         f"It draws in full at a {finest:g} m cell or coarser."
     )
     if stretching:
-        note += f" Leaving out {name_list(stretching)} would also let it draw in full."
+        grids = "grid" if len(stretching) == 1 else "grids"
+        note = f"{note[:-1]}, or without {grids} {name_list(stretching)}."
     return note
 
 
@@ -691,8 +753,9 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 
 #: Issue #81: the cell a grid starts from, in metres -- fixed, not a
 #: fraction of the line spacing, because along a line the detail is set by
-#: the trace spacing. `default_cell` caps it at half the line spacing.
-DEFAULT_CELL_M = 0.2
+#: the trace spacing. `default_cell` caps it at half the line spacing. 0.1 m
+#: since the session A walkthrough (the author's call; it was 0.2 m).
+DEFAULT_CELL_M = 0.1
 
 
 def default_cell(spacing_m: float, floor: float) -> float:
@@ -853,3 +916,130 @@ def limit_windows(
     # The step is more than one window, so the rounded positions are distinct.
     picks = [int(round(i * (n - 1) / (max_windows - 1))) for i in range(max_windows)]
     return tuple(windows[i] for i in picks)
+
+
+# ---- the 3-D export (M16) ---------------------------------------------------
+
+#: The depth stretch a 3-D export starts at (spec call 5).
+DEFAULT_STRETCH = 3.0
+
+
+def _positive(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0.0
+    )
+
+
+@dataclass(frozen=True)
+class VolumeChoice:
+    """A grid's 3-D settings (spec decision 8): its own cell and depth step, the
+    transform it is binned with, the depth stretch and the volume's parameters."""
+
+    cell: float
+    dz_ns: float
+    transform: str
+    stretch: float = DEFAULT_STRETCH
+    settings: VolumeSettings = VolumeSettings()
+    #: How deep the export goes, in ns on the cube's clock; None is to the end of the record.
+    t1_ns: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("cell", "dz_ns", "stretch"):
+            if not _positive(getattr(self, name)):
+                raise ValueError(f"{name} must be finite and > 0, got {getattr(self, name)!r}")
+        if self.t1_ns is not None and not _positive(self.t1_ns):
+            raise ValueError(f"t1_ns must be None or finite and > 0, got {self.t1_ns!r}")
+
+    def to_record(self) -> dict[str, float | str]:
+        """The fields `Site.slice_sources[grid]["volume"]` remembers."""
+        record: dict[str, float | str] = {
+            "cell": self.cell,
+            "dz_ns": self.dz_ns,
+            "transform": self.transform,
+            "stretch": self.stretch,
+            **self.settings.to_dict(),
+        }
+        if self.t1_ns is not None:
+            record["t1_ns"] = self.t1_ns
+        return record
+
+
+def volume_choice(
+    record: Mapping[str, Any] | None,
+    *,
+    cell_default: float,
+    dz_default: float,
+    transform_default: str,
+    t1_default: float | None = None,
+) -> VolumeChoice:
+    """The grid's 3-D choice: the defaults on first use, then the record, field by field.
+
+    A field that is missing or unusable in `record` reads as unset and takes its default
+    (for the deepest time, `t1_default`, which may be None: to the end of the record).
+    """
+    rec: Mapping[str, Any] = record or {}
+
+    def number(key: str, default: float) -> float:
+        value = rec.get(key)
+        if isinstance(value, (int, float)) and _positive(value):
+            return float(value)
+        return default
+
+    transform = rec.get("transform")
+    return VolumeChoice(
+        cell=number("cell", cell_default),
+        dz_ns=number("dz_ns", dz_default),
+        # "none" is how a combo spells no transform; a record that kept it reads as "".
+        transform=(NO_TRANSFORM if transform == "none" else transform)
+        if isinstance(transform, str)
+        else transform_default,
+        stretch=number("stretch", DEFAULT_STRETCH),
+        settings=VolumeSettings.from_dict(dict(rec)),
+        t1_ns=_positive_or(rec.get("t1_ns"), t1_default),
+    )
+
+
+def _positive_or(value: object, default: float | None) -> float | None:
+    if isinstance(value, (int, float)) and _positive(value):
+        return float(value)
+    return default if default is not None and _positive(default) else None
+
+
+def export_size_bytes(nx: int, ny: int, nd: int) -> int:
+    """What `cube.vti` takes on disk: three float32 arrays. Picks and lines are small
+    enough to ignore."""
+    return image_data_bytes((nx, ny, nd), 3)
+
+
+def too_fine_for_export(cell: float, grid_id: str, cells: int, safe: float) -> str:
+    """Why a 3-D cell cannot be used, and what would work (as the Slices panel says it)."""
+    return (
+        f"a {cell:g} m cell over grid {grid_id!r} is {cells:,} cells, too fine "
+        f"to export; use {safe:g} m or coarser"
+    )
+
+
+def slice_dir_prefix(pid: int) -> str:
+    """The name a process's Slices preview folder starts with: the pid says who owns it."""
+    return f"nsgeo-slice-{pid}-"
+
+
+def slice_dir_pid(name: str) -> int | None:
+    """The pid a Slices preview folder was made for, or None when `name` is not one of ours
+    (`nsgeo-slice-<pid>-<random>`)."""
+    match = re.fullmatch(r"nsgeo-slice-(\d+)-[A-Za-z0-9_]+", name)
+    return int(match.group(1)) if match else None
+
+
+def stale_slice_dirs(names: Iterable[str], is_alive: Callable[[int], bool | None]) -> list[str]:
+    """The preview folders left by a process that is gone. `is_alive` says True, False or None
+    (cannot tell: the folder stays)."""
+    out: list[str] = []
+    for name in names:
+        pid = slice_dir_pid(name)
+        if pid is not None and is_alive(pid) is False:
+            out.append(name)
+    return out

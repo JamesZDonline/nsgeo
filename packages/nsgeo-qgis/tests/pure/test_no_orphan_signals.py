@@ -90,6 +90,12 @@ SHADOWED = {
     # raised). plugin.py connects each tool's `failed` where it builds the tool
     # (`_arm_pick` and `_toggle_cut_tool`), so both declarations are consumed.
     "failed": {"declared": 2, "connects": 2},
+    # M17b Task 4: GridImportPage.changed and GpsImportPage.changed (title,
+    # Import text or enabled state moved). AddDataDialog connects each.
+    "changed": {"declared": 2, "connects": 2},
+    # M17b's AddDataDialog.imported and M19a's MagImportDialog.imported, met at
+    # the main merge (2026-11-20): plugin.py connects each where it opens it.
+    "imported": {"declared": 2, "connects": 2},
     # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
     # connects This grid's panel (Task 4); Task 5 connects the site's, raising
     # connects to 3.
@@ -98,6 +104,10 @@ SHADOWED = {
     # M19a Task 6: SlicesDock.symbology_requested and MagDock.symbology_requested
     # (#180), each connected in plugin.py to open its layer's Symbology page.
     "symbology_requested": {"declared": 2, "connects": 2},
+    # Hyperbola tracer: ProfileView.velocity_mode_requested (the Ctrl/Cmd press,
+    # emitted from the view's press) is relayed by ProfileDock's own. The dock
+    # connects the view's; the plugin connects the dock's.
+    "velocity_mode_requested": {"declared": 2, "connects": 2},
 }
 
 

@@ -6,6 +6,8 @@ import pytest
 from nsgeo.processing.bandpass import Bandpass
 from nsgeo.processing.base import Radargram, build_step
 
+from tests.real_data import DATA, real_radargram
+
 DT_NS = 0.2  # 5 GHz sampling -> 2500 MHz Nyquist
 
 
@@ -151,3 +153,36 @@ def test_the_direct_wave_does_not_wrap_into_the_bottom_of_the_trace(low, high):
     n = out.shape[0]
     bottom = out[n - (15 * n) // 100 :]
     assert np.sqrt((bottom**2).mean()) < 1e-4 * np.abs(out).max()
+
+
+def test_refuses_a_real_line_holding_a_nan():
+    """An FFT spreads one NaN along its whole trace."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[100, 300] = np.nan
+    with pytest.raises(
+        ValueError,
+        match=(
+            "1 of 635 traces hold samples that are not finite; "
+            "the filter would spread each one along its whole trace"
+        ),
+    ):
+        build_step("bandpass", low_mhz=250.0, high_mhz=750.0).apply(rg.replace(data=data))
+
+
+def test_a_band_holding_no_frequency_is_refused_on_a_real_line():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    with pytest.raises(
+        ValueError,
+        match="holds no frequency on this line, whose frequencies are 4.51 MHz apart",
+    ):
+        build_step("bandpass", low_mhz=300.0, high_mhz=302.0, taper_frac=0.0).apply(rg)
+    df = 1 / (1024 * 0.21653e-9) / 1e6
+    out = build_step("bandpass", low_mhz=300.0, high_mhz=300.0 + df, taper_frac=0.0).apply(rg)
+    assert out.data.shape == rg.data.shape
+
+
+def test_bandpass_runs_on_an_all_zero_line():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    out = Bandpass(250, 750).apply(rg.replace(data=np.zeros((512, 1))))
+    assert not out.data.any()

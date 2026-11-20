@@ -20,7 +20,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtWidgets import QTabBar, QToolButton
 
-PANELS = ("Survey", "Profile", "Processing", "Slices", "Mag")
+PANELS = ("Survey", "Profile", "Processing", "Slices", "Surfaces", "Mag")
 LAYOUTS = ("Profile work", "Slices work", "Show all")
 
 
@@ -37,6 +37,7 @@ def _docks(plugin):
                 plugin.profile_dock,
                 plugin.processing_dock,
                 plugin.slices_dock,
+                plugin.surfaces_dock,
                 plugin.mag_dock,
             ),
         )
@@ -119,7 +120,7 @@ def shown_plugin(fake_iface, qgis_app):
         QgsSettings().setValue(_TABIFIED_KEY, False)
 
 
-def test_the_panels_button_drops_down_the_five_panels_then_the_layouts(fake_iface):
+def test_the_panels_button_drops_down_the_six_panels_then_the_layouts(fake_iface):
     plugin = NsgeoPlugin(fake_iface)
     plugin.initGui()
     try:
@@ -131,16 +132,16 @@ def test_the_panels_button_drops_down_the_five_panels_then_the_layouts(fake_ifac
         assert button.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup
         actions = plugin.panels_menu.actions()
         assert [a.text() for a in actions] == [*PANELS, "", *LAYOUTS]
-        assert actions[5].isSeparator()
-        assert all(a.isCheckable() for a in actions[:5])
-        assert not any(a.isCheckable() for a in actions[6:])
+        assert actions[6].isSeparator()
+        assert all(a.isCheckable() for a in actions[:6])
+        assert not any(a.isCheckable() for a in actions[7:])
     finally:
         plugin.unload()
 
 
 def test_every_open_panel_is_ticked_even_the_one_behind_a_tab(shown_plugin):
     # The Mag panel is the one hidden at start-up (plan call P14).
-    assert [a.isChecked() for a in shown_plugin.panels_menu.actions()[:5]] == [True] * 4 + [False]
+    assert [a.isChecked() for a in shown_plugin.panels_menu.actions()[:6]] == [True] * 5 + [False]
 
 
 def test_the_mag_panel_starts_hidden_and_the_menu_opens_it(shown_plugin):
@@ -216,7 +217,7 @@ def test_a_panel_entry_keeps_its_name_when_the_panel_retitles_itself(fake_iface)
     plugin.initGui()
     try:
         plugin.profile_dock.setWindowTitle("nsgeo Profile · FILE__001 · 6301 traces")
-        assert [a.text() for a in plugin.panels_menu.actions()[:5]] == list(PANELS)
+        assert [a.text() for a in plugin.panels_menu.actions()[:6]] == list(PANELS)
     finally:
         plugin.unload()
 
@@ -243,9 +244,10 @@ def test_ticking_a_closed_panel_brings_it_back_in_front_of_its_tab_group(fake_if
 def test_profile_work_leaves_survey_and_profile(shown_plugin):
     _choose(shown_plugin, "Profile work")
     assert _open(shown_plugin) == {"Survey", "Profile"}
-    assert [a.isChecked() for a in shown_plugin.panels_menu.actions()[:5]] == [
+    assert [a.isChecked() for a in shown_plugin.panels_menu.actions()[:6]] == [
         True,
         True,
+        False,
         False,
         False,
         False,
@@ -366,3 +368,18 @@ def test_unloading_removes_the_panels_button_and_its_menu(fake_iface, qgis_app):
     assert sip.isdeleted(menu)
     assert sip.isdeleted(button)
     assert all(sip.isdeleted(a) for a in entries)
+
+
+def test_the_3d_view_button_greys_until_a_site_opens(fake_iface, tmp_path):
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        assert not plugin.act_view3d.isEnabled()
+        folder = tmp_path / "site"
+        folder.mkdir()
+        plugin.session.new_site(folder)
+        assert plugin.act_view3d.isEnabled()
+        plugin.session.close_site()
+        assert not plugin.act_view3d.isEnabled()
+    finally:
+        plugin.unload()

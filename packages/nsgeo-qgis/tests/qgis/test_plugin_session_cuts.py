@@ -93,36 +93,38 @@ def test_remove_grid_drops_its_cuts_and_keeps_the_others(session):
     session.save()  # validates: a cut on a removed grid would refuse it
 
 
-def test_cut_velocity_is_the_grids_then_the_first_lines_header(session, tmp_path):
+def test_grid_depth_velocity_is_the_grids_then_the_first_lines_header(session, tmp_path):
     session.add_grid(GRID)
     model = VelocityModel.constant(0.09)
     session.set_grid_velocity("A", model)
-    assert session.cut_velocity("A") == model
+    assert session.grid_depth_velocity("A") == model
     session.set_grid_velocity("A", None)
     with pytest.raises(KeyError):
-        session.cut_velocity("A")
+        session.grid_depth_velocity("A")
     session.add_lines(_lines(tmp_path, 3))
     keys = session.keys_on_grid("A")
     header = VelocityModel.from_dielectric(14.0)  # synthetic_dzt's rhf_epsr
-    assert session.cut_velocity("A") == header
+    assert session.grid_depth_velocity("A") == header
     # A line override never moves a cut (spec call 16): not the second line's,
     # and not the first's either.
     session.set_line_velocity(keys[1], VelocityModel.constant(0.05))
     session.set_line_velocity(keys[0], VelocityModel.constant(0.07))
-    assert session.cut_velocity("A") == header
+    assert session.grid_depth_velocity("A") == header
     with pytest.raises(KeyError):
-        session.cut_velocity("nope")
+        session.grid_depth_velocity("nope")
 
 
-def test_cut_velocity_takes_the_first_lines_header_when_dielectrics_differ(session, tmp_path):
+def test_grid_depth_velocity_takes_the_first_lines_header_when_dielectrics_differ(
+    session, tmp_path
+):
     session.add_grid(GRID)
     lines = []
     for i, epsr in enumerate((9.0, 25.0)):
         p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", epsr=epsr)
         lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
     session.add_lines(lines)
-    assert session.cut_velocity("A") == VelocityModel.from_dielectric(9.0)
-    assert session.cut_velocity("A") != VelocityModel.from_dielectric(25.0)
+    assert session.grid_depth_velocity("A") == VelocityModel.from_dielectric(9.0)
+    assert session.grid_depth_velocity("A") != VelocityModel.from_dielectric(25.0)
 
 
 def test_cuts_survive_save_and_reopen(session, tmp_path):
@@ -172,7 +174,7 @@ def test_resolved_velocity_of_a_cut_is_its_grids(session, tmp_path):
     model = VelocityModel.constant(0.09)
     session.set_grid_velocity("A", model)
     key = session.add_cut("A", V)
-    assert session.resolved_velocity(key) == model == session.cut_velocity("A")
+    assert session.resolved_velocity(key) == model == session.grid_depth_velocity("A")
 
 
 def test_removing_the_working_or_previewed_cut_clears_it(session):

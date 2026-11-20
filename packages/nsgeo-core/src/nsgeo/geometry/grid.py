@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_source import VelocitySource
 
 #: What a grid is surveyed with. Fixed once the grid exists.
 INSTRUMENTS: tuple[str, ...] = ("gpr", "mag")
@@ -28,6 +29,7 @@ class Grid:
     crs: str
     default_spacing: float
     velocity: VelocityModel | None = None
+    velocity_source: VelocitySource | None = None
     instrument: str = "gpr"
 
     def __post_init__(self) -> None:

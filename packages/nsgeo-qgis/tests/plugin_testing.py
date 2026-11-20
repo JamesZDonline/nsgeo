@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
+import math
 import threading
 import time
+import types
 import zlib
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pytest
+from nsgeo.geometry.grid import Grid
 from tests.real_data import CAMPUS_LINES
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
@@ -18,10 +22,44 @@ LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
 #: their file names (#141); each has its own list in the core's real_data.py.
 REAL_DZT = CAMPUS_LINES
 
+GRID = Grid("Grid A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+STEPS_ZERO = [
+    {"step": "time_zero", "params": {}, "enabled": True},
+    {"step": "dewow", "params": {}, "enabled": True},
+    {"step": "background_mean", "params": {}, "enabled": True},
+]
+STEPS_RADAR = STEPS_ZERO[1:]
+
+
+class Dock:
+    """What the exporter reads from the Slices dock: two engines and the transform combo."""
+
+    def __init__(self, session):
+        from nsgeo_qgis.slices_engine import SliceEngine
+
+        self.engine = SliceEngine(session)
+        self.site_engine = SliceEngine(session)
+        self.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
+        self.registered: list = []
+        self.foreign_preparing = False
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine):
+        self.registered.append(engine)
+        try:
+            yield
+        finally:
+            self.registered.remove(engine)
+
+    def dispose(self):
+        self.engine.dispose()
+        self.site_engine.dispose()
+
+
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
 
-def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
+def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, n_samples: int = 512, **kw) -> Path:
     """A small synthetic DZT with a visible pattern, written into `folder`."""
     from tests.synthetic import write_dzt
 
@@ -29,7 +67,7 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     # crc32, not hash(): str hashing is salted per-process (PYTHONHASHSEED),
     # so the same `name` would otherwise seed different data every run.
     rng = np.random.default_rng(zlib.crc32(name.encode()))
-    data = (rng.normal(size=(512, n_traces)) * 1e6).astype(np.int32)
+    data = (rng.normal(size=(n_samples, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000  # a flat band, so background removal has something to remove
     path = folder / name
     write_dzt(path, data, **kw)
@@ -56,6 +94,19 @@ def synthetic_grad601(
     path = folder / name
     path.write_bytes(("\r\n".join(lines) + "\r\n").encode("ascii"))
     return path
+
+
+def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None) -> Any:
+    """Set line `key`'s velocity from its stored fit `fit_id`, with a
+    one-member record of it: what the strip's Apply to line does after Save
+    fit. Returns the record."""
+    from nsgeo.velocity import VelocityModel
+    from nsgeo_qgis.velocity_records import fit_record
+
+    fit = session.line_for_key(key).velocity_fits[fit_id]
+    record = fit_record(session, [(key, fit_id, fit)], applied_at=applied_at)
+    session.apply_line_velocity(key, VelocityModel.constant(fit.v_m_ns), record)
+    return record
 
 
 def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None) -> None:
@@ -112,6 +163,37 @@ def send_hover(widget: Any, local_pos: Any) -> None:
     from qgis.PyQt.QtCore import Qt
 
     send_move_while_pressed(widget, local_pos, held_button=Qt.MouseButton.NoButton)
+
+
+def click_table_cell(table: Any, row: int, column: int, *, right_edge: bool = False) -> None:
+    """A real left click in a table cell, at its centre or (`right_edge`) one
+    pixel in from its right edge: in a checkable cell, off the check box. The
+    table must be shown, so its cells have their real geometry."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    rect = table.visualRect(table.model().index(row, column))
+    x = rect.right() - 1 if right_edge else rect.center().x()
+    QTest.mouseClick(
+        table.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, rect.center().y()),
+    )
+
+
+def click_header_section(header: Any, section: int) -> None:
+    """A real left click in the middle of a shown header's section."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    x = header.sectionViewportPosition(section) + header.sectionSize(section) // 2
+    QTest.mouseClick(
+        header.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, header.height() // 2),
+    )
 
 
 def connect_message_log(slot: Callable[[str, str, int], None]) -> Callable[[], None]:
@@ -572,3 +654,73 @@ def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> 
     assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
     assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
     assert items[-1].value == pytest.approx(limit)
+
+
+def synthetic_gps_dzt(
+    folder: Path,
+    name: str,
+    track: Any,
+    n_traces: int = 200,
+    **kw: Any,
+) -> Path:
+    """A synthetic DZT with a DZG beside it. `track` is `(trace, lat, lon, quality)`
+    fixes, written near the made-up place the core's `dzg_data` uses."""
+    from tests.dzg_data import write_dzg
+
+    path = synthetic_dzt(folder, name, n_traces=n_traces, **kw)
+    write_dzg(path.with_suffix(".DZG"), list(track))
+    return path
+
+
+CRS = "EPSG:32632"
+LAT0, LON0 = 45.2, 10.5
+M_PER_DEG = 6_371_000.0 * math.pi / 180.0
+
+
+def fix(trace, quality=4):
+    """A fix on a line walked due north at 0.1 m a trace."""
+    return (trace, LAT0 + trace * 0.1 / M_PER_DEG, LON0, quality)
+
+
+def gps_line(folder, name, qualities, n_traces=200, travel_shift=0.0):
+    """A line at 10 traces a metre with a fix at each trace of `qualities`."""
+    path = synthetic_gps_dzt(
+        folder,
+        name,
+        [fix(t, q) for t, q in sorted(qualities.items())],
+        n_traces=n_traces,
+        traces_per_metre=10.0,
+    )
+    return open_gps(path, travel_shift=travel_shift)
+
+
+def open_gps(path, crs=CRS, travel_shift=0.0, grid_id=None):
+    import dataclasses
+
+    from nsgeo.geometry import track_from_log
+    from nsgeo.io import dzg_for, read_dzg
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.ui.gps_import_dialog import lonlat_to_xy
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    log = read_dzg(dzg_for(path))
+    placement = track_from_log(log, lonlat_to_xy(QgsCoordinateReferenceSystem(crs)), crs)
+    placement = dataclasses.replace(placement, travel_shift=travel_shift, grid_id=grid_id)
+    return Line.open(path, placement)
+
+
+def wheel_event(dy: int = -120) -> Any:
+    """A plain vertical wheel notch, built as it works on Qt 5 and Qt 6."""
+    from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(2, 2),
+        QPointF(2, 2),
+        QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )

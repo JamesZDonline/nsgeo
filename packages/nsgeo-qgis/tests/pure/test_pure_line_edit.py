@@ -4,13 +4,14 @@ import dataclasses
 import json
 
 import pytest
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackFix, TrackPlacement
 from nsgeo_qgis.line_edit import (
     CHANGED_ELSEWHERE,
     EditOutcome,
     GridEditReport,
     LineEdit,
     Skipped,
+    TrackEdit,
     edge_inset,
     fit_scale,
     followed_length,
@@ -211,3 +212,42 @@ def test_the_length_report_counts_refitted_lines():
     assert GridEditReport("F", refitted=(("y", 11.0, 2),)).message() == (
         "F is now 11.00 m along y; its 2 fitted line(s) were fitted to the new length."
     )
+
+
+# ---- M17b: a GPS line's edit --------------------------------------------------------
+
+
+def _track(grid_id=None):
+    fixes = tuple(
+        TrackFix(trace=t, x=500000.0, y=5000000.0 + t * 0.1, lat=45.2, lon=10.5) for t in (0, 100)
+    )
+    return TrackPlacement(fixes, "EPSG:32616", grid_id=grid_id, label="t")
+
+
+def test_a_track_edit_with_nothing_set_places_the_line_as_seen():
+    seen = _track("A")
+    edit = TrackEdit("k", seen)
+    assert edit.placed(FRAMES) == seen
+    assert not edit.changes(FRAMES)
+
+
+def test_a_track_edit_moves_only_the_grid_and_never_the_fixes():
+    seen = _track()
+    placed = TrackEdit("k", seen, grid_id="B").placed(FRAMES)
+    assert placed == dataclasses.replace(seen, grid_id="B")
+    assert placed.fixes == seen.fixes
+    assert TrackEdit("k", seen).moved_to("B", FRAMES) == TrackEdit("k", seen, grid_id="B")
+    assert TrackEdit("k", seen, grid_id="B").changes(FRAMES)
+
+
+def test_a_track_edit_into_a_grid_not_in_frames_raises_key_error():
+    with pytest.raises(KeyError):
+        TrackEdit("k", _track(), grid_id="Z").placed(FRAMES)
+    with pytest.raises(KeyError):
+        TrackEdit("k", _track()).moved_to("Z", FRAMES)
+
+
+def test_a_track_edit_applies_travel_shift_and_label():
+    placed = TrackEdit("k", _track("A"), travel_shift=0.3, label="x").placed(FRAMES)
+    assert (placed.travel_shift, placed.label, placed.grid_id) == (0.3, "x", "A")
+    assert TrackEdit("k", _track("A"), travel_shift=0.3).changes(FRAMES)

@@ -26,7 +26,7 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
-from nsgeo_qgis.line_edit import LineEdit
+from nsgeo_qgis.line_edit import LineEdit, TrackEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -39,9 +39,22 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     limit_windows,
+    transform_names,
 )
-from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
+from plugin_testing import (
+    CRS,
+    LAT0,
+    LON0,
+    M_PER_DEG,
+    REAL_DZT,
+    needs_real_data,
+    open_gps,
+    spin_until,
+    synthetic_dzt,
+    synthetic_gps_dzt,
+)
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
@@ -1457,6 +1470,30 @@ def test_provenance_velocity_is_none_when_all_prepared_lines_removed(sourced):
     assert engine.cube() is not None  # arrays are still there
 
 
+def _override_every_line(session, velocity=0.12):
+    """The hazard input: the grid's first line in survey order, and the first
+    prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def test_slice_provenance_velocity_is_the_grids_not_the_first_lines_override(sourced):
+    engine, session, errors, _ = sourced
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+    assert errors == []
+
+
+def test_slice_provenance_velocity_falls_back_to_the_grids_first_line_header(sourced):
+    engine, session, errors, _ = sourced
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == session.grid_depth_velocity("A").to_dict()
+    assert engine.provenance().velocity != VelocityModel.constant(0.12).to_dict()
+
+
 # ---- M12: the hooks the site engine composes this engine through ----------
 
 
@@ -1681,6 +1718,50 @@ def test_a_label_only_edit_does_not_re_prepare(sourced):
     assert errors == []
 
 
+def test_a_label_only_edit_to_a_gps_line_does_not_re_prepare(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    session.add_grid(Grid("G", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.5))
+    paths = [
+        synthetic_gps_dzt(
+            tmp_path / "raw",
+            f"FILE__00{i + 1}.DZT",
+            [(t, LAT0 + t * 0.1 / M_PER_DEG, LON0 + i * 0.5 / M_PER_DEG, 4) for t in (25, 175)],
+            n_traces=200,
+            traces_per_metre=10.0,
+        )
+        for i in range(2)
+    ]
+    session.add_lines([open_gps(p, grid_id="G") for p in paths])
+    session.site.presets["p"] = list(PRESET)
+    errors: list[str] = []
+    prepared: list[int] = []
+    engine = SliceEngine(
+        session, on_prepared=lambda: prepared.append(1), on_error=lambda m: errors.append(m)
+    )
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="G",
+                preset="p",
+                transform="amp_envelope",
+                line_keys=tuple(session.keys()),
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        count = len(prepared)
+        key = session.keys()[0]
+        session.edit_lines([TrackEdit(key, session.line_for_key(key).placement, label="the wall")])
+        assert session.line_for_key(key).placement.label == "the wall"
+        assert not engine.is_running
+        assert engine.wait_for_preparation(2_000)
+        assert len(prepared) == count
+        assert errors == []
+    finally:
+        engine.dispose()
+
+
 def test_a_line_moved_to_another_grid_leaves_the_source(sourced):
     engine, session, errors, prepared = sourced
     session.add_grid(GRID_B)
@@ -1855,3 +1936,182 @@ def test_section_fills_refuse_to_build_a_cube_and_the_generation_follows_it(sour
     engine.cube()
     assert (engine.choice, engine.frame, engine.z) == (choice, frame, z)
     assert engine.cube_generation == before + 3
+
+
+def test_a_stored_resolution_past_the_limit_builds_nothing_once_lines_arrive(sourced):
+    engine, session, errors, _ = sourced
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=100.0))
+    assert engine.frame is None and engine.z is None, "no choice, no check"
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())[:3]
+        )
+    )
+    assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    assert engine.frame is None and engine.z is None
+    assert errors == []
+
+
+# ---- #162 item 1: the radar-clock first break of the prepared lines ----------
+
+
+def _banded_engine(tmp_path, band_rows, rise=0.0):
+    """An engine on one line per entry of `band_rows`, under "radar", a preset
+    with no Time zero step. Each line is quiet noise with a flat band at its row,
+    as `_banded_dzt` in the dock tests writes it, rising to `rise` of the band
+    over the two rows before; None is a silent line, every sample zero.
+
+    "gained" is a second preset without Time zero: AGC, then a gain curve that
+    climbs 20 dB between rows 39 and 40 of the raw axis, as a curve drawn on
+    the profile viewer to bring up what lies below the first arrival might. It
+    holds the rows above 40 down, so on these lines it moves a pick taken on
+    the prepared data (`_gained_pick_lands_late`)."""
+    from tests.synthetic import write_dzt
+
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    lines = []
+    for i, row in enumerate(band_rows):
+        path = tmp_path / "raw" / f"FILE__00{i + 1}.DZT"
+        rng = np.random.default_rng(i)
+        data = (rng.normal(size=(512, 60)) * 1e4).astype(np.int32)  # quiet: the band breaks
+        if row is None:
+            data[:] = 0
+        else:
+            data[row : row + 4, :] = 5_000_000
+            if rise:
+                data[row - 2 : row, :] = int(rise * 5_000_000)
+        write_dzt(path, data)
+        lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["radar"] = []
+    raw = _raw_record(lines[0])
+    session.site.presets["gained"] = [
+        {"step": "gain_agc", "params": {}, "enabled": True},
+        {
+            "step": "gain_curve",
+            "params": {"points": [[_row_ns(raw, 39), -20.0], [_row_ns(raw, 40), 0.0]]},
+            "enabled": True,
+        },
+    ]
+    errors: list[str] = []
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
+    return engine, session, errors
+
+
+def _raw_record(line):
+    """A line's record as read, before any step: what Time zero runs on in an
+    ordinary preset, where it comes first."""
+    return Radargram.from_profile(line.load()[0])
+
+
+def _row_ns(rg, row):
+    """The radar-clock time of `row` on a raw record."""
+    return rg.t0_ns + row * rg.dt_ns
+
+
+def test_median_first_break_is_the_median_band_row(qgis_app, tmp_path):
+    """The shift a restore owes when its preset has lost Time zero: the median,
+    over the prepared lines, of each one's radar-clock first break. Two lines
+    break at row 40 and one at 41, so the median is row 40."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41))
+    try:
+        assert engine.median_first_break() is None, "nothing prepared yet"
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == []
+        line = engine.prepared_lines()[0]
+        assert line.zero_ns == 0.0  # the radar's clock
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40 * line.dt_ns)
+    finally:
+        engine.dispose()
+
+
+def test_median_first_break_leaves_out_a_line_with_no_signal(qgis_app, tmp_path):
+    """A line whose samples are all zero has no first break, so it is left out
+    of the median rather than read as row 0; with no break on any line there is
+    no median (Review Focus 5)."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 41, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        line = engine.prepared_lines()[0]
+        assert engine.median_first_break() == pytest.approx(line.t0_ns + 40.5 * line.dt_ns)
+    finally:
+        engine.dispose()
+    engine, session, errors = _banded_engine(tmp_path / "silent", (None, None, None))
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="radar")
+        assert errors == [] and engine.line_count == 3
+        assert engine.median_first_break() is None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "transform", [NO_TRANSFORM, *transform_names()], ids=lambda name: name or "none"
+)
+@pytest.mark.parametrize("preset", ["radar", "gained"])
+def test_median_first_break_is_the_raw_records_break_whatever_the_preparation(
+    qgis_app, tmp_path, preset, transform
+):
+    """PF-1: each line's first break is picked on its raw record, where Time
+    zero runs in an ordinary preset (it comes first), so neither the preset's
+    other steps nor the transform move it. These lines rise to 0.3 of the band
+    two rows before it, so Time zero's own pick on the raw records is that rise:
+    rows 38, 38 and 39, median row 38, exactly, under every preset and every
+    transform the registry offers, now or later.
+
+    Picked on the prepared lines instead, "gained" moved it two rows late, onto
+    the band (`_gained_pick_lands_late`), as the author's own gain steps moved
+    it two samples late on the campus lines; and the envelope of a flat step
+    picked three rows early under either preset."""
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=transform, preset=preset)
+        assert errors == [] and engine.line_count == 3
+        raw = _raw_record(session.line_for_key(session.keys()[0]))
+        estimate = engine.median_first_break()
+        assert estimate is not None
+        late = (estimate - _row_ns(raw, 38)) / raw.dt_ns  # in samples
+        assert late == pytest.approx(0.0, abs=1e-6), (preset, transform, late)
+    finally:
+        engine.dispose()
+
+
+def test_gained_pick_lands_late(qgis_app, tmp_path):
+    """The premise of the test above, a guard that holds today: under "gained",
+    Time zero's own pick taken on the PREPARED lines lands two rows late (row 40,
+    the band, on every line), while the raw records break at rows 38, 38 and 39.
+    Should a change to the gain steps stop moving it, this says so rather than
+    leave the test above checking a preset that moves nothing."""
+    from nsgeo.processing import build_step
+
+    engine, session, errors = _banded_engine(tmp_path, (40, 40, 41), rise=0.3)
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="gained")
+        assert errors == []
+        pick = build_step("time_zero")
+        keys = session.keys()  # SiteSession.keys(), a list in survey order
+        raws = [_raw_record(session.line_for_key(key)) for key in keys]
+        rows_raw = [round((pick.apply(rg).zero_ns - rg.t0_ns) / rg.dt_ns) for rg in raws]
+        prepared = [
+            Radargram(data=line.data, dt_ns=line.dt_ns, t0_ns=line.t0_ns)
+            for line in engine.prepared_lines()
+        ]
+        rows_prepared = [round((pick.apply(rg).zero_ns - rg.t0_ns) / rg.dt_ns) for rg in prepared]
+        assert rows_raw == [38, 38, 39]
+        assert rows_prepared == [40, 40, 40]
+    finally:
+        engine.dispose()
+
+
+def test_set_resolution_refuses_before_storing(sourced):
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    z, frame = engine.z, engine.frame
+    with pytest.raises(TooManyLevels, match="Too many levels: dz 0.001 ns"):
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.001, t0_ns=2.0, t1_ns=30.0))
+    assert engine.z is z and engine.frame is frame
+    assert errors == []

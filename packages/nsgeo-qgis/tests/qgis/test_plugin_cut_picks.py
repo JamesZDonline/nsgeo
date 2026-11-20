@@ -80,7 +80,7 @@ def test_a_pick_on_a_cut_lands_on_the_cut_and_records_its_provenance(opened):
     assert row["time_ns"] == T
     assert row["zero_ns"] == NULL  # NULL, not 0.0
     assert [p.zero_ns for p in session.picks_for(key)] == [None]
-    velocity = session.cut_velocity("A")
+    velocity = session.grid_depth_velocity("A")
     assert row["depth_m"] == pytest.approx(float(velocity.depth_at([T])[0]))
     assert row["velocity_m_ns"] == pytest.approx(float(velocity.velocity_at([T])[0]))
 
@@ -251,7 +251,7 @@ def test_opening_a_site_rederives_cut_picks_with_no_engine_prepared(
     plugin.slices_dock.engine.dispose()  # nothing prepared when the site opens
     session.open_site(path)
     (again,) = _rows(plugin)
-    velocity = session.cut_velocity("A")
+    velocity = session.grid_depth_velocity("A")
     assert again["depth_m"] == pytest.approx(float(velocity.depth_at([T])[0]))
     assert again["velocity_m_ns"] == pytest.approx(float(velocity.velocity_at([T])[0]))
 

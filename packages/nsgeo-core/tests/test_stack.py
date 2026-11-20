@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, build_step
-from nsgeo.processing.stack import StepStack
+from nsgeo.processing.stack import StepRefused, StepStack
 
 
 def source(n_samples=64, n_traces=120, seed=0):
@@ -400,3 +402,52 @@ def test_zero_ns_without_a_source_is_an_error_only_when_one_is_needed():
     st.append(build_step("time_zero", mode="sample", sample=1))
     with pytest.raises(ValueError, match="no source"):
         st.zero_ns()
+
+
+def refusing_stack():
+    """A Dewow then a Bandpass whose top is past Nyquist at dt 0.2165 ns."""
+    st = StepStack()
+    rg = source()
+    st.source = rg.replace(dt_ns=0.2165)
+    st.append(build_step("dewow"))
+    st.append(build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+    return st
+
+
+def test_a_refusing_step_is_named_by_index_and_title():
+    st = refusing_stack()
+    with pytest.raises(StepRefused) as caught:
+        st.result()
+    e = caught.value
+    assert e.index == 1
+    assert e.title == st.entries[1][0].title == "Bandpass"
+    assert "Nyquist" in str(e)
+    assert isinstance(e, ValueError)
+
+
+def test_a_refusal_in_a_bypass_chain_is_named_too():
+    st = refusing_stack()
+    with pytest.raises(StepRefused) as caught:
+        st.result_bypassing(0)
+    assert caught.value.index == 1
+
+
+def test_a_step_refusal_pickles():
+    with pytest.raises(StepRefused) as caught:
+        refusing_stack().result()
+    e = pickle.loads(pickle.dumps(caught.value))
+    assert (str(e), e.index, e.title) == (
+        str(caught.value),
+        caught.value.index,
+        caught.value.title,
+    )
+
+
+def test_difference_and_no_source_stay_plain_value_errors():
+    st = stack_of(("time_zero", {"mode": "sample", "sample": 8}))
+    with pytest.raises(ValueError) as caught:
+        st.difference(0)
+    assert not isinstance(caught.value, StepRefused)
+    with pytest.raises(ValueError) as caught:
+        StepStack().result()
+    assert not isinstance(caught.value, StepRefused)

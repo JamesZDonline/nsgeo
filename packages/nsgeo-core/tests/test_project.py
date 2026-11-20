@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.geometry.track import TrackFix, TrackPlacement, track_from_log
+from nsgeo.io.dzg import read_dzg
 from nsgeo.model import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing import StepStack, build_step
 from nsgeo.project import (
     CUTS_SCHEMA_VERSION,
+    MAG_SCHEMA_VERSION,
     READABLE_SCHEMA_VERSIONS,
+    TRACK_SCHEMA_VERSION,
+    VELOCITY_SOURCE_SCHEMA_VERSION,
     ProjectError,
     line_key,
     load_site,
@@ -21,7 +27,9 @@ from nsgeo.project import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import METHOD_FIT, SourceFit, VelocitySource
 
+from tests.dzg_data import local_xy, write_dzg
 from tests.synthetic import write_dzt
 
 
@@ -118,9 +126,9 @@ def test_rejects_future_schema_version(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 4
+    doc["schema_version"] = 6
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 4"):
+    with pytest.raises(ProjectError, match="schema version 6"):
         load_site(out)
 
 
@@ -450,22 +458,22 @@ def _a_fit() -> StoredFit:
 
 def test_velocity_fits_survive_a_save_and_load(tmp_path, site):
     fit = _a_fit()
+    source = VelocitySource.from_fits([SourceFit.of("data/L0.DZT", "f1", "L0", fit)], None)
     site.lines[0] = dataclasses.replace(
-        site.lines[0], velocity_fits={"f1": fit}, velocity_from_fit="f1"
+        site.lines[0], velocity_fits={"f1": fit}, velocity_source=source
     )
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     loaded = load_site(out).lines[0]
     assert loaded.velocity_fits == {"f1": fit}
     assert loaded.velocity_from_fit == "f1"
+    assert loaded.velocity_source == source
     assert loaded.velocity_fits["f1"].points == ((389, 21.2), (412, 18.6), (437, 21.9))
 
 
 def test_a_fits_time_zero_survives_a_save_and_load(tmp_path, site):
     fit = dataclasses.replace(_a_fit(), zero_ns=-0.4775)
-    site.lines[0] = dataclasses.replace(
-        site.lines[0], velocity_fits={"f1": fit}, velocity_from_fit="f1"
-    )
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_fits={"f1": fit})
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     assert load_site(out).lines[0].velocity_fits["f1"].zero_ns == -0.4775
@@ -477,21 +485,20 @@ def test_a_line_entry_without_fits_loads(tmp_path, site):
     entry = json.loads(out.read_text())["lines"][0]
     assert "velocity_fits" not in entry
     assert "velocity_from_fit" not in entry
+    assert "velocity_source" not in entry
     loaded = load_site(out).lines[0]
     assert loaded.velocity_fits == {}
     assert loaded.velocity_from_fit is None
 
 
 def test_a_file_with_fits_still_declares_schema_version_1(tmp_path, site):
-    site.lines[0] = dataclasses.replace(
-        site.lines[0], velocity_fits={"f1": _a_fit()}, velocity_from_fit="f1"
-    )
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_fits={"f1": _a_fit()})
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     assert json.loads(out.read_text())["schema_version"] == 1
 
 
-def test_a_velocity_from_fit_naming_a_missing_fit_loads_as_no_selection(tmp_path, site):
+def test_an_old_velocity_from_fit_naming_a_missing_fit_loads_no_record(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     doc = json.loads(out.read_text())
@@ -500,6 +507,7 @@ def test_a_velocity_from_fit_naming_a_missing_fit_loads_as_no_selection(tmp_path
     out.write_text(json.dumps(doc))
     loaded = load_site(out).lines[0]
     assert loaded.velocity_from_fit is None
+    assert loaded.velocity_source is None
     assert set(loaded.velocity_fits) == {"f1"}
 
 
@@ -515,6 +523,7 @@ def test_a_non_string_velocity_from_fit_loads_as_no_selection(tmp_path, site, po
     out.write_text(json.dumps(doc).replace('"@@"', pointer))
     loaded = load_site(out).lines[0]
     assert loaded.velocity_from_fit is None
+    assert loaded.velocity_source is None
     assert set(loaded.velocity_fits) == {"f1"}
 
 
@@ -536,7 +545,21 @@ def _two_grid_site():
 def test_slice_sources_and_site_view_round_trip(tmp_path):
     site = _two_grid_site()
     site.slice_sources = {
-        "A": {"preset": "slice-standard", "lines": ["data/L0.DZT"], "gain": 1.5},
+        "A": {
+            "preset": "slice-standard",
+            "lines": ["data/L0.DZT"],
+            "gain": 1.5,
+            "volume": {
+                "cell": 0.05,
+                "dz_ns": 0.2,
+                "transform": "amp_square",
+                "stretch": 4.0,
+                "period_ns": 3.0,
+                "blur_m": 0.0,
+                "trend_m": 0.2,
+                "t1_ns": 40.0,
+            },
+        },
         "B": {"preset": "slice-raw", "lines": None},
     }
     site.site_view = {"grids": ["A", "B"], "transform": "amp_envelope", "normalisation": "edge"}
@@ -545,6 +568,36 @@ def test_slice_sources_and_site_view_round_trip(tmp_path):
     loaded = load_site(path)
     assert loaded.slice_sources == site.slice_sources
     assert loaded.site_view == site.site_view
+
+
+def test_a_volume_entry_drops_unknown_keys_and_unusable_values(tmp_path):
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {
+        "A": {
+            "preset": "p",
+            "volume": {
+                "cell": 0.05,
+                "dz_ns": -1,
+                "transform": 3,
+                "stretch": "bad",
+                "period_ns": 2.5,
+                "blur_m": -0.1,
+                "trend_m": 0,
+                "t1_ns": 0,
+                "extra": 1,
+            },
+        },
+        "B": {"volume": "nope"},
+    }
+    path.write_text(json.dumps(doc))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {
+        "A": {"preset": "p", "volume": {"cell": 0.05, "period_ns": 2.5}},
+        "B": {},
+    }
 
 
 _FULL_RESOLUTION = {
@@ -683,8 +736,8 @@ def test_a_wrong_typed_inner_value_reads_as_unset(tmp_path):
     save_site(site, path)
     doc = json.loads(path.read_text())
     doc["slice_sources"] = {
-        "A": {"preset": 3, "lines": "L0", "gain": -2.0},
-        "B": {"preset": "ok", "gain": 0.0},
+        "A": {"preset": 3, "lines": "L0", "gain": -2.0, "volume": [1]},
+        "B": {"preset": "ok", "gain": 0.0, "volume": {"cell": "x", "stretch": None}},
         "GONE": 7,
     }
     doc["site_view"] = {"grids": "A", "transform": 4}
@@ -794,18 +847,18 @@ def test_cuts_round_trip_and_bump_the_schema_only_when_present(tmp_path):
     assert load_site(path).cuts == []
 
 
-def test_loads_schema_1_2_and_3_and_refuses_4(tmp_path):
-    assert READABLE_SCHEMA_VERSIONS == (1, 2, 3)
+def test_loads_schema_1_to_5_and_refuses_6(tmp_path):
+    assert READABLE_SCHEMA_VERSIONS == (1, 2, 3, 4, 5)
     path = tmp_path / "survey.nsgeo.json"
     save_site(_cut_site(), path)
     doc = json.loads(path.read_text())
-    for version, ok in ((1, True), (2, True), (3, True), (4, False)):
+    for version, ok in ((1, True), (2, True), (3, True), (4, True), (5, True), (6, False)):
         doc["schema_version"] = version
         path.write_text(json.dumps(doc))
         if ok:
             load_site(path)
         else:
-            with pytest.raises(ProjectError, match="schema version 4"):
+            with pytest.raises(ProjectError, match="schema version 6"):
                 load_site(path)
 
 
@@ -851,6 +904,186 @@ def test_duplicate_cut_ids_fail_validate():
     site.cuts[0] = dataclasses.replace(site.cuts[0], grid_id="zzz")
     with pytest.raises(ValueError, match="unknown grid"):
         site.validate()
+
+
+# --- velocity source records (grid velocity from fits, Task 1) ---
+
+
+def _record(key="data/L0.DZT", fit_id="fit-1", label="L0", fit=None) -> VelocitySource:
+    member = SourceFit.of(key, fit_id, label, fit or _a_fit())
+    return VelocitySource.from_fits([member], "2026-11-12T09:00:00Z")
+
+
+def _version(path) -> int:
+    return json.loads(path.read_text())["schema_version"]
+
+
+def test_a_site_without_records_saves_as_today(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert _version(out) == 1
+    assert "velocity_source" not in out.read_text()
+    site.cuts = [Cut(id="c1", name="Cut 1", grid_id="G1", vertices=((0.0, 0.0), (3.0, 4.0)))]
+    save_site(site, out)
+    assert _version(out) == 2
+    assert "velocity_source" not in out.read_text()
+
+
+def test_a_line_record_lifts_the_file_to_version_3_and_round_trips(tmp_path, site):
+    assert VELOCITY_SOURCE_SCHEMA_VERSION == 3
+    record = _record()
+    site.lines[0] = dataclasses.replace(
+        site.lines[0], velocity_fits={"fit-1": _a_fit()}, velocity_source=record
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert _version(out) == 3
+    doc = json.loads(out.read_text())
+    assert "velocity_source" in doc["lines"][0]
+    assert "velocity_from_fit" not in doc["lines"][0]
+    assert load_site(out).lines[0].velocity_source == record
+
+
+def test_a_grid_record_lifts_the_file_to_version_3_and_round_trips(tmp_path, site):
+    a, b = _record(), _record("data/L1.DZT", "fit-2", "L1")
+    average = VelocitySource.from_fits([a.members[0], b.members[0]], None)
+    site.grids[0] = dataclasses.replace(
+        site.grids[0], velocity=VelocityModel.constant(average.v_m_ns), velocity_source=average
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert _version(out) == 3
+    assert load_site(out).grids[0].velocity_source == average
+
+
+def test_a_record_and_cuts_save_as_version_3(tmp_path, site):
+    site.cuts = [Cut(id="c1", name="Cut 1", grid_id="G1", vertices=((0.0, 0.0), (3.0, 4.0)))]
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_source=_record())
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert _version(out) == 3
+    assert load_site(out).cuts == site.cuts
+
+
+def test_a_site_loads_and_a_newer_schema_version_is_refused(tmp_path, site):
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_source=_record())
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    load_site(out)
+    doc = json.loads(out.read_text())
+    doc["schema_version"] = 6
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="schema version 6"):
+        load_site(out)
+
+
+def test_an_old_velocity_from_fit_loads_as_a_one_fit_record(tmp_path, site):
+    fit = _a_fit()
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["velocity_fits"] = {"fit-2": fit.to_dict()}
+    doc["lines"][0]["velocity_from_fit"] = "fit-2"
+    out.write_text(json.dumps(doc))
+    loaded = load_site(out)
+    line = loaded.lines[0]
+    src = line.velocity_source
+    assert src is not None
+    assert src.method == METHOD_FIT
+    assert src.applied_at is None
+    assert src.members[0] == SourceFit.of("data/L0.DZT", "fit-2", "line 0", fit)  # placement label
+    assert line.velocity_from_fit == "fit-2"
+    save_site(loaded, out)
+    assert _version(out) == 3
+
+
+def test_a_record_naming_a_line_or_fit_the_file_lacks_still_loads(tmp_path, site):
+    record = _record("raw/GONE.DZT", "fit-9", "GONE")
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_source=record)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_source == record
+    assert loaded.velocity_from_fit is None
+
+
+def test_a_malformed_line_record_is_a_project_error_naming_the_line(tmp_path, site):
+    site.lines[0] = dataclasses.replace(site.lines[0], velocity_source=_record())
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["velocity_source"]["method"] = "median"
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="L0.DZT"):
+        load_site(out)
+
+
+def test_a_malformed_grid_record_is_a_project_error_naming_the_grid(tmp_path, site):
+    site.grids[0] = dataclasses.replace(site.grids[0], velocity_source=_record())
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["grids"][0]["velocity_source"]["members"] = []
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="G1"):
+        load_site(out)
+
+
+def test_fit_serial_saves_and_loads_without_lifting_the_version(tmp_path, site):
+    site.lines[0] = dataclasses.replace(site.lines[0], fit_serial=5)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert _version(out) == 1
+    doc = json.loads(out.read_text())
+    assert doc["lines"][0]["fit_serial"] == 5
+    assert "fit_serial" not in doc["lines"][1]
+    loaded = load_site(out)
+    assert loaded.lines[0].fit_serial == 5
+    assert loaded.lines[1].fit_serial == 0
+
+
+def test_fit_serial_on_an_old_file_is_its_highest_fit_number(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    fit = _a_fit().to_dict()
+    doc["lines"][0]["velocity_fits"] = {"fit-1": fit, "fit-4": fit, "f7": fit}
+    out.write_text(json.dumps(doc))
+    assert load_site(out).lines[0].fit_serial == 4
+
+
+def test_fit_serial_is_the_larger_of_the_saved_and_the_highest_fit(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["velocity_fits"] = {"fit-3": _a_fit().to_dict()}
+    doc["lines"][0]["fit_serial"] = 2
+    out.write_text(json.dumps(doc))
+    assert load_site(out).lines[0].fit_serial == 3
+    doc["lines"][0]["fit_serial"] = 9
+    out.write_text(json.dumps(doc))
+    assert load_site(out).lines[0].fit_serial == 9
+
+
+def test_velocity_from_fit_reads_none_when_the_record_is_an_average_or_its_fit_is_gone(site):
+    fit = _a_fit()
+    line = site.lines[0]
+    one = _record(fit=fit)
+    with_fit = dataclasses.replace(line, velocity_fits={"fit-1": fit}, velocity_source=one)
+    assert with_fit.velocity_from_fit == "fit-1"
+    gone = dataclasses.replace(with_fit, velocity_fits={})
+    assert gone.velocity_from_fit is None
+    other = dataclasses.replace(fit, fitted_at="2026-12-01T00:00:00Z")
+    reimported = dataclasses.replace(with_fit, velocity_fits={"fit-1": other})
+    assert reimported.velocity_from_fit is None
+    two = VelocitySource.from_fits(
+        [one.members[0], _record("data/L1.DZT", "fit-2").members[0]], None
+    )
+    average = dataclasses.replace(
+        line, velocity_fits={"fit-1": fit, "fit-2": fit}, velocity_source=two
+    )
+    assert average.velocity_from_fit is None
+    assert line.velocity_from_fit is None
 
 
 # ---- #180: the slice colours each scope keeps ------------------------------------------
@@ -909,7 +1142,7 @@ def _mag_site(tmp_path, **extra):
     return Site(grids=[grid], mag_files=[mag]), mag, MagSetup
 
 
-def test_a_site_with_mag_saves_as_schema_3_and_round_trips(tmp_path):
+def test_a_site_with_mag_saves_as_schema_5_and_round_trips(tmp_path):
     from nsgeo.mag import MagSetup
 
     site, mag, _ = _mag_site(tmp_path)
@@ -923,7 +1156,7 @@ def test_a_site_with_mag_saves_as_schema_3_and_round_trips(tmp_path):
     path = tmp_path / "survey.nsgeo.json"
     save_site(site, path)
     doc = json.loads(path.read_text())
-    assert doc["schema_version"] == 3
+    assert doc["schema_version"] == 5 == MAG_SCHEMA_VERSION
     assert doc["grids"][0]["instrument"] == "mag"
     assert doc["mag_files"] == [
         {
@@ -960,12 +1193,12 @@ def test_a_remembered_setup_is_written_whenever_it_is_set(tmp_path):
     assert load_site(path).mag_setup == MagSetup()
 
 
-def test_a_mag_grid_with_no_file_is_schema_3(tmp_path):
+def test_a_mag_grid_with_no_file_is_schema_5(tmp_path):
     site, _, _ = _mag_site(tmp_path)
     site.mag_files = []
     path = tmp_path / "survey.nsgeo.json"
     save_site(site, path)
-    assert json.loads(path.read_text())["schema_version"] == 3
+    assert json.loads(path.read_text())["schema_version"] == 5
     assert load_site(path).grids[0].instrument == "mag"
 
 
@@ -1085,3 +1318,330 @@ def test_an_overflowing_mag_setup_number_is_tolerated_or_a_project_error(tmp_pat
     path.write_text(json.dumps(doc))
     with pytest.raises(ProjectError, match="invalid setup for mag file 'data/a.dat'"):
         load_site(path)
+
+
+def test_mag_outranks_a_velocity_record_and_both_load_back(tmp_path, site):
+    from nsgeo.mag import MagFile, MagSetup
+
+    from tests.mag_data import write_grad601
+
+    fit = _a_fit()
+    member = SourceFit.of(site.lines[0].path.name, "fit-1", "L0", fit)
+    site.lines[0] = dataclasses.replace(
+        site.lines[0],
+        velocity_fits={"fit-1": fit},
+        velocity_source=VelocitySource.from_fits([member], None),
+    )
+    mag_grid = Grid("M", (100.0, 0.0), 0.0, 30.0, 30.0, site.grids[0].crs, 0.5, instrument="mag")
+    (tmp_path / "data").mkdir(exist_ok=True)
+    dat = write_grad601(tmp_path / "data" / "a.dat", np.ones((4, 16)))
+    site.grids.append(mag_grid)
+    site.mag_files = [MagFile.open(dat, "M", MagSetup())]
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert json.loads(path.read_text())["schema_version"] == 5
+    back = load_site(path)
+    assert back.lines[0].velocity_source is not None
+    assert [m.grid_id for m in back.mag_files] == ["M"]
+    assert back.grids[-1].instrument == "mag"
+
+
+def test_mag_outranks_gps_lines_and_the_crs_is_still_written(tmp_path):
+    from nsgeo.mag import MagFile, MagSetup
+
+    from tests.mag_data import write_grad601
+
+    mag_grid = Grid("M", (0.0, 0.0), 0.0, 30.0, 30.0, _TRACK_CRS, 0.5, instrument="mag")
+    site, _ = _gps_site(tmp_path, grids=[mag_grid])
+    dat = write_grad601(tmp_path / "data" / "a.dat", np.ones((4, 16)))
+    site.mag_files = [MagFile.open(dat, "M", MagSetup())]
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == 5 and doc["crs"] == _TRACK_CRS
+    back = load_site(out)
+    assert isinstance(back.lines[0].placement, TrackPlacement)
+    assert [m.grid_id for m in back.mag_files] == ["M"]
+
+
+# --- GPS lines and the site's CRS (M17a Task 3, P8, P9) ------------------------
+
+_LAT0, _LON0 = 45.2, 10.5
+_TRACK_CRS = "EPSG:32632"
+
+
+def _gps_site(tmp_path, *, shift=0.0, grids=(), label="gps 1", drop_alt=False):
+    dzt = tmp_path / "data" / "G1.DZT"
+    dzt.parent.mkdir(exist_ok=True)
+    write_dzt(dzt, np.zeros((64, 60), dtype=np.int32))
+    step = 0.00001
+    fixes = [
+        (0, _LAT0, _LON0, 4),
+        (20, _LAT0 + step * 4, _LON0, 4),
+        (40, _LAT0 + step * 8, _LON0, 1),
+        (59, _LAT0 + step * 12, _LON0, 4),
+    ]
+    dzg = write_dzg(dzt.with_suffix(".DZG"), fixes)
+    log = read_dzg(dzg, 60)
+    placement = track_from_log(log, local_xy(_LAT0, _LON0), _TRACK_CRS, label=label)
+    if shift:
+        placement = dataclasses.replace(placement, travel_shift=shift)
+    if drop_alt:
+        first = dataclasses.replace(placement.fixes[0], alt_m=None)
+        placement = dataclasses.replace(placement, fixes=(first, *placement.fixes[1:]))
+    site = Site(grids=list(grids), lines=[Line.open(dzt, placement)])
+    site.crs = _TRACK_CRS
+    return site, dzt
+
+
+def test_a_gps_line_round_trips_with_identical_positions_without_its_dzg(tmp_path):
+    site, dzt = _gps_site(tmp_path, shift=0.24, drop_alt=True)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    saved = site.lines[0].placement
+    assert any(math.isnan(f.x) for f in saved.fixes) is False  # all positioned here
+    dzt.with_suffix(".DZG").unlink()
+    back = load_site(out)
+    loaded = back.lines[0].placement
+    assert isinstance(loaded, TrackPlacement)
+    assert loaded == saved
+    assert loaded.travel_shift == 0.24
+    assert loaded.fixes[0].alt_m is None and loaded.fixes[1].alt_m is not None
+    np.testing.assert_allclose(
+        back.lines[0].trace_coords({}), site.lines[0].trace_coords({}), atol=1e-9
+    )
+
+
+def test_a_fix_with_no_position_keeps_nan_and_a_missing_altitude_keeps_none(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    placement = site.lines[0].placement
+    nan = float("nan")
+    blank = TrackFix(trace=30, x=nan, y=nan, lat=nan, lon=nan, alt_m=None, geoid_m=None, quality=0)
+    fixes = tuple(sorted((*placement.fixes, blank), key=lambda f: f.trace))
+    site.lines = [
+        dataclasses.replace(site.lines[0], placement=dataclasses.replace(placement, fixes=fixes))
+    ]
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    row = [r for r in json.loads(out.read_text())["lines"][0]["placement"]["fixes"] if r[0] == 30]
+    assert row == [[30, None, None, None, None, None, None, 0]]
+    loaded = load_site(out).lines[0].placement.fixes
+    got = [f for f in loaded if f.trace == 30][0]
+    assert isinstance(got.x, float) and math.isnan(got.x) and math.isnan(got.lon)
+    assert got.alt_m is None and got.geoid_m is None
+    assert loaded == fixes
+
+
+def test_a_site_with_a_gps_line_saves_as_schema_4_and_names_its_crs(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == 4 == TRACK_SCHEMA_VERSION
+    assert doc["crs"] == "EPSG:32632"
+    assert doc["lines"][0]["placement"]["type"] == "track"
+
+
+def test_a_site_with_gps_lines_and_a_cut_still_saves_as_schema_4(tmp_path, site):
+    grid = dataclasses.replace(site.grids[0], crs=_TRACK_CRS)
+    gps, _ = _gps_site(tmp_path, grids=[grid])
+    gps.cuts = [Cut("c1", "cut", "G1", ((0.0, 0.0), (5.0, 0.0), (5.0, 5.0)))]
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(gps, out)
+    assert json.loads(out.read_text())["schema_version"] == 4
+
+
+def test_saving_gps_lines_with_no_crs_anywhere_is_refused(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    site.crs = None
+    with pytest.raises(ProjectError, match="CRS"):
+        save_site(site, tmp_path / "survey.nsgeo.json")
+
+
+def test_a_site_without_gps_lines_saves_exactly_as_before(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert "crs" not in doc and doc["schema_version"] == 1
+    first = out.read_text()
+    back = load_site(out)
+    assert back.crs is None and back.effective_crs() == "EPSG:32616"  # never pinned by a load
+    save_site(back, out)
+    assert out.read_text() == first  # ...and never written back
+
+    site.cuts = [Cut("c1", "cut", "G1", ((0.0, 0.0), (5.0, 0.0), (5.0, 5.0)))]
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == 2 and "crs" not in doc
+    again = out.read_text()
+    save_site(load_site(out), out)
+    assert out.read_text() == again
+
+    line0 = site.lines[0]
+    fit = _a_fit()
+    member = SourceFit.of(site.lines[0].path.name, "fit-1", "L0", fit)
+    site.lines[0] = dataclasses.replace(
+        line0,
+        velocity_fits={"fit-1": fit},
+        velocity_source=VelocitySource.from_fits([member], None),
+    )
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == 3 and "crs" not in doc
+
+
+def test_an_older_file_loads_with_no_pinned_crs_and_follows_its_first_grid(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    back = load_site(out)
+    assert back.crs is None and back.effective_crs() == site.grids[0].crs
+    back.grids[0] = dataclasses.replace(back.grids[0], crs="EPSG:32617")
+    assert back.crs is None and back.effective_crs() == "EPSG:32617"
+
+
+def test_a_site_with_no_grids_and_no_crs_key_has_no_crs(tmp_path):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(Site(), out)
+    assert load_site(out).crs is None
+
+
+def test_a_grid_free_site_keeps_its_crs(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    back = load_site(out)
+    assert back.grids == [] and back.crs == _TRACK_CRS
+
+
+def test_the_files_crs_wins_over_the_first_grid(tmp_path, site):
+    grid = dataclasses.replace(site.grids[0], crs=_TRACK_CRS)
+    gps, _ = _gps_site(tmp_path, grids=[grid])
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(gps, out)
+    doc = json.loads(out.read_text())
+    doc["grids"][0]["crs"] = "EPSG:32616"
+    out.write_text(json.dumps(doc))
+    # the grid now differs, but the file's own "crs" is what the site is in
+    assert load_site(out).crs == _TRACK_CRS
+
+
+def test_travel_shift_and_grid_id_are_written_only_when_set(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())["lines"][0]["placement"]
+    assert "travel_shift" not in doc and "grid_id" not in doc
+    assert doc["crs"] == _TRACK_CRS and doc["label"] == "gps 1"
+
+    placement = dataclasses.replace(site.lines[0].placement, travel_shift=0.24, grid_id="G1")
+    site.lines = [dataclasses.replace(site.lines[0], placement=placement)]
+    site.grids = [dataclasses.replace(_grid(), id="G1", crs=_TRACK_CRS)]
+    save_site(site, out)
+    doc = json.loads(out.read_text())["lines"][0]["placement"]
+    assert doc["travel_shift"] == 0.24 and doc["grid_id"] == "G1"
+    back = load_site(out).lines[0].placement
+    assert back.travel_shift == 0.24 and back.grid_id == "G1"
+
+
+def test_schema_4_is_readable_and_6_is_not(tmp_path):
+    assert 4 in READABLE_SCHEMA_VERSIONS and 6 not in READABLE_SCHEMA_VERSIONS
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert load_site(out).lines
+    doc = json.loads(out.read_text())
+    doc["schema_version"] = 6
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="schema version 6"):
+        load_site(out)
+
+
+def test_a_gps_line_in_another_crs_is_refused_on_load(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["crs"] = "EPSG:32616"
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="is placed in EPSG:32632, but the site is in EPSG:32616"):
+        load_site(out)
+
+
+def test_a_direct_save_refuses_a_gps_line_in_another_crs(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    site.crs = "EPSG:32616"
+    with pytest.raises(ProjectError, match="placed in EPSG:32632, but the site is in EPSG:32616"):
+        save_site(site, tmp_path / "survey.nsgeo.json")
+    assert not (tmp_path / "survey.nsgeo.json").exists()
+
+
+def test_a_pinned_crs_survives_an_edit_of_the_first_grid_through_save_and_load(tmp_path, site):
+    grid = dataclasses.replace(site.grids[0], crs=_TRACK_CRS)
+    gps, _ = _gps_site(tmp_path, grids=[grid])  # pinned: site.crs is _TRACK_CRS
+    gps.grids[0] = dataclasses.replace(grid, crs="EPSG:32616")
+    gps.validate()
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(gps, out)
+    assert load_site(out).crs == _TRACK_CRS
+
+
+def test_view_stretch_round_trips_and_a_bad_one_is_dropped(tmp_path):
+    site = _two_grid_site()
+    site.slice_sources = {"A": {"view_stretch": 2.5}, "B": {"preset": "p"}}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert load_site(path).slice_sources == site.slice_sources
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {"A": {"view_stretch": "wide"}, "B": {"view_stretch": True}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}
+    doc["slice_sources"] = {"A": {"view_stretch": 0}, "B": {"view_stretch": -2.0}}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_sources == {"A": {}, "B": {}}
+
+
+# ---- #129: the preset each import last chose ------------------------------------------
+
+
+def test_import_presets_round_trip(tmp_path):
+    site = _two_grid_site()
+    gid = site.grids[0].id
+    site.import_presets = {"grids": {gid: "A", site.grids[1].id: None}, "site": "A"}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert json.loads(path.read_text())["import_presets"] == site.import_presets
+    assert load_site(path).import_presets == site.import_presets
+
+
+def test_import_presets_are_read_tolerantly(tmp_path):
+    site = _two_grid_site()
+    gid = site.grids[0].id
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["import_presets"] = {"grids": {gid: "A", "nowhere": "B", site.grids[1].id: 7}, "site": 3}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).import_presets == {"grids": {gid: "A"}}
+    doc["import_presets"] = ["not", "an", "object"]
+    path.write_text(json.dumps(doc))
+    assert load_site(path).import_presets == {}
+
+
+def test_import_presets_do_not_change_the_schema_version(tmp_path):
+    plain = tmp_path / "a.nsgeo.json"
+    with_presets = tmp_path / "b.nsgeo.json"
+    save_site(_two_grid_site(), plain)
+    site = _two_grid_site()
+    site.import_presets = {"site": "A"}
+    save_site(site, with_presets)
+    assert (
+        json.loads(plain.read_text())["schema_version"]
+        == json.loads(with_presets.read_text())["schema_version"]
+    )
+
+
+def test_an_empty_import_presets_is_not_written(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_two_grid_site(), path)
+    assert "import_presets" not in json.loads(path.read_text())
+    assert load_site(path).import_presets == {}

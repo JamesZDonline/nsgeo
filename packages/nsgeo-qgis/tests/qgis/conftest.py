@@ -6,6 +6,7 @@ matrix (no QGIS) stays green while `.venv-qgis` and the Docker job run it.
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import traceback
@@ -18,6 +19,13 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 qgis_core = pytest.importorskip("qgis.core")
 
+# `pytest -m real_data` runs the tests CI cannot; see real_data_marks.py.
+from real_data_marks import (  # noqa: E402,F401
+    pytest_collection_modifyitems,
+    pytest_configure,
+    pytest_runtest_makereport,
+)
+
 
 @pytest.fixture(scope="session")
 def qgis_app():
@@ -27,6 +35,9 @@ def qgis_app():
     app = QgsApplication([], False)
     app.initQgis()
     yield app
+    # A parentless dialog left in a reference cycle would otherwise be collected after
+    # exitQgis(), and its destruction then crashes the process.
+    gc.collect()
     app.exitQgis()
 
 
@@ -58,6 +69,66 @@ class _FakeSignal:
             slot(*args)
 
 
+class _CameraRecorder:
+    """The 3-D view's camera controller: records where it was asked to look."""
+
+    def __init__(self) -> None:
+        self.poses: list = []
+
+    def setLookingAtMapPoint(self, *args) -> None:  # noqa: N802 -- QGIS's name
+        self.poses.append(args)
+
+
+class _LegacyCameraRecorder:
+    """QGIS 3.40's camera controller: no `setLookingAtMapPoint`, only `resetView(distance)`."""
+
+    def __init__(self) -> None:
+        self.resets: list = []
+
+    def resetView(self, distance) -> None:  # noqa: N802 -- QGIS's name
+        self.resets.append(distance)
+
+
+def _make_fake_canvas3d(legacy_camera=False):
+    """A `QObject` standing in for QGIS's `Qgs3DMapCanvas`, which hangs under offscreen.
+
+    As QGIS does, it copies the map's layers into its settings when made and whenever the
+    project gains or loses layers. The FakeIface's `QgsMapCanvas` has no layer-tree bridge (its
+    `layers()` is always empty), so the checked layers of the layer tree stand for them."""
+    from qgis._3d import Qgs3DMapSettings
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtCore import QObject
+
+    class FakeCanvas3D(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._settings = Qgs3DMapSettings()
+            self._camera = _LegacyCameraRecorder() if legacy_camera else _CameraRecorder()
+            self._project = QgsProject.instance()
+            self._copy_layers()
+            self._project.layersAdded.connect(self._copy_layers)
+            self._project.layersRemoved.connect(self._copy_layers)
+            self.destroyed.connect(self._unhook)
+
+        def _copy_layers(self, *_) -> None:
+            self._settings.setLayers(self._project.layerTreeRoot().checkedLayers())
+
+        def _unhook(self, *_) -> None:
+            try:
+                self._project.layersAdded.disconnect(self._copy_layers)
+                self._project.layersRemoved.disconnect(self._copy_layers)
+            except (TypeError, RuntimeError):
+                pass
+
+        def mapSettings(self):  # noqa: N802 -- QGIS's name
+            return self._settings
+
+        def cameraController(self):  # noqa: N802 -- QGIS's name
+            return self._camera
+
+    return FakeCanvas3D()
+
+
 class FakeIface:
     """The parts of QgisInterface the plugin touches."""
 
@@ -80,6 +151,73 @@ class FakeIface:
         self.menu_actions: list = []
         #: `(layer, page)` for each `showLayerProperties` call (#180).
         self.layer_properties: list = []
+        #: The fake 3-D views (M16 C), by name: what is open now, and every one ever made.
+        self.canvases3d: dict = {}
+        self.dialogs3d: dict = {}
+        self.created3d = 0
+        #: Host new views in a `QDockWidget`, not a `QDialog`; answer None to every create.
+        self.dock3d = False
+        self.refuse3d = False
+        #: Make new views' camera controllers QGIS 3.40's (no `setLookingAtMapPoint`).
+        self.legacy_camera3d = False
+
+    def _make_holder(self, name, title=None):
+        """The top-level window (a `QDialog`, or a `QDockWidget` when `dock3d` is set) that holds
+        a 3-D view; `title` carries a title across a swap, as QGIS's dock toggle does."""
+        from qgis.PyQt.QtWidgets import QDialog, QDockWidget
+
+        class _Dialog(QDialog):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        class _Dock(QDockWidget):
+            raised = 0
+
+            def raise_(self) -> None:
+                self.raised += 1
+                super().raise_()
+
+        holder = _Dock() if self.dock3d else _Dialog()
+        holder.setWindowTitle(title if title is not None else name)
+        return holder
+
+    def swap_holder3d(self, name):
+        """Dock (or undock) the view as the user does: a new holder, titled with the view's
+        ORIGINAL name, as QgsDockableWidgetHelper does (it re-applies the title it stored)."""
+        from qgis.PyQt import sip
+
+        old = self.dialogs3d[name]
+        self.dock3d = not self.dock3d
+        self.dialogs3d[name] = self._make_holder(name)
+        sip.delete(old)
+
+    def createNewMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """A fake canvas and its window titled `name`, as the real call makes; None, as QGIS
+        answers, when a view of that name is open (names are unique) or `refuse3d` is set."""
+        if self.refuse3d or name in self.canvases3d:
+            return None
+        canvas = _make_fake_canvas3d(self.legacy_camera3d)
+        self.canvases3d[name] = canvas
+        self.dialogs3d[name] = self._make_holder(name)
+        self.created3d += 1
+        return canvas
+
+    def closeMapCanvas3D(self, name):  # noqa: N802 -- QGIS's name
+        """Delete both, so `destroyed` fires, as closing the real view does."""
+        from qgis.PyQt import sip
+
+        canvas = self.canvases3d.pop(name, None)
+        dialog = self.dialogs3d.pop(name, None)
+        if canvas is not None and not sip.isdeleted(canvas):
+            sip.delete(canvas)
+        if dialog is not None and not sip.isdeleted(dialog):
+            sip.delete(dialog)
+
+    def mapCanvases3D(self):  # noqa: N802 -- QGIS's name
+        return list(self.canvases3d.values())
 
     def mainWindow(self):
         return self._main
@@ -597,3 +735,144 @@ def mag_site(qgis_app, tmp_path):
     session.set_mag_file(MagFile.open(m1, "M1", MagSetup()))
     session.save()
     yield session, root
+
+
+@pytest.fixture
+def synth_site(qgis_app, tmp_path):
+    """Two synthetic lines on a 3 x 12 m grid, in a site folder with a space in its path:
+    for tests that prepare nothing real (they run on CI). Yields `(session, dock, export)`."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import GRID, STEPS_ZERO, Dock, synthetic_dzt
+
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session = SiteSession()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    dock = Dock(session)
+    yield session, dock, ParaViewExport(session, dock)
+    dock.dispose()
+
+
+@pytest.fixture
+def built_site(synth_site):
+    """`(session, dock, export, layers, surfaces)`; surfaces build through `export`."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.surfaces import Surfaces
+    from qgis.core import QgsProject
+
+    session, dock, export = synth_site
+    project = QgsProject.instance()
+    project.clear()
+    layers = SiteLayers(session, project=project)
+    layers.refresh()  # the site is already open
+    surfaces = Surfaces(session, layers, export_for=lambda: export)
+    yield session, dock, export, layers, surfaces
+    layers.detach()
+    project.clear()
+
+
+@pytest.fixture
+def surface_plugin(fake_iface, tmp_path, answer_modal):
+    """The plugin over a synthetic site (two lines on `Grid A`, a preset `p`) with four saved
+    picks on its picks layer, none in a surface. Yields the plugin; `plugin.pick_fids` lists
+    the picks' fids in the order `PICKS` gives them."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.plugin import NsgeoPlugin
+    from nsgeo_qgis.session import Pick
+    from plugin_testing import GRID, STEPS_ZERO, synthetic_dzt
+    from qgis.core import QgsProject, QgsSettings
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    session = plugin.session
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    keys = session.keys()
+    before = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    for line, trace, time_ns in [(0, 5, 10.0), (0, 55, 11.0), (1, 5, 10.5), (1, 55, 11.5)]:
+        plugin.layers.write_pick(
+            Pick(
+                line_key=keys[line],
+                trace=trace,
+                time_ns=time_ns,
+                distance_m=None,
+                depth_m=None,
+                velocity_m_ns=None,
+                stack_json="",
+                note="",
+                created="2026-11-13T00:00:00+00:00",
+                zero_ns=None,
+            )
+        )
+    plugin.pick_fids = sorted(
+        {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()} - before
+    )
+    try:
+        yield plugin
+    finally:
+        plugin.unload()
+        QgsProject.instance().clear()
+        QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+        QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+
+
+@pytest.fixture(autouse=True)
+def _fold_settings(tmp_path, monkeypatch):
+    """Fold state never reaches a real QGIS settings file (#157 item 6)."""
+    from nsgeo_qgis.ui import folds
+    from qgis.PyQt.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(folds, "fold_settings", lambda: store)
+
+
+@pytest.fixture(autouse=True)
+def _add_data_mode_memory(qgis_app):
+    """The Add data dialog remembers its mode in QgsSettings and every import a
+    test runs writes it: start each test with nothing remembered (a value a
+    killed run left behind must not steer the next one), and put the value
+    back after."""
+    from nsgeo_qgis.ui.add_data_dialog import MODE_KEY
+    from qgis.core import QgsSettings
+
+    settings = QgsSettings()
+    before = settings.value(MODE_KEY, None)
+    settings.remove(MODE_KEY)
+    yield
+    if before is None:
+        settings.remove(MODE_KEY)
+    else:
+        settings.setValue(MODE_KEY, before)
+
+
+@pytest.fixture(autouse=True)
+def _slice_previews_in_tmp(tmp_path, monkeypatch):
+    """The Slices preview folders never reach the real cache folder (R19)."""
+    from nsgeo_qgis import slice_layer
+
+    monkeypatch.setattr(slice_layer, "cache_root", lambda: tmp_path / "cache" / "nsgeo")
+    monkeypatch.setattr(slice_layer, "_swept", False)

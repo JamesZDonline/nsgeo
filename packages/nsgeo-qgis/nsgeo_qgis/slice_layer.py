@@ -56,12 +56,13 @@ from qgis.core import (
     QgsSingleBandPseudoColorRenderer,
 )
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QStandardPaths, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis import own_colours
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.log import log as _log
+from nsgeo_qgis.slices_plan import slice_dir_prefix, stale_slice_dirs
 
 #: Deletion goes through this name so a test can refuse one file without
 #: patching `os.remove` for the whole process.
@@ -131,6 +132,58 @@ def apply_renderer(
     apply_smooth_resampling(layer)
 
 
+def cache_root() -> Path | None:
+    """Where the preview folders go: the user's cache folder, NOT the platform temp folder,
+    because QGIS warns of "temporary layers" for a layer file under the temp folder (and
+    `skipMemoryLayersCheck` does not stop that for a file layer). None when there is none."""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
+    return Path(base) / "nsgeo" if base else None
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """Whether a process is running; None when this platform cannot tell."""
+    if os.name != "posix":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+_swept = False
+
+
+def _sweep_stale(root: Path) -> None:
+    """Remove the preview folders of processes that are gone (a cache folder is not emptied
+    on reboot). Once per process; best effort, never raises."""
+    global _swept
+    if _swept:
+        return
+    _swept = True
+    try:
+        for name in stale_slice_dirs([p.name for p in root.iterdir()], _pid_alive):
+            shutil.rmtree(root / name, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 -- best effort
+        _log(f"could not sweep old slice preview folders: {exc}")
+
+
+def _make_preview_dir() -> Path:
+    root = cache_root()
+    if root is not None:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            _sweep_stale(root)
+            return Path(tempfile.mkdtemp(prefix=slice_dir_prefix(os.getpid()), dir=root))
+        except OSError as exc:
+            _log(f"could not use the cache folder for slice previews, so the temp folder is: {exc}")
+    return Path(tempfile.mkdtemp(prefix="nsgeo-slice-"))
+
+
 class SliceLayer(QObject):
     """The one live raster layer showing the dock's current slice.
 
@@ -156,7 +209,7 @@ class SliceLayer(QObject):
     def __init__(self, layers: SiteLayers, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.layers = layers
-        self._dir = Path(tempfile.mkdtemp(prefix="nsgeo-slice-"))
+        self._dir = _make_preview_dir()
         #: The CURRENT file: the one the layer reads. Replaced, never
         #: rewritten, on every update, and moved only once the layer
         #: actually reads the new one.

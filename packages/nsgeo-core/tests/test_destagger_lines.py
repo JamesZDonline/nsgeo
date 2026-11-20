@@ -1,4 +1,4 @@
-"""Per-line destagger values, measured on the real Nashville grids (#159).
+"""Per-line destagger values, measured on the real GPS survey grids (#159).
 
 A line gets its own value only when it is clearly and repeatably off against
 its neighbours; a line that changes partway along, or matches nothing, is named

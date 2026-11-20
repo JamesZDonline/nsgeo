@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import gc
 import threading
@@ -13,9 +14,11 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import retime_ns
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
+from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_engine import solve_key
@@ -27,11 +30,18 @@ from nsgeo_qgis.slices_plan import (
     REFINING_SLICE_INDICATOR,
     Resolution,
     SliceFinish,
+    clock_change_note,
+    level_limit_problem,
     limit_windows,
+    no_break_note,
     old_cube_note,
+    smallest_safe_cell,
     transform_names,
 )
+from nsgeo_qgis.ui import folds, site_scope
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, Entry
+from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
     LayoutProbe,
@@ -40,9 +50,12 @@ from plugin_testing import (
     needs_real_data,
     slow_jobs,
     synthetic_dzt,
+    wheel_event,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QApplication, QMessageBox, QScrollArea
+from tests.real_data import CAMPUS_LINES, GPS_LINES, GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -67,6 +80,12 @@ def docked_banded(qgis_app, tmp_path):
     """Time-zero preset on lines whose flat bands sit at rows 40, 40 and 41:
     two lines on the earlier zero, one a sample later (the GPS survey's case)."""
     yield from _docked_with(tmp_path, TIME_ZERO_PRESET, band_rows=(40, 40, 41))
+
+
+@pytest.fixture
+def docked_banded_radar(qgis_app, tmp_path):
+    """The banded lines under a preset with no Time zero step: the radar's clock."""
+    yield from _docked_with(tmp_path, PRESET, band_rows=(40, 40, 41))
 
 
 def _banded_dzt(folder, name, band_row):
@@ -1171,24 +1190,24 @@ def test_a_cube_saved_before_a_spacing_edit_follows_the_new_spacing(docked):
     assert dock.grid_finish.max_distance_metres.text() == "= 1 m"
 
 
-def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(docked):
+def test_a_grid_starts_from_square_a_0_1_m_cell_and_the_default_interpolation(docked):
     """#81: what a grid's slices start from before anything is remembered
-    for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
+    for it. `GRID`'s spacing is 0.5 m, where 0.1 m is under half the
     spacing, so nothing is clamped here."""
     dock, _ = docked
     assert dock.transform_combo.value() == "amp_square"
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.slice_finish() == SliceFinish()  # kriging out to 0.75 x spacing, no smoothing
 
 
-@pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
+@pytest.mark.parametrize(("spacing", "cell"), [(0.15, 0.075), (1.0, 0.1)])
 def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
     qgis_app, tmp_path, spacing, cell
 ):
-    """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
-    0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
+    """#81: a fixed 0.1 m, capped at spec 4's half the line spacing -- so
+    0.075 m on a 0.15 m-spaced grid, and still 0.1 m (not 0.5) at 1 m. The
     max distance is always half the grid's own spacing."""
     session = SiteSession()
     session.new_site(tmp_path)
@@ -1418,14 +1437,13 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
 
 
 def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
-    """Final review, Minor 6. `engine.provenance()` resolves velocity
-    against the FIRST prepared line's key and raises `KeyError` once that
-    line has been removed from the session -- a contributing line can be
-    deleted while a source stays prepared, and the cube's own arrays are
-    still entirely correct. `_resolved_velocity`'s catch used to guard
-    only `RuntimeError`, so the `KeyError` escaped through `_update_
-    readout` into `refresh_slice`'s broad `except`, which reported
-    `error: '<key>'` and cleared the map for a still-good slice."""
+    """Final review, Minor 6. A contributing line can be deleted while a source
+    stays prepared, and the cube's own arrays are still entirely correct. The
+    grid's velocity (`grid_depth_velocity`) is the grid's own velocity, else
+    the first line left in survey order, so removing the first line moves the
+    label to the new first line rather than raising. A `KeyError` escaping
+    through `_update_readout` into `refresh_slice`'s broad `except` used to
+    report `error: '<key>'` and clear the map for a still-good slice."""
     dock, session = docked
     _ready(dock)
     dock.slice_slider.setValue(5)
@@ -1441,7 +1459,147 @@ def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked)
     assert dock.current_values() is not None, "a still-valid slice must not be blanked"
     assert not dock.readout.text().startswith("error:"), dock.readout.text()
     assert not any(removed_key in e for e in errors), errors
-    assert dock.velocity_label.text() == "", "the velocity provenance has nothing left to name"
+    # The grid's velocity does not hang on the removed line: the label stays,
+    # and names the grid's new first line.
+    new_first = session.keys_on_grid("A")[0]
+    epsr = session.line_for_key(new_first).header.epsr
+    assert dock.velocity_label.text().endswith(
+        f"(header ε {epsr:g}, {line_label(session.line_for_key(new_first))})"
+    )
+
+
+def _override_every_line(session, velocity=0.12):
+    """The hazard input (spec 12): the grid's first line in survey order, and
+    the first prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def _two_fit_record(session):
+    members = [
+        SourceFit(
+            key,
+            "fit-1",
+            "2026-11-12T00:00:00+00:00",
+            line_label(session.line_for_key(key)),
+            20.0,
+            0.09,
+            0.002,
+            0.0,
+        )
+        for key in session.keys_on_grid("A")[:2]
+    ]
+    return VelocitySource.from_fits(members, applied_at=None)
+
+
+def test_slice_label_and_readout_use_the_grids_velocity(docked, message_log):
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+    lo_m, hi_m = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.09))
+    text = dock.readout.text()
+    assert f"{lo_m:.2f}" in text and f"{hi_m:.2f}" in text
+    lo_o, hi_o = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.12))
+    assert f"{lo_o:.2f}–{hi_o:.2f} m" not in text
+    assert message_log == []
+
+
+def test_slice_label_names_the_grids_record(docked, message_log):
+    dock, session = docked
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_live_grid_apply_relabels_the_prepared_slice(docked, message_log):
+    """Final review, Important: `grids_changed` reached `rebuild_source`, which
+    only refreshed a slice whose finish had moved, so a grid Apply left the
+    label and the readout's metres standing while Export GeoTIFF (through
+    `_resolved_velocity`) already used the new velocity."""
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+
+    def metres(v):
+        lo, hi = window_depths_m(dock.engine.z, window, VelocityModel.constant(v))
+        return f"{lo:.2f}-{hi:.2f} m"
+
+    assert metres(0.09) in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), None)
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A)"
+    assert metres(0.12) in dock.readout.text()
+    assert metres(0.09) not in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), _two_fit_record(session))
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_slice_survives_losing_every_line_of_a_grid_with_no_velocity(docked, message_log):
+    """The `KeyError` guards in `_resolved_velocity` and `_update_velocity_label`:
+    a grid with no velocity and no line has nothing to resolve, and that must
+    neither blank a still-valid slice nor leave an old label standing."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    for key in list(session.keys_on_grid("A")):
+        session.remove_line(key)
+    dock.slice_slider.setValue(6)
+    assert dock.current_values() is not None
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert "error:" not in dock.readout.text()
+    assert dock.velocity_label.text() == ""
+    # `_resolved_velocity` returns first on this path, so the label's own guard
+    # is reached only when it is handed a velocity the grid can no longer name.
+    dock.velocity_label.setText("stale")
+    dock._update_velocity_label("A", VelocityModel.constant(0.1))
+    assert dock.velocity_label.text() == ""
+    assert message_log == []
+
+
+def test_slice_label_without_a_grid_velocity_names_the_header_and_line(docked, message_log):
+    dock, session = docked
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    v = session.grid_depth_velocity("A").surface_velocity
+    assert dock.velocity_label.text() == (
+        f"v = {v:.3f} m/ns (header ε {first.header.epsr:g}, {line_label(first)})"
+    )
+    assert v != pytest.approx(0.12)
+    assert message_log == []
+
+
+def test_grid_velocity_label_covers_each_tier(docked):
+    from nsgeo_qgis.ui.profile_dock import grid_velocity_label
+
+    _, session = docked
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    assert (
+        grid_velocity_label(session, "A") == f"header ε {first.header.epsr:g}, {line_label(first)}"
+    )
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert grid_velocity_label(session, "A") == "Grid A"
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    assert grid_velocity_label(session, "A") == "Grid A, average of 2 fits"
+    one = VelocitySource.from_fits(_two_fit_record(session).members[:1], applied_at=None)
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), one)
+    assert grid_velocity_label(session, "A") == f"Grid A, fit on {one.members[0].line_label}"
 
 
 def test_moving_the_slider_announces_the_window_it_averaged(docked):
@@ -1986,9 +2144,7 @@ def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
         # a "fix" that merely let the groups be squashed would lose rows.
         assert scroll.widget().minimumSizeHint().height() >= 600
 
-        # ... and the dock still OPENS at a usable width, so this is not
-        # the degenerate fix of making everything collapsible to nothing.
-        assert dock.sizeHint().width() >= 280
+        # How wide it opens is pinned in test_plugin_slices_width.py (#50).
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2035,7 +2191,9 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         seeded = dock.cell_spin.value()
         assert frame_cells(big.size_x, big.size_y, seeded) <= MAX_FRAME_CELLS
 
-        # Hold the down-arrow. Far more presses than the range can absorb.
+        # Hold the down-arrow from well above the floor (the 0.1 m seed is
+        # clamped to it). Far more presses than the range can absorb.
+        dock.cell_spin.setValue(0.5)
         for _ in range(500):
             dock.cell_spin.stepBy(-1)
             assert frame_cells(big.size_x, big.size_y, dock.cell_spin.value()) <= (
@@ -2043,11 +2201,15 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
             ), f"cell {dock.cell_spin.value()} on a 300 m grid cannot be drawn"
 
         # ... and one click is a usable increment, not a leap to the end
-        # of the range. The old behaviour went 0.5 -> minimum in one.
-        dock.cell_spin.setValue(seeded)
+        # of the range. The old behaviour went 0.5 -> minimum in one. (The
+        # 0.1 m seed is clamped to this grid's 0.15 m floor, so it starts
+        # from 0.5 m, above the floor.)
+        start = 0.5
+        assert start > dock.cell_spin.minimum()
+        dock.cell_spin.setValue(start)
         dock.cell_spin.stepBy(-1)
-        assert dock.cell_spin.value() < seeded
-        assert seeded - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
+        assert dock.cell_spin.value() < start
+        assert start - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2144,12 +2306,19 @@ def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app
         dock.cell_spin.setValue(0.001)
         dock.flush_debounce()
 
-        assert errors, "an undrawable geometry must say so"
-        assert "too many to draw" in errors[-1], errors
-        assert "0.15" in errors[-1], f"the refusal must name a cell that works: {errors[-1]}"
+        entries = dock.warnings_panel.entries()
+        assert [e.kind for e in entries] == [REFUSAL], entries
+        assert "too many to draw" in entries[0].text
+        assert "0.15" in entries[0].text, f"it must name a cell that works: {entries[0].text}"
+        assert "Still showing" in entries[0].text
+        assert errors == [], "one place only: the Warnings section, not a toast"
         assert dock.engine.frame is before, (
             "the engine must still hold the geometry it had, not a frame it cannot draw"
         )
+
+        dock.cell_spin.setValue(0.25)
+        dock.flush_debounce()
+        assert dock.warnings_panel.entries() == ()
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2186,17 +2355,26 @@ def test_the_coverage_legend_says_what_a_blank_cell_means(docked):
     assert "blank" not in amplitude.lower(), amplitude
 
 
-def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
+def test_the_legend_label_elides_rather_than_widening_the_dock(qgis_app):
     """A `QLabel`'s minimum width is its text width unless it wraps, and a
     dock's minimum width is a hard floor on the QGIS main window's -- the
     same mechanism that made this dock force a 556 px window in round 1.
-    The coverage legend is the longest string this dock ever shows.
+    The coverage legend is the longest string this dock ever shows. It is cut
+    off with "…" and not wrapped (#121): a wrapped legend changes height with its
+    text, which moves the panel under the wheel. The tooltip carries the whole text.
     """
     dock = SlicesDock(SiteSession())
     try:
-        assert dock.legend_label.wordWrap()
-        dock.legend_label.setText("1 – 15 traces per cell · blank = no line crossed")
-        assert dock.legend_label.minimumSizeHint().width() <= 200
+        text = "1 – 15 traces per cell · blank = no line crossed"
+        dock.legend_label.setText(text)
+        dock.legend_label.setParent(None)  # shown on its own, narrower than its text
+        dock.legend_label.resize(60, dock.legend_label.height())
+        dock.legend_label.show()
+        from qgis.PyQt.QtWidgets import QLabel
+
+        assert dock.legend_label.text() == text
+        assert QLabel.text(dock.legend_label).endswith("…"), "what is drawn is cut off"
+        assert dock.legend_label.toolTip() == text
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2218,14 +2396,24 @@ def _line(tmp_path, grid_id, name, offset):
 def docked_two_grids(qgis_app, tmp_path):
     """`docked`, plus a second grid "B" with its own synthetic lines and a
     second preset "q", so a grid switch has something to restore."""
+    yield from _two_grids_with(tmp_path, PRESET)
+
+
+@pytest.fixture
+def docked_two_grids_zeroed(qgis_app, tmp_path):
+    """`docked_two_grids` with both presets setting time zero (#97)."""
+    yield from _two_grids_with(tmp_path, TIME_ZERO_PRESET)
+
+
+def _two_grids_with(tmp_path, preset):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
     session.add_grid(GRID_B)
     session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
     session.add_lines([_line(tmp_path, "B", f"FILE__01{i}", 1.0 + i) for i in range(2)])
-    session.site.presets["p"] = list(PRESET)
-    session.site.presets["q"] = list(PRESET)
+    session.site.presets["p"] = list(preset)
+    session.site.presets["q"] = list(preset)
     session.presets_changed.emit()
     session.save()
     dock = SlicesDock(session)
@@ -2475,6 +2663,132 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     assert session.slice_source("A")["lines"] is None
 
 
+# ---- #152: the grid the panel falls back to ---------------------------------
+def _another_palette(dock):
+    """An offered palette other than the one showing (the default after a preparation)."""
+    shown = dock.palette_combo.currentText()
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    return next(name for name in offered if name != shown)
+
+
+def _second_survey(tmp_path, presets=("p",)):
+    """Another survey on disk, under `tmp_path / "second"`: grid A, three
+    synthetic lines, and `presets` (each the dewow `PRESET`). Its grid has no
+    remembered slice source."""
+    folder = tmp_path / "second"
+    folder.mkdir()
+    other = SiteSession()
+    other.new_site(folder)
+    other.add_grid(GRID)
+    other.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+    )
+    for name in presets:
+        other.site.presets[name] = list(PRESET)
+    other.save()
+    return other.json_path
+
+
+def test_a_grid_the_combo_falls_back_to_opens_on_the_preset_whole_site_draws_it_with(
+    docked_two_grids,
+):
+    """#152: removing the selected grid moves the combo on its own. The grid it
+    falls back to used to keep the removed grid's preset; it opens on the one
+    Whole site draws it with, and nothing is written to its record."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")  # by hand: A remembers q
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("A")["preset"] == "q"
+    assert session.slice_source("B") in (None, {})
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == site_scope.default_preset(session, "B") == "p"
+    assert dock.engine.choice.preset == "p"
+    assert not session.slice_source("B")
+
+
+def test_a_grid_picked_by_hand_still_carries_the_preset_over(docked_two_grids):
+    """Guard (holds today): #152's rule is for a grid the combo moves to on its
+    own. A grid picked by hand keeps the preset showing, and the pick records
+    it as that grid's source."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.preset_combo.currentText() == "q"
+    assert session.slice_source("B")["preset"] == "q"
+
+
+def test_opening_a_survey_does_not_carry_a_same_named_preset_over(docked_two_grids, tmp_path):
+    """Guard (holds today): #152 (spec §5) counts the first grid of a survey just
+    opened as one the combo moved to on its own. A preset the last survey showed
+    is no choice made for it, even when the new survey has one of the same name.
+    It already opens on `p`: `open_site` closes the open survey first, and that
+    `site_closed` empties the preset combo, so the refill selects the first
+    preset. This pins it now that a site open goes through the fallback rule."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.preset_combo.currentText() == "q"
+    session.save()
+
+    session.open_site(_second_survey(tmp_path, presets=("p", "q")))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert session.slice_source("A") is None
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.engine.choice.preset == "p"
+
+
+def test_removing_the_grid_while_its_restore_prepares_drops_the_restore(docked_two_grids):
+    """Review Focus 1: the restored grid is removed before its preparation
+    lands, so the combo falls back to another grid. That is a source change:
+    the restored palette and shift are dropped, not applied to that grid."""
+    dock, session = docked_two_grids
+    session.site.presets["z"] = list(TIME_ZERO_PRESET)
+    session.presets_changed.emit()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.preset_combo.setCurrentText("z")  # A's cube on a preset that sets time zero
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()  # B's too: the same transform
+    other = _another_palette(dock)
+    _owed_record(dock, session, palette=other)  # no clock marked: it owes a shift
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+    session.remove_grid("A", with_lines=True)
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "B"
+    assert dock._pending_palette is None
+    assert not dock._pending_z_shift
+    assert dock.palette_combo.currentText() == default
+    # No shift landed on B: neither a toast nor a note says so.
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+
+
 # ---- #71: each grid remembers its own resolution ----------------------------
 def _switch(dock, grid_id):
     """Pick `grid_id` in This grid's combo, then let the change land."""
@@ -2507,10 +2821,10 @@ def test_a_resolution_edit_is_remembered_for_that_grid_only(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     assert not session.dirty
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
-    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert session.slice_resolution("A") == {"cell": 0.15}
     assert session.slice_resolution("B") == {}
     assert session.dirty
 
@@ -2520,7 +2834,7 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.engine.wait_for_preparation(20_000)
     seed_cell = dock.cell_spin.value()
     seed_dz = dock.dz_spin.value()
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(seed_dz * 2)
     dock.grid_finish.max_distance_spin.setValue(1.5)
     dock.flush_debounce()
@@ -2532,11 +2846,11 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
 
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
     assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     # On the engine too, not only in the boxes, and drawn.
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.15)
     assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
     assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
     assert dock.current_values() is not None
@@ -2546,7 +2860,7 @@ def test_seeding_never_remembers_a_resolution(docked_two_grids):
     dock, session = docked_two_grids
     # B's own spacing seeds a different cell, so every switch below really
     # moves the box (and emits) rather than passing for want of a change.
-    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.3))
+    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.1))
     _settle_sources(dock, session)
     seen: list[float] = []
     dock.cell_spin.valueChanged.connect(seen.append)
@@ -2563,7 +2877,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
 ):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.dz_spin.setValue(0.5)
     dock.z0_spin.setValue(2.0)
     dock.z1_spin.setValue(30.0)
@@ -2573,7 +2887,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     session.save()
     stored = session.slice_source("A")
     assert stored["resolution"] == {
-        "cell": 0.1,
+        "cell": 0.15,
         "dz_ns": 0.5,
         "t0_ns": 2.0,
         "t1_ns": 30.0,
@@ -2585,7 +2899,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     dock2 = SlicesDock(reopened)
     try:
         assert dock2.grid_combo.currentText() == "A"
-        assert dock2.cell_spin.value() == pytest.approx(0.1)
+        assert dock2.cell_spin.value() == pytest.approx(0.15)
         assert dock2.dz_spin.value() == pytest.approx(0.5)
         assert dock2.z0_spin.value() == pytest.approx(2.0)
         assert dock2.z1_spin.value() == pytest.approx(30.0)
@@ -2593,7 +2907,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         dock2.flush_debounce()
         assert dock2.engine.wait_for_preparation(20_000)
         # The restored values reached the engine and drew a slice.
-        assert dock2.engine.frame.cell == pytest.approx(0.1)
+        assert dock2.engine.frame.cell == pytest.approx(0.15)
         assert dock2.engine.z.t0_ns == pytest.approx(2.0)
         assert dock2.engine.z.dz_ns == pytest.approx(0.5)
         assert dock2.engine.z.t_end_ns == pytest.approx(30.0)
@@ -2755,7 +3069,7 @@ def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_gri
 def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
-    dock.cell_spin.setValue(0.1)
+    dock.cell_spin.setValue(0.15)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
     _save_cube(dock, session, "A__res", dock.view_settings())
@@ -2777,10 +3091,10 @@ def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
         "smooth_x_m",
         "smooth_y_m",
     }
-    assert remembered["cell"] == pytest.approx(0.1)
+    assert remembered["cell"] == pytest.approx(0.15)
     _switch(dock, "B")
     _switch(dock, "A")
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.15)
 
 
 # ---- minimum curvature: preview while the depth moves, refine once it rests --
@@ -3530,6 +3844,11 @@ def test_a_line_imported_onto_a_default_grid_still_shows_stale(docked_two_grids,
     assert dock.source_status.text().startswith("stale")
 
 
+def _notes(dock) -> list[str]:
+    """The texts of the ⓘ notes in Warnings, in order (spec §8)."""
+    return [e.text for e in dock.warnings_panel.entries() if e.kind == NOTE]
+
+
 def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
@@ -3545,7 +3864,9 @@ def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_tw
     dock.restore_cube("A__m")
     assert dock.engine.wait_for_preparation(20_000)
     assert a_keys[2] not in dock.included_keys()
-    assert any("moved to another grid since it was saved" in e for e in errors), errors
+    moved = [n for n in _notes(dock) if "moved to another grid since it was saved" in n]
+    assert len(moved) == 1, _notes(dock)
+    assert not [e for e in errors if "moved to another grid" in e], errors
 
 
 def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
@@ -3593,10 +3914,10 @@ def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docke
 # ---- #97: cubes on the time-zero clock ------------------------------------
 
 
-def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None):
+def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None, palette="amp_black_high"):
     """A record as an earlier build wrote it: no `time_base`, z on the radar clock."""
     record = _save_cube(
-        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
     )
     record.pop("time_base", None)
     if time_base is not None:
@@ -3642,7 +3963,9 @@ def _clock_start_record(dock, session, cube_id="A__old"):
 def _assert_a_clean_old_restore(dock, errors):
     median = dock.engine.median_zero()
     assert not [m for m in errors if "does not cover" in m or "could not" in m], errors
-    assert errors.count(old_cube_note(-median)) == 1, errors
+    note = old_cube_note(-median)
+    assert _notes(dock).count(note) == 1, _notes(dock)
+    assert note not in errors, errors
     low, high = dock.engine.prepared_z_bounds()
     assert low - 1e-9 <= dock.engine.z.t0_ns < dock.engine.z.t_end_ns <= high + 1e-9
     assert dock.current_values() is not None
@@ -3739,14 +4062,14 @@ def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_l
     errors: list[str] = []
     dock.error.connect(errors.append)
     dock.restore_cube("A__old")
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
     dock._scope = "site"
     try:
         dock._on_prepared()  # the preparation lands while Whole site is showing
     finally:
         dock._scope = "grid"
-    assert dock._pending_z_shift is True
-    assert not errors.count(old_cube_note(-(dock.engine.median_zero() or 0.0)))
+    assert dock._pending_z_shift
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
 
     assert dock.engine.wait_for_preparation(20_000)
     dock._on_prepared()  # This grid's preparation lands
@@ -3754,32 +4077,42 @@ def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_l
     _assert_shifted_once(dock, errors)
 
 
-def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed):
+def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed, monkeypatch):
+    """With a shift owed and a preparation running, `_settle_and_push` leaves
+    both the shift and the push to that preparation's `_on_prepared`: no
+    range reaches the engine before its owed shift (spec §3)."""
     dock, session = docked_zeroed
     _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
     errors: list[str] = []
     dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
     dock.restore_cube("A__old")
     assert dock.engine.is_running
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
 
-    dock._apply_owed_z_shift()  # must not consume the flag or say anything
+    dock._settle_and_push()  # must not consume the flag, push or say anything
 
-    assert dock._pending_z_shift is True
-    assert not [m for m in errors if "first break" in m], errors
+    assert dock._pending_z_shift
+    assert pushed == [], "pushed while the shift was still owed"
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
     assert dock.engine.wait_for_preparation(20_000)
     _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
 
 
-def _assert_shifted_once(dock, errors):
+def _assert_shifted_once(dock, errors, note=None):
+    """The owed record's range (5..40 ns, radar clock) moved once by the median
+    zero, said once in Warnings: `note`, or an unmarked record's by default."""
     median = dock.engine.median_zero()
-    assert median is not None
+    assert median is not None and abs(median) > 1e-3, median
     assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
     # The engine, not just the spins: the slice and Save cube read this.
     assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
-    assert errors.count(old_cube_note(-median)) == 1, errors
-    assert dock._pending_z_shift is False
+    note = note or old_cube_note(-median)
+    assert _notes(dock).count(note) == 1, _notes(dock)
+    assert note not in errors, errors
+    assert not dock._pending_z_shift
 
 
 def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
@@ -3814,7 +4147,7 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     dock.error.connect(errors.append)
     dock._grid_prepare_pending = True  # R-P5: a site task is still live
     dock.restore_cube("A__old")
-    assert dock._pending_z_shift is True
+    assert dock._pending_z_shift
 
     dock._run_pending_grid_prepare()  # the engine holds the source: a no-op prepare
 
@@ -3827,14 +4160,359 @@ def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed
     dock._on_prepared()
     assert dock.z0_spin.value() == pytest.approx(20.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(30.0, abs=1e-3)
-    assert errors.count(old_cube_note(-dock.engine.median_zero())) == 1
+    # The edit took the note down, and no second shift said it again.
+    assert _notes(dock) == []
+    assert old_cube_note(-dock.engine.median_zero()) not in errors, errors
 
 
-def test_rebuilding_the_source_drops_an_owed_shift(docked_zeroed):
-    dock, _session = docked_zeroed
-    dock._pending_z_shift = True
+# ---- spec §3: one settle sequence (#162 item 3, #200), notes in Warnings (§8) ----
+
+
+def _record_pushes(dock, monkeypatch) -> list[float]:
+    """Each `t0_ns` pushed at This grid's engine, in order, refused or not."""
+    pushed: list[float] = []
+    inner = dock.engine.set_resolution
+
+    def record(resolution):
+        if resolution is not None:
+            pushed.append(resolution.t0_ns)
+        inner(resolution)
+
+    monkeypatch.setattr(dock.engine, "set_resolution", record)
+    return pushed
+
+
+def _assert_pushed_shifted(dock, pushed):
+    """The owed record's range (5..40 ns, radar clock) reached the engine
+    shifted by the median zero, and never unshifted."""
+    median = dock.engine.median_zero()
+    assert median is not None and abs(median) > 1e-3, median
+    assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
+    assert pushed, "the restored range never reached the engine"
+    assert all(t == pytest.approx(5.0 - median, abs=1e-3) for t in pushed), pushed
+    assert not [t for t in pushed if t == pytest.approx(5.0, abs=1e-3)], pushed
+
+
+def _site_task_live(monkeypatch, dock) -> list[bool]:
+    """Make the site engine report a live task (R-P5) while `live[0]` is True.
+    Patched on the class, as a property; monkeypatch undoes it."""
+    live = [True]
+    monkeypatch.setattr(type(dock.site_engine), "has_live_task", property(lambda _s: live[0]))
+    return live
+
+
+def test_an_owed_shift_is_pushed_only_after_it_is_applied(docked_zeroed, monkeypatch):
+    """#162 item 3: the preparation and the resolution are both owed, and the
+    engine already holds the source. `_run_pending_grid_prepare` clamped and
+    pushed the record's radar-clock range first, then shifted it and pushed
+    again: the range started a line zero late until the second push."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock._grid_prepare_pending = True
+    dock._resolution_owed = True
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    dock._run_pending_grid_prepare()
+
+    _assert_pushed_shifted(dock, pushed)
+
+
+def test_an_owed_shift_waits_for_the_preparation_it_is_owed_to(docked_zeroed, monkeypatch):
+    """#162 item 3, with a preparation running. The engine was cleared, so a
+    preparation is dispatched (the restore's own `prepare()`: no site task is
+    live) and `_run_pending_grid_prepare` finds it running. It pushed the
+    radar-clock range at once; the preparation's `_on_prepared` shifted it
+    only afterwards."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=True)
+    dock._grid_prepare_pending = True
+    dock._resolution_owed = True
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_pushed_shifted(dock, pushed)
+
+
+def test_a_restore_that_waits_for_a_site_task_and_owes_a_shift_pushes_it_shifted(
+    docked_zeroed, monkeypatch
+):
+    """Spec §3 with #200: the restore defers behind a live site task, the retry
+    dispatches the preparation (the engine was cleared), and the shift is owed
+    to it. Nothing is pushed before `_on_prepared` shifts the range, and the
+    note shows once. A guard: it pins today's code."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the retry dispatches
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    pushed = _record_pushes(dock, monkeypatch)
+
+    dock.restore_cube("A__old")
+    assert dock._grid_prepare_pending and dock._resolution_owed and dock._pending_z_shift
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.is_running, "the retry dispatched the preparation"
+    assert pushed == [], "pushed before the shift"
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+    _assert_pushed_shifted(dock, pushed)
+
+
+@pytest.mark.parametrize("leave", ["edit", "scope"])
+def test_a_restore_note_goes_when_the_cube_is_left(docked_zeroed, leave):
+    """Spec §8: the note describes the cube the Cube box names. An edit marks
+    the cube unsaved and takes the note down; so does a scope change."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")  # picked, as the user picks it
+    assert not dock.engine.is_running
+    assert _notes(dock) == [old_cube_note(-dock.engine.median_zero())]
+
+    if leave == "edit":
+        dock.z1_spin.stepDown()
+        assert dock.cube_combo.currentText() == "(unsaved)"
+    else:
+        dock.set_scope("site")
+        assert dock.site_engine.wait_until_idle(60_000)
+        dock.set_scope("grid")
+
+    assert _notes(dock) == []
+
+
+def test_an_edit_while_a_restore_prepares_leaves_no_note_past_the_next_edit(docked_zeroed):
+    """Review I2-1, route (b): an edit inside the preparation window marks the
+    cube unsaved before its shift lands. The shift then moves the edited spins
+    and its note says why; the next edit, with the Cube box already reading
+    "(unsaved)", must take that note down."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.is_running
+
+    dock.z1_spin.stepDown()
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert _notes(dock), "the late note: the shift moved the edited range"
+
+    dock.z1_spin.stepDown()
+
+    assert _notes(dock) == []
+
+
+def test_a_restore_refused_at_its_checks_takes_the_last_notes_down(docked_zeroed):
+    """Review I2-1, route (a): a refused restore leaves the dock as it was, but
+    the Cube box leaves the cube it named, so that cube's notes go with it."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    record = _save_cube(
+        dock, session, "A__gone", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    record["preset"] = "does-not-exist"
+    dock.cube_combo.setCurrentText("A__old")
+    assert _notes(dock)
+
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert _notes(dock) == []
+
+
+def test_a_restore_that_fails_past_its_checks_takes_the_last_notes_down(docked_zeroed, monkeypatch):
+    """A restore that passed its checks drops the last cube's notes; one that
+    then fails says so in a toast, and Warnings shows what is left."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")
+    assert _notes(dock)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dock, "apply_view", boom)
+    dock.restore_cube("A__old")
+
+    assert dock.cube_combo.currentText() == "(unsaved)"
+    assert _notes(dock) == []
+
+
+def test_saving_a_cube_takes_the_last_restore_s_notes_down(docked_zeroed):
+    """Spec §8 (final review F-I1): Save cube… selects the record it just wrote
+    (`refresh_cube_combo(select=...)`), so the Cube box leaves the restored cube
+    and that cube's notes go with it. A refill with no `select` (a survey
+    signal's rebuild) leaves the Cube box where it was, and the note stands."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock.cube_combo.setCurrentText("A__old")  # picked, as the user picks it
+    note = old_cube_note(-dock.engine.median_zero())
+    assert _notes(dock) == [note]
+
+    # Recorded as `plugin.save_cube` records it; `_save_cube` refills with no `select`.
+    _save_cube(dock, session, "A__saved", dock.view_settings(), time_base=TIME_BASE_TIME_ZERO)
+    assert dock.cube_combo.currentText() == "A__old"
+    assert _notes(dock) == [note]
+
+    dock.refresh_cube_combo(select="A__saved")
+
+    assert dock.cube_combo.currentText() == "A__saved"
+    assert _notes(dock) == []
+
+
+def test_closing_the_site_while_a_restore_waits_for_a_site_task_is_quiet(
+    docked_zeroed, message_log, monkeypatch
+):
+    """Review Focus 2: the restore waits behind a live site task (R-P5), and
+    the survey closes meanwhile. The retry then runs on a closed survey: no
+    toast, no logged failure, and no resolution left owed. A guard test: it
+    held before the restore owed its resolution (#200), as a closed survey
+    offers no source to prepare or push."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock._grid_prepare_pending, "the restore waits for the site task"
+    assert dock._resolution_owed
+
+    session.save()
+    session.close_site()
+    # Here, not after the retry below: the retry consumes the flag anyway.
+    assert not dock._resolution_owed, "the close dropped the owed resolution"
+    live[0] = False
+    dock._run_pending_grid_prepare()
+
+    assert errors == []
+    assert not [m for m in message_log if "could not" in m], message_log
+
+
+def test_restoring_the_same_old_cube_twice_before_it_prepares_shifts_once(docked_zeroed):
+    """Review Focus 3: picked twice before its preparation lands, the old cube
+    is shifted once, and says so once. A guard on the shift, which held
+    before; only the note's place (Warnings, spec §8) is new."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_a_restore_that_leaves_lines_out_and_shifts_shows_both_notes(docked_two_grids_zeroed):
+    """Review Focus 4: an unmarked record of A, one of whose lines has moved to
+    B since. Both notes show in Warnings, and one edit takes both down."""
+    dock, session = docked_two_grids_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    _owed_record(dock, session)  # "A__old", every line of A
+    session.move_lines([a_keys[2]], "B")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    notes = _notes(dock)
+    moved = [n for n in notes if "moved to another grid since it was saved" in n]
+    assert old_cube_note(-dock.engine.median_zero()) in notes, notes
+    assert len(moved) == 1 and len(notes) == 2, notes
+    assert not [e for e in errors if "first break" in e or "moved to another" in e], errors
+
+    dock.z1_spin.stepDown()
+    assert _notes(dock) == []
+
+
+@pytest.mark.parametrize("signal", ["lines_changed", "grids_changed", "presets_changed"])
+def test_an_edit_while_a_restore_prepares_keeps_its_shift_and_note(docked_zeroed, signal):
+    """#162 item 2: an edit that leaves the source as it was does not forget
+    what a restore still owes. `rebuild_source` answers all three signals, and
+    it used to drop the owed shift on every one: the cube came back on the
+    radar clock, a line zero away, under its own name and with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
+    getattr(session, signal).emit()
+
+    assert dock.engine.wait_for_preparation(20_000)
+    _assert_shifted_once(dock, errors)
+
+
+def test_rebuilding_the_source_keeps_what_a_restore_owes_on_the_same_site(docked_zeroed):
+    """#162 item 2 (spec §2): only a new site or a source change drops a
+    restore's pending values. A rebuild on the same site, with the source as it
+    was, keeps both for the preparation still running."""
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    other = _another_palette(dock)
+    _prepared_with_owed_record(dock, session, palette=other)  # engine cleared
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+
     dock.rebuild_source()
-    assert dock._pending_z_shift is False
+
+    assert dock._pending_z_shift
+    assert dock._pending_palette == other
+
+
+def test_a_restored_palette_does_not_carry_into_the_next_survey(docked, tmp_path):
+    """#163 item 4: a palette a restore still owes belongs to the survey it was
+    made in. Closing that survey mid-preparation used to leave it pending, and
+    the next survey's first preparation applied it."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    default = dock.palette_combo.currentText()
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    dock.engine.clear()
+    dock.restore_cube("A__test")
+    assert dock.engine.is_running
+
+    session.save()
+    session.close_site()
+    assert dock._pending_palette is None
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.palette_combo.currentText() == default
+
+
+def test_a_survey_opened_after_closing_one_in_this_grid_starts_at_its_first_slice(docked, tmp_path):
+    """#102, without Whole site: the slider's own index was the closed survey's.
+    With no axis left to carry a time from, nothing placed it again, so the next
+    survey opened at the old one's slice."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    assert dock.slice_slider.value() > 0
+    session.save()
+    session.close_site()
+
+    session.open_site(_second_survey(tmp_path))
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+
+    assert dock.slice_slider.value() == 0
 
 
 def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):
@@ -3862,7 +4540,8 @@ def test_a_marked_record_is_not_shifted(docked_zeroed):
 
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
 
 
 def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
@@ -3876,7 +4555,245 @@ def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
 
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert _notes(dock) == []  # on its own clock: nothing moved, nothing said
+
+
+# ---- #162 item 1: a preset whose clock changed since the save -----------------
+
+
+def test_a_radar_record_whose_preset_gained_time_zero_restores_moved_by_the_median_zero(
+    docked_zeroed,
+):
+    """A cube saved on the radar's clock (its record says so), restored after
+    its preset took up Time zero. Only a record with no clock was shifted, so
+    this one came back a line zero away under its own name, with no note."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, time_base="radar")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    median = dock.engine.median_zero()
+    _assert_shifted_once(
+        dock, errors, note=clock_change_note("A__old", "p", TIME_BASE_TIME_ZERO, -median)
+    )
+
+
+def test_a_time_zero_record_whose_preset_lost_it_restores_moved_by_the_median_first_break(
+    docked_banded_radar,
+):
+    """A cube saved with Time zero, restored after its preset dropped the step.
+    The lines are on the radar's clock and each zero reads 0.0, so the range
+    moves by the median first break, `retime_ns(t, break, 0.0)`. It came back
+    as saved, a line zero away under its own name, with no note."""
+    dock, session = docked_banded_radar
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    first_break = dock.engine.median_first_break()
+    dt = dock.engine.prepared_lines()[0].dt_ns
+    assert first_break is not None and abs(first_break) > dt, first_break
+    # Inside the prepared range with the break added, so the clamp moves nothing.
+    low, high = dock.engine.prepared_z_bounds()
+    t0 = round(low + abs(first_break) + 1.0, 3)
+    t1 = round(min(high - abs(first_break) - 1.0, t0 + 30.0), 3)
+    _owed_record(dock, session, time_base="time_zero", z={"t0_ns": t0, "t1_ns": t1, "dz_ns": 0.5})
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.median_first_break() == pytest.approx(first_break)
+    assert dock.z0_spin.value() == pytest.approx(t0 + first_break, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(t1 + first_break, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(t0 + first_break, abs=1e-3)
+    note = clock_change_note("A__old", "p", TIME_BASE_RADAR, first_break)
+    assert _notes(dock) == [note]
+    assert note not in errors, errors
+    assert not dock._pending_z_shift
+
+
+def test_a_lost_time_zero_with_no_first_break_says_the_range_was_left(
+    docked_banded_radar, monkeypatch
+):
+    """Review Focus 5: the preset lost Time zero, and no prepared line has a
+    first break to shift by. The range stays as saved, and a note says so: the
+    cube must not come back on the wrong clock without a word."""
+    dock, session = docked_banded_radar
+    _prepared_with_owed_record(dock, session, time_base="time_zero")
+    monkeypatch.setattr(dock.engine, "median_first_break", lambda: None)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.is_prepared
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert dock.engine.z.t0_ns == pytest.approx(5.0, abs=1e-3)
+    assert _notes(dock) == [no_break_note("A__old", "p")]
+    assert not dock._pending_z_shift
+
+
+_DEWOW = {"step": "dewow", "params": {}, "enabled": True}
+_TIME_ZERO = {"step": "time_zero", "params": {}, "enabled": True}
+
+#: The real surveys, four lines each, with the grid length that holds them and
+#: the median line zero the author measured on each (spec §1). Each skips when
+#: its lines are not in tests/data/local (CI).
+_REAL_SURVEYS = [
+    pytest.param(
+        CAMPUS_LINES[:4],
+        12.0,
+        (0.3, 0.7),
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        (1.2, 1.7),
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@contextlib.contextmanager
+def _real_docked(tmp_path, paths, length_m, presets):
+    """A dock on real lines across a grid `length_m` long, with `presets`.
+    The lines run half a metre apart, and the grid is wide enough for them."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    width_m = max(3.0, 0.5 * (len(paths) + 1))
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, width_m, length_m, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, p.stem))
+            for i, p in enumerate(paths)
+        ]
+    )
+    session.site.presets.update(presets)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        yield dock, session
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize(("paths", "length_m", "band"), _REAL_SURVEYS)
+def test_a_real_data_old_record_restores_moved_by_the_median_zero(
+    qgis_app, tmp_path, paths, length_m, band
+):
+    """A record with no clock, restored on real lines under a preset with Time
+    zero, moves by the median line zero, of the size the author measured on
+    that survey. A guard: it holds today."""
+    with _real_docked(tmp_path, paths, length_m, {"p": [_TIME_ZERO, _DEWOW]}) as (dock, session):
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.flush_debounce()
+        assert dock.engine.wait_for_preparation(60_000)
+        _owed_record(dock, session)
+        dock.engine.clear()
+        errors: list[str] = []
+        dock.error.connect(errors.append)
+
+        dock.restore_cube("A__old")
+        assert dock.engine.wait_for_preparation(60_000)
+
+        median = dock.engine.median_zero()
+        assert band[0] <= abs(median) <= band[1], median
+        _assert_shifted_once(dock, errors)
+
+
+def _step(name, **params):
+    return {"step": name, "params": params, "enabled": True}
+
+
+#: The author's own processing on each real survey, less its Time zero step:
+#: what a preset that has lost Time zero runs. The gain steps are what moved
+#: a first break picked on the prepared lines (PF-1).
+_CAMPUS_STEPS = [
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step("gain_curve", points=[[0.478, -0.807], [17.98, 8.33], [33.90, -2.98], [98.82, -3.08]]),
+]
+_GPS_STEPS = [
+    _step("time_cutoff", end_ns=45.0),
+    _step("dewow", window_ns=4.0),
+    _step("background_mean"),
+    _step("gain_agc", window_ns=20.0, target=1.0, eps=1e-12),
+    _step(
+        "gain_curve",
+        points=[[-1.559, 0.0], [7.29, -0.079], [12.47, 6.15], [19.55, -0.142], [45.0, 0.0]],
+    ),
+]
+#: All ten campus lines, not the first four: on lines 1-4 the gain steps
+#: leave a prepared-line pick where it was, and on five of the other six they
+#: move it four samples late, which made the median two samples late (PF-1).
+_REAL_PROCESSING = [
+    pytest.param(
+        CAMPUS_LINES,
+        12.0,
+        _CAMPUS_STEPS,
+        id="campus",
+        marks=pytest.mark.skipif(not CAMPUS_LINES, reason="no campus lines in tests/data/local"),
+    ),
+    pytest.param(
+        GPS_LINES[:4],
+        31.0,
+        _GPS_STEPS,
+        id="gps",
+        marks=pytest.mark.skipif(not GPS_LINES, reason="no GPS lines in tests/data/local"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("paths", "length_m", "steps"), _REAL_PROCESSING)
+def test_the_first_break_estimate_matches_time_zero_on_real_lines(
+    qgis_app, tmp_path, paths, length_m, steps
+):
+    """Spec §9, the check that the estimate is fair: the median first break a
+    restore shifts by when its preset has lost Time zero agrees with the median
+    line zero Time zero itself finds, within half a sample: they are the same
+    pick on the same raw records, so they match exactly, and a whole sample off
+    is a different row. The lost side runs the author's own processing less
+    Time zero; the found side puts Time zero in front of it, where it runs on
+    the raw record. Both are read as This grid prepares the lines, under its own
+    transform (the default), as a restore reads them.
+
+    Picked on the prepared lines, the estimate was two samples late on the
+    campus lines and one sample late on these four GPS lines (PF-1): the gain
+    steps moved it. One sample passed the one-sample tolerance this test had
+    before, so GPS pinned nothing. The pick is now each raw record's, so the
+    transform cannot move it either; no transform is pinned.
+
+    With Time zero in front, `time_cutoff`'s 45 ns is on the time-zero clock,
+    and without it on the radar's: it ends the record well after the first
+    arrival either way."""
+    presets = {"radar": list(steps), "zeroed": [_TIME_ZERO, *steps]}
+    with _real_docked(tmp_path, paths, length_m, presets) as (dock, _session):
+        assert dock.engine.wait_for_preparation(60_000)
+        read = {}
+        for preset in ("radar", "zeroed"):
+            dock.preset_combo.setCurrentText(preset)
+            assert dock.engine.wait_for_preparation(60_000)
+            assert dock.engine.choice.preset == preset and dock.engine.is_prepared
+            assert dock.engine.line_count == len(paths), preset
+            read[preset] = (dock.engine.median_first_break(), dock.engine.median_zero())
+        dt = dock.engine.prepared_lines()[0].dt_ns
+        transform = dock.engine.choice.transform
+    first_break, zero = read["radar"][0], read["zeroed"][1]
+    assert first_break == pytest.approx(zero, abs=dt / 2), (transform, first_break, zero, dt)
 
 
 def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):
@@ -3892,8 +4809,8 @@ def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_p
 
     assert dock.engine.median_zero() is None
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
-    assert not [m for m in errors if "first break" in m], errors
-    assert dock._pending_z_shift is False
+    assert not [m for m in (*errors, *_notes(dock)) if "first break" in m], errors
+    assert not dock._pending_z_shift
     assert not [m for m in message_log if "could not" in m], message_log
 
 
@@ -3937,6 +4854,41 @@ def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
     finally:
         profile.hide()
         profile.deleteLater()
+
+
+@pytest.mark.skipif(len(GRID2_LINES) < 3, reason="needs Grid 2 in tests/data/local/grid2")
+def test_real_grid2_slice_depth_follows_the_grid_with_an_override_on_the_first_line(
+    qgis_app, tmp_path, message_log
+):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("G2", (500.0, 700.0), 0.0, 2.0, 29.96, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("G2", "y", 0.25 + 0.5 * k, 0.0, 1, p.stem))
+            for k, p in enumerate(GRID2_LINES[:3])
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.set_grid_velocity("G2", VelocityModel.constant(0.09))
+    session.set_line_velocity(session.keys_on_grid("G2")[0], VelocityModel.constant(0.12))
+    dock = SlicesDock(session)
+    try:
+        _ready(dock)
+        dock.thickness_spin.setValue(4.0)
+        dock.slice_slider.setValue(10)
+        assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid G2)"
+        assert dock.engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+        lo_m, hi_m = window_depths_m(
+            dock.engine.z, dock.current_window(), VelocityModel.constant(0.09)
+        )
+        assert f"{lo_m:.2f}" in dock.readout.text()
+        assert message_log == []
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
 
 
 # ---- #180: a saved cube carries This grid's colours ---------------------------------------
@@ -3996,3 +4948,861 @@ def test_the_symbology_button_is_off_while_coverage_shows(docked):
     assert "Show coverage" in dock.symbology_button.toolTip()
     dock.coverage_check.setChecked(False)
     assert dock.symbology_button.isEnabled()
+
+
+# ---- the wheel (#177; walkthrough W1) ----
+
+
+def _short_and_active(dock):
+    """Floated short enough to scroll, shown and active, so focus is real."""
+    dock.setFloating(True)
+    dock.resize(420, 300)
+    dock.show()
+    dock.activateWindow()
+    assert QTest.qWaitForWindowActive(dock)
+    scroll = dock.findChild(QScrollArea)
+    scroll.verticalScrollBar().setValue(0)
+    return scroll
+
+
+@pytest.mark.parametrize("name", ("cell_spin", "dz_spin", "z0_spin", "z1_spin", "thickness_spin"))
+def test_the_slices_boxes_take_the_wheel_unfocused(docked, name):
+    """Walkthrough W1: the author tried the click-first rule on the Resolution
+    boxes and chose Qt's own wheel back, with folding to keep it away."""
+    dock, _ = docked
+    _ready(dock)
+    _short_and_active(dock)
+    dock.slice_slider.setFocus()
+    box = getattr(dock, name)
+    assert box.focusPolicy() == Qt.FocusPolicy.WheelFocus
+    before = box.value()
+    QApplication.sendEvent(box, wheel_event(120))
+    assert box.value() == pytest.approx(before + box.singleStep(), abs=1e-4)
+
+
+def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(GRID)
+    session.add_grid(big)
+    session.add_lines([_line(tmp_path, "A", "FILE__001", 1.0)])
+    session.add_lines([_line(tmp_path, "Big", "FILE__010", 1.0)])
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        dock.grid_combo.setCurrentText("Big")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        record = _save_cube(dock, session, "cube1", dock.view_settings())
+        record["cell"] = 0.05
+        dock.grid_combo.setCurrentText("A")
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.cell_spin.setValue(0.3)  # neither the floor nor a seed, so the restore shows
+        dock.flush_debounce()
+
+        dock.restore_cube("cube1")
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+
+        assert dock.cell_spin.value() == pytest.approx(smallest_safe_cell(300.0, 300.0), abs=1e-3)
+        assert dock.warnings_panel.entries() == ()
+        assert errors == []
+        assert session.site.cubes["cube1"]["cell"] == 0.05
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_warning_coming_and_going_keeps_the_box_you_type_in(docked):
+    dock, _ = docked
+    _ready(dock)  # preparation done, so nothing clears the entries behind the test
+    scroll = _short_and_active(dock)
+    bar = scroll.verticalScrollBar()
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x " * 200)])
+    QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
+    bar.setValue(bar.maximum())
+    assert bar.value() > 0
+    dock.dz_spin.setFocus()
+    dock.dz_spin.setValue(0.75)
+    before = bar.value()
+    dock.warnings_panel.set_entries([])  # the range shrinks under the value
+    QTest.qWait(100)
+    assert bar.value() != before, "the scroll value moved, so the hazard was exercised"
+    assert dock.dz_spin.hasFocus()
+    assert dock.dz_spin.value() == 0.75
+
+
+def test_a_long_warning_never_widens_the_panel(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.setFloating(True)
+    dock.show()
+    content = dock.findChild(QScrollArea).widget()
+    QApplication.processEvents()
+    before = content.minimumSizeHint().width()
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x" * 400)])
+    QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
+    assert content.minimumSizeHint().width() == before
+
+
+# ---- #177: dz floors at the sample interval; a cube past twice its samples is refused ----
+
+
+def _first_dt(session, grid_id=None):
+    keys = session.keys() if grid_id is None else _grid_keys(session, grid_id)
+    return session.line_for_key(keys[0]).header.dt_ns
+
+
+def test_dz_cannot_go_below_the_sample_interval_in_this_grid(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dt = _first_dt(session)
+    assert dock.dz_spin.minimum() == pytest.approx(dt, abs=1e-4)
+    dock.dz_spin.setValue(0.001)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    dock.dz_spin.stepBy(1)
+    assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + dt, abs=1e-4)
+
+
+def test_dz_says_why_it_stops_at_the_sample_interval(docked):
+    """Walkthrough D1: at its floor, dz says "(sample interval)" beside the
+    number, and its tooltip says why it can't go lower."""
+    from nsgeo_qgis.ui.site_scope import set_spins_quietly
+    from nsgeo_qgis.ui.slices_dock import DZ_FLOOR_NOTE
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    note = dock.dz_floor_note
+    assert note.text() == DZ_FLOOR_NOTE == "(sample interval)"
+    assert "sample interval" in note.toolTip()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert not note.isHidden()
+    dock.dz_spin.stepBy(1)  # the arrows and the wheel
+    assert note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum())  # a seed or restore, signals blocked
+    assert not note.isHidden()
+    set_spins_quietly(dock, dz=dock.dz_spin.minimum() * 3)
+    assert note.isHidden()
+    dock.dz_spin.setValue(0.001)  # below the floor: clamped to it
+    assert not note.isHidden()
+
+
+def test_dz_says_it_while_a_floor_moves_under_it(docked):
+    """The floor moves with signals blocked (the scope switch, a seed): the
+    note follows it, not only dz's own changes."""
+    from nsgeo_qgis.ui.site_scope import set_dz_floor
+
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    floor = dock.dz_spin.minimum()
+    assert dock.dz_spin.value() == floor and not dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor / 2)  # a finer floor: dz now sits above it
+    assert dock.dz_spin.value() == floor
+    assert dock.dz_floor_note.isHidden()
+    set_dz_floor(dock, floor)  # back onto dz
+    assert not dock.dz_floor_note.isHidden()
+
+
+def test_a_grid_left_with_no_lines_drops_dz_back_to_no_floor(docked):
+    """Spec 3.2: with no line there is no interval, so neither the old floor
+    nor its note stays."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() > 0.01 and not dock.dz_floor_note.isHidden()
+    session.remove_lines(tuple(session.keys()))
+    QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(0.001)
+    assert dock.dz_floor_note.isHidden()
+
+
+def test_dz_says_nothing_before_any_line_gives_it_a_floor(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    dock = SlicesDock(session)
+    try:
+        assert dock.dz_spin.minimum() == pytest.approx(0.001)
+        dock.dz_spin.setValue(0.001)
+        assert dock.dz_floor_note.isHidden()
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def _assert_at_the_floor_and_built(dock):
+    """The box shows the floor and the cube built within the level limit."""
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert dock.dz_spin.value() > 0.2
+    assert dock.engine.z is not None
+    assert dock.engine.z.nz <= 1024
+    assert dock.warnings_panel.entries() == ()
+
+
+def test_a_remembered_dz_below_the_floor_comes_back_at_the_floor(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.remember_slice_resolution("A", dz_ns=0.001)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("A")
+    _assert_at_the_floor_and_built(dock)
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record stands"
+
+
+@pytest.fixture
+def docked_fine_b(qgis_app, tmp_path):
+    """Grid A as `docked`, and grid B recorded finer: 512 samples over 25 ns
+    (0.0488 ns), so the two grids' dz floors differ."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FINE__0{i}.DZT", n_traces=60, range_ns=25.0),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"FINE__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    yield dock, session
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked_fine_b):
+    dock, session = docked_fine_b
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__low", view)
+    record["z"]["dz_ns"] = 0.001
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
+    dock.restore_cube("A__low")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    _assert_at_the_floor_and_built(dock)
+    assert record["z"]["dz_ns"] == 0.001
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record is remembered as saved"
+
+
+@pytest.mark.parametrize("lines", ["none", "stale_first"])
+def test_a_cube_record_without_usable_first_line_still_sets_its_grids_floor(docked_fine_b, lines):
+    """A record with no `lines` key, or whose first key left the site, restored
+    while the finer grid is shown: the floor is the cube grid's own."""
+    dock, session = docked_fine_b
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__lines", view)
+    if lines == "none":
+        del record["lines"]
+    else:
+        record["lines"] = ["GONE__999", *record["lines"]]
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
+    dock.restore_cube("A__lines")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_failed_apply_clears_the_refusal_the_last_one_left(docked, monkeypatch):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+
+    def fail(resolution):
+        raise RuntimeError("the engine failed")
+
+    monkeypatch.setattr(dock.engine, "set_resolution", fail)
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert errors == ["the engine failed"]
+
+
+def test_the_dz_floor_travels_with_the_scope(docked_fine_b):
+    from nsgeo_qgis.ui.site_scope import capture_spins
+
+    dock, session = docked_fine_b
+    assert dock.engine.wait_for_preparation(20_000)
+    before = capture_spins(dock).dz_min
+    assert before == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    assert dock.site_engine.wait_until_idle(60_000)
+    QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the site's floor"
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert capture_spins(dock).dz_min == before
+
+
+def test_a_z_range_past_the_level_limit_is_refused_in_this_grid_and_the_map_stays(docked):
+    dock, session = docked
+    _ready(dock)
+    z = dock.engine.z
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert dock.engine.z is z
+    entries = dock.warnings_panel.entries()
+    assert [e.kind for e in entries] == [REFUSAL]
+    assert entries[0].text.startswith("Too many levels: dz 0.5 ns from 2 to 100,000 ns")
+    assert errors == []
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.engine.z is not None and dock.engine.z.nz <= 1024
+
+
+@needs_real_data
+def test_real_lines_floor_at_0_2165_and_allow_1024_levels(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    session.add_lines(
+        [
+            Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+            for i in range(4)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(30_000)
+        assert dock.dz_spin.minimum() == pytest.approx(0.2165, abs=1e-4)
+        samples = [session.line_for_key(k).header.n_samples for k in session.keys()]  # noqa: SIM118 -- SiteSession.keys()
+        assert set(samples) == {512}
+        seeded = Resolution(
+            dock.cell_spin.value(),
+            dock.dz_spin.minimum(),
+            dock.z0_spin.value(),
+            dock.z1_spin.value(),
+        )
+        assert level_limit_problem(seeded, samples) is None
+        deep = dataclasses.replace(seeded, t1_ns=100_000.0)
+        assert "1,024 (twice the 512 samples in each line)" in level_limit_problem(deep, samples)
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+# ---- #157 item 6: sections that fold, and the coverage view explained ----
+
+FOLDING = ("resolution_group", "grid_finish", "display_group")
+
+
+def _shown(dock):
+    dock.setFloating(True)
+    dock.resize(420, 900)
+    dock.show()
+    QCoreApplication.processEvents()
+
+
+@pytest.mark.parametrize("name", FOLDING)
+def test_each_settings_section_folds_and_unfolds(docked, name):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    _ready(dock)
+    _shown(dock)
+    box = getattr(dock, name)
+    assert isinstance(box, QgsCollapsibleGroupBox)
+    open_height = box.height()
+    box.setCollapsed(True)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert box.isCollapsed()
+    assert box.height() < open_height
+    box.setCollapsed(False)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert not box.isCollapsed()
+    assert box.height() == open_height
+
+
+def test_source_position_and_warnings_do_not_fold(docked):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    for name in ("source_group", "position_group", "warnings_panel"):
+        assert not isinstance(getattr(dock, name), QgsCollapsibleGroupBox)
+
+
+def test_every_section_starts_unfolded(docked):
+    dock, _ = docked
+    _shown(dock)
+    boxes = [getattr(dock, n) for n in FOLDING]
+    boxes += [dock.site_finish, dock.normalisation_panel.group]
+    assert all(not b.isCollapsed() for b in boxes)
+
+
+def _drawn_folded(box):
+    return box.height() < 60 and box.maximumHeight() < 60
+
+
+def _drawn_open(box):
+    return box.height() > 60
+
+
+def test_the_two_interpolation_panels_fold_together(docked):
+    """Through real scope switches: a fold made in one scope is DRAWN in the other."""
+    dock, _ = docked
+    _shown(dock)
+    dock.set_scope("site")
+    _events_n()
+    assert dock.site_finish.isVisible() and not dock.grid_finish.isVisible()
+    dock.site_finish.setCollapsed(True)
+    _events_n()
+    assert _drawn_folded(dock.site_finish)
+    dock.set_scope("grid")
+    _events_n()
+    assert dock.grid_finish.isCollapsed()
+    assert _drawn_folded(dock.grid_finish), (dock.grid_finish.height(),)
+    # and the reverse: unfold here, the site's draws open
+    dock.grid_finish.setCollapsed(False)
+    _events_n()
+    dock.set_scope("site")
+    _events_n()
+    assert not dock.site_finish.isCollapsed()
+    assert _drawn_open(dock.site_finish), dock.site_finish.height()
+
+
+def _events_n():
+    for _ in range(8):
+        QCoreApplication.processEvents()
+
+
+def test_folds_are_remembered_across_a_restart(docked):
+    dock, session = docked
+    _shown(dock)
+    dock.display_group.setCollapsed(True)
+    QCoreApplication.processEvents()
+    assert folds.fold_settings().value("nsgeo/slices/folded/display", type=bool) is True
+    again = SlicesDock(session)
+    try:
+        _shown(again)
+        _events_n()
+        assert again.display_group.isCollapsed()
+        assert _drawn_folded(again.display_group)
+        assert not again.resolution_group.isCollapsed()
+        assert _drawn_open(again.resolution_group)
+    finally:
+        again.refiner.shutdown()
+        again.engine.wait_for_preparation(20_000)
+        again.engine.dispose()
+        again.deleteLater()
+
+
+def _fold_unfold_display_keeps_dz(dock):
+    """dz focused; Display folds, the panel is scrolled up, Display unfolds and
+    scrolls itself into view. Returns (dz still focused, the unfold's scroll)."""
+    scroll = _short_and_active(dock)
+    bar = scroll.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    dock.display_group.setCollapsed(True)
+    _events_n()
+    bar.setValue(0)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    before = bar.value()
+    dock.display_group.setCollapsed(False)
+    _events_n()
+    return dock.dz_spin.hasFocus(), bar.value() - before
+
+
+def test_a_section_folding_does_not_take_focus_from_dz(docked):
+    dock, _ = docked
+    kept, moved = _fold_unfold_display_keeps_dz(dock)
+    assert moved > 0, "the unfold must scroll the panel, or this tests nothing"
+    assert kept
+
+
+def test_the_folding_boxes_are_not_tab_stops(docked):
+    dock, _ = docked
+    boxes = [dock.resolution_group, dock.grid_finish, dock.site_finish, dock.display_group]
+    assert all(b.focusPolicy() == Qt.FocusPolicy.NoFocus for b in boxes)
+    assert dock.normalisation_panel.group.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+def test_fold_state_never_touches_a_real_settings_file(tmp_path):
+    from pathlib import Path
+
+    assert Path(folds.fold_settings().fileName()).parent == tmp_path
+
+
+def test_the_coverage_tooltip_explains_what_and_how_a_preview_draws_it(docked):
+    dock, _ = docked
+    assert dock.coverage_check.toolTip() == (
+        "Shows how many traces fell in each cell, instead of the amplitude.\n"
+        "Use it to see where your lines ran and where there is no data: blank cells had no "
+        "line through them.\n"
+        "In a Whole site preview each pixel shows the largest count among the cells under it, "
+        "so lines look wider than they are."
+    )
+
+
+# ---- final review I1/M1: a restore onto another grid, and a failed apply ----
+
+
+def _make_dock(session):
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    return SlicesDock(session)
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+@pytest.fixture
+def docked_mixed_radar(qgis_app, tmp_path):
+    """Grid A with 512-sample lines, grid B with 2,048 over the same range."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"DEEP__0{i}.DZT", n_traces=60, n_samples=2048),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"DEEP__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def _deep_cube_saved_with_a_shown(dock, session, palette: str | None = "amp_black_high"):
+    """Save "B__deep", a cube of B with more levels than A's lines allow, then
+    show A again. Returns the cube's z axis. A `palette` of None saves it with
+    an offered palette that is not B's default (`_another_palette`)."""
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dz = dock.dz_spin.minimum()
+    assert dz == pytest.approx(110.864 / 2047, abs=1e-3)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(90.0)  # inside what the lines cover, so nothing is clamped
+    dock.dz_spin.setValue(dz)
+    dock.flush_debounce()
+    deep = dock.engine.z
+    assert deep is not None and deep.nz > 1024, "more levels than A's lines would allow"
+    if palette is None:
+        palette = _another_palette(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, palette, "this slice", False)
+    _save_cube(dock, session, "B__deep", view)
+    dock.grid_combo.setCurrentText("A")
+    assert dock.engine.wait_for_preparation(20_000)
+    return deep
+
+
+def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(docked_mixed_radar):
+    dock, session = docked_mixed_radar
+    deep = _deep_cube_saved_with_a_shown(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("B__deep")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "B"
+    z = dock.engine.z
+    assert z is not None
+    assert z.nz == deep.nz
+    assert z.dz_ns == pytest.approx(deep.dz_ns)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_that_waits_for_a_site_task_applies_its_resolution_to_its_own_grid(
+    docked_mixed_radar, monkeypatch
+):
+    """#200: a site task is still live, so R-P5 defers the restore's
+    preparation and the engine still holds A. The restore flushed its
+    resolution at once, against A's level limit, which refused B's deep cube.
+    It is owed instead, and lands on B once B is prepared."""
+    dock, session = docked_mixed_radar
+    deep = _deep_cube_saved_with_a_shown(dock, session)
+    live = _site_task_live(monkeypatch, dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("B__deep")
+
+    assert dock.warnings_panel.entries() == ()
+    assert dock._resolution_owed
+    assert dock.engine.choice.grid_id == "A"
+
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+
+    assert dock.grid_combo.currentText() == "B"
+    z = dock.engine.z
+    assert z is not None
+    assert z.nz == deep.nz
+    assert z.dz_ns == pytest.approx(deep.dz_ns)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_that_waits_for_a_site_task_keeps_its_palette(docked_mixed_radar, monkeypatch):
+    """#200: the restore's preparation is owed while a site task is live, so
+    no preparation is running when `restore_cube` returns. That read as a no-op
+    preparation and dropped the cube's palette, and the owed preparation's
+    `_on_prepared` then drew B on its default palette."""
+    dock, session = docked_mixed_radar
+    _deep_cube_saved_with_a_shown(dock, session, palette=None)
+    palette = session.site.cubes["B__deep"]["view"]["palette"]
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("B__deep")
+    live[0] = False
+    dock._run_pending_grid_prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+
+    assert dock.grid_combo.currentText() == "B"
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert palette in offered, offered
+    assert dock.palette_combo.currentText() == palette
+
+
+def test_a_waiting_restore_whose_source_is_prepared_leaves_no_palette_pending(docked, monkeypatch):
+    """The restore waits behind a site task for a source the engine already
+    holds, so the owed preparation is a no-op and no `_on_prepared` follows.
+    The palette the restore set stands, and none stays pending for a later,
+    unrelated preparation to apply (fix round 1's rule)."""
+    dock, session = docked
+    _ready(dock)
+    other = _another_palette(dock)
+    _save_cube(dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, other, "this slice", False))
+    live = _site_task_live(monkeypatch, dock)
+
+    dock.restore_cube("A__test")
+    assert dock._pending_palette == other, "held for the owed preparation"
+    live[0] = False
+    dock._run_pending_grid_prepare()
+
+    assert not dock.engine.is_running
+    assert dock._pending_palette is None
+    assert dock.palette_combo.currentText() == other
+
+
+@pytest.fixture
+def docked_big_and_small(qgis_app, tmp_path):
+    """A 300 m grid (whose cell floor is about 0.15 m) and a 6 m one."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("Small", (900.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    session.add_lines([_line(tmp_path, "Big", f"BIG__00{i}", 1.0 + i) for i in range(2)])
+    session.add_lines([_line(tmp_path, "Small", f"SMALL__00{i}", 1.0 + i) for i in range(2)])
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def _saved_small_fine_cube(dock, session):
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("Small")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.05)
+    dock.flush_debounce()
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    return _save_cube(dock, session, "Small__fine", view)
+
+
+def test_restoring_a_fine_cell_cube_while_a_large_grid_shows_draws_it_unrefused(
+    docked_big_and_small,
+):
+    dock, session = docked_big_and_small
+    _saved_small_fine_cube(dock, session)
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "Small"
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_onto_another_grid_clears_the_refusal_of_the_one_left(docked_big_and_small):
+    dock, session = docked_big_and_small
+    record = _saved_small_fine_cube(dock, session)
+    del record["z"]
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    big_floor = dock.cell_spin.minimum()
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.cell_spin.minimum() < big_floor, "the record has no resolution: Small's floor"
+
+
+def test_a_restore_owed_a_shift_clears_the_refusal_of_the_grid_left_at_once(
+    docked_two_grids_zeroed,
+):
+    """Parked Ruling 36, sharpening the test above: a restore that owes a shift
+    pushes nothing until its preparation lands, so no apply clears A's
+    refusal for it. Only the restore's own clearing does, and Warnings is
+    empty as soon as `restore_cube` returns. A guard test: it holds today."""
+    dock, session = docked_two_grids_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")  # B's lines on a preset that sets time zero
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    _owed_record(dock, session, cube_id="B__old")  # no clock marked: it owes a shift
+    dock.grid_combo.setCurrentText("A")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+
+    dock.restore_cube("B__old")
+
+    assert dock._pending_z_shift, "the shift waits for B's preparation"
+    assert dock.warnings_panel.entries() == ()
+
+
+def test_a_z_range_the_resolution_rejects_clears_the_last_refusal(docked):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    dock.z1_spin.setValue(1.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert len(errors) == 1 and "must exceed" in errors[0]
+
+
+# ---- #129: the panel follows a preset written for the grid it shows -------------------
+
+
+@pytest.fixture
+def docked_empty_grid(qgis_app, tmp_path):
+    """A site whose one grid is empty and which has two presets, "a" before "p"."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.site.presets["a"] = list(PRESET)
+    session.site.presets["p"] = [{"step": "dewow", "params": {"window_ns": 7.0}, "enabled": True}]
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    yield dock, session, tmp_path
+    dock.refiner.shutdown()
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def _record_set_source(dock, monkeypatch):
+    choices: list[Any] = []
+    real = dock.engine.set_source
+
+    def recording(choice):
+        choices.append(choice)
+        real(choice)
+
+    monkeypatch.setattr(dock.engine, "set_source", recording)
+    return choices
+
+
+def test_the_panel_follows_a_preset_written_for_the_grid_it_shows(docked_empty_grid):
+    dock, session, _ = docked_empty_grid
+    assert dock.preset_combo.currentText() == "a"
+    session.set_slice_preset("A", "p")
+    assert dock.preset_combo.currentText() == "p"
+
+
+def test_the_panel_ignores_its_own_writes_other_grids_and_other_fields(
+    docked_empty_grid, monkeypatch
+):
+    dock, session, _ = docked_empty_grid
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    session.set_slice_preset("A", "p")
+    assert dock.engine.wait_for_preparation(20_000)
+    choices = _record_set_source(dock, monkeypatch)
+    session.remember_slice_resolution("A", cell=0.4)
+    session.set_slice_preset("B", "a")  # another grid
+    session.remember_slice_source("A", preset="p", lines=None)  # the panel's own kind of write
+    assert dock.preset_combo.currentText() == "p"
+    assert choices == []
+
+
+def test_an_import_into_the_shown_empty_grid_prepares_with_the_imports_preset_once(
+    docked_empty_grid, monkeypatch
+):
+    from nsgeo_qgis.ui.add_data_dialog import GRID, AddDataDialog
+
+    dock, session, tmp_path = docked_empty_grid
+    assert dock.engine.wait_for_preparation(20_000)
+    choices = _record_set_source(dock, monkeypatch)
+    files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    dlg = AddDataDialog(session, grid_id="A", mode=GRID)
+    d = dlg.grid_page
+    d.add_files(files)
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("p"))
+    dlg.accept()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.preset_combo.currentText() == "p"
+    with_lines = [c for c in choices if c.line_keys]
+    assert [c.preset for c in with_lines] == ["p"], "the new lines are prepared once, with P"
+    assert choices[-1].preset == "p"
+    assert dock.engine.line_count == 2
+    # a Choose-lines change keeps P in the grid's remembered source
+    dock.set_included(tuple(session.keys())[:1])
+    assert session.slice_source("A")["preset"] == "p"

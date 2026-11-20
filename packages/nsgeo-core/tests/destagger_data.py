@@ -1,4 +1,4 @@
-"""Real-data helpers for the destagger tests: Nashville Grid 1 and Grid 2 as measure lines.
+"""Real-data helpers for the destagger tests: GPS survey Grid 1 and Grid 2 as measure lines.
 
 Lines are placed the way the survey was walked: zigzag at 0.5 m, line 1
 forward, on grid "G". Reading and binning a file takes about 0.15 s, so the

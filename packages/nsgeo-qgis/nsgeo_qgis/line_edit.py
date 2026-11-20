@@ -19,7 +19,7 @@ import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 
 # The Note's "a few centimetres": a Start closer to its edge than this is at it.
 START_TOLERANCE_M = 0.05
@@ -227,6 +227,45 @@ class LineEdit:
 
 
 @dataclass(frozen=True)
+class TrackEdit:
+    """A GPS line's requested change against the placement the table `seen`.
+    `None` means unchanged. Only the grid, label and destagger can change; the
+    track never moves (spec C3)."""
+
+    key: str
+    seen: TrackPlacement
+    label: str | None = None
+    grid_id: str | None = None
+    travel_shift: float | None = None
+
+    def placed(self, frames: Mapping[str, Grid]) -> TrackPlacement:
+        """`seen` with the set fields applied. `KeyError` for a grid that is
+        not in `frames`."""
+        p = self.seen
+        if self.grid_id is not None and self.grid_id not in frames:
+            raise KeyError(self.grid_id)
+        return dataclasses.replace(
+            p,
+            grid_id=p.grid_id if self.grid_id is None else self.grid_id,
+            label=p.label if self.label is None else self.label,
+            travel_shift=p.travel_shift if self.travel_shift is None else self.travel_shift,
+        )
+
+    def moved_to(self, grid_id: str, frames: Mapping[str, Grid]) -> TrackEdit:
+        if grid_id not in frames:
+            raise KeyError(grid_id)
+        return dataclasses.replace(self, grid_id=grid_id)
+
+    def changes(self, frames: Mapping[str, Grid]) -> bool:
+        p = self.placed(frames)
+        return not (
+            p.grid_id == self.seen.grid_id
+            and p.label == self.seen.label
+            and abs(p.travel_shift - self.seen.travel_shift) <= SAME_M
+        )
+
+
+@dataclass(frozen=True)
 class Skipped:
     key: str
     label: str
@@ -298,6 +337,7 @@ __all__ = [
     "Inset",
     "LineEdit",
     "Skipped",
+    "TrackEdit",
     "edge_inset",
     "fit_scale",
     "followed_length",

@@ -83,6 +83,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     TIME_BASE_RADAR,
@@ -108,10 +109,12 @@ from nsgeo.velocity_fit import (
     hyperbola_time,
     radar_clock_note,
 )
+from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -129,12 +132,21 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
+STEPS_REFUSED_TEXT = "This line's steps can't run. See the Processing panel."
+PREVIEW_STEPS_REFUSED_TEXT = (
+    "{name}'s steps can't run. Select it to see why in the Processing panel."
+)
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
 KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
 SITE_VIEW_SUFFIX = " · site view, not normalised"
 OTHER_CLOCK_SUFFIX = " · {n} picks on another clock"
+NO_DISTANCE_CALIBRATION = (
+    "This line has no distance calibration (no traces per metre, as with time-triggered "
+    "collection), so a hyperbola cannot be fitted."
+)
 
 
 def _time_base_of_provenance(provenance_json: str) -> str:
@@ -182,7 +194,9 @@ def _fit_t0_at_line_zero(session: SiteSession, key: str, line: Any, fit: StoredF
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
     "line override" (or "line override (fit at 18.4 ns)" when the override
-    was measured from a stored fit), "Grid <id>", a header-dielectric fallback, or
+    was measured from a stored fit, "line override, average of 3 fits" from
+    several), "Grid <id>" (with ", average of 6 fits" or ", fit on FILE__003"
+    when the grid remembers its fits), a header-dielectric fallback, or
     "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
@@ -213,22 +227,46 @@ def velocity_source(session: SiteSession, key: str) -> str:
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
         # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        record = line.velocity_source
+        if record is not None and record.method == METHOD_WEIGHTED_MEAN:
+            return f"line override, {record.summary()}"
         fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
         if fit is not None:
             return f"line override (fit at {_fit_t0_at_line_zero(session, key, line, fit):.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
         return f"Grid {grid.id}"
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
 
 
+def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
+    """What the Slices panel says a grid's depths come from: "Grid G2" with
+    ", average of 6 fits" or ", fit on FILE__003" when it remembers its fits,
+    else the header dielectric of the grid's first line, named, the line
+    `SiteSession.grid_depth_velocity` takes it from. `KeyError` as that does."""
+    grid = session.grid(grid_id)
+    if grid.velocity is not None:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
+        return f"Grid {grid.id}"
+    keys = session.keys_on_grid(grid_id)
+    if not keys:
+        raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+    line = session.line_for_key(keys[0])
+    return f"header ε {line.header.epsr:g}, {line_label(line)}"
+
+
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
     gain_points_changed = pyqtSignal(list)
+    gain_reset_requested = pyqtSignal()
     difference_cleared = pyqtSignal()
+    velocity_mode_requested = pyqtSignal()  # relayed from the view; wired in the plugin
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
@@ -239,6 +277,9 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
+        # The step object the Difference view is on (final review, #13): a
+        # move re-indexes it, and the view follows the object, not the row.
+        self._difference_step: Any = None
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
@@ -246,6 +287,10 @@ class ProfileDock(QgsDockWidget):
         # points are empty after it (#128). Apply to line / grid act on that
         # fit; every reset of `_velocity_points` ends it too.
         self._just_saved: tuple[str, str] | None = None
+        # Why the last box drew nothing. It shows in the velocity strip's note
+        # and ends with the next edit (a dot added or removed, or another box),
+        # Clear, Save fit, a line switch or velocity mode going off.
+        self._box_note = ""
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
         # (line key, fit id) the velocity dialog has selected, drawn bold.
@@ -403,6 +448,8 @@ class ProfileDock(QgsDockWidget):
         self.view.pick_requested.connect(self._pick)
         self.view.velocity_point_requested.connect(self._on_velocity_point_requested)
         self.view.velocity_point_discarded.connect(self._on_velocity_point_discarded)
+        self.view.velocity_box_drawn.connect(self._on_velocity_box_drawn)
+        self.view.velocity_mode_requested.connect(self.velocity_mode_requested)
         self.apply_line_button.clicked.connect(self._apply_velocity_to_line)
         self.apply_grid_button.clicked.connect(self._apply_velocity_to_grid)
         self.save_fit_button.clicked.connect(self._save_velocity_fit)
@@ -410,6 +457,7 @@ class ProfileDock(QgsDockWidget):
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
+        self.gain_strip.reset_requested.connect(self.gain_reset_requested.emit)
 
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
@@ -672,9 +720,11 @@ class ProfileDock(QgsDockWidget):
         # as if it belonged here.
         self._velocity_points = []
         self._just_saved = None
+        self._reset_box_state()
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         if was_diff:
             self.difference_cleared.emit()
@@ -778,6 +828,8 @@ class ProfileDock(QgsDockWidget):
         if profiles:
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None:
+                self._show_steps_refused(key, is_preview=is_preview)
         else:
             self.channel_combo.hide()
             # No `_render` on this branch, so nothing else would take down
@@ -786,20 +838,40 @@ class ProfileDock(QgsDockWidget):
             # load that fails stays here: left up, the line could be
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
-            self._cutoff_step = None
-            self._shown_radargram = None
-            self.view.set_cutoff(None)
-            self._set_axes_holding(
-                key,
-                line.n_traces,
-                line.header.n_samples,
-                line.header.position_ns,
-                line.header.dt_ns,
-                self._safe_distance(line),
-            )
-            self.view.set_image(None)
+            self._take_down_picture(key, line)
             self._refresh_picks()  # no `_render` on this branch to do it
         self._refresh_velocity()
+
+    def _take_down_picture(self, key: str, line: Any) -> None:
+        """Take down what the last line left: its cutoff, its radargram and
+        its picture, with the axes set for `line`'s own record."""
+        self._cutoff_step = None
+        self._shown_radargram = None
+        self.view.set_cutoff(None)
+        self._set_axes_holding(
+            key,
+            line.n_traces,
+            line.header.n_samples,
+            line.header.position_ns,
+            line.header.dt_ns,
+            self._safe_distance(line),
+        )
+        self.view.set_image(None)
+
+    def _show_steps_refused(self, key: str, *, is_preview: bool) -> None:
+        """The line's samples are here but its steps cannot run: say so
+        instead of leaving the last line's picture up. Called when a line is
+        shown or its samples arrive, never on a stack edit, where the last
+        picture of the same line staying up is the point (#197)."""
+        line = self.session.line_for_key(key)
+        self._take_down_picture(key, line)
+        # After the axes: `set_axes` resets the message to "loading…".
+        self.view.set_message(
+            PREVIEW_STEPS_REFUSED_TEXT.format(name=line_label(line))
+            if is_preview
+            else STEPS_REFUSED_TEXT
+        )
+        self._refresh_picks()
 
     # ---- cuts (cut spec §4.3, §4.4) ---------------------------------------
     def _set_cut_chrome(self, on: bool) -> None:
@@ -910,6 +982,8 @@ class ProfileDock(QgsDockWidget):
             profiles = self.session.profiles_for(key) or []
             self._configure_channels(len(profiles))
             self._render()
+            if self.image is None and not is_cut_key(key):
+                self._show_steps_refused(key, is_preview=key == self._preview_key)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not render line {key!r} once it loaded: {exc}", Qgis.MessageLevel.Critical)
 
@@ -1036,6 +1110,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip = None
         was_diff = self._difference_index >= 0
         self._difference_index = -1
+        self._difference_step = None
         self.difference_label.setText("")
         try:
             self._clear_view_only()
@@ -1060,6 +1135,7 @@ class ProfileDock(QgsDockWidget):
         self.velocity_label.setText("")
         self._velocity_points = []
         self._just_saved = None
+        self._reset_box_state()
         self._update_velocity_fit()
         self.channel_combo.hide()
 
@@ -1160,6 +1236,7 @@ class ProfileDock(QgsDockWidget):
         self._velocity_mode = bool(flag)
         if not self._velocity_mode:
             self._just_saved = None
+            self._reset_box_state()
         self.view.set_velocity_fit_mode(self._velocity_mode)
         self.velocity_strip.setVisible(self._velocity_mode)
         self._update_velocity_fit()
@@ -1188,6 +1265,7 @@ class ProfileDock(QgsDockWidget):
             if self._refuse_velocity_edit_on_preview():
                 return
             self._just_saved = None
+            self._reset_box_state()
             self._velocity_points.append(
                 (int(trace), float(retime_ns(float(time_ns), self.shown_zero_ns(), 0.0)))
             )
@@ -1195,12 +1273,92 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
 
+    def _reset_box_state(self) -> None:
+        self._box_note = ""
+
+    def _box_refusal(self) -> str:
+        """Why a box cannot be traced now, or "" (the preview is refused apart,
+        with an error). A cut never gets here in practice: Velocity is disabled
+        on one, and `_velocity_axis` refuses it if it does."""
+        if self._effective_difference_index >= 0:
+            return "Cannot trace a difference view. Turn the difference off to trace."
+        key = self._working_key
+        if key is None or not self.session.is_open or is_cut_key(key):
+            return ""
+        for step, enabled in self.session.stack_for(key, insert=False).entries:
+            if not enabled:
+                continue
+            if step.name == "migrate_fk":
+                return (
+                    f"Cannot trace with {step.title} on: it has already collapsed the "
+                    "hyperbolas. Switch it off in the processing stack to trace, or click "
+                    "the points by hand."
+                )
+            if step.name in ("amp_abs", "amp_square", "amp_envelope"):
+                return (
+                    f"Cannot trace with {step.title} on: it removes the edge the tracer "
+                    "follows. Switch it off in the processing stack to trace, or click "
+                    "the points by hand."
+                )
+        return ""
+
+    def _on_velocity_box_drawn(
+        self, first_trace: int, last_trace: int, top_ns: float, bottom_ns: float
+    ) -> None:
+        try:
+            if self._refuse_velocity_edit_on_preview():
+                return
+            self._box_note = ""
+            reason = self._box_refusal()
+            if not reason:
+                try:
+                    self._trace_box(first_trace, last_trace, top_ns, bottom_ns)
+                except ValueError as exc:
+                    reason = (
+                        NO_DISTANCE_CALIBRATION
+                        if self._line_has_no_distance_calibration()
+                        else str(exc)
+                    )
+            if reason:
+                self._box_note = reason
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not trace the box: {exc}", Qgis.MessageLevel.Critical)
+
+    def _trace_box(
+        self, first_trace: int, last_trace: int, top_ns: float, bottom_ns: float
+    ) -> None:
+        """Replace the working dots with the hyperbola traced in the box. Raises
+        `ValueError` with the reason, leaving the dots as they were."""
+        distance, _, _ = self._velocity_axis()
+        rg = self._shown_radargram
+        if rg is None:
+            raise ValueError("no radargram is drawn")
+        zero = self._line_zero()
+        shown = rg.zero_ns
+        # The box and the times are on the drawn axis; the fit's clock is the line's own.
+        times = retime_ns(rg.times_ns(), shown, zero)
+        box = TraceBox(
+            first_trace,
+            last_trace,
+            float(retime_ns(top_ns, shown, zero)),
+            float(retime_ns(bottom_ns, shown, zero)),
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            dots = trace_hyperbola(rg.data, times, distance, box)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._velocity_points = [(int(tr), float(retime_ns(t, zero, 0.0))) for tr, t in dots]
+        self._just_saved = None
+
     def _on_velocity_point_discarded(self, index: int) -> None:
         try:
             if self._refuse_velocity_edit_on_preview():
                 return
             if 0 <= index < len(self._velocity_points):
                 del self._velocity_points[index]
+                self._reset_box_state()
                 self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not discard the velocity point: {exc}", Qgis.MessageLevel.Critical)
@@ -1396,18 +1554,13 @@ class ProfileDock(QgsDockWidget):
                     self.velocity_readout.setText(readout)
                 except ValueError as exc:
                     if self._line_has_no_distance_calibration():
-                        self.velocity_readout.setText(
-                            "This line has no distance calibration (no traces per metre, "
-                            "as with time-triggered collection), so a hyperbola cannot "
-                            "be fitted."
-                        )
+                        self.velocity_readout.setText(NO_DISTANCE_CALIBRATION)
                     else:
                         self.velocity_readout.setText(str(exc))
-            self.velocity_note.setText(
-                self._velocity_time_zero_note(
-                    None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
-                )
+            time_zero_note = self._velocity_time_zero_note(
+                None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
             )
+            self.velocity_note.setText(" ".join(n for n in (self._box_note, time_zero_note) if n))
             if self._preview_key is None and self._velocity_mode:
                 shown = self.shown_zero_ns()
                 self.view.set_velocity_fit(
@@ -1482,46 +1635,76 @@ class ProfileDock(QgsDockWidget):
         grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
         return None if grid is None else str(grid.id)
 
+    def _saved_record(self) -> tuple[str, float, VelocitySource] | None:
+        """After Save fit, with no new points: the saved fit's line, its
+        velocity at the line's current zero, and its record. None once that
+        state has ended (the store is asked, so a deleted fit is never applied
+        or named)."""
+        saved = None if self._velocity_points else self._saved_fit_now()
+        if saved is None or self._just_saved is None:
+            return None
+        key, fit_id = self._just_saved
+        # One member, made by `fit` (grid velocity spec §7.4).
+        record = fit_record(self.session, [(key, fit_id, saved)], applied_at=applied_now())
+        return key, saved.v_m_ns, record
+
+    def _stored_twin_record(self, key: str) -> VelocitySource | None:
+        """The record for an unsaved working fit applied to its line: a stored
+        fit with these very points, else none -- a bare "line override" is
+        better than a provenance the velocity does not have. Same points, same
+        fit: the working points and a stored fit's points are both on the radar
+        clock, whatever the line's time zero is, so equal points are the same
+        clicks. The fit is measured at the zero the working fit used, so the
+        record copies the number applied."""
+        points = tuple(self._velocity_points)
+        line = self.session.line_for_key(key)
+        stored = [i for i, f in line.velocity_fits.items() if f.points == points]
+        if not stored:
+            return None
+        fit_id = stored[-1]
+        try:
+            at_zero = fit_at_zero(
+                line.velocity_fits[fit_id], line.distance_along(), self._line_zero()
+            )
+        except ValueError:
+            return None  # not measurable at this zero: the dialog never applies it either
+        return fit_record(self.session, [(key, fit_id, at_zero)], applied_at=applied_now())
+
     def _apply_velocity_to_line(self, *_: Any) -> None:
         try:
-            saved = None if self._velocity_points else self._saved_fit_now()
-            if saved is not None and self._just_saved is not None:
-                # Just saved: the working points are gone, the stored fit is
-                # the one being applied, and its id is the provenance.
-                key, fit_id = self._just_saved
-                self.session.set_line_velocity(key, VelocityModel.constant(saved.v_m_ns))
-                self.session.set_velocity_from_fit(key, fit_id)
+            saved = self._saved_record()
+            if saved is not None:
+                # Just saved: the working points are gone, and the stored fit
+                # is the one being applied, with its record.
+                key, v, record = saved
+                self.session.apply_line_velocity(key, VelocityModel.constant(v), record)
                 return
             fit = self._velocity_fit
-            if fit is not None and self._working_key is not None:
-                self.session.set_line_velocity(
-                    self._working_key, VelocityModel.constant(fit.v_m_ns)
-                )
-                # `velocity_from_fit` is the fit that produced the override:
-                # a stored fit with these very points, else none -- a bare
-                # "line" is better than a provenance the velocity does not
-                # have. Same points, same fit: the working points and a stored
-                # fit's points are both on the radar clock, whatever the line's
-                # time zero is, so equal points are the same clicks. The store
-                # is asked rather than remembered, so a deleted fit is never
-                # named.
-                points = tuple(self._velocity_points)
-                fits = self.session.line_for_key(self._working_key).velocity_fits
-                stored = [i for i, f in fits.items() if f.points == points]
-                self.session.set_velocity_from_fit(
-                    self._working_key, stored[-1] if stored else None
+            working = self._working_key
+            if fit is not None and working is not None:
+                self.session.apply_line_velocity(
+                    working,
+                    VelocityModel.constant(fit.v_m_ns),
+                    self._stored_twin_record(working),
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
 
     def _apply_velocity_to_grid(self, *_: Any) -> None:
+        """A saved fit is recorded as the grid's source; an unsaved working fit
+        sets a bare number, with no record (grid velocity spec §7.4)."""
         try:
-            saved = None if self._velocity_points else self._saved_fit_now()
-            fit = self._velocity_fit
-            v = saved.v_m_ns if saved is not None else (None if fit is None else fit.v_m_ns)
             grid_id = self._working_grid_id()
-            if v is not None and grid_id is not None:
-                self.session.set_grid_velocity(grid_id, VelocityModel.constant(v))
+            if grid_id is None:
+                return
+            saved = self._saved_record()
+            if saved is not None:
+                _, v, record = saved
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(v), record)
+                return
+            fit = self._velocity_fit
+            if fit is not None:
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns), None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
 
@@ -1549,6 +1732,7 @@ class ProfileDock(QgsDockWidget):
             # The read-out says where the fit went (`_update_velocity_fit`).
             self._velocity_points = []
             self._just_saved = (key, fit_id)
+            self._reset_box_state()
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
@@ -1557,6 +1741,7 @@ class ProfileDock(QgsDockWidget):
         try:
             self._velocity_points = []
             self._just_saved = None
+            self._reset_box_state()
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)
@@ -1579,6 +1764,7 @@ class ProfileDock(QgsDockWidget):
         if index == self._difference_index:
             return
         self._difference_index = index
+        self._difference_step = None
         try:
             self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -1645,6 +1831,7 @@ class ProfileDock(QgsDockWidget):
             return None
         declined: str | None = None
         if self._effective_difference_index >= 0:
+            self._follow_differenced_step(stack)
             # Its own `try`, and a declined difference falls through to the
             # ordinary view below rather than returning None. Returning None
             # left whatever was on screen: another step's difference, with
@@ -1689,6 +1876,24 @@ class ProfileDock(QgsDockWidget):
                 self.error.emit(str(exc))
             return None
 
+    def _follow_differenced_step(self, stack: StepStack) -> None:
+        """Keep the Difference view on the step object it was set on when a
+        move re-indexes it. Found elsewhere by identity: the index follows.
+        Not found (edited in place, or removed): the index stands, and the
+        object tracked becomes whatever sits there now (None when out of
+        range), so today's decline paths are unchanged."""
+        entries = stack.entries
+        idx = self._difference_index
+        tracked = self._difference_step
+        if tracked is None or (idx < len(entries) and entries[idx][0] is tracked):
+            self._difference_step = entries[idx][0] if idx < len(entries) else None
+            return
+        for j, (step, _on) in enumerate(entries):
+            if step is tracked:
+                self._difference_index = j
+                return
+        self._difference_step = entries[idx][0] if idx < len(entries) else None
+
     def _decline_difference(self, message: str) -> None:
         """Report `message` and revert an active difference view: shared
         by both except branches of `current_radargram`'s difference `try`
@@ -1698,6 +1903,7 @@ class ProfileDock(QgsDockWidget):
         self.error.emit(message)
         if self._difference_index >= 0:
             self._difference_index = -1
+            self._difference_step = None
             self.difference_label.setText("")
             self.difference_cleared.emit()
 
@@ -1890,10 +2096,10 @@ class ProfileDock(QgsDockWidget):
         defaulted here, unlike on `set_points` itself, only so the three
         hide calls need not invent a token for a payload that is never
         delivered -- the `points is None` branch returns without reaching
-        `set_points` at all. A `None` owner alongside real points would
-        still be honoured, and ends any gesture in progress -- the safe
-        direction: the corrupting one is keeping a gesture alive across a
-        change of curve.
+        `set_points` at all. A `None` owner alongside real points is
+        honoured as a different owner only when the strip shows a real one
+        (it then ends any gesture in progress); callers always pass a real
+        token.
 
         While a preview is up this is deferred rather than acted on: the
         strip edits a step in the WORKING line's stack and writes on

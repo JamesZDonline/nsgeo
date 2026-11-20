@@ -1,0 +1,397 @@
+from __future__ import annotations
+
+import numpy as np
+from nsgeo.slices import SurfaceSettings
+from nsgeo_qgis.surface_plan import (
+    INPUTS,
+    KIND_SURFACE,
+    STALE_REASONS,
+    FeatureRecord,
+    also_note,
+    built_message,
+    clean_name,
+    cut_pick_base,
+    cut_pick_on_clock,
+    delete_question,
+    empty_message,
+    feature_ids,
+    fit_rows,
+    join_feature_ids,
+    mesh_2dm,
+    mesh_dat,
+    name_refusal,
+    outlier_line,
+    rebuild_refusal,
+    remembered_end,
+    remembered_step,
+    remove_refusal,
+    selection_refusal,
+    stale_text,
+)
+
+
+def test_record_round_trips_and_bad_settings_read_as_defaults():
+    rec = FeatureRecord(
+        "abc",
+        "Bowl",
+        "A",
+        KIND_SURFACE,
+        SurfaceSettings(join="idw", window_m=0.05, strength=0.5, smoothing_m=0.1),
+        "2026-11-13T10:00:00+00:00",
+    )
+    row = rec.to_row()
+    assert set(row) == {"feature_id", "name", "grid_id", "kind", "settings_json", "created"}
+    assert FeatureRecord.from_row(row) == rec
+    for bad in ("", "not json", "[1, 2]", "null", None):
+        got = FeatureRecord.from_row({**row, "settings_json": bad})
+        assert got.settings == SurfaceSettings()
+        assert got.name == "Bowl"
+
+
+def test_names_are_trimmed_and_unique_case_folded():
+    assert clean_name("  Bowl   north \t") == "Bowl north"
+    assert name_refusal("  Bowl  ", []) == ""
+    assert name_refusal("bowl", ["Bowl"])  # taken, whatever the case
+    assert name_refusal(" BOWL ", ["Bowl", "Ditch"])
+    assert name_refusal("Bowl", ["Bowl"], own="Bowl") == ""  # renaming to its own name
+    assert name_refusal("bowl", ["Bowl"], own="Bowl") == ""  # or its own, re-cased
+    assert name_refusal("Ditch", ["Bowl", "Ditch"], own="Bowl")  # someone else's
+    assert name_refusal("", [])
+    assert name_refusal("   ", [])
+    assert name_refusal("x" * 80, []) == ""
+    assert "80" in name_refusal("x" * 81, [])
+
+
+def test_selection_refusals_come_in_order():
+    ok = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
+    assert selection_refusal(**ok) == ""
+    everything = {"n": 2, "unsaved": 2, "grids": {"A", "B"}, "spans_area": False}
+    assert selection_refusal(**{**everything, "n": 0}).startswith("Select picks")
+    assert selection_refusal(**everything) == (
+        "Save the picks layer's edits first; 2 of these picks are not saved yet."
+    )
+    everything["unsaved"] = 0
+    assert selection_refusal(**everything) == (
+        "These picks are on Grid A and Grid B. "
+        "A surface comes from one grid; select picks on one grid only."
+    )
+    everything["grids"] = {"A"}
+    assert selection_refusal(**everything) == (
+        "A surface needs at least 3 picks that are not in a straight line (2 selected)."
+    )
+    assert "straight line" in selection_refusal(**{**ok, "spans_area": False})
+    assert "straight line" in selection_refusal(**{**ok, "n": 2})
+    # a pick that cannot be placed comes before the grids check
+    assert "not on a line of a grid" in selection_refusal(**{**everything, "no_grid": 1})
+    # picks on a deleted cut are told so, ahead of the generic no-grid wording
+    gone = selection_refusal(**{**everything, "deleted_cut": 1, "no_grid": 1})
+    assert gone == "1 of these picks is on a cut that has been deleted, so it cannot be placed."
+    assert "2 of these picks are on a cut that has been deleted, so they" in selection_refusal(
+        **{**everything, "deleted_cut": 2}
+    )
+    # adding to a surface needs no area of its own
+    assert selection_refusal(**{**ok, "n": 1, "spans_area": True, "minimum": 1}) == ""
+
+
+def test_also_note_names_each_surface_once_and_says_nothing_moves():
+    assert also_note({"Bowl": 4}, 30) == "4 of these picks are also in “Bowl”."
+    assert also_note({"Bowl": 6}, 6) == "All 6 of these picks are also in “Bowl”."
+    two = also_note({"Bowl": 4, "Ditch": 2}, 30)
+    assert two.count("“Bowl”") == 1 and two.count("“Ditch”") == 1
+    assert "4 of these picks are also in “Bowl”" in two and "2 in “Ditch”" in two
+    assert "move" not in two
+    assert also_note({"Bowl": 1}, 1) == "This pick is also in “Bowl”."
+    assert also_note({"Bowl": 1}, 5) == "1 of these picks is also in “Bowl”."
+    assert also_note({}, 30) == ""
+    assert also_note({"Bowl": 0}, 30) == ""
+
+
+def test_feature_ids_read_tolerantly_and_join_in_order():
+    assert feature_ids(" a ; ;b;a ") == ("a", "b")
+    assert feature_ids(None) == () and feature_ids("") == () and feature_ids(" ; ") == ()
+    assert feature_ids("solo") == ("solo",)
+    assert join_feature_ids(["b", "a", "b", ""]) == "b;a"
+    assert join_feature_ids([]) is None
+
+
+def test_remove_and_delete_wording():
+    assert remove_refusal(3) == ""
+    assert remove_refusal(2) and "2" in remove_refusal(2)
+    q = delete_question("Bowl", 88)
+    assert q.startswith("Delete “Bowl”? Its 88 picks stay")
+
+
+def test_unreadable_picks_have_their_own_wording_and_come_after_unsaved():
+    base = {"n": 5, "unsaved": 0, "grids": {"A"}, "spans_area": True}
+    assert selection_refusal(**base, unreadable=1) == (
+        "1 of these picks has no trace or time; edit or delete it in the picks layer."
+    )
+    assert "3 of these picks have no trace or time" in selection_refusal(**base, unreadable=3)
+    assert selection_refusal(**{**base, "unsaved": 1}, unreadable=2).startswith("Save")
+
+
+def test_stale_text_names_every_reason():
+    assert set(STALE_REASONS) == {*INPUTS, "unavailable"}
+    assert stale_text(n for n in ["picks", "fill"]).count("changed") == 2  # a generator is fine
+    assert STALE_REASONS["picks"] == "its picks changed"
+    assert STALE_REASONS["resolution"] == "the grid's 3-D cell or depth step changed"
+    assert stale_text(()) == ""
+    for name in INPUTS:
+        assert STALE_REASONS[name] in stale_text([name])
+    one = stale_text(["picks"])
+    assert one.startswith("Stale: its picks changed since it was built.")
+    assert "last build" in one
+    # panel order, "and" before the last
+    both = stale_text(["resolution", "picks"])
+    assert "its picks changed and the grid's 3-D cell or depth step changed" in both
+
+
+REPORT = {
+    "fit": {
+        "picks": 88,
+        "within_2cm": 82,
+        "within_5cm": 3,
+        "further": 0,
+        "at_edge": 0,
+        "on_holes": 3,
+    },
+    "offset_m": 0.036,
+    "offset_votes": 85,
+    "offset_at_limit": 2,
+    "offset_reliable": True,
+    "cells": 5214,
+    "region_cells": 6038,
+    "resolution": {"cell": 0.05, "dz_ns": 0.1},
+    "built_utc": "2026-11-13T10:42:07+00:00",
+}
+
+
+def test_fit_rows_match_the_mockup():
+    rows = fit_rows(REPORT)
+    assert [k for k, _ in rows] == ["Picks", "Offset", "Cover", "Built"]
+    assert dict(rows) == {
+        "Picks": "82 of 88 within 2 cm · 3 within 5 cm · 3 on holes",
+        "Offset": "your picks sit 3.6 cm above the strongest swing",
+        "Cover": "5,214 of 6,038 cells (86%); the rest are holes",
+        "Built": "2026-11-13 10:42 UTC at 0.05 m, 0.1 ns",
+    }
+
+
+def test_fit_rows_show_edge_picks_and_say_when_the_offset_is_unreliable():
+    report = {
+        **REPORT,
+        "fit": {**REPORT["fit"], "at_edge": 4, "further": 2},
+        "offset_m": -0.02,
+        "offset_at_limit": 60,
+        "offset_reliable": False,
+    }
+    rows = dict(fit_rows(report))
+    assert "4 at the window's edge" in rows["Picks"] and "2 further away" in rows["Picks"]
+    assert "2.0 cm below the strongest swing" in rows["Offset"]
+    assert "5 cm search limit" in rows["Offset"] and "check the picks" in rows["Offset"]
+    assert "no pick had a swing" in dict(fit_rows({**REPORT, "offset_votes": 0}))["Offset"]
+    assert dict(fit_rows({**REPORT, "cells": 36, "region_cells": 36}))["Cover"] == (
+        "all 36 cells; no holes"
+    )
+    assert "no cell" in dict(fit_rows({**REPORT, "cells": 0, "region_cells": 0}))["Cover"]
+
+
+def test_outlier_lines_and_the_messages():
+    hole = {
+        "line_key": "a/FILE__023.DZT",
+        "label": "FILE__023",
+        "distance_m": 4.15,
+        "picked_m": 0.62,
+        "surface_m": None,
+        "reason": "hole",
+    }
+    far = {
+        "line_key": "k",
+        "label": "FILE__027",
+        "distance_m": 1.35,
+        "picked_m": 0.58,
+        "surface_m": 0.55,
+        "reason": "far",
+    }
+    assert outlier_line(hole) == "FILE__023 at 4.15 m · picked 0.62 m · on a hole"
+    assert (
+        outlier_line(far)
+        == "FILE__027 at 1.35 m · picked 0.58 m · surface 0.55 m (3.0 cm) · beyond the window"
+    )
+    edge = {**far, "reason": "edge", "distance_m": None}
+    assert outlier_line(edge).endswith("held at the window's edge")
+    assert outlier_line(edge).startswith("FILE__027 · picked")
+    assert built_message("Bowl", REPORT) == (
+        "Built “Bowl”: 82 of 88 picks within 2 cm, 3 on holes. "
+        "Your picks sit 3.6 cm above the strongest swing."
+    )
+    assert "“Bowl”" in empty_message("Bowl") and "strength" in empty_message("Bowl")
+    assert rebuild_refusal("Bowl", 3) == ""
+    assert "too few to rebuild" in rebuild_refusal("Bowl", 2)
+
+
+def test_the_mesh_files():
+    xy = np.array([[100.0, 200.0], [101.0, 200.0], [100.0, 201.0]])
+    text = mesh_2dm(xy, np.array([-0.5, -0.6, -0.55]), np.array([[0, 1, 2]]))
+    assert text.splitlines() == [
+        "MESH2D",
+        "ND 1 100.0000 200.0000 -0.50000",
+        "ND 2 101.0000 200.0000 -0.60000",
+        "ND 3 100.0000 201.0000 -0.55000",
+        "E3T 1 1 2 3 1",
+    ]
+    dat = mesh_dat(np.array([0.5, 0.6, 0.55]), 1).splitlines()
+    assert (
+        dat[0] == "DATASET"
+        and dat[-1] == "ENDDS"
+        and dat[7:-1] == ["0.50000", "0.60000", "0.55000"]
+    )
+    assert mesh_2dm(np.empty((0, 2)), np.empty(0), np.empty((0, 3), dtype=int)) == "MESH2D\n"
+
+
+def test_the_dialog_and_panel_wording():
+    from nsgeo_qgis.surface_plan import (
+        build_outcome,
+        fit_short,
+        selection_label,
+        settings_summary,
+        skipped_surfaces_text,
+        state_text,
+        write_failure_text,
+    )
+
+    assert selection_label(0, None, []) == "No picks selected."
+    assert selection_label(1, "1", ["F__001"]) == "1 pick selected, on Grid 1 (line F__001)."
+    assert selection_label(88, "1", ["F__020", "F__033", "F__025"]) == (
+        "88 picks selected, all on Grid 1 (lines F__020 to F__033)."
+    )
+    assert selection_label(5, None, []) == "5 picks selected."
+    # cuts are named as cuts, never in the line range
+    assert selection_label(4, "1", ["F__001"], ["Cut 1"]) == (
+        "4 picks selected, all on Grid 1 (line F__001; cut Cut 1)."
+    )
+    assert selection_label(4, "1", ["F__001"], [], 1) == (
+        "4 picks selected, all on Grid 1 (line F__001; a deleted cut)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"], 2) == (
+        "2 picks selected, all on Grid 1 (cut Cut 1; 2 deleted cuts)."
+    )
+    assert selection_label(2, "1", [], ["Cut 1"]) == "2 picks selected, all on Grid 1 (cut Cut 1)."
+    assert selection_label(3, "1", ["F__001", "F__003"], ["Cut 2", "Cut 1"]) == (
+        "3 picks selected, all on Grid 1 (lines F__001 to F__003; cuts Cut 1, Cut 2)."
+    )
+    assert settings_summary(SurfaceSettings()) == (
+        "smooth join · window ±2 cm · strength 1.0 × typical · no smoothing"
+    )
+    assert settings_summary(SurfaceSettings(join="idw", window_m=0.035, smoothing_m=0.5)) == (
+        "inverse-distance join · window ±3.5 cm · strength 1.0 × typical · smoothing 0.50 m"
+    )
+    assert state_text(False, ()) == "not built"
+    assert state_text(True, ()) == ""
+    assert state_text(True, ("picks",)) == "stale"
+    assert fit_short(None) == ""
+    assert fit_short({"fit": {"within_2cm": 80, "picks": 84}}) == "80/84"
+    assert "database is locked" not in write_failure_text("could not write: database is locked")
+    assert "Save the picks layer" in write_failure_text("could not write: database is locked")
+    assert write_failure_text("disk full") == "disk full"
+    # only SQLite's own text gets the picks-layer advice; a Windows file lock has its own words
+    other = "could not write: another process has locked a portion of the file"
+    assert "Save the picks layer" not in write_failure_text(other)
+    assert "open" in write_failure_text(other) and "locked a portion" not in write_failure_text(
+        other
+    )
+    assert write_failure_text("the lock screen is up") == "the lock screen is up"
+    assert skipped_surfaces_text([]) == ""
+    assert "“Bowl”" in skipped_surfaces_text(["Bowl"]) and "left out" in skipped_surfaces_text(
+        ["Bowl"]
+    )
+    good = {"fit": {"picks": 4, "within_2cm": 4, "on_holes": 0}, "offset_votes": 4, "cells": 9}
+    text, warn = build_outcome("Bowl", good)
+    assert text.startswith("Built “Bowl”") and not warn
+    assert build_outcome("Bowl", {**good, "cells": 0}) == (empty_message("Bowl"), True)
+    assert build_outcome("Bowl", {**good, "offset_reliable": False})[1]
+    assert build_outcome("Bowl", {**good, "skipped": [{"why": "x"}]})[1]
+    assert build_outcome("Bowl", {**good, "fit": {**good["fit"], "at_edge": 1}})[1]
+
+
+def test_the_panel_build_and_dialog_wording_round_two():
+    from nsgeo_qgis.surface_plan import (
+        build_failure_text,
+        build_title,
+        not_built_text,
+        outlier_header,
+        resolution_hint,
+    )
+
+    assert not_built_text(1) == "Not built yet (1 pick). Rebuild to put it on the map."
+    assert not_built_text(4).startswith("Not built yet (4 picks)")
+    assert outlier_header(0.02, 0) == (
+        "Picks the surface doesn't follow (0): on a hole, at the window's edge, "
+        "or more than 2 cm off"
+    )
+    assert outlier_header(0.02, 6).endswith(
+        "(6): on a hole, at the window's edge, or more than 2 cm off; "
+        "click one to select it on the map:"
+    )
+    assert build_title(["Bowl"]) == "Building “Bowl”"
+    assert build_title(["A", "B", "C"]) == "Building 3 surfaces"
+    assert resolution_hint("1", 0.05, 0.1) == (
+        "Built at Grid 1's 3-D resolution (0.05 m, 0.1 ns), the one its ParaView export uses."
+    )
+    assert resolution_hint(None).startswith("Built at the grid's 3-D resolution")
+    assert build_failure_text(["A", "B"], OSError("No space left")) == (
+        "Could not build “A” and “B”: No space left"
+    )
+    assert build_failure_text(["A"], ValueError("too few")) == "too few"
+
+
+def test_remembered_end_rounds_up_to_four_decimals_and_is_stable():
+    """The depth end a build remembers, and the one staleness compares (walkthrough A1)."""
+    assert remembered_end(None) is None
+    assert remembered_end(40.0) == 40.0
+    assert remembered_end(35.55) == 35.55
+    assert remembered_end(35.55001) == 35.5501
+    assert remembered_end(12.34561234) == 12.3457
+    for t in (40.0, 35.5501, 12.3457, 0.0001, 49.9999, 1234.5678):
+        assert remembered_end(t) == t  # a remembered end comes back unchanged
+        assert remembered_end(remembered_end(t + 3e-5)) == remembered_end(t + 3e-5)
+        assert remembered_end(t + 3e-5) >= t + 3e-5
+
+
+def test_remembered_step_is_the_export_dialogs_four_decimals():
+    assert remembered_step(0.1) == 0.1
+    assert remembered_step(0.21653124690055847) == 0.2165
+    assert remembered_step(0.00004) == 0.00004  # rounding to nothing keeps the step
+    assert remembered_step(remembered_step(0.07812)) == 0.0781
+
+
+def test_cut_picks_are_no_longer_refused():
+    refusal = selection_refusal(n=5, unsaved=0, grids={"A"}, spans_area=True)
+    assert "cut" not in (refusal or "")
+    assert "cut" not in selection_refusal(
+        n=5, unsaved=0, grids={"A"}, spans_area=True, unreadable=1
+    )
+
+
+def _pick(**kw):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**kw)
+
+
+def test_a_cut_picks_time_base_comes_from_its_provenance():
+    assert cut_pick_base(_pick(stack_json='{"time_base": "time_zero"}')) == "time_zero"
+    assert cut_pick_base(_pick(stack_json="")) == "radar"
+    assert cut_pick_base(_pick(stack_json="not json")) == "radar"
+    assert cut_pick_base(_pick(stack_json='{"other": 1}')) == "radar"
+    assert cut_pick_base(_pick(stack_json="[1]")) == "radar"
+
+
+def test_a_cut_pick_is_on_the_clock_when_it_has_a_distance_and_the_presets_base():
+    zero = [{"step": "time_zero"}]  # a preset that sets time zero
+    z = _pick(distance_m=3.0, stack_json='{"time_base": "time_zero"}')
+    r = _pick(distance_m=3.0, stack_json='{"time_base": "radar"}')
+    none = _pick(distance_m=None, stack_json='{"time_base": "time_zero"}')
+    none_r = _pick(distance_m=None, stack_json='{"time_base": "radar"}')
+    assert [cut_pick_on_clock(p, zero) for p in (z, r, none, none_r)] == [True, False, False, False]
+    assert [cut_pick_on_clock(p, []) for p in (z, r, none, none_r)] == [False, True, False, False]

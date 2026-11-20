@@ -1,4 +1,5 @@
-"""Import mag…: the dialog behind the toolbar button, its setup picture, and the plugin wiring."""
+"""Add data ▸ Magnetometer…: the dialog behind the menu entry, its setup picture,
+and the plugin wiring."""
 
 from __future__ import annotations
 
@@ -298,19 +299,18 @@ def _open(plugin, root):
     QCoreApplication.processEvents()
 
 
-def test_the_toolbar_action_is_greyed_out_until_a_site_is_open(plugin, mag_site):
+def test_add_data_names_magnetometer_after_gpr_and_is_greyed_until_a_site_is_open(plugin, mag_site):
     _, root = mag_site
-    act = plugin.act_import_mag
-    assert act.text() == "Import mag…"
-    assert act.toolTip() == "Imports Bartington Grad601 grid files onto magnetometer grids."
-    assert [a.text() for a in plugin.toolbar_actions][
-        [a.text() for a in plugin.toolbar_actions].index("Import DZT…") + 1
-    ] == "Import mag…"
-    assert not act.isEnabled()
+    act = plugin.act_add_mag
+    assert act.text() == "Magnetometer…"
+    assert act.toolTip() == "Bartington Grad601 grid files, onto magnetometer grids."
+    assert plugin.add_data_menu.actions() == [plugin.act_add_gpr, act]
+    button = plugin.act_add_data
+    assert not button.isEnabled()
     _open(plugin, root)
-    assert act.isEnabled()
+    assert button.isEnabled()
     plugin.session.close_site()
-    assert not act.isEnabled()
+    assert not button.isEnabled()
 
 
 def test_new_mag_grid_opens_the_grid_dialog_as_magnetometer(plugin, mag_site):
@@ -400,12 +400,12 @@ def test_importing_shows_the_mag_panel_on_the_imported_grid(plugin, mag_site):
     assert plugin.mag_dock.grid_combo.currentData() == "M2"
 
 
-def test_the_toolbar_action_starts_from_the_survey_panels_mag_grid(plugin, mag_site, monkeypatch):
+def test_magnetometer_starts_from_the_survey_panels_mag_grid(plugin, mag_site, monkeypatch):
     session, root = mag_site
     _open(plugin, root)
     _fresh_grid(plugin.session, "M3")
     monkeypatch.setattr(plugin.survey_dock, "target_mag_grid_id", lambda: "M3")
-    plugin._import_mag_from_toolbar()
+    plugin.act_add_mag.trigger()
     d = plugin._mag_import_dialog
     d.add_files([synthetic_grad601(root / "raw" / "mag", "m3.dat")])
     assert d.row_grid(0) == "M3"  # not the first free grid, M2

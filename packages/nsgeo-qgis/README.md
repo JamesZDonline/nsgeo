@@ -7,8 +7,8 @@ signal processing (a test enforces it).
 
 The [getting-started guide](../../docs/guide/getting-started.md) describes
 everything the plugin does: sites and grids, import, processing, picks, and time
-and depth slices. The two sections below record how the map link and picking
-behave in more detail.
+and depth slices, and lines placed along an RTK GPS track (**Add data ▾ ▸ GPR…**, placed by GPS).
+The two sections below record how the map link and picking behave in more detail.
 
 ### The map ↔ profile link
 
@@ -80,6 +80,36 @@ QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/te
 
 The `qgis/` directory skips itself when `qgis` is not importable.
 
+### What to run locally, and what CI runs
+
+CI runs every tier on every push: the core and `tests/pure` on Linux, macOS and
+Windows, and `tests/qgis` whole in QGIS 3.44 and 4.2. What CI cannot run is
+anything that needs the real surveys, because they are gitignored. So before
+pushing:
+
+```bash
+# the core and tests/pure, whole: a few minutes, real-data tests included
+.venv/bin/python -m pytest packages/nsgeo-core/tests packages/nsgeo-qgis/tests/pure -q
+# the QGIS-tier files you changed, plus every real-data test in that tier (~1 min)
+packages/nsgeo-qgis/scripts/qgis_tests.sh packages/nsgeo-qgis/tests/qgis/test_plugin_x.py
+packages/nsgeo-qgis/scripts/qgis_tests.sh packages/nsgeo-qgis/tests/qgis -m real_data
+```
+
+Then check the branch's CI run, which covers the rest of the QGIS tier on both
+versions. A whole local run of `tests/qgis` takes about 25 minutes on a 4-core
+machine, and several at once take longer each than running them in turn. When
+one is needed, `qgis_tests.sh full` waits for any other `full` run on the
+machine to finish first.
+
+`-m real_data` selects every QGIS-tier test that carries a skipif naming
+`tests/data/local`, as `needs_real_data` does, plus any marked
+`@pytest.mark.real_data` by hand. A test that skips for want of the data
+without the mark fails, so CI, which has no data, catches one the selection
+would miss.
+
+A passing run deletes its `tmp_path` folders when it ends; a failing run keeps
+them, under pytest's usual `/tmp/pytest-of-<user>/`.
+
 To test against either QGIS major without installing it, run the suite in the
 official image with `scripts/in_qgis_docker.sh`. It copies the worktree to a
 throwaway `/work`, installs pytest, and makes the real-data symlinks resolve:
@@ -91,8 +121,8 @@ packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:3.44 \
     python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
 ```
 
-CI runs the same two images. On Qt 6, the dock-width test is an expected failure
-until #50 settles the Slices panel's width.
+CI runs the same two images. The Slices panel's width is pinned to the Processing
+panel's minimum by `test_plugin_slices_width.py`.
 
 ## Building the release zip
 

@@ -16,12 +16,15 @@ EXPECTED_PUBLIC = {
     "mag",
     "model",
     "geometry",
+    "hyperbola_trace",
     "processing",
     "slices",
     "project",
     "render",
     "velocity",
     "velocity_fit",
+    "velocity_source",
+    "vtkxml",
 }
 
 

@@ -132,7 +132,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
-from nsgeo.geometry import GridPlacement
+from nsgeo.geometry import GridPlacement, TrackPlacement
 from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
@@ -160,6 +160,7 @@ from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.line_edit import same_placement
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_plan import (
     DEFAULT_METHOD,
     LIVE_SOLVE_BUDGET_MS,
@@ -170,9 +171,11 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     choose_residency,
     estimate_memory,
     format_status,
+    level_limit_problem,
     limit_windows,
     preset_transform_conflict,
 )
@@ -210,6 +213,17 @@ def solve_key(values: np.ndarray) -> bytes:
     digest.update(str(values.shape).encode())
     digest.update(str(values.dtype).encode())
     return digest.digest()
+
+
+def _raw_first_break(record: Radargram) -> float | None:
+    """The radar-clock time of a raw record's first arrival, picked by the Time
+    zero step itself at its default threshold, or None for a record with no
+    signal, which the step refuses ("Time zero found no first arrival").
+    Called on the preparation worker, before the preset runs."""
+    try:
+        return float(build_step("time_zero").apply(record).zero_ns)
+    except ValueError:
+        return None
 
 
 class PendingSolve:
@@ -452,6 +466,24 @@ class SliceEngine(QObject):
         if not self._lines:
             return None
         return float(np.median([line.zero_ns for line in self._lines]))
+
+    def median_first_break(self) -> float | None:
+        """The median of the prepared lines' radar-clock first breaks: the shift
+        a restore owes when its preset has lost Time zero (#162 item 1).
+
+        Each line's break is picked during preparation, on its RAW record, by
+        the Time zero step itself at its default threshold
+        (`_raw_first_break`). That is where Time zero runs in an ordinary
+        preset, where it comes first, so neither the preset's other steps nor
+        the transform move the pick. Picked on the prepared lines instead, the
+        author's gain steps moved it two samples (0.43 ns) late on the campus
+        lines, nearly the whole shift (PF-1).
+
+        A line with no signal has no first break (the step refuses it), and is
+        left out rather than read as row 0, as `first_break_ns` would. None with
+        nothing prepared or no break on any line."""
+        breaks = [line.first_break_ns for line in self._lines if line.first_break_ns is not None]
+        return float(np.median(breaks)) if breaks else None
 
     def prepared_z_bounds(self) -> tuple[float, float] | None:
         """The two-way time range EVERY prepared line covers, or None.
@@ -866,6 +898,8 @@ class SliceEngine(QObject):
                 try:
                     profiles = line.load()
                     radargram = Radargram.from_profile(profiles[0])
+                    # The raw record's, never `result`'s: see `median_first_break`.
+                    first_break = _raw_first_break(radargram)
                     stack = self._build_stack(steps, transform)
                     stack.source = radargram
                     result = stack.result()
@@ -877,6 +911,7 @@ class SliceEngine(QObject):
                             t0_ns=result.t0_ns,
                             coords=coords,
                             zero_ns=float(result.zero_ns),
+                            first_break_ns=first_break,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 -- one bad line must not
@@ -1016,9 +1051,34 @@ class SliceEngine(QObject):
 
     # ---- geometry ---------------------------------------------------------
     def set_resolution(self, resolution: Resolution | None) -> None:
-        """Set the binning geometry. Drops every plan; see the module docstring."""
+        """Set the binning geometry. Drops every plan; see the module docstring.
+
+        Raises `TooManyLevels` before storing anything (#177), so the engine
+        keeps the geometry it has."""
+        problem = self._level_problem(resolution)
+        if problem is not None:
+            raise TooManyLevels(problem)
         self._resolution = resolution
         self._rebuild_geometry()
+
+    def _level_problem(self, resolution: Resolution | None) -> str | None:
+        """Why `resolution` is past the level limit for the chosen lines, or None.
+
+        The samples are the raw `n_samples` of the chosen lines still in the
+        session; no choice, no check."""
+        if resolution is None or self._choice is None or not self.session.is_open:
+            return None
+        try:
+            live = set(self.session.keys())
+            samples = [
+                int(self.session.line_for_key(k).header.n_samples)
+                for k in self._choice.line_keys
+                if k in live
+            ]
+        except Exception as exc:  # noqa: BLE001 -- a check never stops a rebuild
+            _log(f"could not check the level limit: {exc}")
+            return None
+        return level_limit_problem(resolution, samples)
 
     def _rebuild_geometry(self) -> None:
         # Unconditional, and wholesale. There is no such thing as keeping
@@ -1050,6 +1110,11 @@ class SliceEngine(QObject):
             return
         grid = self.session.grid(self._choice.grid_id)
         res = self._resolution
+        if self._level_problem(res) is not None:
+            # Past the limit (#177): no cube. This runs inside `set_source` and
+            # task callbacks, so it records nothing and raises nothing.
+            self._choose_mode()
+            return
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
         if held[0] is not None and held[0][0][0] == self._frame:
@@ -1091,7 +1156,7 @@ class SliceEngine(QObject):
         When the fingerprint has NOT changed, `replace_grid` may still
         have run -- `set_grid_velocity` goes through it too, and
         `grids_changed` carries no information about which grid or which
-        field changed. `provenance()` reads `resolved_velocity` LIVE, but
+        field changed. `provenance()` reads `grid_depth_velocity` LIVE, but
         `cube()` freezes a `Provenance` snapshot into the `SliceCube` the
         moment it is built; a resident cube built before a velocity edit
         would otherwise export the STALE velocity forever, while a
@@ -1132,7 +1197,7 @@ class SliceEngine(QObject):
     def _without_label(placement: Any) -> Any:
         """A placement as geometry only: the label names a line and never
         moves it, so a label-only edit must not re-prepare (line editing spec §4.5)."""
-        if isinstance(placement, GridPlacement):
+        if isinstance(placement, (GridPlacement, TrackPlacement)):
             return dataclasses.replace(placement, label=None)
         return placement
 
@@ -1724,6 +1789,11 @@ class SliceEngine(QObject):
         """
         self._cube = None
 
+    @property
+    def prepared_steps(self) -> tuple[dict[str, Any], ...]:
+        """The preset's steps as they stood when preparation was dispatched."""
+        return self._steps
+
     def provenance(self) -> Provenance:
         """What a reader needs to trust the cube.
 
@@ -1741,26 +1811,20 @@ class SliceEngine(QObject):
         never actually built from -- the same defect this docstring
         already rejects for `line_keys`, one field over.
 
-        A line can be removed from the survey while a source stays
-        prepared, and `resolved_velocity` raises KeyError for a key that
-        is gone. The cube's own arrays are still correct, so losing the
+        The velocity is the grid's (`grid_depth_velocity`: its own, else
+        the header of its first line in survey order), so a line's
+        override never reaches a slice. A grid can lose every line, or
+        the grid itself, while a source stays prepared, and that raises
+        KeyError. The cube's own arrays are still correct, so losing the
         depth LABEL is the only honest consequence -- blanking the map
-        and breaking "Save cube..." and "Export GeoTIFF" is not. Falling
-        through to the next prepared line is faithful rather than
-        arbitrary: `resolve_velocity` goes line override -> grid velocity
-        -> header dielectric, and a cube is built from one grid (spec 3),
-        so another line of the same grid almost always carries the same
-        model.
+        and breaking "Save cube..." and "Export GeoTIFF" is not.
         """
         if self._choice is None:
             raise RuntimeError("no source is chosen")
+        # The grid's velocity, never a line's override (grid velocity spec 10).
         velocity = None
-        for line in self._lines:
-            try:
-                velocity = self.session.resolved_velocity(line.key).to_dict()
-                break
-            except (KeyError, RuntimeError):
-                continue
+        with contextlib.suppress(KeyError, RuntimeError):
+            velocity = self.session.grid_depth_velocity(self._choice.grid_id).to_dict()
         return Provenance(
             line_keys=tuple(line.key for line in self._lines),
             preset_name=self._choice.preset,

@@ -36,6 +36,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.decimal_input import parse_decimal
 from nsgeo_qgis.log import log as _log
 
 REQUIRED_STYLE = "QLineEdit { border: 1px solid #d1702f; background: #fff8f2; }"
@@ -364,18 +365,16 @@ class ParamForm(QWidget):
                 raise ValueError(f"{spec.label} must be a whole number, got {text!r}") from None
             raise ValueError(f"{spec.label}: {text!r} is not a number") from None
         try:
-            value = float(text)
+            float(text)
         except ValueError:
             raise ValueError(f"{spec.label}: {text!r} is not a number") from None
-        if not math.isfinite(value):
-            # `float("nan")`/`float("inf")` succeed in Python but are not
-            # valid values for a physical parameter: nan silently slips
-            # past a step's own validation entirely (confirmed directly
-            # against Bandpass: low_mhz=nan raises nothing, and produces
-            # different, finite, arbitrary output rather than an error) --
-            # the parser is the right place to refuse it instead.
+        try:
+            return parse_decimal(text)
+        except ValueError:
+            # float() read it, so parse_decimal refused a finite-ness rule
+            # (nan/inf: silently slips past a step's own validation, e.g.
+            # Bandpass low_mhz=nan raises nothing) -- the message is ours.
             raise ValueError(f"{spec.label} must be a finite number, got {text!r}") from None
-        return value
 
     def build(self) -> Step | None:
         """The step, or None with `message` and `error` set."""

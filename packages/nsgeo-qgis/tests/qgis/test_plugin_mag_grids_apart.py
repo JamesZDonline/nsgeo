@@ -7,7 +7,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
-from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.import_dialog import GridImportPage
 from nsgeo_qgis.ui.slices_dock import SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 from plugin_testing import synthetic_dzt
@@ -19,9 +19,9 @@ def _combo_items(combo):
     return [combo.itemText(i) for i in range(combo.count())]
 
 
-def test_the_dzt_import_dialog_lists_only_gpr_grids(mag_site):
+def test_add_datas_grid_page_lists_only_gpr_grids(mag_site):
     session, _ = mag_site
-    d = ImportDialog(session, grid_id="G1")
+    d = GridImportPage(session, grid_id="G1")
     try:
         assert _combo_items(d.grid_combo) == ["G1"]
     finally:

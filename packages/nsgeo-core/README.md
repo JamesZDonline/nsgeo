@@ -19,15 +19,21 @@ between minor releases.
 
 ### `nsgeo.io`
 
-DZT and DZX readers.
+DZT, DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
+| `DzgError` | Raised when a DZG's trace numbers cannot be trusted. |
+| `DzgFix` | One GPS fix: its DZT trace, time, position, quality, satellites, HDOP, altitude and geoid separation. |
+| `DzgLog` | The fixes of a DZG in file order, with counts of dropped and unpaired sentences. |
 | `DztError` | Raised when a DZT file is malformed or unsupported. |
 | `DztHeader` | The parsed DZT header. |
 | `DzxError` | Raised when a DZX sidecar exists but cannot be parsed. |
 | `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
+| `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
+| `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
+| `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
 | `read_header` | Read only the header, cheaply. |
 | `read_samples` | Read all samples as (channels, samples, traces). |
@@ -84,6 +90,19 @@ Coordinate frames and trace placement.
 | `GridPlacement` | A line positioned parametrically within a grid frame. |
 | `Placement` | How traces are positioned; the protocol placements satisfy. |
 | `fit_grid_from_corners` | Least-squares rigid fit of grid-local metres to world coordinates. |
+| `TrackPlacement` | A line placed along the RTK GPS track logged in its DZG. Only RTK-fixed fixes place traces; a dropout is bridged by a straight segment (`bridges`), the ends run on by wheel at the line's heading (`end_runs`), and `travel_shift` moves every trace forward along the walked path. |
+| `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
+| `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
+| `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
+| `ALONG_DEG` | 20 degrees: a line within this of the main direction runs along it. |
+| `MIN_VOTE_M` | 1 m: a line whose first-to-last chord is shorter does not vote for the main direction. |
+| `TrackFrame` | A fitted grid rectangle (origin, azimuth, `size_x`, `size_y`, `lined_up`); `as_grid(id, crs, spacing)` makes the `Grid`. |
+| `fit_frame` | The rectangle around tracks: lined up with their main direction, half a spacing outside the outer lines or further to hold every trace, else the smallest rectangle around every trace. Raises `ValueError` for no tracks, a track with no finite point or a non-positive spacing. |
+| `main_direction` | The axial azimuth in [0, 180) the tracks share (length-weighted, lines within `ALONG_DEG`), or `None` when they share none. |
+| `measure_spacing` | The median gap between neighbouring along lines, or `None` with fewer than two or no main direction. |
+| `metres_outside` | Metres of trace-to-trace steps whose midpoint lies outside a `Grid`, and whether any trace lies inside. |
+| `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
+| `END_LIMIT_M` | A start or end run longer than this many metres (2.0) is flagged. |
 
 ### `nsgeo.processing`
 
@@ -96,6 +115,7 @@ User-ordered processing steps. Nothing runs automatically.
 | `Radargram` | A radargram as the steps see it. |
 | `STEP_GROUPS` | The groups a step menu is laid out in, in processing order. |
 | `Step` | A pure function of (parameters, radargram). |
+| `StepRefused` | The `ValueError` a stack raises when a step refuses its input; names the step. |
 | `StepStack` | An ordered list of steps applied to a radargram. |
 | `TIME_BASE_RADAR` | `"radar"`: times are on the radar's own clock. |
 | `TIME_BASE_TIME_ZERO` | `"time_zero"`: times are measured from each line's first break. |
@@ -128,13 +148,23 @@ several grids' slices into one site view.
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
 | `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
 | `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
+| `FIT_CLOSE_M` | How near a pick must sit to the surface to count as fitting: 2 cm. |
+| `FIT_NEAR_M` | The looser fit distance, 5 cm. |
 | `Footprint` | Where one grid lands on a site lattice: a window, and the bilinear taps of its pixels. |
+| `HULL_MARGIN_M` | How far past the picks' convex hull a surface may reach: 0.3 m. |
+| `IDW_MIN_DISTANCE_M` | The nearest distance inverse-distance joining uses, 5 cm, so a pick does not spike. |
+| `JOIN_REACH_M` | How far from a pick the minimum-curvature join reaches: 2 m. |
+| `JOINS` | The ways picks can be joined into a guide: `min_curvature`, `idw`. |
+| `JUMP_M` | The depth step between neighbouring cells above which a surface mesh does not join them: 6 cm. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging, minimum curvature. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
 | `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
+| `OFFSET_SEARCH_M` | How far from a pick the strongest swing is sought when measuring the offset: 5 cm. |
+| `Outlier` | A pick the surface does not honour, with its `reason`: `hole`, `edge` (the surface is held at the window's edge) or `far` (further than the window). |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
+| `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
 | `CROP_MAX_DISTANCE_SPACINGS` | The most a section's max distance may be, in line spacings, for its minimum curvature to be solved on crops; above it the whole frame is solved. |
@@ -148,16 +178,24 @@ several grids' slices into one site view.
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
+| `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset with its `offset_votes`, `offset_at_limit` and `offset_reliable` (False when at least half the votes sit on the search limit: a stronger reflection out of reach is likely pulling the surface, so check the picks; a sidelobe inside the search can still pull it unflagged), and the fit. |
+| `SurfaceFit` | How a surface sits against its picks, every pick counted once: within 2 cm, within 5 cm, further, `at_edge` (held at the window's edge) or on a hole; and the outliers. |
+| `SurfaceSettings` | How a surface is built: the join, the tracking window, the strength test and the smoothing. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
+| `VolumeSettings` | How a volume is prepared: the RMS wave period, the sideways blur and the depth-trend window. |
+| `VolumeStopped` | Preparing a volume gave up because its progress callback asked it to stop. |
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
+| `build_surface` | Follow the reflection a set of picks names, leave holes where it fades, and report the fit. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
+| `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
+| `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |
 | `finish_section` | Every level of a cube, finished and read along a section's columns, as the slice picture would show it. |
@@ -171,11 +209,13 @@ several grids' slices into one site view.
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
+| `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
 | `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_section_curvature` | One minimum-curvature plan per crop of a cut, built once for every level. |
 | `plan_windows` | Every window of a thickness, at a step. |
+| `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
 | `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
@@ -192,6 +232,8 @@ several grids' slices into one site view.
 | `solve_section_level_whole` | One level solved by minimum curvature on the whole frame and read along a cut's columns. |
 | `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
+| `surface_mesh` | Points, triangles and flat cell ids of a surface's kept cells, never joining cells that jump in depth. |
+| `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
 | `window_depths_m` | A window in metres, through a velocity model. |
@@ -263,6 +305,20 @@ The destagger a grid's lines need, measured from the lines themselves: each line
 | `measure_destagger` | The grid value per axis, and each line's result, for a set of placed lines: its own value when it is clearly off on its own, otherwise the grid value. |
 | `one_way_result` | What `measure_destagger` gives when no axis was walked both ways, from the placements alone, so no line need be read; None when some axis was. |
 
+### `nsgeo.hyperbola_trace`
+
+Trace a diffraction hyperbola from a box, as dots on the outer edge of its top band: the zero crossing into the band's first strong lobe.
+
+| Name | Purpose |
+|---|---|
+| `TraceBox` | The box: first and last trace, earliest and latest time on the clock the fit uses. |
+| `trace_hyperbola` | The strongest hyperbola in a box as at most `MAX_DOTS` `(trace, time)` dots, the apex-nearest first, ready for `fit_hyperbola`. Each dot is the zero crossing into the band's first strong lobe, chosen once from the stack along the hyperbola of the traces near its apex (so a bigger box does not change it), looked for only in a narrow window around where that lobe is expected on each trace (none there, no dot) and read between samples by linear interpolation; no dot is kept a lobe away from the rest. It takes no Time zero fraction. Raises `ValueError` with a plain reason when the box is too small, too big, empty (no hyperbola, including when the fit's apex lies outside the dots), too faint, leaves too few points, or leaves dots too flat to give a velocity. |
+| `MAX_DOTS` | The most dots one trace returns (10). |
+| `MIN_DOTS` | The fewest dots a trace may leave after cleaning (4). |
+| `MAX_BOX_CELLS` | The largest box, in traces times samples, that is traced. |
+| `V_MIN_M_NS` | The slowest velocity the trace looks for (0.03 m/ns). |
+| `V_MAX_M_NS` | The fastest velocity the trace looks for (0.30 m/ns). |
+
 ### `nsgeo.velocity_fit`
 
 Radar velocity from a diffraction hyperbola, with its standard error.
@@ -278,3 +334,24 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
 | `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |
 | `unusable_fit_note` | The text for a stored fit that cannot be fitted again at the line's current time zero, with the reason. |
+
+### `nsgeo.velocity_source`
+
+Where a line's or a grid's velocity came from: the saved fits that made it.
+
+| Name | Purpose |
+|---|---|
+| `VelocitySource` | The record on a `Line` or `Grid`: how the velocity was made (`fit` or `weighted mean`), its member fits, the velocity and its standard error, and when it was applied. `from_fits` builds it, `summary` names it, `to_dict` and `from_dict` give the survey-JSON form. |
+| `SourceFit` | One member of a record: the line key, fit id and `fitted_at` that identify the fit, and a copy of its numbers (t0, velocity, standard error, zero) as used, so the record holds after the fit is deleted or its line changes. `of` copies a `StoredFit`. |
+| `weighted_mean` | Inverse-variance mean of velocity and standard-error pairs, with its standard error. Raises `ValueError` for no fits or a standard error that is zero, negative or not finite. |
+| `METHOD_FIT`, `METHOD_WEIGHTED_MEAN` | The two ways a record's velocity is made: one picked fit, or the weighted mean of several. |
+
+### `nsgeo.vtkxml`
+
+Streaming VTK XML writers, numpy only, for files ParaView opens directly.
+
+| Name | Purpose |
+|---|---|
+| `write_image_data` | Writes float32 point arrays on a regular grid (`.vti`), each array fed as chunks so a volume never sits in memory whole. Written to a `.part` file and renamed; an array of the wrong length raises `ValueError` and leaves no file. Returns the bytes written. |
+| `write_poly_data` | Writes points, point arrays and vertex, line and polygon cells (`.vtp`). An empty point set is a valid file. Returns the bytes written. |
+| `image_data_bytes` | The exact payload `write_image_data` will write for a shape and array count, plus a fixed 4096-byte header allowance. |

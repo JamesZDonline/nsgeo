@@ -77,7 +77,7 @@ class MagImportDialog(QDialog):
         self._rows: list[_Row] = []
         self._combos: list[QComboBox] = []
         self._updating = False
-        self.setWindowTitle("Import magnetometer files")
+        self.setWindowTitle("Add magnetometer data")
         self.resize(900, 640)
         layout = QVBoxLayout(self)
 

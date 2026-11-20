@@ -69,6 +69,15 @@ def test_dzt_lines_cannot_go_on_a_mag_grid(mag_site):
     assert session.keys() == before
 
 
+def test_moving_lines_onto_a_mag_grid_skips_and_names_each_one(mag_site):
+    session, _ = mag_site
+    keys = session.keys_on_grid("G1")
+    outcome = session.move_lines(keys, "M1")
+    assert [s.reason for s in outcome.skipped] == ["its new grid 'M1' is a magnetometer grid"] * 2
+    assert session.keys_on_grid("G1") == keys
+    assert not session.dirty
+
+
 def test_removing_a_mag_grid_holding_a_file_needs_with_lines(mag_site):
     session, root = mag_site
     session.set_mag_view(grid="M1")

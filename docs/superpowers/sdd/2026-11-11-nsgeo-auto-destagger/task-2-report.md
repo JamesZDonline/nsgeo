@@ -54,7 +54,7 @@ along the run.
 - Holding the run's ends means no net trend across the run can be absorbed, so a skew or an angled feature is
   not "straightened".
 
-**6. Passes** (`_Solver.run`), up to `MAX_PASSES` = 8; the Nashville grids settle in 1–3.
+**6. Passes** (`_Solver.run`), up to `MAX_PASSES` = 8; the GPS survey grids settle in 1–3.
 - Start from the strict candidates at zero correction.
 - Each pass: solve, re-read every line, then:
   - drop for good any own line that no longer qualifies (or fell under `MIN_OWN_M`);

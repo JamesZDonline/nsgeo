@@ -7,6 +7,7 @@ import tracemalloc
 
 import numpy as np
 import pytest
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO
 from nsgeo.slices import METHODS, plan_fill
 from nsgeo_qgis.slices_plan import (
     CURVATURE_PLAN_BYTES_PER_CELL,
@@ -22,14 +23,18 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     bands_detail,
     choose_residency,
+    clock_change_note,
     combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
+    level_limit_problem,
     mixed_clock_note,
     name_list,
+    no_break_note,
     old_cube_note,
     preset_transform_conflict,
     preview_note,
@@ -358,17 +363,18 @@ def test_a_site_source_shares_one_transform_and_names_each_grid_once():
         SiteSource(transform="amp_envelope", grids=(a, b, again_a))
 
 
-def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
-    """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
-    line the detail is set by the trace spacing, so a widely spaced grid
+def test_the_default_cell_is_0_1_m_no_larger_than_half_the_spacing():
+    """#81: a fixed 0.1 m (0.2 m until the session A walkthrough), not a
+    fraction of the line spacing -- along a line the detail is set by the
+    trace spacing, so a widely spaced grid
     keeps fine cells. Spec 4's "no larger than half the line spacing"
     still caps it, and the frame's affordable floor (`smallest_safe_cell`,
     walkthrough W7) still wins over both."""
     from nsgeo_qgis.slices_plan import default_cell
 
-    assert default_cell(0.5, 0.01) == pytest.approx(0.2)
-    assert default_cell(1.0, 0.01) == pytest.approx(0.2)  # not 0.4: fixed, not relative
-    assert default_cell(0.25, 0.01) == pytest.approx(0.125)  # half the spacing
+    assert default_cell(0.5, 0.01) == pytest.approx(0.1)
+    assert default_cell(1.0, 0.01) == pytest.approx(0.1)  # not 0.5: fixed, not relative
+    assert default_cell(0.15, 0.01) == pytest.approx(0.075)  # half the spacing
     assert default_cell(0.5, 0.3) == pytest.approx(0.3)  # the floor wins
 
 
@@ -594,13 +600,14 @@ def test_name_list_reads_as_a_sentence():
 
 def test_preview_note_is_exact_copy():
     base = (
-        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
-        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "Preview at 0.4 m pixels: the site (1234 \u00d7 568 m) is too big to draw at 0.05 m. "
         "It draws in full at a 0.12 m cell or coarser."
     )
     assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
-    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
-        base + " Leaving out C and D would also let it draw in full."
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C"]) == base[:-1] + ", or without grid C."
+    assert (
+        preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"])
+        == base[:-1] + ", or without grids C and D."
     )
 
 
@@ -816,6 +823,37 @@ def test_the_old_cube_note_names_the_shift_with_its_sign():
     assert old_cube_note(1.0).endswith("moved by +1.00 ns.")
 
 
+@pytest.mark.parametrize("shift", [-0.52, 0.52])
+def test_clock_change_note_names_the_cube_the_preset_and_the_signed_shift(shift):
+    """#162 item 1: a marked cube whose preset gained or lost Time zero since
+    it was saved. The note names both, and the shift with its sign."""
+    gained = clock_change_note("A__old", "p", TIME_BASE_TIME_ZERO, shift)
+    lost = clock_change_note("A__old", "p", TIME_BASE_RADAR, shift)
+    for text in (gained, lost):
+        assert "'A__old'" in text and "preset 'p'" in text, text
+        assert f"{shift:+.2f} ns" in text, text
+    assert "saved on the radar's clock" in gained and "now has Time zero" in gained, gained
+    assert "saved with Time zero" in lost and "no longer has it" in lost, lost
+    assert gained == (
+        "Cube 'A__old' was saved on the radar's clock, and preset 'p' now has Time zero. "
+        "It was rebuilt from each line's first break, with its range moved by "
+        f"{shift:+.2f} ns (the median line zero)."
+    )
+    assert lost == (
+        "Cube 'A__old' was saved with Time zero, and preset 'p' no longer has it. "
+        f"It was rebuilt on the radar's clock, with its range moved by {shift:+.2f} ns, "
+        "the median first break as Time zero finds it by default."
+    )
+
+
+def test_no_break_note_names_the_cube_and_the_preset():
+    """Review Focus 5: no first break to shift by, so the range was left as saved."""
+    assert no_break_note("A__old", "p") == (
+        "Cube 'A__old' was saved with Time zero, and preset 'p' no longer has it. "
+        "No line has a first break to move it by, so its range was left as saved."
+    )
+
+
 def test_mixed_clock_note_names_the_radar_grids():
     assert mixed_clock_note([]) == ""
     assert mixed_clock_note(["A"]).startswith("Grid A has no Time zero step")
@@ -832,3 +870,44 @@ def test_combined_time_base_is_one_rule_for_a_set_of_grids():
     assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
     with pytest.raises(ValueError):
         combined_time_base([])
+
+
+def test_the_level_limit_message_is_exact():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    assert level_limit_problem(res, [512, 512, 512]) == (
+        "Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube "
+        "allows 1,024 (twice the 512 samples in each line). Narrow z0\u2013z1 or raise dz."
+    )
+
+
+def test_the_level_limit_names_the_deepest_line_when_counts_differ():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    problem = level_limit_problem(res, [512, 1024])
+    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in problem
+
+
+def test_native_dz_over_the_whole_record_is_within_the_limit():
+    assert level_limit_problem(Resolution(0.25, 0.21653, -11.086, 99.546), [512]) is None
+    assert level_limit_problem(Resolution(0.25, 0.001, 0.0, 100.0), []) is None
+
+
+def test_the_wheel_hazard_dz_is_over_the_limit_and_too_many_levels_is_a_value_error():
+    res = Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=110.0)
+    assert level_limit_problem(res, [512]) is not None
+    assert issubclass(TooManyLevels, ValueError)
+
+
+def test_slice_dir_pid_reads_only_our_folders():
+    from nsgeo_qgis.slices_plan import slice_dir_pid, slice_dir_prefix
+
+    assert slice_dir_pid(slice_dir_prefix(1234) + "ab_c9x2") == 1234
+    for name in ("nsgeo-slice-ab_c9x2", "nsgeo-slice--x", "other-12-abc", "nsgeo-slice-12-"):
+        assert slice_dir_pid(name) is None
+
+
+def test_stale_slice_dirs_keeps_live_unknown_and_foreign_folders():
+    from nsgeo_qgis.slices_plan import stale_slice_dirs
+
+    names = ["nsgeo-slice-1-aa", "nsgeo-slice-2-bb", "nsgeo-slice-3-cc", "x", "nsgeo-slice-zz"]
+    state = {1: False, 2: True, 3: None}
+    assert stale_slice_dirs(names, lambda pid: state[pid]) == ["nsgeo-slice-1-aa"]

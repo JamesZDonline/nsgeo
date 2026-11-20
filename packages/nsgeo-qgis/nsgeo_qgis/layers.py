@@ -12,11 +12,12 @@
    table's own refill and logs a failure via `QgsMessageLog` rather than
    letting one bad table silently cancel the other two.
 
-The package CRS is the CRS of the first grid; other grids are transformed
-into it on write. If the first grid's own CRS changes (or a package
-predates a field this version of `TABLES` expects), every table is
-rebuilt: the derived tables are simply overwritten, since they are fully
-refilled anew immediately afterward, but `picks` has no other source of
+The package CRS is the site's CRS (pinned by its first GPS line, else the
+first grid's); other grids are transformed into it on write. If that CRS
+changes (or a package predates a field or table this version of `TABLES`
+expects), every table the site has is rebuilt (`rtk_gaps` only while the
+site has GPS lines): the derived tables are simply overwritten, since they are
+fully refilled anew immediately afterward, but `picks` has no other source of
 truth, so its rebuild migrates every row into a fresh table and verifies
 it before ever touching the original (see `_rebuild_picks`).
 """
@@ -26,12 +27,13 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry import Grid
+from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement, measure_spacing
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Cut, Line, is_cut_key
 from nsgeo.processing import retime_ns
@@ -42,10 +44,12 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsFields,
     QgsGeometry,
     QgsLayerTree,
+    QgsMapLayer,
     QgsMessageLog,
     QgsPalLayerSettings,
     QgsPointXY,
@@ -63,7 +67,14 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
+from nsgeo_qgis.qtcompat import without_layer_flag
 from nsgeo_qgis.session import Pick, SiteSession
+from nsgeo_qgis.surface_plan import (
+    FeatureRecord,
+    feature_ids,
+    join_feature_ids,
+    settings_json,
+)
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
 _KIND = {
@@ -98,6 +109,11 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             ("length_m", "float"),
             ("antenna", "str"),
             ("file_name", "str"),
+            # M17a (P12): "tape" or "gps". The tape-only fields above are NULL
+            # for a GPS line; `without_rtk_m` is its bridges' metres (NULL on
+            # a tape line).
+            ("placed_by", "str"),
+            ("without_rtk_m", "float"),
         ],
     ),
     "marks": (
@@ -109,6 +125,18 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
     "cuts": (
         QgsWkbTypes.Type.LineString,
         [("cut_key", "str"), ("name", "str"), ("grid_id", "str"), ("length_m", "float")],
+    ),
+    # M17a (P12): one feature per bridge of a GPS line, plus one per end run
+    # over END_LIMIT_M, along the line's own trace positions.
+    "rtk_gaps": (
+        QgsWkbTypes.Type.LineString,
+        [
+            ("line_key", "str"),
+            ("kind", "str"),
+            ("first_trace", "int"),
+            ("last_trace", "int"),
+            ("metres", "float"),
+        ],
     ),
     "picks": (
         QgsWkbTypes.Type.Point,
@@ -130,7 +158,9 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             # ordered run of existing picks sharing a `feature_id`, so
             # adding them here -- while `picks` holds at most a handful of
             # authored rows -- costs one migration now instead of a
-            # migration of real interpretations later. `_ensure_table`
+            # migration of real interpretations later. (With multi-membership,
+            # one `seq` per pick cannot order a pick that sits in two ordered
+            # features; a future ordered kind needs its own ordering.) `_ensure_table`
             # sees the field-set mismatch on any pre-M8 package and routes
             # it through `_rebuild_picks`, whose migrate-by-field-name
             # loop leaves both columns NULL on every existing row with no
@@ -142,15 +172,49 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         ],
     ),
 }
-DERIVED = ("grids", "lines", "marks", "cuts")
+# `rtk_gaps` exists only while the site has GPS lines (`_has_gps_lines`).
+DERIVED = ("grids", "lines", "marks", "cuts", "rtk_gaps")
+
+# M16 B (spec §4 call 8): the site's authored features -- surfaces now, more
+# kinds later. A plain attribute table with no geometry. Like `picks` it has
+# no other source of truth, so nothing ever drops or recreates it and a CRS
+# change leaves it alone; unlike `picks` it is never in `TABLES` (those are
+# rebuilt per CRS), never in the project or the Layers panel, and edited only
+# through nsgeo. Membership is the picks table's own `feature_id` column.
+FEATURES = "features"
+FEATURES_SPEC: list[tuple[str, str]] = [
+    ("feature_id", "str"),
+    ("name", "str"),
+    ("grid_id", "str"),
+    ("kind", "str"),
+    ("settings_json", "str"),
+    ("created", "str"),
+]
+
+
+@dataclass(frozen=True)
+class PickRow:
+    """One committed `picks` row: its fid, the pick, and its map position in
+    the package CRS (None for a row with no geometry)."""
+
+    fid: int
+    pick: Pick
+    point: tuple[float, float] | None
+
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
-# slice preview and exported GeoTIFFs join below them.
-LEGEND_ORDER = ("picks", "marks", "cuts", "lines", "grids")
+# slice preview and exported GeoTIFFs join below them. A name here is where
+# the table goes when the site has it: `rtk_gaps` only with GPS lines.
+LEGEND_ORDER = ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
 
 # One colour for every cut, and none of the grid colours (cut spec §4.8).
 CUT_COLOUR = "#e6550d"
+
+# M17a (P12): a line with no grid, and the stretches of a GPS line placed with
+# no RTK fix. Neither is a grid colour or the cut colour.
+NO_GRID_COLOUR = "#636363"
+RTK_GAP_COLOUR = "#e377c2"
 
 # Dragging a group in the Layers panel does not move the node:
 # QgsLayerTreeModel serialises it, builds a new node at the drop and deletes
@@ -164,7 +228,9 @@ _GROUP_TOKEN = "nsgeo/site_group"
 # a moire pattern over the slice, from about 1:400 at 0.5 m spacing by the
 # user's eye (lines about 4.7 px apart on a 96 dpi screen). Lines and their
 # marks hide beyond this scale denominator per metre of the finest line
-# spacing among the grids that have lines (see `_hide_when_lines_crowd`).
+# spacing among the lines: each line's grid's default spacing (tape or GPS
+# alike), and for GPS lines in no grid the spacing measured from their tracks
+# (see `_hide_when_lines_crowd`).
 HIDE_LINES_BEYOND_SCALE_PER_M = 800.0
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
@@ -261,6 +327,26 @@ def _attr(feature: QgsFeature, name: str) -> Any:
     return feature[name] if feature.fields().indexOf(name) >= 0 else NULL
 
 
+def _groups_transactions(project: Any) -> bool:
+    """Whether the project's "automatic transaction groups" (or buffered groups) are on, across
+    QGIS 3.40 to 4.x: `transactionMode()` where it exists, else `autoTransaction()`."""
+    mode = getattr(project, "transactionMode", None)
+    if mode is not None and hasattr(Qgis, "TransactionMode"):
+        return bool(mode() != Qgis.TransactionMode.Disabled)
+    auto = getattr(project, "autoTransaction", None)
+    return bool(auto()) if auto is not None else False
+
+
+def _provider_reason(provider: Any) -> str:
+    """The provider's own message, or a plain reason when it gives none."""
+    message = provider.error().message()
+    if not message:
+        # A real "database is locked" leaves error() empty and its text only in errors().
+        errors = [e for e in provider.errors() if e]
+        message = errors[-1] if errors else ""
+    return message or "the GeoPackage refused the write (is it read-only?)"
+
+
 def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
     """The point of `trace`, or of the nearest trace the line has: the trace
     index IS the vertex index, and a pick past either end sits on that end."""
@@ -316,9 +402,8 @@ def _as_str(value: Any) -> str:
 
 
 def _as_opt_str(value: Any) -> str | None:
-    """`feature_id` specifically: null and empty are different states
-    here. Null means "not grouped"; an empty string would be a group
-    whose name is empty."""
+    """`feature_id` specifically: the raw text (a list of ids joined by ";", read with
+    `surface_plan.feature_ids`), or None for NULL."""
     return None if value == NULL else str(value)
 
 
@@ -343,6 +428,9 @@ class SiteLayers(QObject):
         # that may report what following changed (line editing spec §4.4).
         self._report_follow = False
         self.layers: dict[str, QgsVectorLayer] = {}
+        # Depth counter: >0 while the `lines` table is being refilled, so MapLink
+        # can tell a refill's selection change from the user's gesture (#57).
+        self._refilling_lines = 0
         self._group: Any = None
         self._group_token = ""
         # Finding A: which `picks` QgsVectorLayer object `_on_picks_edited`
@@ -353,6 +441,10 @@ class SiteLayers(QObject):
         # already hold the NEW object, and the old one is only reachable
         # if something kept it).
         self._bound_picks: QgsVectorLayer | None = None
+        # The `features` table (see FEATURES): held here, never in `layers` or
+        # the project, so `detach` and `_on_layers_removed` leave it to us.
+        self._features: QgsVectorLayer | None = None
+        self._features_problem = ""
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
@@ -453,6 +545,8 @@ class SiteLayers(QObject):
             if ids:
                 self.project.removeMapLayers(ids)
             self.layers.clear()
+        self._features = None
+        self._features_problem = ""
         group = self.group
         if group is not None:
             parent = group.parent()
@@ -584,19 +678,20 @@ class SiteLayers(QObject):
         return None
 
     def crs(self) -> QgsCoordinateReferenceSystem | None:
-        site = self.session.site
-        if site is None or not site.grids:
-            return None
-        return QgsCoordinateReferenceSystem(site.grids[0].crs)
+        crs = self.session.site_crs()
+        return None if crs is None else QgsCoordinateReferenceSystem(crs)
 
     def refresh(self) -> None:
         site = self.session.site
         if site is None:
             return
-        if not site.grids:
+        if (not site.grids and not site.lines) or self.crs() is None:
+            self._drop_rtk_gaps()  # empties it first, so the clear below skips it
             self._clear_derived_tables()
             return
         try:
+            if not self._has_gps_lines():
+                self._drop_rtk_gaps()
             self.ensure_tables()
         except Exception as exc:  # noqa: BLE001 -- see rule 4 above
             # ensure_tables() already contains each table's own setup (see
@@ -611,6 +706,7 @@ class SiteLayers(QObject):
             ("lines", self.refill_lines),
             ("marks", self.refill_marks),
             ("cuts", self.refill_cuts),
+            ("rtk_gaps", self.refill_rtk_gaps),
         ):
             try:
                 fn()
@@ -693,8 +789,8 @@ class SiteLayers(QObject):
         keys = set(self.session.keys())
         cut_keys = set(self.session.cut_keys())
         # One computation per line, however many picks it carries. None
-        # marks a line with no points to put a pick on (no grid, or no
-        # distance axis): its picks still follow its velocity.
+        # marks a line with no points to put a pick on (no grid and no GPS
+        # track, or no distance axis): its picks still follow its velocity.
         placed: dict[str, list[QgsPointXY] | None] = {}
         failed: set[str] = set()
         geometry_changes: dict[int, QgsGeometry] = {}
@@ -718,8 +814,7 @@ class SiteLayers(QObject):
                 continue
             if key not in placed:
                 line = self.session.line_for_key(key)
-                grid = self.session.grid_for_line(line)
-                placed[key] = None if grid is None else self._line_points(line, grid, site.frames)
+                placed[key] = self._line_points(line, site.frames)
             coords = placed[key]
             if key in failed:
                 continue
@@ -875,11 +970,32 @@ class SiteLayers(QObject):
             self.session.picks_changed.emit()
         return len(changes)
 
+    def _has_gps_lines(self) -> bool:
+        site = self.session.site
+        return site is not None and any(
+            isinstance(line.placement, TrackPlacement) for line in site.lines
+        )
+
+    def _drop_rtk_gaps(self) -> None:
+        """`rtk_gaps` belongs to a site with GPS lines (walkthrough G9): when the
+        last one is gone, empty the table so a later reader of the file sees no
+        stale gaps, then take the layer out of the group and the project. The
+        table itself stays in the GeoPackage."""
+        layer = self.layers.get("rtk_gaps")
+        if layer is None:
+            return
+        if not sip.isdeleted(layer):
+            try:
+                self._refill("rtk_gaps", [])
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                _log(f"could not clear 'rtk_gaps': {exc}", Qgis.MessageLevel.Critical)
+        self._drop_loaded_layer("rtk_gaps")
+
     def _clear_derived_tables(self) -> None:
-        """No grids left: there is nothing to derive line/mark geometry
-        from. The tables were already created while a grid existed, so
-        clear them rather than leaving the last grid's stale features on
-        the map. `picks` is untouched, same as every other refill."""
+        """The site has no grid and no line (or no CRS), so there is nothing
+        to derive geometry from. The tables were already created while a grid
+        or line existed, so clear them rather than leaving the last
+        features on the map. `picks` is untouched, same as every other refill."""
         for name in DERIVED:
             if name not in self.layers:
                 continue  # a site that has never had a grid: nothing to clear
@@ -893,7 +1009,10 @@ class SiteLayers(QObject):
         path = str(self.session.gpkg_path)
         crs = self.crs()
         assert crs is not None
+        gps = self._has_gps_lines()
         for name, (wkb, spec) in TABLES.items():
+            if name == "rtk_gaps" and not gps:
+                continue  # only a site with GPS lines carries it
             try:
                 self._ensure_table(path, name, wkb, spec, crs)
             except Exception as exc:  # noqa: BLE001 -- see rule 4 above
@@ -903,6 +1022,12 @@ class SiteLayers(QObject):
                 # trying the other three, the same containment refresh()
                 # already gives each refill.
                 _log(f"could not prepare table {name!r}: {exc}", Qgis.MessageLevel.Critical)
+        try:
+            self._ensure_features_table(path)
+            self._features_problem = ""
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            self._features_problem = str(exc)
+            _log(f"could not prepare table {FEATURES!r}: {exc}", Qgis.MessageLevel.Critical)
         group = self.group
         if group is None:
             # #68: on top, above any imagery already open, rather than
@@ -914,7 +1039,7 @@ class SiteLayers(QObject):
             self._group = group
         opened = []
         for name in LEGEND_ORDER:
-            if name in self.layers:
+            if name in self.layers or (name == "rtk_gaps" and not gps):
                 continue
             try:
                 layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
@@ -942,6 +1067,33 @@ class SiteLayers(QObject):
         # when the bound object hasn't changed (unbind-then-rebind onto
         # the same layer nets one connection, same as before).
         self._bind_picks_signals()
+
+    def _ensure_features_table(self, path: str) -> None:
+        """Create `features` only when it is absent, add any field an older
+        table lacks, and hold it open (not in the project). Never rebuilt, never
+        dropped: a table present but unopenable is refused, not replaced."""
+        if self._features_layer() is not None:
+            return
+        crs, _ = self._table_schema(path, FEATURES)
+        if crs is _TABLE_UNREADABLE:
+            raise RuntimeError(
+                f"the features table in {path} is present but could not be opened; "
+                "refusing to replace it -- it has no other source of truth"
+            )
+        if crs is None:
+            self._create_table(path, FEATURES, QgsWkbTypes.Type.NoGeometry, FEATURES_SPEC, None)
+        layer = QgsVectorLayer(f"{path}|layername={FEATURES}", FEATURES, "ogr")
+        if not layer.isValid():
+            raise RuntimeError(f"could not open table {FEATURES!r} in {path}")
+        missing = [(n, k) for n, k in FEATURES_SPEC if layer.fields().indexOf(n) < 0]
+        if missing:
+            provider = layer.dataProvider()
+            if not provider.addAttributes([QgsField(n, _KIND[k]) for n, k in missing]):
+                raise RuntimeError(
+                    f"could not add fields to {FEATURES!r}: {_provider_reason(provider)}"
+                )
+            layer.updateFields()
+        self._features = layer
 
     def _legend_row(self, group: Any, name: str) -> int:
         """Where table `name` goes in `group`: just below the lowest of the
@@ -1337,7 +1489,7 @@ class SiteLayers(QObject):
         name: str,
         wkb: Any,
         spec: list[tuple[str, str]],
-        crs: QgsCoordinateReferenceSystem,
+        crs: QgsCoordinateReferenceSystem | None,
     ) -> None:
         opts = QgsVectorFileWriter.SaveVectorOptions()
         opts.driverName = "GPKG"
@@ -1348,7 +1500,12 @@ class SiteLayers(QObject):
             else QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
         )
         writer = QgsVectorFileWriter.create(
-            path, _fields(spec), wkb, crs, self.project.transformContext(), opts
+            path,
+            _fields(spec),
+            wkb,
+            QgsCoordinateReferenceSystem() if crs is None else crs,
+            self.project.transformContext(),
+            opts,
         )
         if writer.hasError() != QgsVectorFileWriter.WriterError.NoError:
             raise RuntimeError(f"could not create table {name!r}: {writer.errorMessage()}")
@@ -1368,9 +1525,18 @@ class SiteLayers(QObject):
         pts = [QgsPointXY(float(x), float(y)) for x, y in np.asarray(xy, dtype=float)]
         return [tr.transform(p) for p in pts] if tr is not None else pts
 
-    def _line_points(
-        self, line: Line, grid: Grid, frames: dict[str, Grid]
-    ) -> list[QgsPointXY] | None:
+    def _line_crs(self, line: Line) -> str | None:
+        """The CRS `line`'s own coordinates are in: its grid's, or for a GPS
+        line the CRS its track was projected into. None for a line placed
+        by a grid the site no longer has."""
+        # A GPS line's coordinates are in its own CRS even when it names a
+        # grid (M17c), so the placement is asked first.
+        if isinstance(line.placement, TrackPlacement):
+            return line.placement.crs
+        grid = self.session.grid_for_line(line)
+        return None if grid is None else grid.crs
+
+    def _line_points(self, line: Line, frames: dict[str, Grid]) -> list[QgsPointXY] | None:
         """World points for every trace of `line`, or None when the line
         cannot be positioned at all.
 
@@ -1382,14 +1548,32 @@ class SiteLayers(QObject):
         from there is a real bug (a bad shape, a broken transform), not
         an unplaceable line, and must not be misreported as one.
         """
+        crs = self._line_crs(line)
+        if crs is None:
+            return None
         try:
             xy = line.trace_coords(frames)
         except ValueError as exc:
             _log(f"{line.path.name} could not be placed and was left out of the map: {exc}")
             return None
-        return self._points(xy, grid.crs)
+        return self._points(xy, crs)
+
+    @property
+    def refilling_lines(self) -> int:
+        """Truthy while the `lines` layer is being refilled (read-only, for MapLink)."""
+        return self._refilling_lines
 
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
+        if name != "lines":
+            self._refill_table(name, features)
+            return
+        self._refilling_lines += 1
+        try:
+            self._refill_table(name, features)
+        finally:
+            self._refilling_lines -= 1
+
+    def _refill_table(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
         target = self.crs()
         # A table whose own prep failed this cycle (ensure_tables()
@@ -1683,10 +1867,7 @@ class SiteLayers(QObject):
             cut = self.session.cut_for_key(pick.line_key)
             return self._cut_point(cut, pick.distance_m)
         line = self.session.line_for_key(pick.line_key)
-        grid = self.session.grid_for_line(line)
-        if grid is None:
-            return None
-        coords = self._line_points(line, grid, site.frames)
+        coords = self._line_points(line, site.frames)
         if coords is None:
             return None
         return _clamped(coords, pick.trace)
@@ -1785,7 +1966,7 @@ class SiteLayers(QObject):
         ok, _ = layer.dataProvider().addFeatures([feature])
         if not ok:
             raise RuntimeError(
-                f"could not write the pick: {layer.dataProvider().error().message()}"
+                f"could not write the pick: {_provider_reason(layer.dataProvider())}"
             )
         layer.updateExtents()
         layer.triggerRepaint()
@@ -1860,6 +2041,245 @@ class SiteLayers(QObject):
             zero_ns=_as_float(_attr(feature, "zero_ns")),
         )
 
+    # ---- features and pick membership (M16 B) -------------------------------
+    def picks_in_open_transaction(self) -> bool:
+        """True while the picks layer is in editing mode and the project groups its layers' edits
+        into transactions: a write to the package then lands inside the user's open transaction
+        (and "database is locked", or a Discard that undoes it)."""
+        layer = self._picks_layer()
+        if layer is None or not layer.isEditable():
+            return False
+        return _groups_transactions(self.project)
+
+    def features_available(self) -> bool:
+        """Whether the `features` table is open: when it is not, `feature_records()` is empty
+        for want of reading, not because there are no features."""
+        layer = self._features_layer()
+        return layer is not None and layer.isValid()
+
+    def _features_layer(self) -> QgsVectorLayer | None:
+        layer = self._features
+        if layer is None or sip.isdeleted(layer):
+            return None
+        return layer
+
+    def selected_pick_ids(self) -> list[int]:
+        """The fids selected on the picks layer, in order. Unsaved rows (added
+        in QGIS's editing mode) have negative fids; `pick_rows` leaves them out
+        and the caller counts them."""
+        layer = self._picks_layer()
+        return [] if layer is None else sorted(layer.selectedFeatureIds())
+
+    def select_picks(self, fids: Iterable[int]) -> None:
+        """Make `fids` (picks-layer fids) the picks layer's selection, as QGIS's own Select
+        tool would; an empty list clears it."""
+        layer = self._picks_layer()
+        if layer is not None:
+            layer.selectByIds(sorted({int(f) for f in fids}))
+
+    def unsaved_among(self, fids: Iterable[int]) -> set[int]:
+        """The `fids` the picks layer holds only in its edit buffer: rows added
+        there (negative fids), and saved rows with a pending attribute or
+        geometry change or a pending delete. Their saved values are not what
+        the user sees, so a surface must not be built from them."""
+        wanted = {int(f) for f in fids}
+        out = {f for f in wanted if f < 0}
+        layer = self._picks_layer()
+        buffer = None if layer is None else layer.editBuffer()
+        if buffer is not None:
+            pending = (
+                set(buffer.changedAttributeValues())
+                | set(buffer.changedGeometries())
+                | set(buffer.deletedFeatureIds())
+            )
+            out |= wanted & pending
+        return out
+
+    def pick_rows(self, fids: Iterable[int]) -> list[PickRow]:
+        """The committed, readable rows among `fids` as `PickRow`s, by fid. An
+        unsaved, deleted or unreadable row is simply absent, so `len(result) <
+        len(fids)` says some could not be used; `unreadable_pick_ids` tells
+        which of the absent ones are saved rows with no trace or time."""
+        layer = self._picks_layer()
+        wanted = sorted({int(f) for f in fids if int(f) >= 0})
+        if layer is None or not wanted:
+            return []
+        request = QgsFeatureRequest().setFilterFids(wanted)
+        return [
+            row for row in map(self._pick_row, layer.dataProvider().getFeatures(request)) if row
+        ]
+
+    def unreadable_pick_ids(self, fids: Iterable[int]) -> set[int]:
+        """The committed rows among `fids` that cannot be a `Pick` (no trace or
+        time: a point digitised by hand with blank attributes)."""
+        layer = self._picks_layer()
+        wanted = sorted({int(f) for f in fids if int(f) >= 0})
+        if layer is None or not wanted:
+            return set()
+        request = QgsFeatureRequest().setFilterFids(wanted)
+        return {
+            f.id()
+            for f in layer.dataProvider().getFeatures(request)
+            if _attr(f, "trace") == NULL or _attr(f, "time_ns") == NULL
+        }
+
+    def _pick_row(self, feature: QgsFeature) -> PickRow | None:
+        # Checked here too so a read made only to count never logs a line per
+        # unreadable row (`_row_to_pick` logs, for the reads that skip a row).
+        if _attr(feature, "trace") == NULL or _attr(feature, "time_ns") == NULL:
+            return None
+        pick = self._row_to_pick(feature, _as_str(_attr(feature, "line_key")))
+        if pick is None:
+            return None
+        geometry = feature.geometry()
+        point = None
+        if not geometry.isNull() and not geometry.isEmpty():
+            xy = geometry.asPoint()
+            point = (xy.x(), xy.y())
+        return PickRow(feature.id(), pick, point)
+
+    def members_by_feature(self) -> dict[str, list[PickRow]]:
+        """Every committed pick that belongs to a feature, by feature id, in one scan. A
+        pick lists its surfaces in `feature_id` (ids joined by ";"), so it appears under
+        each. An id that names no record in `features` is ignored (a deleted surface's
+        leftovers are not members of anything)."""
+        layer = self._picks_layer()
+        if layer is None:
+            return {}
+        known = {r.feature_id for r in self.feature_records()}
+        out: dict[str, list[PickRow]] = {}
+        for feature in layer.dataProvider().getFeatures():
+            listed = [
+                i for i in feature_ids(_as_opt_str(_attr(feature, "feature_id"))) if i in known
+            ]
+            if not listed:
+                continue
+            row = self._pick_row(feature)
+            if row is not None:
+                for fid in listed:
+                    out.setdefault(fid, []).append(row)
+        return out
+
+    def _edit_pick_features(
+        self,
+        fids: Iterable[int] | None,
+        change: Callable[[tuple[str, ...]], tuple[str, ...]],
+    ) -> int:
+        """Rewrite the surface list of committed rows `fids` (None: every row) with `change`,
+        read raw from the provider, as one `changeAttributeValues` through the provider:
+        the edit buffer is never read or changed, so a note typed in editing mode survives.
+        Rows whose list does not change are not written. Returns the rows changed. Raises
+        RuntimeError if the write fails."""
+        layer = self._picks_layer()
+        if layer is None:
+            raise RuntimeError("the picks table is not open; no site is loaded")
+        provider = layer.dataProvider()
+        index = provider.fieldNameIndex("feature_id")
+        if index < 0:
+            raise RuntimeError("the picks table has no feature_id field")
+        if fids is None:
+            request = QgsFeatureRequest()
+        else:
+            wanted = sorted({int(f) for f in fids if int(f) >= 0})
+            if not wanted:
+                return 0
+            request = QgsFeatureRequest().setFilterFids(wanted)
+        changes: dict[int, dict[int, Any]] = {}
+        for feature in provider.getFeatures(request):
+            raw = _as_opt_str(_attr(feature, "feature_id"))
+            before = feature_ids(raw)
+            after = change(before)
+            if after != before:
+                joined = join_feature_ids(after)
+                changes[int(feature.id())] = {index: NULL if joined is None else joined}
+        if not changes:
+            return 0
+        if not provider.changeAttributeValues(changes):
+            raise RuntimeError(f"could not update the picks: {_provider_reason(provider)}")
+        layer.triggerRepaint()
+        return len(changes)
+
+    def add_pick_feature(self, fids: Iterable[int], feature_id: str) -> int:
+        """Add `feature_id` to the surfaces of committed rows `fids`; the others they are in
+        stay. Returns the rows changed (a row already in it is not written)."""
+        return self._edit_pick_features(
+            fids, lambda ids: ids if feature_id in ids else (*ids, feature_id)
+        )
+
+    def remove_pick_feature(self, fids: Iterable[int], feature_id: str) -> int:
+        """Take `feature_id` out of the surfaces of committed rows `fids`; returns the rows
+        changed."""
+        return self._edit_pick_features(fids, lambda ids: tuple(i for i in ids if i != feature_id))
+
+    def _feature_fid(self, feature_id: str) -> int:
+        layer = self._features_layer()
+        if layer is not None:
+            for feature in layer.dataProvider().getFeatures():
+                if _as_str(_attr(feature, "feature_id")) == feature_id:
+                    return int(feature.id())
+        raise KeyError(f"no feature with id {feature_id!r}")
+
+    def clear_pick_feature(self, feature_id: str) -> int:
+        """Take `feature_id` out of every committed row that lists it, read raw (not through
+        `_row_to_pick`), so a row with a blank time that was once a member cannot keep naming
+        a deleted surface. The row's other surfaces stay. Returns the rows changed."""
+        return self._edit_pick_features(None, lambda ids: tuple(i for i in ids if i != feature_id))
+
+    def feature_records(self) -> list[FeatureRecord]:
+        """Every row of `features`, oldest first."""
+        layer = self._features_layer()
+        if layer is None:
+            return []
+        names = [f.name() for f in layer.fields() if f.name() != "fid"]
+        records = [
+            FeatureRecord.from_row({n: _as_str(_attr(f, n)) for n in names})
+            for f in layer.dataProvider().getFeatures()
+        ]
+        return records
+
+    def write_feature(self, record: FeatureRecord) -> None:
+        layer = self._features_layer()
+        if layer is None:
+            raise RuntimeError(
+                "the features table is not available: "
+                + (self._features_problem or "no site with a grid is loaded")
+            )
+        feature = QgsFeature(layer.fields())
+        for name, value in record.to_row().items():
+            feature[name] = value
+        ok, _ = layer.dataProvider().addFeatures([feature])
+        if not ok:
+            raise RuntimeError(
+                f"could not write the feature: {_provider_reason(layer.dataProvider())}"
+            )
+
+    def update_feature(
+        self, feature_id: str, *, name: str | None = None, settings: Any = None
+    ) -> None:
+        """Change a record's name and/or settings. KeyError for an unknown id."""
+        layer = self._features_layer()
+        fid = self._feature_fid(feature_id)
+        assert layer is not None
+        provider = layer.dataProvider()
+        values: dict[int, Any] = {}
+        if name is not None:
+            values[provider.fieldNameIndex("name")] = name
+        if settings is not None:
+            values[provider.fieldNameIndex("settings_json")] = settings_json(settings)
+        if values and not provider.changeAttributeValues({fid: values}):
+            raise RuntimeError(f"could not update the feature: {_provider_reason(provider)}")
+
+    def remove_feature(self, feature_id: str) -> None:
+        """Delete the record only; its picks keep their `feature_id` until the
+        caller clears it (`members_by_feature` ignores such leftovers)."""
+        layer = self._features_layer()
+        fid = self._feature_fid(feature_id)
+        assert layer is not None
+        if not layer.dataProvider().deleteFeatures([fid]):
+            raise RuntimeError(
+                f"could not delete the feature: {_provider_reason(layer.dataProvider())}"
+            )
+
     # ---- derived tables ---------------------------------------------------
     def refill_grids(self) -> None:
         site = self.session.site
@@ -1889,26 +2309,32 @@ class SiteLayers(QObject):
         keys = self.session.keys()
         for key in keys:
             line = self.session.line_for_key(key)
-            grid = self.session.grid_for_line(line)
-            if grid is None:
-                continue  # trackless lines arrive with TrackPlacement, later
-            coords = self._line_points(line, grid, site.frames)
+            coords = self._line_points(line, site.frames)
             if coords is None:
-                continue  # unplaceable (e.g. time-triggered); degrade, don't abort the table
+                continue  # no grid or track, or unplaceable (e.g. time-triggered): degrade
             f = QgsFeature(self.layers["lines"].fields())
             f.setGeometry(QgsGeometry.fromPolylineXY(coords))
             p: Any = line.placement
             f["line_key"] = key
-            f["grid_id"] = grid.id
             f["label"] = p.label or ""
-            f["axis"] = p.axis
-            f["offset_m"] = float(p.offset)
-            f["start_along_m"] = float(p.start_along)
-            f["direction"] = int(p.direction)
             f["n_traces"] = int(line.n_traces)
-            f["length_m"] = float(line.n_traces / line.header.traces_per_metre)
             f["antenna"] = line.header.antenna
             f["file_name"] = line.path.name
+            if isinstance(p, TrackPlacement):
+                # P12: the tape-only fields stay NULL; the length is walked.
+                walked = p.distance_along(line.n_traces, line.header)
+                f["grid_id"] = p.grid_id or ""
+                f["length_m"] = float(walked[-1] - walked[0]) if len(walked) else 0.0
+                f["placed_by"] = "gps"
+                f["without_rtk_m"] = float(sum(b.metres for b in p.bridges()))
+            else:
+                f["grid_id"] = p.grid_id
+                f["axis"] = p.axis
+                f["offset_m"] = float(p.offset)
+                f["start_along_m"] = float(p.start_along)
+                f["direction"] = int(p.direction)
+                f["length_m"] = float(line.n_traces / line.header.traces_per_metre)
+                f["placed_by"] = "tape"
             feats.append(f)
         self._refill("lines", feats)
         self._style_lines()
@@ -1921,16 +2347,13 @@ class SiteLayers(QObject):
         keys = self.session.keys()
         for key in keys:
             line = self.session.line_for_key(key)
-            grid = self.session.grid_for_line(line)
-            if grid is None:
-                continue
             try:
                 info = read_dzx(line.path)
             except DzxError:
                 continue
             if info is None or not info.marks:
                 continue
-            coords = self._line_points(line, grid, site.frames)
+            coords = self._line_points(line, site.frames)
             if coords is None:
                 continue  # unplaceable line; its marks have nowhere to go either
             for mark in info.marks:
@@ -1944,6 +2367,82 @@ class SiteLayers(QObject):
                 feats.append(f)
         self._refill("marks", feats)
         self._hide_when_lines_crowd("marks")
+
+    def refill_rtk_gaps(self) -> None:
+        """P12: one feature per bridge of each GPS line, and one per end run
+        over `END_LIMIT_M`, along the line's own trace positions."""
+        site = self.session.site
+        assert site is not None
+        if "rtk_gaps" not in self.layers:
+            return  # a site with no GPS line has no gap layer
+        layer_fields = self.layers["rtk_gaps"].fields()
+        feats = []
+
+        def add(
+            key: str, kind: str, coords: list[QgsPointXY], a: int, b: int, metres: float
+        ) -> None:
+            if len(coords) < 2:
+                return
+            f = QgsFeature(layer_fields)
+            f.setGeometry(QgsGeometry.fromPolylineXY(coords))
+            f["line_key"] = key
+            f["kind"] = kind
+            f["first_trace"] = int(a)
+            f["last_trace"] = int(b)
+            f["metres"] = float(metres)
+            feats.append(f)
+
+        keys = self.session.keys()
+        for key in keys:
+            line = self.session.line_for_key(key)
+            p = line.placement
+            if not isinstance(p, TrackPlacement):
+                continue
+            bridges = p.bridges()
+            start_m, end_m = p.end_runs(line.n_traces, line.header)
+            long_start, long_end = start_m > END_LIMIT_M, end_m > END_LIMIT_M
+            if not (bridges or long_start or long_end):
+                continue
+            coords = self._line_points(line, site.frames)
+            if coords is None:
+                continue
+            last = line.n_traces - 1
+            for bridge in bridges:
+                a, b = max(bridge.first_trace, 0), min(bridge.last_trace, last)
+                add(
+                    key,
+                    "bridge",
+                    coords[a : b + 1],
+                    bridge.first_trace,
+                    bridge.last_trace,
+                    bridge.metres,
+                )
+            anchors = p.anchors()
+            if long_start:
+                first = min(anchors[0].trace, last)
+                add(key, "start", coords[: first + 1], 0, anchors[0].trace, start_m)
+            if long_end:
+                at = max(anchors[-1].trace, 0)
+                add(key, "end", coords[at:], anchors[-1].trace, last, end_m)
+        self._refill("rtk_gaps", feats)
+        self._style_rtk_gaps()
+
+    def _style_rtk_gaps(self) -> None:
+        # Dotted and heavier than the survey lines, above them, in a colour no
+        # grid or cut uses. Not identifiable and in no selection slot of
+        # `MapLink`, so a click on a gap never navigates.
+        layer = self.layers.get("rtk_gaps")
+        if layer is None:
+            return
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(RTK_GAP_COLOUR))
+        symbol.setWidth(0.8)
+        stroke = symbol.symbolLayer(0)
+        stroke.setUseCustomDashPattern(True)
+        stroke.setCustomDashVector([0.5, 1.0])  # mm on, mm off
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        without_layer_flag(layer, QgsMapLayer.LayerFlag.Identifiable)
+        layer.triggerRepaint()
 
     def refill_cuts(self) -> None:
         site = self.session.site
@@ -1993,6 +2492,23 @@ class SiteLayers(QObject):
             stroke.setUseCustomDashPattern(True)
             stroke.setCustomDashVector([3.0, 2.0])  # mm on, mm off
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
+        # M17a: a GPS line has no grid; its feature carries grid_id "". The
+        # row is only there when such a line is, so a tape-only site's legend
+        # is as it always was.
+        keys = self.session.keys()
+        if not any(
+            isinstance(self.session.line_for_key(k).placement, TrackPlacement) for k in keys
+        ):
+            self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
+            self.layers["lines"].triggerRepaint()
+            return
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(NO_GRID_COLOUR))
+        symbol.setWidth(0.2)
+        stroke = symbol.symbolLayer(0)
+        stroke.setUseCustomDashPattern(True)
+        stroke.setCustomDashVector([3.0, 2.0])
+        categories.append(QgsRendererCategory("", symbol, "No grid"))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
 
@@ -2001,10 +2517,18 @@ class SiteLayers(QObject):
         closely spaced lines start to run together."""
         spacings = set()
         keys = self.session.keys()
+        loose: list[Any] = []  # GPS lines in no grid: their spacing is measured (#222)
         for key in keys:
-            grid = self.session.grid_for_line(self.session.line_for_key(key))
+            line = self.session.line_for_key(key)
+            grid = self.session.grid_for_line(line)
             if grid is not None:
                 spacings.add(grid.default_spacing)
+            elif isinstance(line.placement, TrackPlacement) and line.placement.grid_id is None:
+                loose.append(line.trace_coords({}))
+        if len(loose) >= 2:
+            measured = measure_spacing(loose)
+            if measured is not None:
+                spacings.add(measured)
         layer = self.layers[name]
         if not spacings:
             layer.setScaleBasedVisibility(False)

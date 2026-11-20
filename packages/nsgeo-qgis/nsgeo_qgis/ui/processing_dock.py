@@ -7,11 +7,13 @@ view updates. Nothing here computes anything.
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     Radargram,
+    StepRefused,
     build_step,
     default_params,
     get_step,
@@ -21,7 +23,7 @@ from nsgeo.processing import (
 )
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QPalette
+from qgis.PyQt.QtGui import QBrush, QColor, QPalette
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -33,17 +35,21 @@ from qgis.PyQt.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
 )
 
+from nsgeo_qgis import step_inputs
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
+from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry, WarningsPanel
+from nsgeo_qgis.velocity_records import line_label
 
 #: How far a step's own velocity may sit from the open line's resolved
 #: velocity before the step's row says so, as a fraction of the line's.
@@ -57,6 +63,13 @@ from nsgeo_qgis.ui.param_form import ParamForm
 #: nothing.
 _VELOCITY_MISMATCH_FRACTION = 0.02
 PROCESSING_ON_CUT_TEXT = "Processing does not apply to a cut."
+REFUSAL_TEXT = (
+    "{title} (step {n}) can't run on this line: {reason} "
+    "The profile won't update until this is fixed."
+)
+REFUSAL_COLOUR = QColor(163, 18, 44)
+LINE_LABEL_TEXT = "<b>{name}</b>{grid}"
+PREVIEW_SUFFIX = " · the profile is previewing {name}"
 
 
 def dest_index(start: int, row: int) -> int:
@@ -145,6 +158,8 @@ class ProcessingDock(QgsDockWidget):
         # guard while the outer frame is still mid-rebuild; a counter
         # only reaches zero when the outermost call finishes.
         self._updating = 0
+        # The step the open line's stack refuses to run, or None.
+        self._refusal: StepRefused | None = None
         # `_show_form` last actually displayed: the (key, row) it was shown
         # at, AND the step object identity found there. `rebuild()` emits
         # `step_selected` unconditionally every time it runs, including the
@@ -172,10 +187,21 @@ class ProcessingDock(QgsDockWidget):
         # (row -1, nothing open yet) is never mistaken for an echo.
         self._shown: tuple[str | None, int] = (None, -2)
         self._shown_step: Any = None
+        # (key, row) of a form built while its time field had no clock
+        # (`input_axis` was None); `line_loaded` re-shows only that one.
+        self._form_axis_unknown: tuple[str, int] | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
         layout.setContentsMargins(4, 4, 4, 4)
+        # Names the line the steps below belong to (#33), and the line a map
+        # hover is previewing. Ignored width: a long name wraps, it never
+        # raises the dock's minimum width.
+        self.line_label = QLabel("")
+        self.line_label.setTextFormat(Qt.TextFormat.RichText)
+        self.line_label.setWordWrap(True)
+        self.line_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        layout.addWidget(self.line_label)
         row = QHBoxLayout()
         self.add_button = QToolButton()
         self.add_button.setText("Add step")
@@ -224,6 +250,9 @@ class ProcessingDock(QgsDockWidget):
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         layout.addWidget(self.list)
+
+        self.warnings = WarningsPanel(body)
+        layout.addWidget(self.warnings)
 
         self.form_area = QVBoxLayout()
         layout.addLayout(self.form_area)
@@ -279,7 +308,11 @@ class ProcessingDock(QgsDockWidget):
         self.list.model().rowsMoved.connect(self._on_rows_moved)
 
         session.line_opened.connect(self.rebuild)
+        session.preview_changed.connect(self._on_preview_changed)
+        # A move to another grid or a rename changes the name or grid shown.
+        session.lines_changed.connect(self._update_line_label)
         session.stack_changed.connect(self._on_stack_changed)
+        session.line_loaded.connect(self._on_line_loaded)
         session.site_closed.connect(self.rebuild)
         self.rebuild()
 
@@ -330,7 +363,91 @@ class ProcessingDock(QgsDockWidget):
         for w in (self.add_button, self.apply_button, self.presets_button, self.diff_button):
             w.setEnabled(has_line)
         self._update_row_buttons()
+        self._check_refusal()
+        self._update_line_label()
         self.step_selected.emit(self.list.currentRow())
+
+    def _on_preview_changed(self, _key: str, _trace: int) -> None:
+        self._update_line_label()
+
+    def _update_line_label(self) -> None:
+        """Name the working line, and the previewed one when it differs.
+        Empty with no line open or on a cut. Guarded: it is a slot, and
+        `rebuild` must still reach its `step_selected` emit."""
+        try:
+            key = self.key()
+            if key is None or is_cut_key(key):
+                self.line_label.setText("")
+                return
+            line = self.session.line_for_key(key)
+            grid = self.session.grid_for_line(line)
+            text = LINE_LABEL_TEXT.format(
+                name=escape(line_label(line)),
+                grid=f" · grid {escape(str(grid.id))}" if grid is not None else "",
+            )
+            preview = self.session.preview_key
+            if preview and preview != key and not is_cut_key(preview):
+                other = self.session.line_for_key(preview)
+                text += PREVIEW_SUFFIX.format(name=escape(line_label(other)))
+            self.line_label.setText(text)
+        except Exception as exc:
+            _log(f"_update_line_label: {exc}")
+
+    def refusal(self) -> StepRefused | None:
+        """The step the open line's stack refuses to run, or None."""
+        return self._refusal
+
+    def _check_refusal(self) -> None:
+        """Run the open line's stack and keep what it refuses: a note under
+        the list and a mark on the refusing row, for as long as it is so.
+
+        Guarded as a whole: `rebuild` is a slot and must still reach its
+        `step_selected` emit whatever goes wrong here."""
+        try:
+            self._paint_refusal()
+        except Exception as exc:
+            _log(f"_check_refusal: {exc}")
+
+    def _paint_refusal(self) -> None:
+        refusal: StepRefused | None = None
+        key = self.key()
+        if key is not None and not is_cut_key(key):
+            stack = self.session.stack_for(key)
+            if stack.source is not None:
+                try:
+                    row = self.list.currentRow()
+                    if self.diff_button.isChecked() and 0 <= row < len(stack.entries):
+                        # The Difference view shows the chain up to its step
+                        # only: check that chain, not the whole stack (a
+                        # refusal below it is noted when the view goes off).
+                        stack.intermediate(row)
+                    else:
+                        stack.result()
+                except StepRefused as exc:
+                    refusal = exc
+                except Exception as exc:
+                    _log(f"_check_refusal: {exc}")
+        self._refusal = refusal
+        note = ""
+        if refusal is not None:
+            reason = str(refusal)
+            if not reason.endswith("."):
+                reason += "."
+            note = REFUSAL_TEXT.format(title=refusal.title, n=refusal.index + 1, reason=reason)
+        self._updating += 1
+        try:
+            if key is not None and not is_cut_key(key):
+                entries = self.session.stack_for(key).entries
+                for i in range(min(self.list.count(), len(entries))):
+                    step = entries[i][0]
+                    item = self.list.item(i)
+                    refused = refusal is not None and refusal.index == i
+                    item.setText(("⛔ " if refused else "") + self.row_label(step, key))
+                    item.setForeground(QBrush(REFUSAL_COLOUR) if refused else QBrush())
+                    item.setToolTip(f"{step.name}\n\n{note}" if refused else step.name)
+        finally:
+            self._updating -= 1
+        self.warnings.set_entries([Entry(REFUSAL, note)] if note else [])
 
     def row_label(self, step: Any, key: str) -> str:
         """A step's row text: its title, plus its velocity when it carries
@@ -403,6 +520,9 @@ class ProcessingDock(QgsDockWidget):
             # else in this dock relies on that being true.
             self.diff_button.setChecked(False)
             return
+        # The note follows the chain the view shows (Difference on or off,
+        # or aimed at another row).
+        self._check_refusal()
         self.difference_toggled.emit(row if checked else -1)
 
     # ---- presets ---------------------------------------------------------
@@ -462,6 +582,7 @@ class ProcessingDock(QgsDockWidget):
             if shown == self._shown:
                 return  # already showing "nothing"
             self._shown, self._shown_step = shown, None
+            self._form_axis_unknown = None
             self.form.clear()
             return
         step, _ = self.session.stack_for(key).entries[row]
@@ -469,10 +590,30 @@ class ProcessingDock(QgsDockWidget):
             return  # an echo of our own commit, or add_step()'s second emit
         self._shown, self._shown_step = shown, step
         range_kwargs: dict[str, Any] = {}
+        self._form_axis_unknown = None
         if any(spec.kind == "time" for spec in get_step(step.name).schema()):
-            t0, dt, n = self.input_axis(row)
-            range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
+            axis = self.input_axis(row)
+            if axis is None:
+                self._form_axis_unknown = (key, row)
+            else:
+                t0, dt, n = axis
+                range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
         self.form.set_step(step.name, step.params, **range_kwargs)
+
+    def _on_line_loaded(self, key: str) -> None:
+        """The samples arrived: a time field shown without a clock (see
+        `input_axis`) gets its real range now."""
+        try:
+            if key != self.key():
+                return
+            self._check_refusal()
+            row = self.list.currentRow()
+            if row < 0 or self._form_axis_unknown != (key, row):
+                return
+            self._shown = (None, -2)
+            self._show_form(row)
+        except Exception as exc:
+            _log(f"_on_line_loaded: {exc}")
 
     def _on_form_committed(self, params: dict[str, Any]) -> None:
         key = self.key()
@@ -515,21 +656,36 @@ class ProcessingDock(QgsDockWidget):
             self.session.set_step_enabled(key, row, flag)
 
     def _on_current_row(self, row: int) -> None:
-        if not self._updating:
-            self._update_row_buttons()
-            self.step_selected.emit(row)
-            if self.diff_button.isChecked():
-                self._emit_difference(True)
+        try:
+            if not self._updating:
+                self._update_row_buttons()
+                if self.diff_button.isChecked():
+                    # The note follows the selected row's chain while the
+                    # Difference view is on: refresh it before `step_selected`
+                    # reaches listeners that read `refusal()`.
+                    self._check_refusal()
+                self.step_selected.emit(row)
+                if self.diff_button.isChecked():
+                    self._emit_difference(True)
+        except Exception as exc:
+            _log(f"_on_current_row: {exc}")
 
     def _on_rows_moved(self, _parent: Any, start: int, _end: int, _dest: Any, row: int) -> None:
-        if self._updating:
-            return
-        key = self.key()
-        if key is None:
-            return
-        dst = dest_index(start, row)
-        if dst != start:
-            self.session.move_step(key, start, dst)
+        try:
+            if self._updating:
+                return
+            key = self.key()
+            if key is None:
+                return
+            dst = dest_index(start, row)
+            if dst != start:
+                self.session.move_step(key, start, dst)
+                # The view always shows the selected step (#13): the selection
+                # followed the drag, so the Difference view follows it too.
+                if self.diff_button.isChecked():
+                    self._emit_difference(True)
+        except Exception as exc:
+            _log(f"_on_rows_moved: {exc}")
 
     # ---- actions ----------------------------------------------------------
     def add_step(self, name: str) -> None:
@@ -542,105 +698,26 @@ class ProcessingDock(QgsDockWidget):
         self.session.append_step(key, build_step(name, **default_params(name)))
         self.list.setCurrentRow(self.list.count() - 1)
 
-    def input_axis(self, row: int) -> tuple[float, float, int]:
-        """(t0_ns, dt_ns, n_samples) of what the step at `row` receives:
-        the stack's state after the step above it, or the source when it is
-        first. Bounds a time field to the record that step can clip, so a
-        `time_zero` ahead of it moves the lower limit. Falls back the way
-        `time_axis` does when the stack does not evaluate cleanly."""
+    def input_axis(self, row: int) -> tuple[float, float, int] | None:
+        """(t0_ns, dt_ns, n_samples) of what the step at `row` receives, or
+        None while its clock is unknown. See `step_inputs.input_axis`."""
         key = self.key()
         assert key is not None
-        stack = self.session.stack_for(key)
-        if stack.source is not None:
-            try:
-                rg = stack.intermediate(row - 1) if row > 0 else stack.source
-            except ValueError as exc:
-                _log(
-                    f"input_axis: stack does not evaluate cleanly ({exc}); "
-                    "using the raw source axis instead (seed or field bound)"
-                )
-                rg = stack.source
-            return rg.t0_ns, rg.dt_ns, rg.n_samples
-        h = self.session.line_for_key(key).header
-        return h.position_ns, h.dt_ns, h.n_samples
+        return step_inputs.input_axis(self.session, key, row)
 
     def time_axis(self) -> tuple[float, float, int]:
-        """(t0_ns, dt_ns, n_samples) of the input a step appended right now
-        would actually receive: the stack's own `result()` when it
-        evaluates cleanly, so a step already in the stack that changes the
-        axis (`time_zero` crops `n_samples` and relabels `t0_ns` -- see
-        `nsgeo.processing.timezero`) is accounted for, exactly as the new
-        step's own `apply()` will see it. Only used today to seed a new
-        curve step's identity default (see `add_step_with_dialog`), so the
-        distinction only bites once something ahead of it in the stack
-        changes the sample axis.
-
-        `result()` can raise `ValueError` when some OTHER step already in
-        the stack is misconfigured (a bandpass whose high cut exceeds
-        Nyquist, say) -- that is a problem with that step, not a reason
-        this method should raise too: it falls back to the stack's raw
-        source instead, same as before this method looked at `result()` at
-        all, and to the line's header when nothing has loaded yet. Logged
-        when it fires: the seed then lands on the raw axis while the
-        viewer keeps its last good (possibly quite different) transform,
-        so a curve step seeded right now can end up with control points
-        off the drawn axis with nothing said otherwise."""
+        """The axis a step appended now would receive. See `step_inputs.time_axis`."""
         key = self.key()
         assert key is not None
-        return self.input_axis(len(self.session.stack_for(key).entries))
+        return step_inputs.time_axis(self.session, key)
 
     def probe_radargram(self, key: str) -> Radargram | None:
-        """What a step appended right now would actually receive: the
-        stack's own `result()`, so a step already in the stack that changed
-        the record is accounted for, exactly as the new step's own
-        `apply()` will see it.
-
-        The same quantity `time_axis` already describes, and the same
-        fallback for the same reason: `result()` raises `ValueError` when
-        some OTHER step in the stack is misconfigured, which is a problem
-        with that step, not grounds for refusing to open the Add dialog.
-        Logged when it fires, because the probe then validates against the
-        raw source and can disagree with what the step will meet.
-
-        This was `stack.source` -- the raw radargram, `t0 = -11.09` on
-        every real file -- which left `migrate_fk` permanently un-addable
-        with a disabled OK button and a message about a time zero that was
-        already corrected two rows above it.
-        """
-        stack = self.session.stack_for(key)
-        if stack.source is None:
-            return None
-        try:
-            return stack.result()
-        except ValueError as exc:
-            _log(
-                f"probe_radargram: stack does not evaluate cleanly ({exc}); "
-                "validating the new step against the raw source instead"
-            )
-            return stack.source
+        """What a step appended now would receive. See `step_inputs.probe_radargram`."""
+        return step_inputs.probe_radargram(self.session, key)
 
     def seed_params(self, name: str, key: str) -> dict[str, Any] | None:
-        """What to start `name`'s fields at for this line, or None.
-
-        Migration's velocity starts at whatever `resolve_velocity` says --
-        line override, then the grid, then the header's dielectric -- so
-        the field opens on the same number the depth axis and every pick
-        already use. A seed only: once the step exists the value is its
-        own, and a later velocity change does not reach back into it.
-        """
-        if name != "migrate_fk":
-            return None
-        try:
-            return {"velocity_m_ns": self.session.resolved_velocity(key).surface_velocity}
-        except ValueError as exc:
-            # e.g. a header with a non-positive epsr, which loads fine and
-            # fails when its velocity is resolved. A prefill is a
-            # convenience; failing to make one must not stop the dialog
-            # opening at all, which is the shape `plugin.py` already uses.
-            _log(
-                f"seed_params: cannot resolve a velocity for {key} ({exc}); leaving the field blank"
-            )
-            return None
+        """What to start `name`'s fields at for this line. See `step_inputs.seed_params`."""
+        return step_inputs.seed_params(self.session, name, key)
 
     def build_add_dialog(self, name: str) -> AddStepDialog:
         key = self.key()

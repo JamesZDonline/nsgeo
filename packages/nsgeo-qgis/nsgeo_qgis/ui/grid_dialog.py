@@ -20,7 +20,6 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsCsException,
-    QgsDistanceArea,
     QgsGeometry,
     QgsMapLayerProxyModel,
     QgsPointXY,
@@ -52,31 +51,24 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.crs_rule import (
+    CRS_SCALE_WARN,
+    choose_crs,
+    crs_check,
+    crs_scale_error,
+    project_reason,
+)
 from nsgeo_qgis.lookup import (
     CORNER_ROLES,
     compass_label,
     corner_frame,
     roles_from_ring,
     rotate_roles,
-    utm_epsg,
 )
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.grid_overlay import GridOverlay, tag_text
 
 COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
-
-# Local scale-factor thresholds for _validate()'s CRS check (round 3,
-# Finding 1): |k - 1| where k is ground distance / declared distance at
-# the grid's own origin. Calibrated against real CRSs used as intended
-# (UTM mid-zone/edge, British National Grid, a metres state plane: all
-# comfortably under 0.1%; CONUS Albers/ETRS89 LAEA, both anisotropic
-# equal-area projections: up to ~1.26% away from their centre) against
-# CRSs that are not fit for a metric grid frame at all (EPSG:3857 well
-# above both thresholds everywhere off the equator; a UTM zone abused
-# three zones over, ~1.4-3%). Warn, but do not block, in between --
-# refusing at 1% would false-refuse legitimate Albers/LAEA work.
-CRS_SCALE_WARN = 0.001  # 0.1%
-CRS_SCALE_REFUSE = 0.02  # ~2%
 
 # What the velocity box reads at 0: the grid has no velocity, and each of its
 # lines uses its header's dielectric instead (#4).
@@ -87,6 +79,11 @@ VELOCITY_UNSET = "from line headers"
 # measured in. A degree-sized grid fits to RMS 0.000 and would move an
 # existing grid thousands of kilometres.
 MIN_MEASURED_SIZE = 0.1
+
+
+#: The Spacing box's starting value (also what Fit to these tracks proposes
+#: when the tracks give nothing to measure one from).
+DEFAULT_SPACING = 0.5
 
 
 def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) -> QDoubleSpinBox:
@@ -168,6 +165,8 @@ class GridDialog(QDialog):
         parent: QWidget | None = None,
         canvas: QgsMapCanvas | None = None,
         instrument: str = "gpr",
+        *,
+        proposed: Grid | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
@@ -235,7 +234,7 @@ class GridDialog(QDialog):
         self.azimuth.setWrapping(True)
         self.size_x = _spin(0.0, 1e5, 2, 0.5, 10.0)
         self.size_y = _spin(0.0, 1e5, 2, 0.5, 10.0)
-        self.spacing = _spin(0.01, 100.0, 3, 0.05, 0.5)
+        self.spacing = _spin(0.01, 100.0, 3, 0.05, DEFAULT_SPACING)
         # Optional (#4): 0 is "unset", and each line then falls back on its
         # own header dielectric -- resolve_velocity's last tier.
         self.velocity = _spin(0.0, 0.3, 4, 0.001)
@@ -335,10 +334,20 @@ class GridDialog(QDialog):
             self._typed = [True, True]
             self._set_instrument(grid.instrument)
             self.instrument_combo.setEnabled(False)
+        elif proposed is not None:
+            # Fitted around GPS lines, which never join a mag grid (M17b). Set
+            # first: the instrument's usual size must not overwrite the fit's.
+            self._set_instrument(proposed.instrument)
+            self.instrument_combo.setEnabled(False)
+            self._prefill(proposed, keep_id=False)
+            self._typed = [True, True]
         else:
             self._settle_crs_at_open()
             self._set_instrument(instrument)
             self.instrument_combo.currentIndexChanged.connect(self._on_instrument_changed)
+        # What the velocity box opened with: OK compares with this, not with
+        # the grid now, because the dialog is modeless (`velocity_unchanged`).
+        self._opening_velocity = self.velocity.value()
         self._validate()
         self._refresh_derived()
         self._refresh_overlay()
@@ -1105,9 +1114,13 @@ class GridDialog(QDialog):
         self.use_measured_button.setVisible(show)
 
     # ---- result -----------------------------------------------------------
-    def _prefill(self, grid: Grid) -> None:
-        self.id_edit.setText(grid.id)
-        self.id_edit.setEnabled(False)  # lines reference the id; renaming is a different feature
+    def _prefill(self, grid: Grid, *, keep_id: bool = True) -> None:
+        """Fill the form from `grid`. An existing grid keeps its Id (disabled);
+        a proposed one (Fit to these tracks) leaves the Id empty and editable."""
+        if keep_id:
+            self.id_edit.setText(grid.id)
+            # lines reference the id; renaming is a different feature
+            self.id_edit.setEnabled(False)
         self._write_crs(QgsCoordinateReferenceSystem(grid.crs))
         self._write_numbers(self.crs_widget.crs(), grid.origin[0], grid.origin[1], grid.azimuth)
         self.size_x.setValue(grid.size_x)
@@ -1116,84 +1129,33 @@ class GridDialog(QDialog):
         if grid.velocity is not None:
             self.velocity.setValue(grid.velocity.surface_velocity)
 
+    def _origin_point(self, point: QgsPointXY | None) -> QgsPointXY | None:
+        """`point`, or the form's origin when None -- or None while the origin
+        is still (0, 0), so nothing is measured before it has been set."""
+        if point is not None:
+            return point
+        ox, oy = self.origin_x.value(), self.origin_y.value()
+        return None if ox == 0.0 and oy == 0.0 else QgsPointXY(ox, oy)
+
     def _crs_scale_error(
         self, crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None = None
     ) -> float | None:
-        """max|k - 1| of `crs`'s local linear scale at `point` (in
-        `crs` coordinates; the form's origin when not given), where
-        k = ground (ellipsoidal) distance / declared (crs-unit) distance --
-        or None if it can't be measured.
+        """`crs_rule.crs_scale_error` at `point`, or at the form's origin."""
+        at = self._origin_point(point)
+        return None if at is None else crs_scale_error(crs, at)
 
-        A CRS whose stated unit is metres is not the same thing as a
-        CRS whose metres are ground metres here: EPSG:3857 (Web
-        Mercator) reports Meters and is not geographic, yet its scale
-        factor grows without bound away from the equator (round 3,
-        Finding 1). Measuring at (0, 0) specifically would be worse
-        than not checking at all -- that is the origin of the *CRS*,
-        which for something like EPSG:5070 or EPSG:3035 sits far
-        outside the CRS's own area of use and gives a spuriously large
-        error -- so this measures at the grid's own origin instead, and
-        answers None (skip, don't refuse) before that origin has been
-        set to anything, or if the transform/measurement itself fails
-        (e.g. the origin lies outside the CRS's area of use).
-        """
-        if point is None:
-            ox, oy = self.origin_x.value(), self.origin_y.value()
-            if ox == 0.0 and oy == 0.0:
-                return None
-        else:
-            ox, oy = point.x(), point.y()
-        try:
-            xform = QgsCoordinateTransform(
-                crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance()
-            )
-            da = QgsDistanceArea()
-            da.setEllipsoid("WGS84")
-            baseline = 1000.0
-            worst = 0.0
-            for dx, dy in ((baseline, 0.0), (-baseline, 0.0), (0.0, baseline), (0.0, -baseline)):
-                g0 = xform.transform(QgsPointXY(ox, oy))
-                g1 = xform.transform(QgsPointXY(ox + dx, oy + dy))
-                ground = da.measureLine(g0, g1)
-                worst = max(worst, abs(ground / baseline - 1.0))
-        except Exception:  # noqa: BLE001 -- see the docstring: skip, don't refuse
-            return None
-        return worst
+    def _project_reason(
+        self, crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None
+    ) -> str:
+        return project_reason(crs, kind, scale_error)
 
     def _crs_check(
         self, crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None
     ) -> tuple[str | None, float | None]:
-        """`_validate`'s three checks for `crs` at `point` (in `crs`
-        coordinates; the form's origin when None): (the failed check, the
-        scale error). The check is "authid", "units" or "scale", or None
-        when `crs` is usable there. A CRS that only draws the warning is
-        usable."""
-        if not crs.authid():
-            return "authid", None
-        if crs.mapUnits() != Qgis.DistanceUnit.Meters:
-            return "units", None
-        scale_error = self._crs_scale_error(crs, point)
-        if scale_error is not None and scale_error > CRS_SCALE_REFUSE:
-            return "scale", scale_error
-        return None, scale_error
-
-    def _usable_at(
-        self, crs: QgsCoordinateReferenceSystem, lonlat: QgsPointXY
-    ) -> tuple[str | None, float | None]:
-        """`_crs_check` for `crs` at a lon/lat. A CRS that cannot even place
-        the location ("outside", "none") is not usable there."""
-        if not crs.isValid():
-            return "none", None
-        try:
-            xform = QgsCoordinateTransform(
-                QgsCoordinateReferenceSystem("EPSG:4326"), crs, QgsProject.instance()
-            )
-            point = xform.transform(lonlat)
-        except QgsCsException:
-            return "outside", None
-        if not (math.isfinite(point.x()) and math.isfinite(point.y())):
-            return "outside", None
-        return self._crs_check(crs, point)
+        """`crs_rule.crs_check` at `point` (in `crs` coordinates), or at the
+        form's origin when None -- and with no scale check while the origin
+        is still (0, 0)."""
+        return crs_check(crs, self._origin_point(point))
 
     # ---- the grid's CRS: automatic, or the user's ---------------------------
     def crs_is_auto(self) -> bool:
@@ -1232,41 +1194,19 @@ class GridDialog(QDialog):
         return self._lonlat(extent.center(), self.canvas.mapSettings().destinationCrs())
 
     def _site_crs(self) -> QgsCoordinateReferenceSystem | None:
-        site = self.session.site
-        if site is None or not site.grids:
-            return None
-        return QgsCoordinateReferenceSystem(site.grids[0].crs)
-
-    def _project_reason(
-        self, crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None
-    ) -> str:
-        if not crs.isValid():
-            return "the project has no CRS"
-        if kind == "authid":
-            return "the project CRS has no authority code"
-        if kind == "units":
-            return f"the project CRS ({crs.authid()}) is in {QgsUnitTypes.toString(crs.mapUnits())}"
-        if kind == "outside":
-            return f"the project CRS ({crs.authid()}) does not reach this location"
-        return f"the project CRS ({crs.authid()}) is off by {(scale_error or 0.0) * 100:.1f}% here"
+        crs = self.session.site_crs()
+        return None if crs is None else QgsCoordinateReferenceSystem(crs)
 
     def _choose_crs(self, lonlat: QgsPointXY) -> tuple[QgsCoordinateReferenceSystem, str]:
         """The grid CRS for a grid at `lonlat`, and the note saying why (C10):
-        the site's CRS, else the project's, else that spot's UTM zone, taking
-        the first that is usable there."""
-        project = QgsProject.instance().crs()
-        site = self._site_crs()
-        if site is not None and self._usable_at(site, lonlat)[0] is None:
-            note = "" if site == project else "picked for you: the CRS the site's other grids use"
-            return site, note
-        kind, scale_error = self._usable_at(project, lonlat)
-        if kind is None:
-            return project, ""
-        epsg = utm_epsg(lonlat.x(), lonlat.y())
-        if epsg is None:
-            return project, "no UTM zone covers this latitude"
-        reason = self._project_reason(project, kind, scale_error)
-        return QgsCoordinateReferenceSystem(f"EPSG:{epsg}"), f"picked for you: {reason}"
+        `crs_rule.choose_crs`."""
+        site = self.session.site
+        return choose_crs(
+            self._site_crs(),
+            QgsProject.instance().crs(),
+            lonlat,
+            site_has_grids=bool(site and site.grids),
+        )
 
     def _apply_auto_crs(self, crs: QgsCoordinateReferenceSystem, note: str) -> None:
         if crs != self.crs_widget.crs():
@@ -1493,6 +1433,13 @@ class GridDialog(QDialog):
             velocity=self._result_velocity(),
             instrument=self.instrument,
         )
+
+    def velocity_unchanged(self) -> bool:
+        """The velocity box still shows the value it opened with, to its four
+        decimals. The grid may have a new velocity by now (grid velocity spec
+        §7.2): unchanged, OK leaves the grid's velocity and record as they are
+        at OK."""
+        return round(self.velocity.value(), 4) == round(self._opening_velocity, 4)
 
     def _result_velocity(self) -> VelocityModel | None:
         """None when unset; the grid's own model when the box still shows it,

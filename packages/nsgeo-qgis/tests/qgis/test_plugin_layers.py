@@ -29,6 +29,7 @@ from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 from plugin_testing import (
     REAL_DZT,
+    apply_fit,
     connect_message_log,
     drag_in_layers_panel,
     needs_real_data,
@@ -62,6 +63,10 @@ DZX = """<?xml version="1.0" encoding="UTF-8"?>
 <DZX xmlns="www.geophysical.com/DZX/1.02"><File><name>FILE__002.DZT</name>
 <Profile><WayPt><scan>30</scan><mark>User</mark><name>Mark1</name></WayPt></Profile></File></DZX>"""
 
+# `rtk_gaps` belongs to a site with GPS lines (walkthrough G9); these sites have none.
+_SITE_TABLES = {n: v for n, v in TABLES.items() if n != "rtk_gaps"}
+_SITE_ORDER = tuple(n for n in LEGEND_ORDER if n != "rtk_gaps")
+
 
 @pytest.fixture
 def populated(qgis_app, tmp_path):
@@ -85,12 +90,12 @@ def populated(qgis_app, tmp_path):
 def test_tables_exist_with_the_declared_fields_and_flags(populated):
     session, layers, project = populated
     assert session.gpkg_path.is_file()
-    for name, (_, fields) in TABLES.items():
+    for name, (_, fields) in _SITE_TABLES.items():
         lyr = QgsVectorLayer(f"{session.gpkg_path}|layername={name}", name, "ogr")
         assert lyr.isValid(), name
         assert [f.name() for f in lyr.fields() if f.name() != "fid"] == [f for f, _ in fields]
-    assert set(layers.layers) == set(TABLES)
-    for name in TABLES:
+    assert set(layers.layers) == set(_SITE_TABLES)
+    for name in _SITE_TABLES:
         assert layers.layers[name].readOnly() is (name in DERIVED)
     assert layers.crs().authid() == "EPSG:32616"
     assert layers.layers["lines"].crs().authid() == "EPSG:32616"
@@ -114,7 +119,7 @@ def test_layers_are_grouped_in_the_project_under_the_site_name(populated):
     session, layers, project = populated
     group = project.layerTreeRoot().findGroup(f"nsgeo · {session.site_name}")
     assert group is not None
-    assert len(group.findLayers()) == 5
+    assert len(group.findLayers()) == len(_SITE_TABLES)
 
 
 def test_refill_never_touches_the_picks_table(populated):
@@ -430,7 +435,7 @@ def test_package_crs_follows_the_first_grid_and_transforms_existing_picks(popula
     assert layers.crs().authid() == "EPSG:4326"
     # Every table *on disk* actually carries the new CRS, not just
     # crs()'s own opinion of what it should be.
-    for name in TABLES:
+    for name in _SITE_TABLES:
         on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername={name}", name, "ogr")
         assert on_disk.crs().authid() == "EPSG:4326", name
 
@@ -580,7 +585,7 @@ def test_removing_the_last_grid_clears_the_derived_tables(populated):
     # and this session's registry of its tables are still there, just
     # empty.
     assert session.gpkg_path.is_file()
-    assert set(layers.layers) == set(TABLES)
+    assert set(layers.layers) == set(_SITE_TABLES)
 
 
 # --- fix round 2: ensure_tables() sat outside refresh()'s own signal-slot
@@ -2593,11 +2598,11 @@ def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populate
     preview = QgsVectorLayer("Polygon?crs=EPSG:32616", "Slice (live preview)", "memory")
     project.addMapLayer(preview, False)
     layers.group.addLayer(preview)
-    for name in LEGEND_ORDER:
+    for name in _SITE_ORDER:
         project.removeMapLayer(layers.layers[name].id())
         session.add_grid(Grid(f"G{name}", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-        assert _names(layers.group) == [*LEGEND_ORDER, "Slice (live preview)"], name
+        assert _names(layers.group) == [*_SITE_ORDER, "Slice (live preview)"], name
 
 
 def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
@@ -2794,8 +2799,7 @@ def test_a_picks_depth_and_velocity_follow_the_lines_velocity(populated, source)
         fit_id = session.add_velocity_fit(
             key, StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
         )
-        session.set_line_velocity(key, VelocityModel.constant(0.09))
-        session.set_velocity_from_fit(key, fit_id)
+        apply_fit(session, key, fit_id)
         expected = 0.09
     f = _rows(layers)[key]
     depth, velocity = session.derived_pick_fields(key, 7, 12.5)[1:]
@@ -3046,8 +3050,8 @@ def test_cuts_table_has_the_declared_fields_and_is_read_only(populated):
 
 def test_legend_order_puts_cuts_between_marks_and_lines(populated):
     session, layers, _ = populated
-    assert LEGEND_ORDER == ("picks", "marks", "cuts", "lines", "grids")
-    assert _names(layers.group) == list(LEGEND_ORDER)
+    assert LEGEND_ORDER == ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
+    assert _names(layers.group) == list(_SITE_ORDER)
 
 
 def test_refill_cuts_places_a_cut_in_world_coordinates(populated):

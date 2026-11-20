@@ -44,6 +44,7 @@ from nsgeo_qgis.slices_plan import (
 )
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
+from nsgeo_qgis.ui.warnings_panel import NOTE, REFUSAL, WARNING, Entry
 from osgeo import gdal
 from plugin_testing import (
     ExportGate,
@@ -56,6 +57,7 @@ from plugin_testing import (
     wait_for_export,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID_X = {"A": (500.0, 506.0), "B": (506.0, 512.0), "C": (512.0, 518.0)}
@@ -499,14 +501,14 @@ def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
     assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
 
 
-def test_the_site_starts_from_square_and_a_0_2_m_cell(plugin):
+def test_the_site_starts_from_square_and_a_0_1_m_cell(plugin):
     """#81, in Whole site: with nothing stored the transform falls back to
     This grid's, which starts on Square, and the cell follows This grid's
-    rule (site3's 1.5 m spacing does not clamp 0.2 m)."""
+    rule (site3's 1.5 m spacing does not clamp 0.1 m)."""
     dock = whole_site(plugin)
     assert dock.site_panel.transform() == "amp_square"
     assert dock.site_engine.engine_for("A").choice.transform == "amp_square"
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
 
 
 def test_a_remembered_none_transform_is_kept_over_the_default(plugin):
@@ -1005,6 +1007,22 @@ def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, o
     assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
 
 
+def test_whole_site_uses_each_grids_velocity(plugin, message_log):
+    session = plugin.session
+    v_a = VelocityModel.constant(0.09)
+    session.set_grid_velocity("A", v_a)
+    # the hazard: every line, first of each grid included, overrides
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(0.12))
+    dock = whole_site(plugin)
+    velocities = dock.site_velocities()
+    assert velocities["A"] == v_a == session.grid_depth_velocity("A")
+    for grid_id in ("B", "C"):
+        assert velocities[grid_id] == session.grid_depth_velocity(grid_id)
+        assert velocities[grid_id] != VelocityModel.constant(0.12)
+    assert message_log == []
+
+
 def test_the_profile_band_follows_the_site_window(plugin):
     dock = whole_site(plugin)
     windows: list[tuple[float, float]] = []
@@ -1099,15 +1117,15 @@ def test_a_burst_of_slider_moves_draws_once_with_the_last_value(plugin, monkeypa
 
 def test_the_site_cell_seeds_from_the_finest_spaced_grid(site3_factory, open_plugin):
     """#75: spec 4.4 seeds the cell by M11's rule for the finest-spaced
-    included grid, here B at 0.3 m against A's and C's 1.5 m."""
+    included grid, here B at 0.1 m against A's and C's 1.5 m."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.save()
     plugin = open_plugin(site)
     dock = whole_site(plugin)
     floor = dock.cell_spin.minimum()
-    assert default_cell(0.3, floor) != pytest.approx(default_cell(1.5, floor))
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, floor))
+    assert default_cell(0.1, floor) != pytest.approx(default_cell(1.5, floor))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, floor))
 
 
 def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_plugin):
@@ -1122,17 +1140,17 @@ def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_
 
 
 def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_factory, open_plugin):
-    """#75: a change to the included grids seeds the cell again -- B's 0.3 m
-    spacing seeds 0.15 m, and unticking B seeds A's and C's 0.2 m -- and a
+    """#75: a change to the included grids seeds the cell again -- B's 0.1 m
+    spacing seeds 0.05 m, and unticking B seeds A's and C's 0.1 m -- and a
     hand-set cell survives leaving the site and coming back. A hand-set cell
     is remembered (#71), so it is laid over every later seed as well, the
     seed an untick makes included."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.save()
     plugin = open_plugin(site)
     dock = whole_site(plugin)
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, dock.cell_spin.minimum()))
     dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)  # B
     settle(dock)
     assert dock.cell_spin.value() == pytest.approx(default_cell(1.5, dock.cell_spin.minimum()))
@@ -1213,12 +1231,10 @@ def test_a_z_bound_never_chosen_follows_every_ready_grid(site3_factory, open_plu
     """Ruling 14 (#71): z0 and z1 are the user's field by field. One never
     chosen is the union of the ready grids however they became ready; a
     remembered dz or cell does not hold it at the first grid's range."""
-    from nsgeo_qgis.ui.site_scope import ready_dt
-
     plugin = _short_a_site(site3_factory, open_plugin, **remembered)
     dock = _every_grid_shown(plugin)
     assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
-    dz = pytest.approx(remembered.get("dz_ns", ready_dt(dock.site_engine)), abs=1e-4)
+    dz = pytest.approx(remembered.get("dz_ns", _coarsest_dt(plugin)), abs=1e-4)
     assert dock.dz_spin.value() == dz  # the box holds 4 decimals
     applied = dock._site.res_applied
     assert (applied.dz_ns, applied.t1_ns) == (dz, dock.z1_spin.value())
@@ -1443,7 +1459,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     A is out of the site, so its removal changes no ready grid, and no tick
     re-seeds the site's z range over what landed."""
     session = plugin.session
-    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
+    b_res = {"cell": 0.3, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
     session.remember_slice_resolution("B", **b_res)
     session.set_site_view(grids=("B", "C"))
     session.save()
@@ -1460,12 +1476,12 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     dock.site_panel.select_grid(None)  # This grid comes back on its own grid
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
-    assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
+    assert _resolution_spins(dock) == pytest.approx((0.3, 0.5, 2.0, 30.0))
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
     assert dock.current_values() is not None
     assert session.slice_resolution("B") == b_res
@@ -1475,29 +1491,29 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site3_factory, open_plugin
 ):
     """The same fall-back with nothing remembered for B: This grid comes back
-    with B's own seed (its 0.3 m spacing's cell, the default interpolation), not with
+    with B's own seed (its 0.1 m spacing's cell, the default interpolation), not with
     the values A had before the site."""
     site = site3_factory()
-    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.1))
     site.session.set_site_view(grids=("B", "C"))
     site.session.save()
     plugin = open_plugin(site)
     dock = plugin.slices_dock
     dock.grid_finish.max_distance_spin.setValue(1.5)  # A's own, unlike B's seed
     dock.flush_debounce()
-    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.cell_spin.value() == pytest.approx(0.1)
     whole_site(plugin)
     plugin.session.remove_grid("A", with_lines=True)
     settle(dock)
     dock.site_panel.select_grid(None)
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
-    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.1, dock.cell_spin.minimum()))
     assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.15)
+    assert dock.engine.frame.cell == pytest.approx(0.05)
     assert dock.current_values() is not None
     assert plugin.session.slice_resolution("B") == {}
 
@@ -1992,7 +2008,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     switch is no choice, so nothing is written and the survey stays clean."""
     dock = plugin.slices_dock
     session = plugin.session
-    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, max_distance_spacings=1.5)
+    session.remember_slice_resolution("B", cell=0.3, dz_ns=0.5, max_distance_spacings=1.5)
     session.save()
     stored = session.slice_source("B")
     whole_site(plugin)
@@ -2001,11 +2017,11 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     assert dock.grid_combo.currentText() == "B"
     assert dock.engine.wait_for_preparation(20_000)
     spin_until(lambda: False, 400)  # any debounce runs on its own
-    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.cell_spin.value() == pytest.approx(0.3)
     assert dock.dz_spin.value() == pytest.approx(0.5)
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.choice.grid_id == "B"
-    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
     assert dock.current_values() is not None
     assert session.slice_source("B") == stored
@@ -2127,6 +2143,29 @@ def test_a_carried_time_never_overrides_a_later_resolution_change(plugin):
     z = dock.engine.z
     assert abs(z.t0_ns + dock.slice_slider.value() * z.dz_ns - user_top) <= z.dz_ns / 2 + 1e-9
     assert dock._pending_top_ns is None
+
+
+def test_a_survey_opened_after_closing_one_in_whole_site_starts_at_its_first_slice(
+    plugin, site3_factory
+):
+    """#102: closing a survey under Whole site switches back to This grid, which
+    carries the site's time over. That time was the closed survey's, so the
+    next survey opened at it instead of at its own first slice."""
+    dock = whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.6))
+    _events()
+    plugin.session.save()
+    plugin.session.close_site()
+    _events()
+    assert dock.scope() == "grid"
+    assert dock._pending_top_ns is None
+    assert not dock._resolution_owed
+
+    plugin.session.open_site(site3_factory().json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+
+    assert dock.slice_slider.value() == 0
 
 
 def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugin, monkeypatch):
@@ -3467,42 +3506,41 @@ def _nudge_cell(dock) -> None:
 
 def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin):
     dock = whole_site(plugin)
-    assert dock.site_note.text() == ""
+    assert dock.warnings_panel.entries() == ()
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
     engine = dock.site_engine
     assert engine.is_preview and engine.preview_note
-    assert dock.site_note.text() == engine.preview_note
-    assert dock.site_note.isVisibleTo(dock)
-    # Milestone B exports a preview site at full detail, so the tooltip carries no refusal.
-    assert dock.site_note.toolTip() == engine.preview_note
-    assert "export" not in dock.site_note.toolTip().lower()
+    assert dock.warnings_panel.entries() == (Entry(NOTE, engine.preview_note),)
+    assert dock.warnings_panel.isVisibleTo(dock)
+    # Milestone B exports a preview site at full detail, so the note carries no refusal.
+    assert "export" not in engine.preview_note.lower()
 
 
 def test_the_note_clears_when_the_site_fits_again(plugin):
     dock = whole_site(plugin)
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
-    assert dock.site_note.text()
+    assert dock.warnings_panel.entries()
     dock.site_engine.max_pixels = 10**9
     _nudge_cell(dock)
     assert not dock.site_engine.is_preview
-    assert dock.site_note.text() == ""
-    assert dock.site_note.toolTip() == ""
+    assert dock.warnings_panel.entries() == ()
 
 
 def test_the_note_clears_on_switching_to_this_grid(plugin):
     dock = whole_site(plugin)
     dock.site_engine.max_pixels = 100
     _nudge_cell(dock)
-    assert dock.site_note.isVisibleTo(dock)
+    assert dock.warnings_panel.isVisibleTo(dock)
     dock.grid_scope_button.click()
     _events()
     assert dock.scope() == "grid"
-    assert not dock.site_note.isVisibleTo(dock)
+    assert not dock.warnings_panel.isVisibleTo(dock)
+    assert dock.warnings_panel.entries() == ()
 
 
-def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
+def test_a_failed_resolution_says_why_in_the_panel_and_not_as_a_toast(plugin, monkeypatch):
     dock = plugin.slices_dock
     errors: list[str] = []
     dock.error.connect(errors.append)
@@ -3517,9 +3555,11 @@ def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monk
     assert dock.site_engine.lattice is None, "nothing is drawn"
     scope.refresh_slice()
     assert scope.problem == "the lattice could not be built"
-    assert any("the lattice could not be built" in e for e in errors), "the toast stays"
-    assert dock.site_note.text().startswith("Not drawn: ")
-    assert "the lattice could not be built" in dock.site_note.toolTip()
+    assert not any("the lattice could not be built" in e for e in errors), "one place only"
+    entries = dock.warnings_panel.entries()
+    assert [e.kind for e in entries] == [REFUSAL]
+    assert entries[0].text.startswith("Not drawn: ")
+    assert "the lattice could not be built" in entries[0].text
 
 
 def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
@@ -3528,10 +3568,10 @@ def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
     scope.problem = "stale"
     _nudge_cell(dock)
     assert scope.problem is None
-    assert not dock.site_note.text().startswith("Not drawn")
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
 
 
-def test_the_site_note_never_widens_the_dock(plugin):
+def test_a_long_warning_never_widens_the_site_panel(plugin):
     dock = whole_site(plugin)
     dock.setFloating(True)
     dock.show()
@@ -3539,14 +3579,12 @@ def test_the_site_note_never_widens_the_dock(plugin):
     probe.settle()
     content = probe.scroll.widget()
     before = content.minimumSizeHint().width()
-    height = dock.site_note.height()
-    longest = "a very long preview note " * 12
-    assert len(longest) >= 300
-    dock.site_note.setText(longest)
+    longest = "x" * 400  # unbreakable: a wrapped label's minimum is its longest word
+    dock.warnings_panel.set_entries([Entry(NOTE, longest)])
     probe.settle()
+    assert dock.warnings_panel.isVisibleTo(dock)
     assert content.minimumSizeHint().width() == before
-    assert dock.site_note.height() == height, "empty or full, the line keeps its height"
-    assert dock.site_note.text() == longest
+    assert dock.warnings_panel.entries() == (Entry(NOTE, longest),)
 
 
 def test_export_messages_name_the_cell_and_the_pixel(plugin, drive_dialog, tmp_path):
@@ -3603,44 +3641,61 @@ def _preset_per_grid(session, **presets) -> None:
         session.remember_slice_source(grid_id, preset=presets.get(grid_id, "p"), lines=None)
 
 
-def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
+def test_the_warnings_warn_when_grids_are_on_different_clocks(plugin):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
-    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
 
 
-def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
+def test_the_warnings_say_nothing_when_every_grid_is_on_the_radar_clock(plugin):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, A="radar", B="radar", C="radar")
     dock = whole_site(plugin)
-    assert "Time zero" not in dock.site_note.text()
-    assert "Time zero" not in dock.site_note.toolTip()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
 def test_grid_time_bases_reads_each_grids_preset(plugin):
+    """Before Whole site is entered no grid has been prepared, so each is read
+    from its preset."""
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, C="radar")
     source = site_scope_module.site_source(session, "ABC", "amp_square")
-    assert site_scope_module.grid_time_bases(session, source) == {
+    assert site_scope_module.grid_time_bases(session, source, plugin.slices_dock.site_engine) == {
         "A": "time_zero",
         "B": "time_zero",
         "C": "radar",
     }
 
 
-def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
+def test_a_grid_with_no_lines_has_no_clock(plugin):
+    """A grid with no lines is left out of `grid_time_bases`, as a failed one is.
+    A guard: it holds on today's code (#163 item 6 asked for the test)."""
+    session = plugin.session
+    session.add_grid(dataclasses.replace(session.site.grids[0], id="Z"))
+    _preset_per_grid(session)
+    session.remember_slice_source("Z", preset="p", lines=None)
+    dock = whole_site(plugin)
+    source = site_scope_module.site_source(session, "ABCZ", "amp_square")
+    assert [c.grid_id for c in source.grids] == ["A", "B", "C", "Z"]
+    dock.site_engine.set_source(source)
+    assert site_scope_module.state_text(dock.site_engine, "Z") == "no lines"
+    bases = site_scope_module.grid_time_bases(session, source, dock.site_engine)
+    assert "Z" not in bases
+    assert set(bases) == {"A", "B", "C"}
+
+
+def test_the_clock_warning_follows_the_steps_the_grids_were_prepared_with(plugin):
     """Ruling R15: saving over a preset does not re-prepare, so the drawn cubes
     and the export keep the old steps; the note must say what they say."""
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
     session.site.presets["radar"] = [
         {"step": "time_zero", "params": {}, "enabled": True},
         {"step": "dewow", "params": {}, "enabled": True},
@@ -3649,8 +3704,7 @@ def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
     _events()
     engine = dock.site_engine
     assert time_base_of(engine.engine_for("B").provenance().steps) == "radar"
-    assert mixed_clock_note(["B"]) in dock.site_note.text()
-    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+    assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
 
 
 def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
@@ -3661,7 +3715,7 @@ def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
     session.presets_changed.emit()
     _events()
     assert time_base_of(dock.site_engine.engine_for("B").provenance().steps) == "time_zero"
-    assert "Time zero" not in dock.site_note.text()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
 def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
@@ -3670,23 +3724,56 @@ def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
     _preset_per_grid(session, B="zz_bad")
     dock = whole_site(plugin)
     assert dock.site_engine.grid_state("B") != "ready"
-    assert "Time zero" not in dock.site_note.text()
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == WARNING]
 
 
-def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugin, monkeypatch):
+def test_the_clock_warning_is_its_own_entry_beside_a_preview_or_a_reason(plugin, monkeypatch):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
     dock = whole_site(plugin)
     scope = dock._site
-    warning = mixed_clock_note(["B"])
+    warning = Entry(WARNING, mixed_clock_note(["B"]))
     monkeypatch.setattr(type(scope.engine), "preview_note", property(lambda s: "A preview"))
-    scope.show_note(drawn=True)
-    assert dock.site_note.text() == f"A preview. {warning}"
+    scope.drawn = True
+    dock.show_warnings()
+    assert dock.warnings_panel.entries() == (warning, Entry(NOTE, "A preview"))
+    scope.drawn = False
     scope.problem = "no depth range"
-    scope.show_note(drawn=False)
-    assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
-    assert dock.site_note.toolTip().endswith(warning)
+    dock.show_warnings()
+    assert dock.warnings_panel.entries() == (
+        Entry(REFUSAL, "Not drawn: no depth range"),
+        warning,
+    )
+
+
+def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
+    plugin, monkeypatch
+):
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    real = site_engine_module.SiteEngine._rebuild_geometry_now
+
+    def boom(self):
+        raise RuntimeError("the lattice could not be built")
+
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry_now", boom)
+    dock.site_engine._rebuild_geometry_reporting()
+    dock._site.refresh_slice()
+    assert dock.site_engine.geometry_problem == "the lattice could not be built"
+    assert [e.text for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == [
+        "Not drawn: the lattice could not be built"
+    ]
+    assert not any("lattice" in e for e in errors)
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry_now", real)
+    _nudge_cell(dock)
+    assert dock.site_engine.geometry_problem is None
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+    # `clear()` forgets a standing problem too.
+    dock.site_engine._geometry_problem = "stale"
+    dock.site_engine.clear()
+    assert dock.site_engine.geometry_problem is None
 
 
 # ---- #180: the slice coloured with the user's own QGIS symbology -------------------------
@@ -3870,3 +3957,165 @@ def test_the_legend_follows_an_edit_without_a_redraw(plugin):
     _own(dock)
     set_range(plugin.slice_layer.layer, -2.0, 5.0)
     assert dock.legend_label.text() == "your own colours · -2 – 5"
+
+
+def test_a_half_typed_value_survives_a_whole_site_ready_tick(plugin):
+    dock = whole_site(plugin)
+    scope = dock._site
+    dock.setFloating(True)
+    dock.show()
+    dock.activateWindow()
+    assert QTest.qWaitForWindowActive(dock)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    dock.dz_spin.selectAll()
+    QTest.keyClicks(dock.dz_spin, "0.")
+    typed = dock.dz_spin.cleanText()
+    plugin.session.remember_site_resolution(dz_ns=0.433)  # the tick now wants another dz
+    scope.ready_handled = None
+    scope._run_tick()
+    assert dock.dz_spin.cleanText() == typed
+
+
+def test_an_unchanged_value_is_not_set_again(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    calls = []
+    monkeypatch.setattr(dock.dz_spin, "setValue", calls.append)
+    assert site_scope_module.set_spins_quietly(dock, dz=dock.dz_spin.value()) is False
+    assert calls == []
+
+
+# ---- #177: dz floors at the finest sample interval ----
+
+
+def _site_floor(plugin):
+    session = plugin.session
+    return site_scope_module.site_dt_floor(session, plugin.slices_dock._site.included())
+
+
+def test_dz_cannot_go_below_the_finest_interval_in_whole_site(plugin):
+    dock = whole_site(plugin)
+    floor = _site_floor(plugin)
+    assert floor == pytest.approx(110.864 / 512, abs=1e-4)
+    assert dock.dz_spin.minimum() == pytest.approx(floor, abs=1e-4)
+    dock.dz_spin.setValue(0.001)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    dock.dz_spin.stepBy(1)
+    assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + floor, abs=1e-4)
+
+
+def test_a_site_dz_below_the_floor_comes_back_at_the_floor(plugin):
+    plugin.session.remember_site_resolution(dz_ns=0.001)
+    dock = whole_site(plugin)
+    dock.flush_debounce()
+    settle(dock)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert dock.dz_spin.value() > 0.2
+    assert all(dock.site_engine.engine_for(g).z.nz <= 1024 for g in dock.site_engine.ready_grids)
+    assert plugin.session.site_resolution()["dz_ns"] == 0.001, "the record stands"
+    assert dock._site.problem is None
+
+
+def test_the_same_z_range_is_clipped_not_refused_in_whole_site(plugin):
+    dock = whole_site(plugin)
+    scope = dock._site
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    settle(dock)
+    scope.refresh_slice()
+    assert scope.problem is None
+    assert dock.site_engine.lattice is not None, "a drawn site"
+    z = dock.site_engine.site_z
+    assert z is not None and z.nz <= 1024
+    top = max(dock.site_engine.engine_for(g).z.t_end_ns for g in dock.site_engine.ready_grids)
+    assert z.t_end_ns == pytest.approx(top, abs=0.3)
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+
+
+def _coarsest_dt(plugin):
+    headers = site_scope_module.first_headers(plugin.session, plugin.slices_dock._site.included())
+    return max(h.dt_ns for h in headers)
+
+
+def _fine_b_site(site3_factory, first):
+    """site3 with grid B recorded 4.4 times finer than A: 512 samples over 25 ns."""
+    from tests.synthetic import write_dzt
+
+    site = site3_factory()
+    rng = np.random.default_rng(7)
+    for path in sorted((site.json_path.parent / "raw" / "B").glob("*.DZT")):
+        write_dzt(
+            path,
+            (rng.normal(size=(512, 60)) * 1e6).astype(np.int32),
+            traces_per_metre=10.0,
+            range_ns=25.0,
+        )
+    if first == "B":  # B first in site order
+        site.session.site.grids.sort(key=lambda g: g.id != "B")
+        site.session.save()
+    return site
+
+
+@pytest.mark.parametrize("first", ["A", "B"])
+def test_a_site_mixing_radars_never_refuses_its_seeded_defaults(open_plugin, site3_factory, first):
+    plugin = open_plugin(_fine_b_site(site3_factory, first))
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    assert dock.dz_spin.value() == pytest.approx(110.864 / 512, abs=1e-4), "coarsest before ready"
+    settle(dock)
+    assert dock._site.included()[0] == first
+    assert dock._site.problem is None
+    assert len(dock.site_engine.ready_grids) == 3
+    assert [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == []
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the finest floor"
+    assert dock.dz_spin.singleStep() == pytest.approx(25.0 / 512, abs=1e-4)
+    assert dock.dz_spin.value() == pytest.approx(110.864 / 512, abs=1e-4), "the coarsest seed"
+
+
+def test_a_dz_the_coarse_grid_cannot_take_is_not_drawn_and_is_not_a_toast(
+    open_plugin, site3_factory
+):
+    plugin = open_plugin(_fine_b_site(site3_factory, "B"))
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.dz_spin.setValue(dock.dz_spin.minimum())
+    dock.flush_debounce()
+    settle(dock)
+    dock._site.refresh_slice()
+    entries = [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+    assert len(entries) == 1
+    assert entries[0].text.startswith("Not drawn: Grid A: Too many levels")
+    assert not any("Too many levels" in e for e in errors), "one place only"
+
+
+def test_the_normalisation_section_folds_and_is_remembered(plugin):
+    from nsgeo_qgis.ui import folds
+    from nsgeo_qgis.ui.slices_dock import SlicesDock
+
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    _events()
+    group = dock.normalisation_panel.group
+    assert not group.isCollapsed()
+    group.setCollapsed(True)
+    _events()
+    assert group.isCollapsed()
+    assert folds.fold_settings().value("nsgeo/slices/folded/normalisation", type=bool) is True
+    again = SlicesDock(plugin.slices_dock.session)
+    try:
+        again.setFloating(True)
+        again.show()
+        again.set_scope("site")
+        settle(again)
+        again_group = again.normalisation_panel.group
+        assert again_group.isCollapsed()
+        assert again_group.height() < 60 and again_group.maximumHeight() < 60
+    finally:
+        again.refiner.shutdown()
+        again.site_engine.wait_until_idle(60_000)
+        again.engine.wait_for_preparation(20_000)
+        again.engine.dispose()
+        again.deleteLater()

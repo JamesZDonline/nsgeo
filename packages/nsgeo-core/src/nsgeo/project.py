@@ -16,18 +16,22 @@ import dataclasses
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry.grid import INSTRUMENTS, Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.geometry.track import TrackFix, TrackPlacement
 from nsgeo.mag import MagFile, MagSetup
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
+from nsgeo.processing.base import build_step, get_step, param_problem, step_title
 from nsgeo.processing.stack import StepStack
 from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 
 __all__ = [
     "ProjectError",
@@ -42,10 +46,25 @@ SCHEMA_VERSION = 1
 #: without cuts still saves as `SCHEMA_VERSION`, and stays readable by those
 #: builds (cut spec §3, plan call 3).
 CUTS_SCHEMA_VERSION = SCHEMA_VERSION + 1
-#: A site with a magnetometer grid or file saves as 3, for the same reason
-#: (M19a spec C17). A site without mag still saves as 1 or 2.
-MAG_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
-READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION, MAG_SCHEMA_VERSION)
+#: A site with any velocity source record saves as 3, for the same reason: an
+#: older build would drop the record on its next save. A site without one
+#: still saves as 1 or 2 (grid velocity spec §9).
+VELOCITY_SOURCE_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
+#: A site with any GPS line saves as 4 and only then gains a top-level `"crs"`
+#: (GPS lines spec §15). A site without GPS lines still saves as 1 to 3.
+TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1
+#: A site with a magnetometer grid or file saves as 5, for the same reason
+#: (M19a spec C17; numbered 3 on its branch until it met main). A site
+#: without mag still saves as 1 to 4.
+MAG_SCHEMA_VERSION = TRACK_SCHEMA_VERSION + 1
+READABLE_SCHEMA_VERSIONS = (
+    SCHEMA_VERSION,
+    CUTS_SCHEMA_VERSION,
+    VELOCITY_SOURCE_SCHEMA_VERSION,
+    TRACK_SCHEMA_VERSION,
+    MAG_SCHEMA_VERSION,
+)
+_FIT_ID = re.compile(r"fit-(\d+)")
 
 
 class ProjectError(Exception):
@@ -67,6 +86,8 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
     # Written only for a mag grid, so a GPR site saves as it always did.
     if grid.instrument != "gpr":
         doc["instrument"] = grid.instrument
+    if grid.velocity_source is not None:
+        doc["velocity_source"] = grid.velocity_source.to_dict()
     return doc
 
 
@@ -85,6 +106,14 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
             f"grid {doc.get('id', '<unknown>')!r} has instrument {instrument!r}; "
             f"expected one of {INSTRUMENTS}"
         )
+    source = None
+    if "velocity_source" in doc:
+        try:
+            source = VelocitySource.from_dict(doc["velocity_source"])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(
+                f"invalid velocity source for grid {doc.get('id', '<unknown>')!r}: {exc}"
+            ) from exc
     return Grid(
         id=doc["id"],
         origin=(float(doc["origin"][0]), float(doc["origin"][1])),
@@ -95,6 +124,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         default_spacing=float(doc["default_spacing"]),
         velocity=velocity,
         instrument=instrument,
+        velocity_source=source,
     )
 
 
@@ -147,11 +177,70 @@ def _placement_to_dict(placement: Any) -> dict[str, Any]:
         if placement.travel_shift != 0.0:
             doc["travel_shift"] = placement.travel_shift
         return doc
+    if isinstance(placement, TrackPlacement):
+        track: dict[str, Any] = {"type": "track", "crs": placement.crs}
+        # As GridPlacement's corrections: written only when set.
+        if placement.grid_id is not None:
+            track["grid_id"] = placement.grid_id
+        track["label"] = placement.label
+        if placement.travel_shift != 0.0:
+            track["travel_shift"] = placement.travel_shift
+        track["fixes"] = [_fix_to_row(f) for f in placement.fixes]
+        return track
     raise ProjectError(f"cannot serialise placement of type {type(placement).__name__}")
 
 
-def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
+def _null_nan(value: float) -> float | None:
+    """NaN is not JSON: a fix with no position writes `null`."""
+    return None if math.isnan(value) else value
+
+
+def _fix_to_row(fix: TrackFix) -> list[Any]:
+    return [
+        fix.trace,
+        _null_nan(fix.x),
+        _null_nan(fix.y),
+        _null_nan(fix.lat),
+        _null_nan(fix.lon),
+        fix.alt_m,
+        fix.geoid_m,
+        fix.quality,
+    ]
+
+
+def _nan_null(value: Any) -> float:
+    return math.nan if value is None else float(value)
+
+
+def _opt_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _fix_from_row(row: Any) -> TrackFix:
+    if not isinstance(row, list) or len(row) != 8:
+        raise TypeError(f"a fix must be a list of 8 values, got {row!r}")
+    return TrackFix(
+        trace=int(row[0]),
+        x=_nan_null(row[1]),
+        y=_nan_null(row[2]),
+        lat=_nan_null(row[3]),
+        lon=_nan_null(row[4]),
+        alt_m=_opt_float(row[5]),
+        geoid_m=_opt_float(row[6]),
+        quality=int(row[7]),
+    )
+
+
+def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement | TrackPlacement:
     kind = doc.get("type")
+    if kind == "track":
+        return TrackPlacement(
+            fixes=tuple(_fix_from_row(r) for r in doc["fixes"]),
+            crs=doc["crs"],
+            grid_id=doc.get("grid_id"),
+            label=doc.get("label"),
+            travel_shift=float(doc.get("travel_shift", 0.0)),
+        )
     if kind != "grid":
         raise ProjectError(f"unknown placement type {kind!r}")
     return GridPlacement(
@@ -327,8 +416,10 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             entry["velocity"] = line.velocity.to_dict()
         if line.velocity_fits:
             entry["velocity_fits"] = {fid: fit.to_dict() for fid, fit in line.velocity_fits.items()}
-        if line.velocity_from_fit is not None:
-            entry["velocity_from_fit"] = line.velocity_from_fit
+        if line.velocity_source is not None:
+            entry["velocity_source"] = line.velocity_source.to_dict()
+        if line.fit_serial > 0:
+            entry["fit_serial"] = line.fit_serial
         lines_data.append(entry)
 
     orphans = sorted(set(site.stacks) - set(keys_written))
@@ -338,15 +429,38 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             f"expected one of {sorted(keys_written)}"
         )
 
-    has_mag = bool(site.mag_files) or any(g.instrument == "mag" for g in site.grids)
-    version = (
-        MAG_SCHEMA_VERSION if has_mag else CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION
+    has_gps = site.has_gps_lines()
+    crs = site.effective_crs() if has_gps else None
+    if has_gps and crs is None:
+        raise ProjectError("GPS lines need the site's CRS, but the site has none")
+    if has_gps:
+        for line in site.lines:
+            placed = getattr(line.placement, "crs", None)
+            if isinstance(line.placement, TrackPlacement) and placed != crs:
+                raise ProjectError(
+                    f"line {line.path.name} is placed in {placed}, but the site is in {crs}"
+                )
+    has_record = any(g.velocity_source is not None for g in site.grids) or any(
+        ln.velocity_source is not None for ln in site.lines
     )
-    doc: dict[str, Any] = {
+    has_mag = bool(site.mag_files) or any(g.instrument == "mag" for g in site.grids)
+    # The highest feature the site holds names the version, so a build that
+    # cannot read that feature refuses the file instead of dropping it.
+    if has_mag:
+        version = MAG_SCHEMA_VERSION
+    elif has_gps:
+        version = TRACK_SCHEMA_VERSION
+    elif has_record:
+        version = VELOCITY_SOURCE_SCHEMA_VERSION
+    else:
+        version = CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION
+    doc = {
         "schema_version": version,
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
+    if crs is not None:
+        doc["crs"] = crs
     if site.cuts:
         doc["cuts"] = [_cut_to_dict(c) for c in site.cuts]
     if site.mag_files:
@@ -368,6 +482,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         doc["site_view"] = site.site_view
     if site.slice_colours:
         doc["slice_colours"] = site.slice_colours
+    if site.import_presets:
+        doc["import_presets"] = site.import_presets
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -434,6 +550,28 @@ def _clean_resolution(value: object) -> dict[str, float | str]:
     return out
 
 
+_VOLUME_POSITIVE = ("cell", "dz_ns", "stretch", "period_ns", "trend_m", "t1_ns")
+
+
+def _clean_volume(value: object) -> dict[str, float | str]:
+    """A grid's remembered 3-D settings (M16), each field kept only if usable.
+
+    Only the eight fields the export reads survive; a damaged one reads as unset
+    and the rest still restore, as `_clean_resolution` does.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float | str] = {}
+    for key in (*_VOLUME_POSITIVE, "blur_m"):
+        number = _finite(value.get(key))
+        if number is None or number < 0 or (number == 0 and key in _VOLUME_POSITIVE):
+            continue
+        out[key] = number
+    if isinstance(value.get("transform"), str):
+        out["transform"] = value["transform"]
+    return out
+
+
 def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if isinstance(entry.get("preset"), str):
@@ -450,6 +588,12 @@ def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     resolution = _clean_resolution(entry.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    volume = _clean_volume(entry.get("volume"))
+    if volume:
+        out["volume"] = volume
+    view_stretch = _finite(entry.get("view_stretch"))
+    if view_stretch is not None and view_stretch > 0:
+        out["view_stretch"] = view_stretch
     return out
 
 
@@ -464,6 +608,29 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     resolution = _clean_resolution(view.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    return out
+
+
+def _clean_import_presets(value: object, known_grid_ids: set[str]) -> dict[str, Any]:
+    """The remembered import presets (#129), each field kept only if usable.
+
+    A non-object reads as empty; a grid the site does not have, or a value
+    that is neither a string nor null, is dropped.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    grids = value.get("grids")
+    if isinstance(grids, dict):
+        kept = {
+            gid: name
+            for gid, name in grids.items()
+            if gid in known_grid_ids and (name is None or isinstance(name, str))
+        }
+        if kept:
+            out["grids"] = kept
+    if "site" in value and (value["site"] is None or isinstance(value["site"], str)):
+        out["site"] = value["site"]
     return out
 
 
@@ -520,6 +687,115 @@ def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _held(specs: dict[str, Any], params: dict[str, Any], skip: set[str], lead: str) -> str:
+    """One sentence listing the saved settings not already named, by label."""
+    items = [f"{specs[k].label} {v!r}" for k, v in params.items() if k not in skip]
+    if not items:
+        return ""
+    listed = items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+    return f"{lead} {listed}."
+
+
+#: Steps that stay on when a setting is reset: turning Time zero off would
+#: move every time after it.
+_STAYS_ON = ("time_zero",)
+
+
+def _repair_steps(
+    entries: list[dict[str, Any]], where: str, notes: list[str]
+) -> list[dict[str, Any]]:
+    """Saved steps whose settings the rules now refuse, made loadable.
+
+    A refused setting with a default is reset to it and the step turned off
+    (Time zero stays on). A refused setting with no default, a missing
+    required one, or a step that cannot be built removes the step. Each
+    change adds one plain-language note. Structural faults (an entry that is
+    not an object, no step name, unknown step or setting) still raise.
+    Returns new dicts; `entries` is untouched.
+    """
+    if not isinstance(entries, list):
+        raise TypeError(f"a stack must be a list of steps, got {type(entries).__name__}")
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise TypeError(f"a step must be an object, got {type(entry).__name__}")
+        name = entry["step"]
+        cls = get_step(name)
+        params = entry.get("params", {})
+        if not isinstance(params, dict):
+            raise TypeError(f"step {name!r}: params must be an object")
+        specs = {s.name: s for s in cls.schema()}
+        unknown = sorted(set(params) - set(specs))
+        if unknown:
+            raise ValueError(
+                f"step {name!r} has no parameter(s) {unknown}; it takes {sorted(specs)}"
+            )
+        title = step_title(name)
+        removed = f"{where}: {title} is removed. "
+        again = "Add it again with the settings you want."
+        fixed = dict(params)
+        # Everything wrong with the step is collected first, so one note
+        # names it all; whether the step goes is decided after.
+        missing = [s for s in specs.values() if s.required and s.name not in params]
+        refused: list[tuple[Any, Any, str]] = []
+        for spec in specs.values():
+            if spec.name in params:
+                reason = param_problem(spec, params[spec.name])
+                if reason is not None:
+                    refused.append((spec, params[spec.name], reason))
+                    if not spec.required:
+                        fixed[spec.name] = spec.default
+        if missing or any(spec.required for spec, _, _ in refused):
+            parts = []
+            for spec, value, reason in refused:
+                tail = f", and {spec.label} has no default" if spec.required else ""
+                parts.append(f"Its {spec.label} was {value!r}, which {reason}{tail}.")
+            for spec in missing:
+                parts.append(f"It has no {spec.label}, which it needs.")
+            named = {spec.name for spec, _, _ in refused}
+            held = _held(specs, params, named, "It also held")
+            notes.append(f"{removed}{' '.join(parts)} {held + ' ' if held else ''}{again}")
+            continue
+        repaired = {**entry, "params": fixed}
+        note = None
+        sentences: list[str] = []
+        if refused:
+            sentences = [
+                f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
+                for spec, value, reason in refused
+            ]
+            was_on = bool(entry.get("enabled", True))
+            if not was_on:
+                note = (
+                    f"{where}: {title} (already off) had "
+                    f"{'a setting' if len(refused) == 1 else 'settings'} reset. "
+                    f"{' '.join(sentences)} The step stays off, as it was saved."
+                )
+            elif name in _STAYS_ON:
+                sentences = [t.replace("Its ", f"{title}'s ", 1) for t in sentences]
+                note = (
+                    f"{where}: {' '.join(sentences)} The step stays on, because "
+                    f"turning {title} off would move every time after it."
+                )
+            else:
+                repaired["enabled"] = False
+                note = (
+                    f"{where}: {title} is turned off. {' '.join(sentences)} "
+                    "Check the step and turn it back on."
+                )
+        try:
+            build_step(name, **fixed)
+        except (TypeError, ValueError) as exc:
+            held = _held(specs, params, set(), "It held")
+            built = " ".join([*sentences, f"It could not be built: {exc}.", held])
+            notes.append(f"{removed}{built.strip()} {again}")
+            continue
+        if note is not None:
+            notes.append(note)
+        out.append(repaired)
+    return out
+
+
 def load_site(path: str | Path) -> Site:
     path = Path(path)
     try:
@@ -538,6 +814,7 @@ def load_site(path: str | Path) -> Site:
     grids = [_grid_from_dict(g) for g in doc.get("grids", [])]
     lines = []
     stacks: dict[str, StepStack] = {}
+    load_notes: list[str] = []
     for entry in doc.get("lines", []):
         stored = Path(entry["path"])
         dzt = stored if stored.is_absolute() else root / stored
@@ -567,27 +844,55 @@ def load_site(path: str | Path) -> Site:
                 fits[fid] = StoredFit.from_dict(fit_doc)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid velocity fit for line {entry['path']!r}: {exc}") from exc
-        # Fits are evidence; a selection naming a fit that is gone is dropped
-        # rather than costing the user the file.
-        from_fit = entry.get("velocity_from_fit")
-        if not isinstance(from_fit, str) or from_fit not in fits:
-            from_fit = None
         try:
             placement = _placement_from_dict(entry["placement"])
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid placement for line {entry['path']!r}: {exc}") from exc
-        line = Line.open(dzt, placement, velocity=velocity)
-        lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))
-        if "stack" in entry:
+        source = None
+        if "velocity_source" in entry:
             try:
-                stacks[key] = StepStack.from_dicts(entry["stack"])
+                source = VelocitySource.from_dict(entry["velocity_source"])
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(
+                    f"invalid velocity source for line {entry['path']!r}: {exc}"
+                ) from exc
+        else:
+            # An older file's pick becomes a one-member record (spec §7.1).
+            # A pick naming a fit that is gone is dropped, as before.
+            from_fit = entry.get("velocity_from_fit")
+            if isinstance(from_fit, str) and from_fit in fits:
+                label = placement.label or Path(entry["path"]).stem
+                member = SourceFit.of(key, from_fit, label, fits[from_fit])
+                source = VelocitySource.from_fits([member], None)
+        serial = entry.get("fit_serial", 0)
+        if not isinstance(serial, int) or isinstance(serial, bool) or serial < 0:
+            serial = 0
+        for fid in fits:
+            found = _FIT_ID.fullmatch(fid)
+            if found:
+                serial = max(serial, int(found.group(1)))
+        line = Line.open(dzt, placement, velocity=velocity)
+        lines.append(
+            dataclasses.replace(line, velocity_fits=fits, velocity_source=source, fit_serial=serial)
+        )
+        if "stack" in entry:
+            where = f"Line {Path(entry['path']).name}"
+            if placement.grid_id:
+                where += f" (grid {placement.grid_id})"
+            try:
+                stacks[key] = StepStack.from_dicts(_repair_steps(entry["stack"], where, load_notes))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(
                     f"invalid processing stack for line {entry['path']!r}: {exc}"
                 ) from exc
 
+    file_crs = doc.get("crs")
+    if file_crs is not None and not isinstance(file_crs, str):
+        raise ProjectError(f"{path}: 'crs' must be text, got {type(file_crs).__name__}")
     site = Site(grids=grids, lines=lines)
+    site.crs = file_crs
     site.stacks = stacks
+    site.load_notes = load_notes
 
     mag_entries = doc.get("mag_files", [])
     if not isinstance(mag_entries, list):
@@ -614,12 +919,14 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(
             f"{path}: 'presets' must be an object keyed by name, got {type(presets).__name__}"
         )
+    repaired_presets: dict[str, list[dict[str, Any]]] = {}
     for name, dicts in presets.items():
         try:
-            StepStack.from_dicts(dicts)
+            repaired_presets[name] = _repair_steps(dicts, f"Preset {name!r}", load_notes)
+            StepStack.from_dicts(repaired_presets[name])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
-    site.presets = dict(presets)
+    site.presets = repaired_presets
 
     cubes = doc.get("cubes", {})
     if not isinstance(cubes, dict):
@@ -652,6 +959,7 @@ def load_site(path: str | Path) -> Site:
     site.mag_view = _clean_mag_view(
         doc.get("mag_view"), {g.id for g in grids if g.instrument == "mag"}
     )
+    site.import_presets = _clean_import_presets(doc.get("import_presets", {}), known)
 
     site.validate()
     return site
