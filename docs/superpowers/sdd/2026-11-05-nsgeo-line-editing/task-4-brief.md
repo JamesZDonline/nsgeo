@@ -81,33 +81,13 @@ def test_snap_on_every_row_fixes_the_stale_reversed_lines_and_nothing_else(table
     changed = Spy(session.lines_changed)
     dialog.select_keys(keys)
     dialog.snap_to_edge()
-    assert [_cell(dialog, r, COL_START) for r in range(6)] == [
-        "0.00",
-        "15.00",
-        "0.00",
-        "15.00",
-        "0.00",
-        "15.00",
-    ]
+    assert [_cell(dialog, r, COL_START) for r in range(6)] == ["0.00", "15.00", "0.00", "15.00", "0.00", "15.00"]
     assert [dialog.table.item(r, COL_START).background().color() == CHANGED for r in range(6)] == [
-        False,
-        True,
-        False,
-        True,
-        False,
-        False,
-    ]
+        False, True, False, True, False, False]
     assert dialog.status.text() == "2 lines changed · 0 picks will move with them"
     assert session.line_for_key(keys[1]).placement.start_along == 16.0  # nothing before OK
     dialog.accept()
-    assert [session.line_for_key(k).placement.start_along for k in keys] == [
-        0.0,
-        15.0,
-        0.0,
-        15.0,
-        0.0,
-        15.0,
-    ]
+    assert [session.line_for_key(k).placement.start_along for k in keys] == [0.0, 15.0, 0.0, 15.0, 0.0, 15.0]
     assert set(dialog.outcome.changed) == {keys[1], keys[3]} and len(changed.calls) == 1
 ```
 

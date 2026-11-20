@@ -15,15 +15,13 @@
 
 ```python
 # session.py
-def is_gps_line(self, key: str) -> bool: ...  # isinstance(placement, TrackPlacement)
+def is_gps_line(self, key: str) -> bool: ...          # isinstance(placement, TrackPlacement)
 def set_travel_shift(self, keys: Iterable[str], metres: float) -> None: ...
-
-
 # All or nothing: KeyError for an unknown key; ValueError(f"{name} is not a GPS line") for a tape line; ValueError for a non-finite value.
 # One dirty mark and one lines_changed; a no-op when nothing would change.
 
 # survey_dock.py
-destagger_requested = pyqtSignal(list)  # GPS line keys
+destagger_requested = pyqtSignal(list)                 # GPS line keys
 ```
 
 - **The guide step** says:

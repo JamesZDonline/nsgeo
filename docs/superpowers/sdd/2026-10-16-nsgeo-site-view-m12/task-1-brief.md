@@ -188,23 +188,21 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam(): ...
 # edge_match_solve: weighted least squares in log space, then per-group anchoring
 ids = sorted(levels)
 x = dict.fromkeys(ids, 0.0)
-for group in connected_components(ids, seam_levels):  # singletons included
+for group in connected_components(ids, seam_levels):        # singletons included
     terms = [s for s in seam_levels if s[0] in group]
     if terms:
         A, rhs, w = [], [], []
-        for a, b, s_ab, s_ba, weight in terms:  # x_a + ln s_ab = x_b + ln s_ba
+        for a, b, s_ab, s_ba, weight in terms:              # x_a + ln s_ab = x_b + ln s_ba
             row = {a: 1.0, b: -1.0}
-            A.append([row.get(g, 0.0) for g in group])
-            rhs.append(log(s_ba) - log(s_ab))
+            A.append([row.get(g, 0.0) for g in group]); rhs.append(log(s_ba) - log(s_ab))
             w.append(sqrt(weight))
-        sol = lstsq(A * w[:, None], rhs * w)  # minimum-norm, gauge-free
+        sol = lstsq(A * w[:, None], rhs * w)                # minimum-norm, gauge-free
         x.update(zip(group, sol))
     # anchor: the group's corrected backgrounds match the site's in the geometric mean
     known = [g for g in group if levels[g]]
     if known:
         shift = ln_b_site - mean(x[g] + log(levels[g]) for g in known)
-        for g in group:
-            x[g] += shift
+        for g in group: x[g] += shift
 # finally: renormalise so mean(x) over ids is 0 -> geometric mean gain 1
 ```
 

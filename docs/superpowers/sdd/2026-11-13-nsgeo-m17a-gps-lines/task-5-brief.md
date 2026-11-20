@@ -11,29 +11,15 @@
 
 ```python
 # layers.py
-TABLES["lines"]  # gains ("placed_by", "str") and ("without_rtk_m", "float"), after "file_name"
-TABLES["rtk_gaps"] = (
-    QgsWkbTypes.Type.LineString,
-    [
-        ("line_key", "str"),
-        ("kind", "str"),
-        ("first_trace", "int"),
-        ("last_trace", "int"),
-        ("metres", "float"),
-    ],
-)
+TABLES["lines"]   # gains ("placed_by", "str") and ("without_rtk_m", "float"), after "file_name"
+TABLES["rtk_gaps"] = (QgsWkbTypes.Type.LineString,
+    [("line_key", "str"), ("kind", "str"), ("first_trace", "int"), ("last_trace", "int"), ("metres", "float")])
 DERIVED = ("grids", "lines", "marks", "cuts", "rtk_gaps")
 LEGEND_ORDER = ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
 NO_GRID_COLOUR = "#636363"
-RTK_GAP_COLOUR = "#e377c2"  # in no grid colour and not the cut colour
-
-
-def _line_crs(
-    self, line: Line
-) -> str | None: ...  # a grid line's grid crs; a GPS line's placement crs
-def _line_points(
-    self, line: Line, frames: dict[str, Grid]
-) -> list[QgsPointXY] | None: ...  # was (line, grid, frames); every caller updated
+RTK_GAP_COLOUR = "#e377c2"     # in no grid colour and not the cut colour
+def _line_crs(self, line: Line) -> str | None: ...          # a grid line's grid crs; a GPS line's placement crs
+def _line_points(self, line: Line, frames: dict[str, Grid]) -> list[QgsPointXY] | None: ...   # was (line, grid, frames); every caller updated
 def refill_rtk_gaps(self) -> None: ...
 ```
 

@@ -40,30 +40,22 @@
   CURVATURE_MAX_ITERATIONS: int = 10_000
   SOLVE_MARGIN_CELLS: int = 2
 
-
-  class SolveStopped(Exception): ...  # raised by solve() when should_stop() returns True
-
+  class SolveStopped(Exception): ...   # raised by solve() when should_stop() returns True
 
   @dataclass(frozen=True, eq=False)
   class CurvaturePlan:
       shape: tuple[int, int]
-      populated: np.ndarray  # (ny*nx,) bool
-      reach: np.ndarray  # (ny*nx,) bool: finite in the output
-      domain: np.ndarray  # (ny, nx) bool: the solve area D (plan call 2)
-      coefficients: (
-          np.ndarray
-      )  # (13, ny, nx) float32: A's row at each unknown, by stencil offset; 0 elsewhere
-
+      populated: np.ndarray     # (ny*nx,) bool
+      reach: np.ndarray         # (ny*nx,) bool: finite in the output
+      domain: np.ndarray        # (ny, nx) bool: the solve area D (plan call 2)
+      coefficients: np.ndarray  # (13, ny, nx) float32: A's row at each unknown, by stencil offset; 0 elsewhere
       def solve(
           self, values: np.ndarray, should_stop: Callable[[], bool] | None = None
-      ) -> tuple[np.ndarray, int]: ...  # (the slice, CG iterations run)
-      def apply(self, values: np.ndarray) -> np.ndarray: ...  # solve(values)[0]: (ny, nx) float32
-      def apply_at(
-          self, values: np.ndarray, cells: np.ndarray
-      ) -> np.ndarray: ...  # apply(values).ravel()[cells]
+      ) -> tuple[np.ndarray, int]: ...                                  # (the slice, CG iterations run)
+      def apply(self, values: np.ndarray) -> np.ndarray: ...            # solve(values)[0]: (ny, nx) float32
+      def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray: ...  # apply(values).ravel()[cells]
       @property
       def nbytes(self) -> int: ...  # sum of the array fields' nbytes
-
 
   def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) -> CurvaturePlan: ...
   ```

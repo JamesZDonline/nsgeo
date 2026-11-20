@@ -184,7 +184,6 @@ def test_a_half_typed_value_survives_a_whole_site_ready_tick(plugin):
     scope._run_tick()
     assert dock.dz_spin.cleanText() == typed
 
-
 def test_an_unchanged_value_is_not_set_again(plugin, monkeypatch):
     dock = whole_site(plugin)
     calls = []
@@ -327,24 +326,19 @@ def test_entries_show_in_full_in_kind_order_and_the_panel_hides_when_empty(qgis_
 - **A geometry failure on an engine callback:**
 
 ```python
-def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
-    plugin, monkeypatch
-):
+def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(plugin, monkeypatch):
     dock = whole_site(plugin)
     errors = []
     dock.error.connect(errors.append)
     real = site_engine_module.SiteEngine._rebuild_geometry
-
     def boom(self):
         raise RuntimeError("the lattice could not be built")
-
     monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", boom)
     dock.site_engine._rebuild_geometry_reporting()
     dock._site.refresh_slice()
     assert dock.site_engine.geometry_problem == "the lattice could not be built"
     assert [e.text for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == [
-        "Not drawn: the lattice could not be built"
-    ]
+        "Not drawn: the lattice could not be built"]
     assert not any("lattice" in e for e in errors)
     monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", real)
     _nudge_cell(dock)
@@ -355,16 +349,11 @@ def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
 `test_pure_slices_plan.py::test_preview_note_is_exact_copy` gets new expectations:
 
 ```python
-base = (
-    "Preview at 0.4 m pixels: the site (1234 × 568 m) is too big to draw at 0.05 m. "
-    "It draws in full at a 0.12 m cell or coarser."
-)
+base = ("Preview at 0.4 m pixels: the site (1234 × 568 m) is too big to draw at 0.05 m. "
+        "It draws in full at a 0.12 m cell or coarser.")
 assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
 assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C"]) == base[:-1] + ", or without grid C."
-assert (
-    preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"])
-    == base[:-1] + ", or without grids C and D."
-)
+assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == base[:-1] + ", or without grids C and D."
 ```
 
 In `test_plugin_site_engine.py:1057`, replace `"Leaving out C"` with `"without grid C"`.
@@ -447,16 +436,11 @@ def test_the_level_limit_message_is_exact():
     res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
     assert level_limit_problem(res, [512, 512, 512]) == (
         "Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube "
-        "allows 1,024 (twice the 512 samples in each line). Narrow z0–z1 or raise dz."
-    )
-
+        "allows 1,024 (twice the 512 samples in each line). Narrow z0–z1 or raise dz.")
 
 def test_the_level_limit_names_the_deepest_line_when_counts_differ():
     res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
-    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in level_limit_problem(
-        res, [512, 1024]
-    )
-
+    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in level_limit_problem(res, [512, 1024])
 
 def test_native_dz_over_the_whole_record_is_within_the_limit():
     assert level_limit_problem(Resolution(0.25, 0.21653, -11.086, 99.546), [512]) is None

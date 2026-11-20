@@ -135,56 +135,53 @@ MIN_BAND_PX = 2.0
 In `__init__`, `self._slice_band: tuple[float, float] | None = None`. Then:
 
 ```python
-def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
-    """Draw the active slice's time window across this radargram.
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        """Draw the active slice's time window across this radargram.
 
-    Spec 9.3: the only new thing the slice adds to the profile view.
-    It answers "is this anomaly real, or is the fill inventing a
-    feature between two lines?" by pointing at the depths the slice
-    averaged, on data that was never filled.
-    """
-    if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+        Spec 9.3: the only new thing the slice adds to the profile view.
+        It answers "is this anomaly real, or is the fill inventing a
+        feature between two lines?" by pointing at the depths the slice
+        averaged, on data that was never filled.
+        """
+        if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+            self._slice_band = None
+        else:
+            self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
+        self.update()
+
+    def clear_slice_band(self) -> None:
         self._slice_band = None
-    else:
-        self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
-    self.update()
+        self.update()
 
+    def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
+        """Local (unoffset) y-bounds of the band, or None when there is
+        none. Factored out the same way `_selection_bounds` is, and for
+        the same reason: a plain pair a test can assert on without
+        rendering a pixel.
 
-def clear_slice_band(self) -> None:
-    self._slice_band = None
-    self.update()
+        A one-level window has zero time extent -- it averages a single
+        sample, and saying otherwise would overstate what was averaged --
+        so the floor is applied HERE, in pixels, rather than by widening
+        the window the readout reports.
+        """
+        if self._slice_band is None:
+            return None
+        y0 = t.y_of_time(self._slice_band[0])
+        y1 = t.y_of_time(self._slice_band[1])
+        if y1 - y0 < MIN_BAND_PX:
+            centre = (y0 + y1) / 2.0
+            y0, y1 = centre - MIN_BAND_PX / 2.0, centre + MIN_BAND_PX / 2.0
+        return y0, y1
 
-
-def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
-    """Local (unoffset) y-bounds of the band, or None when there is
-    none. Factored out the same way `_selection_bounds` is, and for
-    the same reason: a plain pair a test can assert on without
-    rendering a pixel.
-
-    A one-level window has zero time extent -- it averages a single
-    sample, and saying otherwise would overstate what was averaged --
-    so the floor is applied HERE, in pixels, rather than by widening
-    the window the readout reports.
-    """
-    if self._slice_band is None:
-        return None
-    y0 = t.y_of_time(self._slice_band[0])
-    y1 = t.y_of_time(self._slice_band[1])
-    if y1 - y0 < MIN_BAND_PX:
-        centre = (y0 + y1) / 2.0
-        y0, y1 = centre - MIN_BAND_PX / 2.0, centre + MIN_BAND_PX / 2.0
-    return y0, y1
-
-
-def _paint_slice_band(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
-    bounds = self._slice_band_bounds(t)
-    if bounds is None:
-        return
-    y0, y1 = r.top() + bounds[0], r.top() + bounds[1]
-    p.fillRect(QRectF(r.left(), y0, r.width(), y1 - y0), SLICE_BAND_COLOUR)
-    p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
-    p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
-    p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+    def _paint_slice_band(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        bounds = self._slice_band_bounds(t)
+        if bounds is None:
+            return
+        y0, y1 = r.top() + bounds[0], r.top() + bounds[1]
+        p.fillRect(QRectF(r.left(), y0, r.width(), y1 - y0), SLICE_BAND_COLOUR)
+        p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
+        p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
 ```
 
 Call it in `paintEvent` inside the existing `setClipRect(r)` block, **before**
@@ -194,12 +191,11 @@ them. Add `self._slice_band = None` to `clear()`.
 In `profile_dock.py`, two relays, each guarded, and each calling straight through to the view:
 
 ```python
-def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
-    self.view.set_slice_band(lo_ns, hi_ns)
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        self.view.set_slice_band(lo_ns, hi_ns)
 
-
-def clear_slice_band(self) -> None:
-    self.view.clear_slice_band()
+    def clear_slice_band(self) -> None:
+        self.view.clear_slice_band()
 ```
 
 - [ ] **Step 4: Emit the window from the Slices dock and wire it**

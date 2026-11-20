@@ -29,9 +29,7 @@ from plugin_testing import synthetic_dzt
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 
-GRID = Grid(
-    "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
-)
+GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08))
 
 
 @pytest.fixture
@@ -180,9 +178,7 @@ class ProfileDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
         self.setObjectName("nsgeoProfileDock")
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
-        )
+        self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea)
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
@@ -274,11 +270,7 @@ class ProfileDock(QgsDockWidget):
         else:
             self.channel_combo.hide()
             self.view.set_axes(
-                line.n_traces,
-                line.header.n_samples,
-                line.header.position_ns,
-                line.header.dt_ns,
-                line.distance_along(),
+                line.n_traces, line.header.n_samples, line.header.position_ns, line.header.dt_ns, line.distance_along()
             )
             self.view.set_image(None)
         self._refresh_velocity()
@@ -343,9 +335,7 @@ class ProfileDock(QgsDockWidget):
             distance = line.distance_along() if rg.n_traces == line.n_traces else None
         else:
             distance = None
-        keep_window = (
-            self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
-        )
+        keep_window = self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
         old = self.view.transform
         self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
         if keep_window and old is not None and old.n_samples == rg.n_samples:

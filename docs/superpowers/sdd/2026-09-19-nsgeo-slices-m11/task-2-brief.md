@@ -652,7 +652,9 @@ def test_a_line_that_cannot_be_prepared_is_reported_by_name(sourced, tmp_path):
     key = session.keys()[0]
     session.line_for_key(key).path.unlink()  # the file goes away under us
     engine.set_source(
-        SourceChoice(grid_id="A", preset="p", transform="amp_abs", line_keys=tuple(session.keys()))
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_abs", line_keys=tuple(session.keys())
+        )
     )
     assert engine.wait_for_preparation(20_000)
     assert any(key in msg for _, msg in errors), f"no error named {key}: {errors}"

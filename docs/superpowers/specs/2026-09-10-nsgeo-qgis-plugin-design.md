@@ -54,25 +54,22 @@ existing CI matrix with no QGIS present.
 `nsgeo/processing/base.py` gains:
 
 ```python
-REQUIRED: Final = _Required()  # sentinel with repr "REQUIRED"
-
+REQUIRED: Final = _Required()          # sentinel with repr "REQUIRED"
 
 @dataclass(frozen=True)
 class ParamSpec:
-    name: str  # keyword accepted by the step's __init__
-    kind: str  # "float" | "int" | "choice" | "curve"
-    label: str  # human label for the widget
-    default: Any  # a value, or REQUIRED
-    unit: str | None = None  # "ns", "MHz", "traces", "dB"
+    name: str                          # keyword accepted by the step's __init__
+    kind: str                          # "float" | "int" | "choice" | "curve"
+    label: str                         # human label for the widget
+    default: Any                       # a value, or REQUIRED
+    unit: str | None = None            # "ns", "MHz", "traces", "dB"
     min: float | None = None
     max: float | None = None
-    choices: tuple[str, ...] = ()  # kind == "choice" only
+    choices: tuple[str, ...] = ()      # kind == "choice" only
     help: str = ""
-
 
 class Step(Protocol):
     name: str
-
     @property
     def params(self) -> dict[str, Any]: ...
     @classmethod

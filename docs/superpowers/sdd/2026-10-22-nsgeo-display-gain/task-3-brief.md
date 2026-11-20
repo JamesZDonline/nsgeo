@@ -13,11 +13,11 @@
 ```python
 @dataclass(frozen=True)
 class Headroom:
-    limit: float  # the display limit, > 0
-    t0_ns: float  # time of the first displayed row
+    limit: float          # the display limit, > 0
+    t0_ns: float          # time of the first displayed row
     dt_ns: float
     envelope: np.ndarray  # one value >= 0 per displayed row
-    one_sided: bool  # unipolar output: draw the band on the positive side only
+    one_sided: bool       # unipolar output: draw the band on the positive side only
 ```
 
   - `GainStrip.set_headroom(self, headroom: Headroom | None) -> None`. `None` draws the curve alone, and also clears the trace.

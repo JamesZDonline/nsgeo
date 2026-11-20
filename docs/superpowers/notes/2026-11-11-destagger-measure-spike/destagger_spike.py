@@ -26,16 +26,8 @@ def lines_from_args():
         out = []
         for k, p in enumerate(sorted(d.glob("*.DZT"))):
             fwd = k % 2 == 0
-            out.append(
-                dict(
-                    path=str(p),
-                    offset=0.25 + 0.5 * k,
-                    direction=1 if fwd else -1,
-                    start=0.0 if fwd else length,
-                    scale=1.0,
-                    shift=0.0,
-                )
-            )
+            out.append(dict(path=str(p), offset=0.25 + 0.5 * k, direction=1 if fwd else -1,
+                            start=0.0 if fwd else length, scale=1.0, shift=0.0))
         return out, length
     doc = json.loads(Path(sys.argv[2]).read_text())
     gid = sys.argv[3]
@@ -45,17 +37,9 @@ def lines_from_args():
         pl = ln["placement"]
         if pl.get("grid_id") != gid:
             continue
-        out.append(
-            dict(
-                path=ln["path"],
-                offset=pl["offset"],
-                direction=pl["direction"],
-                start=pl["start_along"],
-                scale=pl.get("scale", 1.0),
-                shift=pl.get("travel_shift", 0.0),
-                axis=pl["axis"],
-            )
-        )
+        out.append(dict(path=ln["path"], offset=pl["offset"], direction=pl["direction"],
+                        start=pl["start_along"], scale=pl.get("scale", 1.0),
+                        shift=pl.get("travel_shift", 0.0), axis=pl["axis"]))
     length = g["size_y"] if out[0].get("axis", "y") == "y" else g["size_x"]
     return out, length
 
@@ -76,9 +60,7 @@ def prepare(lines, cache):
         envs.append(env[: nb * BIN].reshape(nb, BIN, -1).mean(axis=1).astype(np.float32))
         print(Path(ln["path"]).stem, data.shape, flush=True)
     t_bins = h.position_ns + (np.arange(nb) * BIN + (BIN - 1) / 2) * h.dt_ns
-    np.savez(
-        cache, spm=h.traces_per_metre, t_bins=t_bins, **{f"env_{i}": e for i, e in enumerate(envs)}
-    )
+    np.savez(cache, spm=h.traces_per_metre, t_bins=t_bins, **{f"env_{i}": e for i, e in enumerate(envs)})
     return envs, h.traces_per_metre, t_bins
 
 
@@ -114,15 +96,8 @@ class Measure:
             M[k] = valid
             for j, b in enumerate(self.bins):
                 f = np.interp(A, a[o], e[b][o].astype(float) / self.gain[j])
-                f = np.convolve(np.pad(f, lp // 2, mode="edge"), np.ones(lp) / lp, mode="valid")[
-                    : A.size
-                ]
-                f = (
-                    f
-                    - np.convolve(np.pad(f, hp // 2, mode="edge"), np.ones(hp) / hp, mode="valid")[
-                        : A.size
-                    ]
-                )
+                f = np.convolve(np.pad(f, lp // 2, mode="edge"), np.ones(lp) / lp, mode="valid")[: A.size]
+                f = f - np.convolve(np.pad(f, hp // 2, mode="edge"), np.ones(hp) / hp, mode="valid")[: A.size]
                 F[k, j] = np.where(valid, f, 0.0)
             v = F[k][:, valid]
             sd = v.std()
@@ -137,11 +112,7 @@ class Measure:
         nfft = 1 << int(np.ceil(np.log2(2 * n)))
         out = {}
         for pos, k in enumerate(order):
-            nb = [
-                order[q]
-                for q in (pos - 1, pos + 1)
-                if 0 <= q < len(order) and dirs[order[q]] != dirs[k]
-            ]
+            nb = [order[q] for q in (pos - 1, pos + 1) if 0 <= q < len(order) and dirs[order[q]] != dirs[k]]
             if not nb:
                 continue
             G = np.mean([F[j] for j in nb], axis=0)
@@ -171,24 +142,17 @@ def report(label, m, lines, alongs, windows):
     allc = np.array([C[k] for k in ks])  # lines, bins, lags
     s, h = peak(allc.sum(axis=1).mean(axis=0))
     rng = np.random.default_rng(0)
-    boots = [
-        peak(allc[rng.integers(0, len(ks), len(ks))].sum(axis=1).mean(axis=0))[0]
-        for _ in range(300)
-    ]
+    boots = [peak(allc[rng.integers(0, len(ks), len(ks))].sum(axis=1).mean(axis=0))[0] for _ in range(300)]
     per = np.array([peak(allc[i].sum(axis=0))[0] for i in range(len(ks))])
     lo, hi = np.percentile(boots, [2.5, 97.5])
-    print(
-        f"\n[{label}] neighbour shift {s * 100:+.1f} cm (95% {lo * 100:+.1f}..{hi * 100:+.1f}); "
-        f"=> destagger {-s / 2:+.3f} m; peak {h:.3f}; per-line shift IQR "
-        f"{np.percentile(per, 25) * 100:+.1f}..{np.percentile(per, 75) * 100:+.1f} cm"
-    )
+    print(f"\n[{label}] neighbour shift {s*100:+.1f} cm (95% {lo*100:+.1f}..{hi*100:+.1f}); "
+          f"=> destagger {-s/2:+.3f} m; peak {h:.3f}; per-line shift IQR "
+          f"{np.percentile(per,25)*100:+.1f}..{np.percentile(per,75)*100:+.1f} cm")
     for wlo, whi in windows:
         sel = np.flatnonzero((m.t[m.bins] >= wlo) & (m.t[m.bins] < whi))
         if sel.size:
             sw, hw = peak(allc[:, sel].sum(axis=1).mean(axis=0))
-            print(
-                f"    {wlo:>5.1f}-{whi:<5.1f} ns: shift {sw * 100:+6.1f} cm => destagger {-sw / 2:+.3f} m (peak {hw:.3f})"
-            )
+            print(f"    {wlo:>5.1f}-{whi:<5.1f} ns: shift {sw*100:+6.1f} cm => destagger {-sw/2:+.3f} m (peak {hw:.3f})")
     return s
 
 
@@ -199,16 +163,12 @@ def main():
     spm = float(spm)
     ntr = [e.shape[1] for e in envs]
     hi = min(70.0, float(t_bins[-1]))
-    print(
-        f"{len(lines)} lines, length {length} m, spm {spm}, bins {t_bins[0]:.1f}..{t_bins[-1]:.1f} ns"
-    )
+    print(f"{len(lines)} lines, length {length} m, spm {spm}, bins {t_bins[0]:.1f}..{t_bins[-1]:.1f} ns")
     m = Measure(envs, t_bins, length, hi=hi)
     windows = [(4, 15), (15, 25), (25, 40), (40, 70), (14.9, 19.7)]
     spans = np.array([(n - 1) / spm for n in ntr])
-    print(
-        f"recorded spans: median {np.median(spans):.2f} m, min {spans.min():.2f}, max {spans.max():.2f} "
-        f"(grid {length} m) => fit scale median {np.median(length / spans):.4f}"
-    )
+    print(f"recorded spans: median {np.median(spans):.2f} m, min {spans.min():.2f}, max {spans.max():.2f} "
+          f"(grid {length} m) => fit scale median {np.median(length/spans):.4f}")
 
     unf = [place(ln, n, spm) for ln, n in zip(lines, ntr)]
     s_u = report("as placed (unfitted)", m, lines, unf, windows)
@@ -219,25 +179,13 @@ def main():
     fit = [place(ln, n, spm, **fitted(ln, n, spm, length)) for ln, n in zip(lines, ntr)]
     s_f = report("fitted to grid edges", m, lines, fit, windows)
     d_f = -s_f / 2
-    fit_d = [
-        place(ln, n, spm, shift=d_f, **fitted(ln, n, spm, length)) for ln, n in zip(lines, ntr)
-    ]
+    fit_d = [place(ln, n, spm, shift=d_f, **fitted(ln, n, spm, length)) for ln, n in zip(lines, ntr)]
     report(f"fitted + destagger {d_f:+.3f}", m, lines, fit_d, windows[:0])
     for d in (-0.15, 0.15):
-        report(
-            f"fitted + destagger {d:+.2f}",
-            m,
-            lines,
-            [place(ln, n, spm, shift=d, **fitted(ln, n, spm, length)) for ln, n in zip(lines, ntr)],
-            [],
-        )
-        report(
-            f"unfitted + destagger {d:+.2f}",
-            m,
-            lines,
-            [place(ln, n, spm, shift=d) for ln, n in zip(lines, ntr)],
-            [],
-        )
+        report(f"fitted + destagger {d:+.2f}", m, lines,
+               [place(ln, n, spm, shift=d, **fitted(ln, n, spm, length)) for ln, n in zip(lines, ntr)], [])
+        report(f"unfitted + destagger {d:+.2f}", m, lines,
+               [place(ln, n, spm, shift=d) for ln, n in zip(lines, ntr)], [])
 
 
 if __name__ == "__main__":

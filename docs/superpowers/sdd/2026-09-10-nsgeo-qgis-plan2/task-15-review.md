@@ -74,8 +74,8 @@ Concrete failing input (add to `test_plugin_profile_dock.py`):
 session.set_trace(key, 120)
 dock.view.range_selected.emit(5, 9)
 session.open_line(key2)
-assert dock.view._cursor == -1  # actual: 120
-assert dock.view._selection == (-1, -1)  # actual: (5, 9)
+assert dock.view._cursor == -1            # actual: 120
+assert dock.view._selection == (-1, -1)   # actual: (5, 9)
 ```
 
 Why Critical and not cosmetic: `session.py`'s own module docstring is
@@ -119,7 +119,7 @@ the lot:
 assert dock.view.transform.n_samples == line.header.n_samples
 assert dock.view.transform.t0_ns == pytest.approx(line.header.position_ns)
 assert dock.view._velocity is not None and dock.view.depth_tick_labels()
-assert dock.view._distance is not None  # metres, not trace index
+assert dock.view._distance is not None          # metres, not trace index
 # after set_profiles
 assert dock.view._image is not None
 ```

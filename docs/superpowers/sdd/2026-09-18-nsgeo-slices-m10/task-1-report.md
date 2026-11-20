@@ -272,7 +272,7 @@ for cell in (0.5, 0.1, 0.05):
                 drops += 1
     print(f"cell {cell:<5} -> {drops}/{combos} combinations drop >=1 defining point")
 
-f = CubeFrame(origin=(0.0, 0.0), azimuth=0.0, cell=1.0, nx=4, ny=3, crs="EPSG:32633")
+f = CubeFrame(origin=(0.0,0.0), azimuth=0.0, cell=1.0, nx=4, ny=3, crs="EPSG:32633")
 print("far-edge case:", f.cell_index(np.array([[4.0 - 1e-12, 0.5]])))
 ```
 Output:
@@ -314,7 +314,6 @@ denominators of 100 rather than the reviewer's presumably coarser grid):
 Command (ad hoc verification script):
 ```python
 from fractions import Fraction
-
 bad, total_exact = [], 0
 for t1h in range(1, 1001):
     for dzh in range(1, 101):

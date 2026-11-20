@@ -1,6 +1,5 @@
 import sys, time, threading
 import numpy as np
-
 sys.path.insert(0, sys.argv[1])
 import mg2
 from check2 import solve, hier
@@ -27,18 +26,7 @@ for cell in (0.2, 0.1, 0.05):
     H = hier(plan)
     print(cell, "mg its", solve(plan, H, v)[1], "today", plan.solve(v)[1])
 # memory ratio at 400x400 lines
-pop = np.zeros((400, 400), bool)
-pop[5::10] = True
-plan = plan_curvature(pop, 0.05, 0.375)
-H = hier(plan)
-nb = (
-    sum(
-        a.nbytes
-        for L in H.levels
-        for a in (L.active, L.scale if hasattr(L, "scale") else L.inverse_diagonal)
-    )
-    + sum(L.coefficients.nbytes for L in H.levels[1:])
-    + H.coarse_inverse.nbytes
-    + H.coarse_cells.nbytes
-)
+pop = np.zeros((400, 400), bool); pop[5::10] = True
+plan = plan_curvature(pop, 0.05, 0.375); H = hier(plan)
+nb = sum(a.nbytes for L in H.levels for a in (L.active, L.scale if hasattr(L, "scale") else L.inverse_diagonal)) + sum(L.coefficients.nbytes for L in H.levels[1:]) + H.coarse_inverse.nbytes + H.coarse_cells.nbytes
 print("hierarchy bytes / plan coefficients bytes", nb / plan.coefficients.nbytes)

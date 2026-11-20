@@ -166,7 +166,7 @@ def galerkin(A, T, reach=3):
     for cy in range(period):
         for cx in range(period):
             e = (((I - cy) % period == 0) & ((J - cx) % period == 0)).astype(np.float64)
-            if T.kind == "linear":
+            if T.kind == 'linear':
                 y = T.restrict(A64.apply(T.prolong(e)))
             else:
                 y = Py.T @ (A64.apply((Py @ e @ Px.T) * act) * act) @ Px
@@ -273,10 +273,7 @@ class Hierarchy:
         self.setup_s = time.perf_counter() - t
 
     def describe(self):
-        return " -> ".join(
-            f"{L.shape[1]}x{L.shape[0]}({int(L.active.sum())},{len(L.offsets)}pt)"
-            for L in self.levels
-        )
+        return " -> ".join(f"{L.shape[1]}x{L.shape[0]}({int(L.active.sum())},{len(L.offsets)}pt)" for L in self.levels)
 
     def vcycle(self, b, level=0):
         A = self.levels[level]

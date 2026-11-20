@@ -50,12 +50,7 @@ for key, P in placements.items():
             np.add.at(S[j], (ia, ic), win_vals[i][j])
     pop = W > 0
     plan = plan_fill(pop, CELL, "kriging", 0.375, 1.0)
-    out[key] = np.array(
-        [
-            plan.apply(np.where(pop, S[j] / np.maximum(W, 1), 0.0).astype(np.float32))
-            for j in range(len(WINDOWS))
-        ]
-    )
+    out[key] = np.array([plan.apply(np.where(pop, S[j] / np.maximum(W, 1), 0.0).astype(np.float32)) for j in range(len(WINDOWS))])
     print(key, "populated", pop.sum(), flush=True)
 
 # marks to annotate (positions under each placement)
@@ -69,15 +64,12 @@ for key, P in placements.items():
             ann.append((key, nm, s_, a[s_], c[s_]))
 np.savez(
     sys.argv[3],
-    tape=out["tape"],
-    gps_raw=out["gps_raw"],
-    gps_corr=out["gps_corr"],
+    tape=out["tape"], gps_raw=out["gps_raw"], gps_corr=out["gps_corr"],
     extent=np.array([c0, c0 + nc * CELL, a0, a0 + na * CELL]),
     windows=np.array(WINDOWS),
     ann=np.array([(x[3], x[4]) for x in ann]),
     ann_lab=np.array([f"{x[0]}|{x[1]}@{x[2]}" for x in ann]),
     line_c=np.array([[np.median(P[i][1]) for i in range(len(L))] for P in placements.values()]),
-    offset=OFFSET,
-    tau=TAU,
+    offset=OFFSET, tau=TAU,
 )
 print("saved")

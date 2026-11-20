@@ -59,16 +59,9 @@ def test_dragging_a_handle_moves_its_point_and_emits(strip):
     strip.points_changed.connect(got.append)
     x0, y0 = strip.x_of_db(20.0), strip.y_of_time(100.0)
     assert strip.handle_at(QPoint(int(x0), int(y0))) == 1
-    QTest.mousePress(
-        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0))
-    )
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0)))
     QTest.mouseMove(strip, QPoint(int(strip.x_of_db(30.0)), int(y0)))
-    QTest.mouseRelease(
-        strip,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(int(strip.x_of_db(30.0)), int(y0)),
-    )
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(strip.x_of_db(30.0)), int(y0)))
     assert got and got[-1][1][1] == pytest.approx(30.0, abs=0.5)
     assert strip.points()[1][0] == pytest.approx(100.0, abs=0.5)
 
@@ -81,12 +74,7 @@ def test_double_click_adds_and_right_click_removes(strip):
     assert len(strip.points()) == 3 and got[-1][1][0] == pytest.approx(50.0, abs=0.5)
     QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, mid)
     assert len(strip.points()) == 2
-    QTest.mouseClick(
-        strip,
-        Qt.MouseButton.RightButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0))),
-    )
+    QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0))))
     assert len(strip.points()) == 2  # never below two
 
 
@@ -106,9 +94,7 @@ def test_profile_dock_shows_the_strip_only_when_asked(qgis_app, tmp_path):
     assert dock.gain_strip.isHidden()
     dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]])
     assert not dock.gain_strip.isHidden()
-    assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(
-        MARGIN_TOP + dock.view.transform.y_of_time(-11.0)
-    )
+    assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(MARGIN_TOP + dock.view.transform.y_of_time(-11.0))
     changed = []
     dock.gain_points_changed.connect(changed.append)
     dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]])
@@ -327,18 +313,17 @@ In `profile_dock.py`: import `GainStrip` and `MARGIN_TOP`; add `gain_points_chan
 and add:
 
 ```python
-def _sync_strip_mapping(self) -> None:
-    if self.view.transform is not None:
-        self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
+    def _sync_strip_mapping(self) -> None:
+        if self.view.transform is not None:
+            self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-
-def show_gain_strip(self, points: list[list[float]] | None) -> None:
-    if points is None or self.view.transform is None:
-        self.gain_strip.hide()
-        return
-    self._sync_strip_mapping()
-    self.gain_strip.set_points(points)
-    self.gain_strip.show()
+    def show_gain_strip(self, points: list[list[float]] | None) -> None:
+        if points is None or self.view.transform is None:
+            self.gain_strip.hide()
+            return
+        self._sync_strip_mapping()
+        self.gain_strip.set_points(points)
+        self.gain_strip.show()
 ```
 
 Also call `self._sync_strip_mapping()` at the end of `_render()` so the strip follows axis changes.
@@ -355,47 +340,45 @@ In `plugin.py` `initGui`, after both docks exist:
 and add:
 
 ```python
-@staticmethod
-def _curve_param_name(step: Any) -> str | None:
-    """The name of a step's curve-kind parameter, if it has one. Decided
-    by the schema's kind, never by the step's name."""
-    for spec in type(step).schema():
-        if spec.kind == "curve":
-            return str(spec.name)
-    return None
+    @staticmethod
+    def _curve_param_name(step: Any) -> str | None:
+        """The name of a step's curve-kind parameter, if it has one. Decided
+        by the schema's kind, never by the step's name."""
+        for spec in type(step).schema():
+            if spec.kind == "curve":
+                return str(spec.name)
+        return None
 
+    def _sync_gain_strip(self, row: int) -> None:
+        assert self.session is not None and self.profile_dock is not None
+        key = self.session.current_key
+        if key is None or row < 0:
+            self.profile_dock.show_gain_strip(None)
+            return
+        entries = self.session.stack_for(key).entries
+        if row >= len(entries):
+            self.profile_dock.show_gain_strip(None)
+            return
+        step = entries[row][0]
+        name = self._curve_param_name(step)
+        self.profile_dock.show_gain_strip(step.params[name] if name else None)
 
-def _sync_gain_strip(self, row: int) -> None:
-    assert self.session is not None and self.profile_dock is not None
-    key = self.session.current_key
-    if key is None or row < 0:
-        self.profile_dock.show_gain_strip(None)
-        return
-    entries = self.session.stack_for(key).entries
-    if row >= len(entries):
-        self.profile_dock.show_gain_strip(None)
-        return
-    step = entries[row][0]
-    name = self._curve_param_name(step)
-    self.profile_dock.show_gain_strip(step.params[name] if name else None)
-
-
-def _on_gain_points(self, points: list) -> None:
-    assert self.session is not None and self.processing_dock is not None
-    key = self.session.current_key
-    row = self.processing_dock.current_row()
-    if key is None or row < 0:
-        return
-    step = self.session.stack_for(key).entries[row][0]
-    name = self._curve_param_name(step)
-    if name is None:
-        return
-    params = dict(step.params)
-    params[name] = points
-    try:
-        self.session.replace_step(key, row, build_step(step.name, **params))
-    except ValueError as exc:
-        self.message(str(exc), Qgis.MessageLevel.Warning)
+    def _on_gain_points(self, points: list) -> None:
+        assert self.session is not None and self.processing_dock is not None
+        key = self.session.current_key
+        row = self.processing_dock.current_row()
+        if key is None or row < 0:
+            return
+        step = self.session.stack_for(key).entries[row][0]
+        name = self._curve_param_name(step)
+        if name is None:
+            return
+        params = dict(step.params)
+        params[name] = points
+        try:
+            self.session.replace_step(key, row, build_step(step.name, **params))
+        except ValueError as exc:
+            self.message(str(exc), Qgis.MessageLevel.Warning)
 ```
 
 with `from nsgeo.processing import build_step`.

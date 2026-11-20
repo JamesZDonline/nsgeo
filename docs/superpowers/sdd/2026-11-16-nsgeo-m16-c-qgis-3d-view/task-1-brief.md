@@ -37,19 +37,16 @@ def test_view_title_states_grid_stretch_and_stale_count():
     )
     assert view_title("Grid 1", 3.0, 2).endswith("  ·  2 surfaces stale")
 
-
 def test_scene_grid_follows_this_grid_and_keeps_the_last_in_whole_site():
     assert scene_grid("grid", "Grid 2", "Grid 1") == "Grid 2"
     assert scene_grid("site", "Grid 2", "Grid 1") == "Grid 1"
     assert scene_grid("site", "Grid 2", None) == "Grid 2"
     assert scene_grid("grid", None, None) is None
 
-
 def test_scene_stretch_is_the_grids_own_or_the_default():
     assert scene_stretch({"stretch": 2.0}) == 2.0
     for bad in ({}, {"stretch": 0.0}, {"stretch": float("nan")}, {"stretch": "x"}):
         assert scene_stretch(bad) == DEFAULT_STRETCH
-
 
 def test_camera_frames_the_grid_at_mid_depth():
     pose = camera_pose([(0, 0), (20, 0), (20, 16), (0, 16)], [1.0, 3.0], 3.0)
@@ -83,15 +80,11 @@ def test_pick_depths_match_place_picks_without_preparing(site, steps, monkeypatc
     monkeypatch.setattr(fresh, "_prepared", lambda *a, **k: pytest.fail("prepared a line"))
     assert fresh.pick_depths(GRID, rows) == pytest.approx(want)
 
-
 def test_pick_depths_are_none_where_they_cannot_be_found(synth_site):
     session, _, export = synth_site
     key = session.keys()[0]
-    rows = [
-        ("raw/none.DZT", _pick(key, 5, 10.0)),
-        ("cut:abc", _pick(key, 5, 10.0)),
-        (key, _pick(key, 5, float("nan"))),
-    ]
+    rows = [("raw/none.DZT", _pick(key, 5, 10.0)), ("cut:abc", _pick(key, 5, 10.0)),
+            (key, _pick(key, 5, float("nan")))]
     assert export.pick_depths(GRID, rows) == [None, None, None]
 ```
 

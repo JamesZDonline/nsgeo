@@ -23,7 +23,6 @@ def test_keeps_the_rows_before_the_cutoff_and_the_start_time():
     assert out.t0_ns == rg.t0_ns
     np.testing.assert_array_equal(out.data, rg.data[:37])
 
-
 def test_a_snapped_boundary_on_a_real_world_axis_keeps_exactly_m_rows():
     # dt and t0 as this repo's real HS350 headers carry them; t0 + m*dt is inexact in binary
     rg = make(n_samples=512, dt_ns=0.21653111279010773, t0_ns=-11.086392402648926)
@@ -31,19 +30,14 @@ def test_a_snapped_boundary_on_a_real_world_axis_keeps_exactly_m_rows():
         end = rg.t0_ns + m * rg.dt_ns
         assert build_step("time_cutoff", end_ns=end).apply(rg).n_samples == m
 
-
 def test_a_cutoff_between_samples_keeps_every_sample_before_it():
     rg = make(n_samples=100, dt_ns=0.5, t0_ns=0.0)
-    assert (
-        build_step("time_cutoff", end_ns=10.2).apply(rg).n_samples == 21
-    )  # samples at 0.0 .. 10.0
-
+    assert build_step("time_cutoff", end_ns=10.2).apply(rg).n_samples == 21  # samples at 0.0 .. 10.0
 
 def test_a_cutoff_past_the_record_is_a_no_op():
     rg = make(n_samples=100, dt_ns=0.5, t0_ns=0.0)
     assert build_step("time_cutoff", end_ns=50.0).apply(rg) is rg  # exactly the record end
     assert build_step("time_cutoff", end_ns=1e6).apply(rg) is rg
-
 
 def test_a_cutoff_at_or_before_the_first_sample_is_refused():
     rg = make(n_samples=100, dt_ns=0.5, t0_ns=2.0)
@@ -51,13 +45,11 @@ def test_a_cutoff_at_or_before_the_first_sample_is_refused():
         with pytest.raises(ValueError, match="would leave no samples"):
             build_step("time_cutoff", end_ns=end).apply(rg)
 
-
 def test_end_ns_is_required_and_must_be_a_finite_number():
     with pytest.raises(ValueError, match="end_ns"):
         build_step("time_cutoff")
     with pytest.raises(ValueError, match="must be a number"):
         build_step("time_cutoff", end_ns="late")
-
 
 def test_the_schema_declares_a_time_parameter_in_ns():
     (spec,) = get_step("time_cutoff").schema()
@@ -74,37 +66,25 @@ def test_the_schema_declares_a_time_parameter_in_ns():
 
 ```python
 def test_result_bypassing_skips_only_that_step():
-    st = stack_of(
-        ("dewow", {"window_ns": 4.0}),
-        ("time_cutoff", {"end_ns": 6.0}),
-        ("gain_agc", {"window_ns": 2.0}),
-    )
+    st = stack_of(("dewow", {"window_ns": 4.0}), ("time_cutoff", {"end_ns": 6.0}), ("gain_agc", {"window_ns": 2.0}))
     expected = stack_of(("dewow", {"window_ns": 4.0}), ("gain_agc", {"window_ns": 2.0})).result()
     np.testing.assert_array_equal(st.result_bypassing(1).data, expected.data)
     assert st.result_bypassing(1).n_samples == 64 and st.result().n_samples == 30
 
-
 def test_result_bypassing_reuses_the_prefix_and_leaves_the_real_chain_alone():
-    st = stack_of(
-        ("dewow", {"window_ns": 4.0}),
-        ("time_cutoff", {"end_ns": 6.0}),
-        ("gain_agc", {"window_ns": 2.0}),
-    )
+    st = stack_of(("dewow", {"window_ns": 4.0}), ("time_cutoff", {"end_ns": 6.0}), ("gain_agc", {"window_ns": 2.0}))
     st.result_bypassing(1)
     assert st.cache_size == 1  # only the prefix before the bypassed step
     assert st.result().n_samples == 30
-
 
 def test_result_bypassing_honours_disabled_steps_after_it():
     st = stack_of(("time_cutoff", {"end_ns": 6.0}), ("background_mean", {}))
     st.set_enabled(1, False)
     np.testing.assert_array_equal(st.result_bypassing(0).data, st.source.data)
 
-
 def test_result_bypassing_rejects_an_out_of_range_index():
     with pytest.raises(IndexError, match="out of range"):
         stack_of(("dewow", {"window_ns": 4.0})).result_bypassing(1)
-
 
 def test_a_cutoff_round_trips_through_dicts():
     st = stack_of(("time_cutoff", {"end_ns": 6.0}))

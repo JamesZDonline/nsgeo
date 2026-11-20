@@ -28,8 +28,6 @@ for md in (0.25, 0.375):
         out, it = plan.solve(v)
         times.append(time.perf_counter() - t)
         its.append(it)
-    print(
-        f"    solve median {np.median(times):.2f} s (min {min(times):.2f}, max {max(times):.2f}),"
-        f" iterations median {int(np.median(its))} ({min(its)}-{max(its)}),"
-        f" per iteration {1000 * np.median(times) / np.median(its):.1f} ms"
-    )
+    print(f"    solve median {np.median(times):.2f} s (min {min(times):.2f}, max {max(times):.2f}),"
+          f" iterations median {int(np.median(its))} ({min(its)}-{max(its)}),"
+          f" per iteration {1000 * np.median(times) / np.median(its):.1f} ms")

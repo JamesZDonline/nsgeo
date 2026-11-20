@@ -116,9 +116,9 @@ the brief's public interface list and neither has its *value* pinned anywhere.
 Minimum close: assert the literal, not the symbol.
 
 ```python
-assert MIN_TRACE_SPAN == 4.0 and MIN_SAMPLE_SPAN == 4.0  # public interface constants
+assert MIN_TRACE_SPAN == 4.0 and MIN_SAMPLE_SPAN == 4.0   # public interface constants
 assert z.trace_hi - z.trace_lo == pytest.approx(4.0)
-assert z.time_hi - z.time_lo == pytest.approx(4.0 * 0.2165)  # 0.866 ns
+assert z.time_hi - z.time_lo == pytest.approx(4.0 * 0.2165)   # 0.866 ns
 ```
 
 ### I2 — CLOSED
@@ -342,7 +342,7 @@ degenerate in **0 of 312** of the same fixture sweep:
 
 ```python
 assert FIT.sample_index_at(FIT.y_of_time(FIT.t0_ns + 10.7 * FIT.dt_ns)) == 10
-assert FIT.sample_index_at(FIT.y_of_time(FIT.t0_ns + 10.2 * FIT.dt_ns)) == 10  # optional, pins ceil
+assert FIT.sample_index_at(FIT.y_of_time(FIT.t0_ns + 10.2 * FIT.dt_ns)) == 10   # optional, pins ceil
 ```
 
 #### N2. M7's guard covers the mutators but not the constructor, which is the one that takes untrusted input
@@ -404,9 +404,9 @@ ViewTransform(..., trace_lo=100.0, trace_hi=nan, time_lo=0.0, time_hi=20.0)
 
 ```python
 with pytest.raises(ValueError):
-    FIT.with_window(100.0, float("nan"), 0.0, 20.0)  # NaN reaches t_span only
+    FIT.with_window(100.0, float("nan"), 0.0, 20.0)      # NaN reaches t_span only
 with pytest.raises(ValueError):
-    FIT.with_window(100.0, 300.0, 0.0, float("nan"))  # NaN reaches s_span only
+    FIT.with_window(100.0, 300.0, 0.0, float("nan"))     # NaN reaches s_span only
 ```
 
 Narrowing to `(t_span, s_span)`, and narrowing to a NaN-only test (`v != v`), are both

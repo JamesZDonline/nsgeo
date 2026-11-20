@@ -43,13 +43,8 @@ def axis(nz=5, dz=1.0, t0=0.0):
 
 def prov():
     return Provenance(
-        line_keys=("a.dzt",),
-        preset_name="p",
-        steps=(),
-        transform="amp_abs",
-        velocity=None,
-        built_utc="2026-09-18T00:00:00Z",
-        core_version="0.1.0.dev0",
+        line_keys=("a.dzt",), preset_name="p", steps=(), transform="amp_abs",
+        velocity=None, built_utc="2026-09-18T00:00:00Z", core_version="0.1.0.dev0",
     )
 
 
@@ -150,8 +145,7 @@ def test_slice_levels_shape_is_ny_by_nx():
 def test_cube_rejects_a_mean_of_the_wrong_shape():
     with pytest.raises(ValueError, match="mean must be"):
         SliceCube(
-            frame=frame(),
-            z=axis(),
+            frame=frame(), z=axis(),
             mean=np.zeros((2, 2), dtype=np.float32),
             count=np.zeros(12, dtype=np.int32),
             provenance=prov(),
@@ -256,7 +250,9 @@ class SliceCube:
         if self.mean.shape != expected:
             raise ValueError(f"mean must be {expected}, got {self.mean.shape}")
         if self.count.shape != (self.frame.n_cells,):
-            raise ValueError(f"count must be ({self.frame.n_cells},), got {self.count.shape}")
+            raise ValueError(
+                f"count must be ({self.frame.n_cells},), got {self.count.shape}"
+            )
 
     def slice_levels(self, k0: int, k1: int) -> np.ndarray:
         """Mean over the half-open level window, shaped (ny, nx).
@@ -426,7 +422,9 @@ def build_cube(
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
         accumulate(total, count, line, plan, 0, z.nz)
-    mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
+    mean = np.divide(
+        total, count, out=np.full_like(total, np.nan), where=count > 0
+    )
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
 
 

@@ -59,22 +59,18 @@ The inputs most likely to hurt a user that the spec's own test list does not nam
 ```python
 CURVE = ("gain_curve", {"points": [[0.0, 0.0], [12.0, 12.0]]})
 
-
 def test_result_bypassing_several_steps_skips_each_of_them():
     st = stack_of(CURVE, ("dewow", {"window_ns": 4.0}), CURVE, ("gain_agc", {"window_ns": 2.0}))
     expected = stack_of(("dewow", {"window_ns": 4.0}), ("gain_agc", {"window_ns": 2.0})).result()
     np.testing.assert_array_equal(st.result_bypassing(0, 2).data, expected.data)
 
-
 def test_result_bypassing_nothing_is_the_result():
     st = stack_of(("dewow", {"window_ns": 4.0}))
     assert st.result_bypassing() is st.result()
 
-
 def test_result_bypassing_rejects_any_out_of_range_index():
     with pytest.raises(IndexError, match="out of range"):
         stack_of(("dewow", {"window_ns": 4.0})).result_bypassing(0, 5)
-
 
 def test_a_bypass_survives_replacing_a_bypassed_step():
     st = stack_of(("dewow", {"window_ns": 4.0}), CURVE, ("background_mean", {}))
@@ -112,12 +108,10 @@ def test_row_envelope_is_the_per_row_percentile_of_magnitudes():
     x = np.random.default_rng(0).normal(size=(6, 50))
     np.testing.assert_array_equal(row_envelope(x, 90.0), np.percentile(np.abs(x), 90.0, axis=1))
 
-
 def test_row_envelope_subsamples_wide_data_deterministically():
     x = np.random.default_rng(1).normal(size=(4, 5000))
     got = row_envelope(x, 99.0, max_traces=1000)
     np.testing.assert_array_equal(got, np.percentile(np.abs(x[:, ::5]), 99.0, axis=1))
-
 
 def test_row_envelope_ignores_non_finite_samples_without_warning():
     x = np.ones((3, 4))
@@ -216,11 +210,11 @@ git push
 ```python
 @dataclass(frozen=True)
 class Headroom:
-    limit: float  # the display limit, > 0
-    t0_ns: float  # time of the first displayed row
+    limit: float          # the display limit, > 0
+    t0_ns: float          # time of the first displayed row
     dt_ns: float
     envelope: np.ndarray  # one value >= 0 per displayed row
-    one_sided: bool  # unipolar output: draw the band on the positive side only
+    one_sided: bool       # unipolar output: draw the band on the positive side only
 ```
 
   - `GainStrip.set_headroom(self, headroom: Headroom | None) -> None`. `None` draws the curve alone, and also clears the trace.

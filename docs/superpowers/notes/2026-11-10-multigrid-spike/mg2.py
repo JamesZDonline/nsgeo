@@ -24,11 +24,7 @@ def apply_stencil(offsets, coefficients, x):
     out = np.zeros((ny, nx), np.float32)
     work = np.empty((ny, nx), np.float32)
     for k, (dy, dx) in enumerate(offsets):
-        np.multiply(
-            coefficients[k],
-            pad[_REACH + dy : _REACH + dy + ny, _REACH + dx : _REACH + dx + nx],
-            out=work,
-        )
+        np.multiply(coefficients[k], pad[_REACH + dy : _REACH + dy + ny, _REACH + dx : _REACH + dx + nx], out=work)
         out += work
     return out
 
@@ -90,11 +86,7 @@ def _galerkin(level, fine_shape):
         for px in range(_PERIOD):
             e = np.zeros((cy, cx), np.float32)
             e[py::_PERIOD, px::_PERIOD] = 1.0
-            y = restrict(
-                apply_stencil(level.offsets, level.coefficients, prolong(e, fine_shape) * act)
-                * act,
-                (cy, cx),
-            )
+            y = restrict(apply_stencil(level.offsets, level.coefficients, prolong(e, fine_shape) * act) * act, (cy, cx))
             for k, (oy, ox) in enumerate(_COARSE_OFFSETS):
                 sy, sx = (py - oy) % _PERIOD, (px - ox) % _PERIOD
                 coef[k, sy::_PERIOD, sx::_PERIOD] = y[sy::_PERIOD, sx::_PERIOD]
@@ -147,16 +139,11 @@ def _chebyshev(level, b, x):
         x = np.zeros(b.shape, np.float32)
         r = b * level.inverse_diagonal
     else:
-        r = (
-            b - apply_stencil(level.offsets, level.coefficients, x * level.active)
-        ) * level.inverse_diagonal
+        r = (b - apply_stencil(level.offsets, level.coefficients, x * level.active)) * level.inverse_diagonal
     d = r / np.float32(theta)
     for _ in range(SMOOTHING_DEGREE):
         x += d
-        r -= (
-            apply_stencil(level.offsets, level.coefficients, d * level.active)
-            * level.inverse_diagonal
-        )
+        r -= apply_stencil(level.offsets, level.coefficients, d * level.active) * level.inverse_diagonal
         rho_next = 1.0 / (2.0 * sigma - rho)
         d = np.float32(rho_next * rho) * d + np.float32(2.0 * rho_next / delta) * r
         rho = rho_next

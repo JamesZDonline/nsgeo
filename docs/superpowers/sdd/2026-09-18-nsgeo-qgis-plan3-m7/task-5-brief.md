@@ -51,7 +51,9 @@ def test_promotion_goes_through_open_line_so_it_cannot_diverge(linked):
 def test_selecting_several_lines_promotes_none(linked):
     link, session, layers, _canvas, keys = linked
 
-    layers.layers["lines"].selectByIds([_feature_id(layers, keys[0]), _feature_id(layers, keys[1])])
+    layers.layers["lines"].selectByIds(
+        [_feature_id(layers, keys[0]), _feature_id(layers, keys[1])]
+    )
 
     assert session.current_key == keys[0]
 
@@ -224,52 +226,51 @@ Expected: the selection tests FAIL (`assert session.current_key == keys[1]` — 
 In `map_link.py`'s `__init__`, add `self._lines_layer_bound: QgsVectorLayer | None = None`, and call `self._rebind_layer()` at the end of `__init__`. Add `self._rebind_layer()` as the first statement of `_on_lines_changed`'s try block, before `self._invalidate()`.
 
 ```python
-def _rebind_layer(self) -> None:
-    """Follow the `lines` layer across rebuilds.
+    def _rebind_layer(self) -> None:
+        """Follow the `lines` layer across rebuilds.
 
-    `SiteLayers.refresh()` replaces the layer object, so a connection
-    made once at construction would point at a dead wrapper after the
-    first refresh and promotion would silently stop working -- with no
-    error, which is the worst kind of stop.
-    """
-    old = self._lines_layer_bound
-    if old is not None and not sip.isdeleted(old):
-        try:
-            old.selectionChanged.disconnect(self._on_selection)
-        except TypeError:
-            pass  # already gone; disconnect raises rather than no-ops
-    layer = self._lines_layer()
-    self._lines_layer_bound = layer
-    if layer is not None:
-        layer.selectionChanged.connect(self._on_selection)
-
-
-def _on_selection(self, *_: Any) -> None:
-    """A preview becomes the working line when the user selects the
-    line feature with QGIS's ordinary Select tool.
-
-    No event filter, no tool of our own, no stolen clicks, and it
-    composes with everything else QGIS does with selection. Promotion
-    goes through `session.open_line` -- the same path the survey tree
-    uses -- so opening from the map and opening from the tree cannot
-    diverge.
-    """
-    try:
+        `SiteLayers.refresh()` replaces the layer object, so a connection
+        made once at construction would point at a dead wrapper after the
+        first refresh and promotion would silently stop working -- with no
+        error, which is the worst kind of stop.
+        """
+        old = self._lines_layer_bound
+        if old is not None and not sip.isdeleted(old):
+            try:
+                old.selectionChanged.disconnect(self._on_selection)
+            except TypeError:
+                pass  # already gone; disconnect raises rather than no-ops
         layer = self._lines_layer()
-        if layer is None or not self.session.is_open:
-            return
-        ids = layer.selectedFeatureIds()
-        if len(ids) != 1:
-            # A multi-selection has no single answer, and guessing one
-            # is worse than doing nothing (spec §3.4). An empty
-            # selection is the ordinary result of clicking empty map
-            # and must not close the line the user is working on.
-            return
-        key = str(layer.getFeature(ids[0])["line_key"])
-        if key in self.session.keys():
-            self.session.open_line(key)
-    except Exception as exc:  # noqa: BLE001 -- see the module docstring
-        _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
+        self._lines_layer_bound = layer
+        if layer is not None:
+            layer.selectionChanged.connect(self._on_selection)
+
+    def _on_selection(self, *_: Any) -> None:
+        """A preview becomes the working line when the user selects the
+        line feature with QGIS's ordinary Select tool.
+
+        No event filter, no tool of our own, no stolen clicks, and it
+        composes with everything else QGIS does with selection. Promotion
+        goes through `session.open_line` -- the same path the survey tree
+        uses -- so opening from the map and opening from the tree cannot
+        diverge.
+        """
+        try:
+            layer = self._lines_layer()
+            if layer is None or not self.session.is_open:
+                return
+            ids = layer.selectedFeatureIds()
+            if len(ids) != 1:
+                # A multi-selection has no single answer, and guessing one
+                # is worse than doing nothing (spec §3.4). An empty
+                # selection is the ordinary result of clicking empty map
+                # and must not close the line the user is working on.
+                return
+            key = str(layer.getFeature(ids[0])["line_key"])
+            if key in self.session.keys():
+                self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
 ```
 
 `dispose()` gains the layer unbind, so the link stops promoting as well as drawing.

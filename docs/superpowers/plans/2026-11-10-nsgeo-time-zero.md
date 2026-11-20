@@ -188,9 +188,7 @@ def test_first_break_row_is_the_steps_own_pick():
     data[40:, :] = 100.0
     rg = make(n_samples=200).replace(data=data)
     assert first_break_row(rg, 0.5) == 40
-    assert build_step("time_zero", threshold=0.5).apply(rg).n_samples == 200 - first_break_row(
-        rg, 0.5
-    )
+    assert build_step("time_zero", threshold=0.5).apply(rg).n_samples == 200 - first_break_row(rg, 0.5)
 
 
 def test_sets_time_zero_reads_enabled_entries_only():
@@ -214,29 +212,18 @@ def test_retime_ns_converts_between_clocks():
 @pytest.mark.parametrize(
     "name, params",
     [
-        ("dewow", {}),
-        ("gain_agc", {}),
-        ("gain_parametric", {}),
+        ("dewow", {}), ("gain_agc", {}), ("gain_parametric", {}),
         ("gain_curve", {"points": [[0.0, 0.0], [10.0, 6.0]]}),
         ("bandpass", {"low_mhz": 100.0, "high_mhz": 800.0}),
-        ("background_mean", {}),
-        ("background_sliding", {"window_traces": 5}),
-        ("background_svd", {}),
-        ("amp_abs", {}),
-        ("amp_square", {}),
-        ("amp_envelope", {}),
-        ("time_cutoff", {"end_ns": 10.0}),
-        ("migrate_fk", {"velocity_m_ns": 0.1}),
+        ("background_mean", {}), ("background_sliding", {"window_traces": 5}),
+        ("background_svd", {}), ("amp_abs", {}), ("amp_square", {}), ("amp_envelope", {}),
+        ("time_cutoff", {"end_ns": 10.0}), ("migrate_fk", {"velocity_m_ns": 0.1}),
     ],
 )
 def test_every_other_step_passes_the_clock_through(name, params):
     rg = Radargram(
         data=np.random.default_rng(0).normal(size=(128, 40)),
-        dt_ns=0.2,
-        t0_ns=0.0,
-        dx_m=0.02,
-        zero_ns=-1.25,
-        zero_set=True,
+        dt_ns=0.2, t0_ns=0.0, dx_m=0.02, zero_ns=-1.25, zero_set=True,
     )
     out = build_step(name, **params).apply(rg)
     assert out.zero_ns == -1.25
@@ -363,9 +350,7 @@ puts row 0 at −11.0864 ns with `dt = 0.216531`, so `time_zero(sample=51)` make
 `zero = -0.0433` ns.
 
 ```python
-def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(
-    fake_iface, tmp_path, answer_modal
-):
+def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(fake_iface, tmp_path, answer_modal):
     plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
     try:
         s.append_step(key, build_step("time_cutoff", end_ns=60.0))

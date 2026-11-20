@@ -22,11 +22,10 @@ Spec §4. Suggested implementer tier: opus.
     @dataclass(frozen=True)
     class OwedShift:
         """A restored record's range, still on the clock it was saved on (#162)."""
-
-        to: str  # the clock it moves onto: TIME_BASE_TIME_ZERO or TIME_BASE_RADAR
+        to: str        # the clock it moves onto: TIME_BASE_TIME_ZERO or TIME_BASE_RADAR
         cube_id: str
         preset: str
-        marked: bool  # False: a record from before #97, with no time_base
+        marked: bool   # False: a record from before #97, with no time_base
     ```
     `_pending_z_shift: OwedShift | None`. `_drop_restore_pending()` sets it to `None`.
   - `SliceEngine.median_first_break(self, threshold: float = 0.2) -> float | None`. It is the

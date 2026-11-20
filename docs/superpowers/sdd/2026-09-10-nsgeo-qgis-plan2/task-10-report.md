@@ -304,7 +304,7 @@ My flagged Concern 2 (the `EPSG:4326` fallback introduced to satisfy the brief's
 ```python
 crs = self.crs_widget.crs()
 ...
-ok = ... and bool(crs.authid()) and not crs.isGeographic()
+ok = (... and bool(crs.authid()) and not crs.isGeographic())
 ```
 This covers every route that can ever populate `crs_widget`, because they all funnel through the same widget:
 
@@ -585,11 +585,10 @@ Six findings, all with a precise fix already confirmed by the reviewer. The coor
 
 Verified directly before touching anything, on a bare `QDialog`:
 ```python
-d = QDialog()
-d.hide()
+d = QDialog(); d.hide()
 d.finished.connect(lambda r: print("finished", r))
-d.close()  # 0 "finished" prints -- isVisible() is False, closeEvent() never calls reject()
-d.reject()  # 1 "finished" print
+d.close()    # 0 "finished" prints -- isVisible() is False, closeEvent() never calls reject()
+d.reject()   # 1 "finished" print
 ```
 `_start_digitise()` hides the `GridDialog` deliberately so the canvas can be clicked — "hidden mid-pick" is this feature's *ordinary* state, not an edge case, and `unload()`'s own fix from round 4 only covered the visible case. Left as `close()`, calling `unload()` while a pick was in progress left `_grid_dialog` stale, the map tool active, and the dialog itself alive and reachable (two more canvas clicks would re-show it over an unloaded plugin; OK would then raise `AttributeError` on `self.session`, swallowed to stderr, closing as if saved when nothing was).
 

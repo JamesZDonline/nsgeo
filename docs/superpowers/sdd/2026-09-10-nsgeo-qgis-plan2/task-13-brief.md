@@ -23,9 +23,7 @@ import pytest
 
 from nsgeo_qgis.ui.view_transform import MIN_TRACE_SPAN, ViewTransform, nice_ticks
 
-FIT = ViewTransform.fit(
-    n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300
-)
+FIT = ViewTransform.fit(n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300)
 
 
 def test_fit_maps_the_data_extent_onto_the_widget():
@@ -49,10 +47,7 @@ def test_index_lookups_clamp_to_the_data():
     assert FIT.trace_index_at(400) == 304
     assert FIT.sample_index_at(-5) == 0
     assert FIT.sample_index_at(300) == 511
-    assert FIT.sample_index_at(150) in (
-        255,
-        256,
-    )  # exactly half the record; float rounding either side
+    assert FIT.sample_index_at(150) in (255, 256)  # exactly half the record; float rounding either side
 
 
 def test_source_rect_is_the_visible_window_in_image_pixels():
@@ -103,9 +98,7 @@ def test_resized_keeps_the_window():
 def test_nice_ticks():
     np.testing.assert_allclose(nice_ticks(0.0, 10.13), [0, 2, 4, 6, 8, 10])
     np.testing.assert_allclose(nice_ticks(-11.09, 99.8), [0, 20, 40, 60, 80])
-    np.testing.assert_allclose(
-        nice_ticks(0.0, 4.0, target=8), [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
-    )
+    np.testing.assert_allclose(nice_ticks(0.0, 4.0, target=8), [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
     assert nice_ticks(5.0, 5.0).size == 0
 ```
 
@@ -218,18 +211,14 @@ class ViewTransform:
         s_span = (self.time_hi - self.time_lo) / factor
         fx = anchor_x / self.width
         fy = anchor_y / self.height
-        return self.with_window(
-            at - fx * t_span, at - fx * t_span + t_span, tt - fy * s_span, tt - fy * s_span + s_span
-        )
+        return self.with_window(at - fx * t_span, at - fx * t_span + t_span, tt - fy * s_span, tt - fy * s_span + s_span)
 
     def panned(self, dx_px: float, dy_px: float) -> ViewTransform:
         """Drag by (dx, dy) pixels: positive dx moves the data right, i.e.
         the window moves to lower trace indices."""
         dt = -dx_px / self.width * (self.trace_hi - self.trace_lo)
         ds = -dy_px / self.height * (self.time_hi - self.time_lo)
-        return self.with_window(
-            self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
-        )
+        return self.with_window(self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds)
 
     def resized(self, width: int, height: int) -> ViewTransform:
         return replace(self, width=max(1, width), height=max(1, height))

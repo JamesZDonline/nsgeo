@@ -139,9 +139,7 @@ These are the inputs most likely to hurt a user that the design does not spell o
     ```
   - `test_slices_match_the_dense_layout_bit_for_bit` (`needs_real_files`), parametrised over cell `0.2` and `0.05`, and over two frames: axis-aligned, and the rotated UTM grid from `test_binning_at_utm_magnitude_and_a_rotated_azimuth_drops_no_traces`. For every `(k0, k1)` in `WINDOWS`:
     ```python
-    np.testing.assert_array_equal(
-        cube.slice_levels(k0, k1), dense_mean[k0:k1].mean(axis=0).reshape(ny, nx)
-    )
+    np.testing.assert_array_equal(cube.slice_levels(k0, k1), dense_mean[k0:k1].mean(axis=0).reshape(ny, nx))
     np.testing.assert_array_equal(cube.coverage(), dense_count.reshape(ny, nx))
     ```
   - `test_crossing_lines_match_the_dense_layout`: five lines along X and five along Y on one frame, cell 0.75 m on 0.5 m lines. Same two assertions.

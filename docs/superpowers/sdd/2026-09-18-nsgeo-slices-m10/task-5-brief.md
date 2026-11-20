@@ -32,13 +32,8 @@ from nsgeo.slices.frame import CubeFrame, ZAxis
 
 def prov():
     return Provenance(
-        line_keys=(),
-        preset_name="p",
-        steps=(),
-        transform="amp_abs",
-        velocity=None,
-        built_utc="2026-09-18T00:00:00Z",
-        core_version="0.1.0.dev0",
+        line_keys=(), preset_name="p", steps=(), transform="amp_abs",
+        velocity=None, built_utc="2026-09-18T00:00:00Z", core_version="0.1.0.dev0",
     )
 
 

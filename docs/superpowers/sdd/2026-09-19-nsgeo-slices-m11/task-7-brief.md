@@ -50,12 +50,8 @@ def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_sessio
 
     npz = save_cube_npz(engine, session.root / "slices" / "A__first.npz")
     view = ViewSettings(
-        thickness_ns=5.0,
-        step_ns=2.5,
-        radius_m=0.75,
-        palette="amp_heat",
-        stretch="shared",
-        coverage=False,
+        thickness_ns=5.0, step_ns=2.5, radius_m=0.75,
+        palette="amp_heat", stretch="shared", coverage=False,
     )
     record = cube_record(session, engine.choice, engine.frame, engine.z, view, npz)
     session.site.cubes["A__first"] = record
@@ -101,11 +97,8 @@ def test_a_record_written_by_an_older_build_still_loads(exportable_with_session)
     opaquely, so an old one arrives here intact and the reader -- not the
     schema -- is what has to tolerate it."""
     old = {
-        "grid_id": "A",
-        "preset": "p",
-        "transform": "amp_envelope",
-        "cell": 0.25,
-        "array": "slices/A__old.npz",
+        "grid_id": "A", "preset": "p", "transform": "amp_envelope",
+        "cell": 0.25, "array": "slices/A__old.npz",
     }
     recipe = recipe_from_record(old)
     assert recipe.choice.grid_id == "A"
@@ -116,13 +109,8 @@ def test_a_record_written_by_an_older_build_still_loads(exportable_with_session)
 
 def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session):
     bad = {
-        "grid_id": "A",
-        "preset": "p",
-        "transform": "amp_envelope",
-        "cell": 0.25,
-        "array": "slices/x.npz",
-        "lines": [],
-        "view": {},
+        "grid_id": "A", "preset": "p", "transform": "amp_envelope", "cell": 0.25,
+        "array": "slices/x.npz", "lines": [], "view": {},
         "z": {"t0_ns": 30.0, "t1_ns": 2.0, "dz_ns": 0.5},  # reversed
     }
     with pytest.raises(ValueError, match="z"):

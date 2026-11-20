@@ -24,73 +24,37 @@
 # nsgeo_qgis/crs_rule.py  (qgis.core)
 CRS_SCALE_WARN = 0.001
 CRS_SCALE_REFUSE = 0.02
-
-
 def crs_scale_error(crs: QgsCoordinateReferenceSystem, point: QgsPointXY) -> float | None: ...
-def crs_check(
-    crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None
-) -> tuple[str | None, float | None]: ...  # None point: no scale check
-def usable_at(
-    crs: QgsCoordinateReferenceSystem, lonlat: QgsPointXY
-) -> tuple[str | None, float | None]: ...
-def project_reason(
-    crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None
-) -> str: ...
-def choose_crs(
-    site: QgsCoordinateReferenceSystem | None,
-    project: QgsCoordinateReferenceSystem,
-    lonlat: QgsPointXY,
-) -> tuple[
-    QgsCoordinateReferenceSystem, str
-]: ...  # GridDialog._choose_crs's rule and notes, unchanged
-
+def crs_check(crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None) -> tuple[str | None, float | None]: ...  # None point: no scale check
+def usable_at(crs: QgsCoordinateReferenceSystem, lonlat: QgsPointXY) -> tuple[str | None, float | None]: ...
+def project_reason(crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None) -> str: ...
+def choose_crs(site: QgsCoordinateReferenceSystem | None, project: QgsCoordinateReferenceSystem,
+               lonlat: QgsPointXY) -> tuple[QgsCoordinateReferenceSystem, str]: ...   # GridDialog._choose_crs's rule and notes, unchanged
 
 # nsgeo_qgis/gps_import.py  (no Qt, no qgis)
 @dataclass(frozen=True)
 class GpsRow:
     path: Path
-    line: Line | None  # placed at travel_shift 0; None when refused
+    line: Line | None              # placed at travel_shift 0; None when refused
     n_traces: int | None
     n_fixes: int
     n_fixed: int
     bridges: tuple[Bridge, ...]
     end_runs: tuple[float, float]
-    refusal: str | None  # the Copy's refusal words, or None when ready
-
+    refusal: str | None            # the Copy's refusal words, or None when ready
     @property
-    def without_rtk_m(self) -> float: ...  # sum of bridge metres
+    def without_rtk_m(self) -> float: ...          # sum of bridge metres
 
-
-def first_fixed_lonlat(
-    path: Path,
-) -> (
-    tuple[float, float] | None
-): ...  # (lon, lat) of the DZG's first RTK fix; None if unreadable or none
-def plan_gps_rows(
-    paths: Sequence[Path],
-    to_xy: ToXY,
-    crs: str,
-    taken: Callable[[Path], bool],
-    usable: Callable[[float, float], bool],
-) -> list[GpsRow]: ...
-def shifted_lines(
-    rows: Sequence[GpsRow], metres: float
-) -> list[Line]: ...  # ready rows only, travel_shift set
-def import_messages(
-    rows: Sequence[GpsRow], imported: int
-) -> list[str]: ...  # the Copy's after-import messages, in order
-
+def first_fixed_lonlat(path: Path) -> tuple[float, float] | None: ...   # (lon, lat) of the DZG's first RTK fix; None if unreadable or none
+def plan_gps_rows(paths: Sequence[Path], to_xy: ToXY, crs: str,
+                  taken: Callable[[Path], bool],
+                  usable: Callable[[float, float], bool]) -> list[GpsRow]: ...
+def shifted_lines(rows: Sequence[GpsRow], metres: float) -> list[Line]: ...   # ready rows only, travel_shift set
+def import_messages(rows: Sequence[GpsRow], imported: int) -> list[str]: ...  # the Copy's after-import messages, in order
 
 # tests/plugin_testing.py
-def synthetic_gps_dzt(
-    folder: Path,
-    name: str,
-    track: Sequence[tuple[int, float, float, int]],
-    n_traces: int = 200,
-    **kw,
-) -> (
-    Path
-): ...  # DZT via synthetic_dzt + DZG via tests.dzg_data.write_dzg; (trace, lat, lon, quality)
+def synthetic_gps_dzt(folder: Path, name: str, track: Sequence[tuple[int, float, float, int]],
+                      n_traces: int = 200, **kw) -> Path: ...   # DZT via synthetic_dzt + DZG via tests.dzg_data.write_dzg; (trace, lat, lon, quality)
 ```
 
 - **The plugin's `to_xy`:** a `QgsCoordinateTransform` from EPSG:4326 to the chosen CRS over `QgsProject.instance()`. It is applied point by point (about 100 fixes a line), and NaN stays NaN.

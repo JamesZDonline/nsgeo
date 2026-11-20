@@ -32,45 +32,29 @@ def test_a_ruled_reversed_line_is_mirrored_on_its_bounds(ruled):
     assert v.ruler == R and v.transform.mirrored
     assert (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx((-59.5, 300.5))
 
-
 def test_the_mirrored_image_puts_the_last_trace_on_the_left(ruled):
-    v = ruled
-    shot = v.grab_image()
-    r = v.image_rect()
-    t = v.transform
-    mid_y = r.top() + 130
-    assert (
-        QColor(shot.pixel(int(r.left() + t.x_of_trace(190.5)), mid_y)).red() < 60
-    )  # trace 190: black
-    assert (
-        QColor(shot.pixel(int(r.left() + t.x_of_trace(5.5)), mid_y)).red() > 200
-    )  # trace 5: white
+    v = ruled; shot = v.grab_image(); r = v.image_rect(); t = v.transform; mid_y = r.top() + 130
+    assert QColor(shot.pixel(int(r.left() + t.x_of_trace(190.5)), mid_y)).red() < 60   # trace 190: black
+    assert QColor(shot.pixel(int(r.left() + t.x_of_trace(5.5)), mid_y)).red() > 200    # trace 5: white
     blank = QColor(shot.pixel(r.left() + 40, mid_y))
     assert blank in (BACKGROUND, NO_DATA_HATCH)
 
-
 def test_cursor_picks_and_selection_sit_on_their_traces_when_mirrored(ruled):
-    v = ruled
-    t = v.transform
+    v = ruled; t = v.transform
     v.set_picks([(10, 0.0)])
-    ((px, _),) = v._pick_positions(t)
+    (px, _), = v._pick_positions(t)
     assert t.x_of_trace(11) < px < t.x_of_trace(10)
     v.set_selection(10, 20)
     assert v._selection_bounds(t) == pytest.approx((t.x_of_trace(21), t.x_of_trace(10)))
 
-
 def test_hover_reports_the_trace_under_the_pointer_and_nothing_over_blank_space(ruled):
-    v = ruled
-    heard = []
-    v.trace_hovered.connect(heard.append)
+    v = ruled; heard = []; v.trace_hovered.connect(heard.append)
     send_hover(v, _local(v, v.transform.x_of_trace(150.5), 100))
     send_hover(v, _local(v, 40, 100))
     assert heard == [150]
 
-
 def test_picks_and_velocity_clicks_in_blank_space_do_nothing(ruled):
-    v = ruled
-    picks, points = [], []
+    v = ruled; picks, points = [], []
     v.pick_requested.connect(lambda tr, ns: picks.append(tr))
     v.velocity_point_requested.connect(lambda tr, ns: points.append(tr))
     QTest.mouseClick(v, LEFT, SHIFT, _local(v, 40, 100))
@@ -80,79 +64,54 @@ def test_picks_and_velocity_clicks_in_blank_space_do_nothing(ruled):
     QTest.mouseClick(v, LEFT, NO_MOD, _local(v, v.transform.x_of_trace(42.5), 100))
     assert picks == [42] and points == [42]
 
-
 def test_a_right_click_discards_the_fit_point_under_it_when_mirrored(ruled):
-    v = ruled
-    gone = []
-    v.velocity_point_discarded.connect(gone.append)
+    v = ruled; gone = []; v.velocity_point_discarded.connect(gone.append)
     v.set_velocity_fit_mode(True)
     v.set_velocity_fit([(20, 10.0), (150, 10.0)], [])
-    QTest.mouseClick(
-        v, RIGHT, NO_MOD, _local(v, v.transform.x_of_trace(150.5), v.transform.y_of_time(10.0))
-    )
+    QTest.mouseClick(v, RIGHT, NO_MOD, _local(v, v.transform.x_of_trace(150.5), v.transform.y_of_time(10.0)))
     assert gone == [1]
 
-
 def test_a_drag_off_the_end_stops_at_the_last_trace(ruled):
-    v = ruled
-    got = []
-    v.range_selected.connect(lambda a, b: got.append((a, b)))
+    v = ruled; got = []; v.range_selected.connect(lambda a, b: got.append((a, b)))
     QTest.mousePress(v, LEFT, NO_MOD, _local(v, v.transform.x_of_trace(150.5), 100))
-    send_move_while_pressed(v, _local(v, 40, 100))  # left of the data = past trace 199
+    send_move_while_pressed(v, _local(v, 40, 100))   # left of the data = past trace 199
     QTest.mouseRelease(v, LEFT, NO_MOD, _local(v, 40, 100))
     assert got == [(150, 199)]
 
-
 def test_a_drag_across_only_blank_space_clears_like_a_click(ruled):
-    v = ruled
-    v.set_selection(10, 20)
-    got, cleared = [], []
-    v.range_selected.connect(lambda a, b: got.append((a, b)))
-    v.selection_cleared.connect(lambda: cleared.append(1))
+    v = ruled; v.set_selection(10, 20); got, cleared = [], []
+    v.range_selected.connect(lambda a, b: got.append((a, b))); v.selection_cleared.connect(lambda: cleared.append(1))
     QTest.mousePress(v, LEFT, NO_MOD, _local(v, 20, 100))
     send_move_while_pressed(v, _local(v, 120, 100))
     QTest.mouseRelease(v, LEFT, NO_MOD, _local(v, 120, 100))
     assert got == [] and cleared == [1] and v._selection == (-1, -1)
-
 
 def test_wheel_and_middle_drag_follow_the_pointer_when_mirrored(ruled):
     # wheel one notch in at x_of_trace(100.0): trace_of_x at that x is unchanged.
     # middle-press at X, move to X - 50: the trace that was under X is now under X - 50.
     ...
 
-
 def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
-    v = ruled
-    r = v.image_rect()
-    v.zoom_at(4.0, r.width() / 2, r.height() / 2)
-    v.fit()
-    assert v.transform.mirrored and (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx(
-        (-59.5, 300.5)
-    )
+    v = ruled; r = v.image_rect()
+    v.zoom_at(4.0, r.width() / 2, r.height() / 2); v.fit()
+    assert v.transform.mirrored and (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx((-59.5, 300.5))
     left = v.transform.trace_hi
     v.one_to_one()
     assert v.transform.trace_hi == pytest.approx(left) and v.transform.mirrored
 
-
 def test_distance_ticks_rise_left_to_right_across_blank_space(ruled):
-    v = ruled
-    t = v.transform
+    v = ruled; t = v.transform
     ticks = v._distance_ticks(t)
-    values = [float(label) for label, _ in ticks]
-    xs = [x for _, x in ticks]
+    values = [float(label) for label, _ in ticks]; xs = [x for _, x in ticks]
     assert values == sorted(values) and xs == sorted(xs)
-    assert values[0] <= -0.5 and values[-1] >= 4.5  # ticks over the blank space at both ends
+    assert values[0] <= -0.5 and values[-1] >= 4.5        # ticks over the blank space at both ends
     label, x = next((l, x) for l, x in ticks if float(l) == 2.0)
     assert x == pytest.approx(t.x_of_trace(trace_units_at(D, 2.0)))
 
-
 def test_window_m_round_trips_and_emits_view_changed(ruled):
-    v = ruled
-    changed = []
-    v.view_changed.connect(lambda: changed.append(1))
+    v = ruled; changed = []; v.view_changed.connect(lambda: changed.append(1))
     v.set_window_m(1.0, 2.0, v.transform.time_lo, v.transform.time_hi)
     assert v.window_m() == pytest.approx((1.0, 2.0)) and changed
-
 
 def test_the_caption_names_grid_metres_and_the_walking_direction(ruled, view):
     ruled.set_direction(-1)
@@ -160,25 +119,20 @@ def test_the_caption_names_grid_metres_and_the_walking_direction(ruled, view):
     plain, _ = view
     assert plain._distance_caption() == "m along line →"
 
-
 def test_the_cutoff_can_be_dragged_from_blank_space(ruled):
     # set_cutoff mid-record; press on the line at local x = 40 (blank), drag 30 px up, release:
     # cutoff_dragged fires once with a time earlier than the start value.
     ...
 
-
 def test_a_window_entirely_in_blank_space_paints_without_error(ruled, monkeypatch):
-    v = ruled
-    logged = []
+    v = ruled; logged = []
     monkeypatch.setattr(profile_view_module, "_log", lambda *a, **k: logged.append(a))
     v.set_window_m(-0.9, -0.5, v.transform.time_lo, v.transform.time_hi)
     v.grab_image()
     assert logged == [] and v.transform.source_rect()[2] == 0.0
 
-
 def test_set_axes_drops_a_ruler_without_a_distance(make_view):
-    v = make_view()
-    v.resize(800, 300)
+    v = make_view(); v.resize(800, 300)
     v.set_axes(200, 128, -4.0, 0.5, None, R)
     assert v.ruler is None and not v.transform.mirrored and v.transform.bounds is None
 ```

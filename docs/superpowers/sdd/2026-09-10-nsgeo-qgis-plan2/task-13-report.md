@@ -203,7 +203,6 @@ def trace_index_at(self, x: float) -> int:
     upper = max(0, self.n_traces - 1)
     return int(min(upper, max(0, math.floor(self.trace_of_x(x)))))
 
-
 def sample_index_at(self, y: float) -> int:
     s = math.floor((self.time_of_y(y) - self.t0_ns) / self.dt_ns)
     upper = max(0, self.n_samples - 1)
@@ -453,12 +452,7 @@ def __post_init__(self) -> None:
     if not all(
         math.isfinite(v)
         for v in (
-            self.t0_ns,
-            self.dt_ns,
-            self.trace_lo,
-            self.trace_hi,
-            self.time_lo,
-            self.time_hi,
+            self.t0_ns, self.dt_ns, self.trace_lo, self.trace_hi, self.time_lo, self.time_hi,
         )
     ):
         raise ValueError(

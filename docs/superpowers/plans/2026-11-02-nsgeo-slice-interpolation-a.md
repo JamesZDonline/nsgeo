@@ -133,22 +133,17 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   NEIGHBOURS_PER_QUADRANT: int = 3
   DISTANCE_TOL_M: float = 1e-9
 
-
   @dataclass(frozen=True, eq=False)
   class FillWeights:
-      shape: tuple[int, int]  # (ny, nx)
-      populated: np.ndarray  # (ny*nx,) bool: cells that hold data
-      targets: np.ndarray  # (m,) intp, ascending flat ids of empty cells to fill
-      sources: np.ndarray  # (m, 4*NEIGHBOURS_PER_QUADRANT) int32 flat ids, -1 = empty slot
-      weights: np.ndarray  # same shape, float32, 0.0 in empty slots
-
-      def apply(self, values: np.ndarray) -> np.ndarray: ...  # (ny, nx) -> (ny, nx) float32
-      def apply_at(
-          self, values: np.ndarray, cells: np.ndarray
-      ) -> np.ndarray: ...  # (k,) flat ids -> (k,) float32
+      shape: tuple[int, int]      # (ny, nx)
+      populated: np.ndarray       # (ny*nx,) bool: cells that hold data
+      targets: np.ndarray         # (m,) intp, ascending flat ids of empty cells to fill
+      sources: np.ndarray         # (m, 4*NEIGHBOURS_PER_QUADRANT) int32 flat ids, -1 = empty slot
+      weights: np.ndarray         # same shape, float32, 0.0 in empty slots
+      def apply(self, values: np.ndarray) -> np.ndarray: ...            # (ny, nx) -> (ny, nx) float32
+      def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray: ...  # (k,) flat ids -> (k,) float32
       @property
       def nbytes(self) -> int: ...
-
 
   def plan_fill(
       populated: np.ndarray, cell: float, method: str, max_distance_m: float, search_radius_m: float
@@ -311,12 +306,8 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   ```python
   # smooth.py
   SMOOTH_TRUNCATE_SIGMAS: float = 4.0
-
-
-  def smooth(values: np.ndarray, cell: float, sigma_x_m: float, sigma_y_m: float) -> np.ndarray:
-      ...
+  def smooth(values: np.ndarray, cell: float, sigma_x_m: float, sigma_y_m: float) -> np.ndarray: ...
       # (ny, nx) -> (ny, nx) float32; axis 1 is frame X, axis 0 is frame Y
-
 
   # finish.py
   @dataclass(frozen=True)
@@ -326,12 +317,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
       search_radius_m: float
       smooth_x_m: float = 0.0
       smooth_y_m: float = 0.0
-
-
-  def finish_slice(
-      values: np.ndarray, weights: FillWeights, cell: float, settings: FinishSettings
-  ) -> np.ndarray:
-      ...
+  def finish_slice(values: np.ndarray, weights: FillWeights, cell: float, settings: FinishSettings) -> np.ndarray: ...
       # = smooth(weights.apply(values), cell, settings.smooth_x_m, settings.smooth_y_m)
   ```
 - **`FinishSettings.__post_init__` raises `ValueError` for:**
@@ -421,10 +407,9 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
   DEFAULT_METHOD = "kriging"
   DEFAULT_MAX_DISTANCE_SPACINGS = 0.5
   SEARCH_RADIUS_SPACINGS = 2.0
-  METHOD_LABELS: dict[str, str]  # ordered as METHODS, labels from Global Constraints
-  WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8  # int32 source + float32 weight
+  METHOD_LABELS: dict[str, str]          # ordered as METHODS, labels from Global Constraints
+  WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8   # int32 source + float32 weight
   FINISH_FIELDS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
-
 
   @dataclass(frozen=True)
   class SliceFinish:
@@ -432,15 +417,11 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
       max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
       smooth_x_m: float = 0.0
       smooth_y_m: float = 0.0
-
-      def in_metres(self, spacing_m: float) -> FinishSettings:
-          ...
+      def in_metres(self, spacing_m: float) -> FinishSettings: ...
           # max_distance_m = max_distance_spacings * spacing_m
           # search_radius_m = max(SEARCH_RADIUS_SPACINGS * spacing_m, 2 * max_distance_m)
           # ValueError if spacing_m <= 0
-
-      def updated(self, fields: Mapping[str, object]) -> SliceFinish:
-          ...
+      def updated(self, fields: Mapping[str, object]) -> SliceFinish: ...
           # lays FINISH_FIELDS from `fields` over self; a bad method or a negative or
           # non-finite number is ignored, as is every other key
   ```
@@ -453,25 +434,19 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
 - Produces, in `ui/finish_panel.py`:
   ```python
   @contextmanager
-  def busy_cursor() -> Iterator[None]: ...  # wait cursor; always restored, even on an exception
+  def busy_cursor() -> Iterator[None]: ...     # wait cursor; always restored, even on an exception
 
-
-  class FinishPanel(QGroupBox):  # title "Interpolation"
-      edited = pyqtSignal(str, object)  # (field, value): only a user's edit
-
+  class FinishPanel(QGroupBox):                 # title "Interpolation"
+      edited = pyqtSignal(str, object)          # (field, value): only a user's edit
       def __init__(self, parent: QWidget | None = None, *, metres_label: bool) -> None: ...
-
-      method_combo: QComboBox  # labels from METHOD_LABELS, itemData = key
-      max_distance_spin: QDoubleSpinBox  # 0–10, 2 dp, step 0.25, suffix " × line spacing"
-      max_distance_metres: QLabel  # "= 0.25 m"; exists only when metres_label
-      smooth_x_spin: QDoubleSpinBox  # 0–5, 2 dp, step 0.05, suffix " m"
-      smooth_y_spin: QDoubleSpinBox  # same
-
+      method_combo: QComboBox                   # labels from METHOD_LABELS, itemData = key
+      max_distance_spin: QDoubleSpinBox         # 0–10, 2 dp, step 0.25, suffix " × line spacing"
+      max_distance_metres: QLabel               # "= 0.25 m"; exists only when metres_label
+      smooth_x_spin: QDoubleSpinBox             # 0–5, 2 dp, step 0.05, suffix " m"
+      smooth_y_spin: QDoubleSpinBox             # same
       def value(self) -> SliceFinish: ...
-      def set_value(self, finish: SliceFinish) -> None: ...  # quiet: emits nothing
-      def set_spacing(
-          self, spacing_m: float | None
-      ) -> None: ...  # refreshes the metres label; "" for None
+      def set_value(self, finish: SliceFinish) -> None: ...   # quiet: emits nothing
+      def set_spacing(self, spacing_m: float | None) -> None: ...  # refreshes the metres label; "" for None
   ```
 - **Panel rows:** `Method`, `Max distance to data` (with the metres label beside it, when present), `Smoothing X`, `Smoothing Y`.
 - **Panel behaviour:** `max_distance_spin` is disabled while the method is `"none"`.
@@ -569,17 +544,11 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
   - `plan_fill` and `FillWeights` (Task 1).
 - Produces, on `SliceEngine`:
   ```python
-  def finish_settings(self, finish: SliceFinish) -> FinishSettings:
-      ...
+  def finish_settings(self, finish: SliceFinish) -> FinishSettings: ...
       # finish.in_metres(<chosen grid's default_spacing>); RuntimeError with no source
-
-
   def weights_cached(self, finish: SliceFinish) -> bool: ...
-  def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
-      ...
+  def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray: ...
       # finish_slice(values, <cached or new plan_fill(coverage > 0, frame.cell, ...)>, frame.cell, settings)
-
-
   def shared_limit(self, thickness_levels: int, clip: Any, finish: SliceFinish) -> float: ...
   ```
 - **Cache rule.** The cache holds one `(key, FillWeights)` with `key = (frame, settings)`.

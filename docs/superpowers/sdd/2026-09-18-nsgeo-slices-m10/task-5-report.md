@@ -231,13 +231,8 @@ Exactly what the brief specified, in its step order:
   line:
   ```python
   return Provenance(
-      line_keys=(),
-      preset_name="p",
-      steps=(),
-      transform="amp_abs",
-      velocity=None,
-      built_utc="2026-09-18T00:00:00Z",
-      core_version="0.1.0.dev0",
+      line_keys=(), preset_name="p", steps=(), transform="amp_abs",
+      velocity=None, built_utc="2026-09-18T00:00:00Z", core_version="0.1.0.dev0",
   )
   ```
   `ruff format --check .` flagged this file as needing reformatting (one

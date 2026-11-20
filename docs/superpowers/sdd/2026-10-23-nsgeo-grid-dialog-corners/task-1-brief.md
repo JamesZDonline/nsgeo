@@ -38,50 +38,25 @@
 ```python
 G = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
 W = [tuple(p) for p in G.to_world(np.array([[0, 0], [5, 0], [5, 11], [0, 11]], dtype=float))]
+def _pts(*rows): return [W[i] if i in rows else None for i in range(4)]
 
-
-def _pts(*rows):
-    return [W[i] if i in rows else None for i in range(4)]
-
-
-@pytest.mark.parametrize(
-    "lon, lat, epsg",
-    [
-        (-86.8, 36.1, 32616),
-        (-84.0, 10.0, 32617),
-        (-84.000001, 10.0, 32616),
-        (180.0, 0.0, 32601),
-        (-180.0, 0.0, 32601),
-        (179.99, 0.0, 32660),
-        (0.5, -0.0001, 32731),
-        (0.5, 84.0, 32631),
-    ],
-)
-def test_utm_epsg_picks_the_zone(lon, lat, epsg):
-    assert utm_epsg(lon, lat) == epsg
-
+@pytest.mark.parametrize("lon, lat, epsg", [(-86.8, 36.1, 32616), (-84.0, 10.0, 32617),
+    (-84.000001, 10.0, 32616), (180.0, 0.0, 32601), (-180.0, 0.0, 32601), (179.99, 0.0, 32660),
+    (0.5, -0.0001, 32731), (0.5, 84.0, 32631)])
+def test_utm_epsg_picks_the_zone(lon, lat, epsg): assert utm_epsg(lon, lat) == epsg
 
 @pytest.mark.parametrize("lon, lat", [(0.0, 84.01), (0.0, -84.01), (float("nan"), 0.0)])
-def test_utm_epsg_is_none_where_utm_is_undefined(lon, lat):
-    assert utm_epsg(lon, lat) is None
-
+def test_utm_epsg_is_none_where_utm_is_undefined(lon, lat): assert utm_epsg(lon, lat) is None
 
 @pytest.mark.parametrize("rows", [(0, 1), (0, 3), (0, 1, 2), (1, 2, 3), (0, 1, 2, 3)])
 def test_corner_frame_recovers_the_grid(rows):
-    f = corner_frame(_pts(*rows))
-    fit = fit_grid_from_corners(f.local, f.world)
+    f = corner_frame(_pts(*rows)); fit = fit_grid_from_corners(f.local, f.world)
     assert f.rows == rows and fit.origin == pytest.approx(G.origin, abs=1e-9)
     assert fit.azimuth == pytest.approx(30.0, abs=1e-9) and fit.residual_rms < 1e-9
 
-
 def test_corner_frame_measures_each_axis_from_its_own_edges():
-    assert (corner_frame(_pts(0, 1)).size_x, corner_frame(_pts(0, 1)).size_y) == (
-        pytest.approx(5.0),
-        None,
-    )
-    pts = _pts(0, 1, 2, 3)
-    x_hat, _ = G.axes()
-    pts[2] = tuple(np.asarray(pts[2]) + 0.4 * x_hat)
+    assert (corner_frame(_pts(0, 1)).size_x, corner_frame(_pts(0, 1)).size_y) == (pytest.approx(5.0), None)
+    pts = _pts(0, 1, 2, 3); x_hat, _ = G.axes(); pts[2] = tuple(np.asarray(pts[2]) + 0.4 * x_hat)
     assert corner_frame(pts).size_x == pytest.approx(5.2, abs=1e-9)  # mean of 5.0 and 5.4
 ```
 

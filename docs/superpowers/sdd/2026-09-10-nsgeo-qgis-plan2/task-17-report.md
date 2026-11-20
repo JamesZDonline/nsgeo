@@ -443,11 +443,9 @@ putting the status label inside the same `QFormLayout` that `clear()` empties vi
 `QFormLayout.removeRow()` deletes the row's widgets or only detaches them:
 
 ```python
-layout.addRow("A label", edit)
-layout.addRow(msg)
-while layout.rowCount():
-    layout.removeRow(0)
-msg.text()  # -> RuntimeError: wrapped C/C++ object of type QLabel has been deleted
+layout.addRow("A label", edit); layout.addRow(msg)
+while layout.rowCount(): layout.removeRow(0)
+msg.text()   # -> RuntimeError: wrapped C/C++ object of type QLabel has been deleted
 edit.text()  # -> RuntimeError: wrapped C/C++ object of type QLineEdit has been deleted
 ```
 

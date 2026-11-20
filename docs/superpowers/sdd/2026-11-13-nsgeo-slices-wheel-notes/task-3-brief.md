@@ -52,16 +52,11 @@ def test_the_level_limit_message_is_exact():
     res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
     assert level_limit_problem(res, [512, 512, 512]) == (
         "Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube "
-        "allows 1,024 (twice the 512 samples in each line). Narrow z0–z1 or raise dz."
-    )
-
+        "allows 1,024 (twice the 512 samples in each line). Narrow z0–z1 or raise dz.")
 
 def test_the_level_limit_names_the_deepest_line_when_counts_differ():
     res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
-    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in level_limit_problem(
-        res, [512, 1024]
-    )
-
+    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in level_limit_problem(res, [512, 1024])
 
 def test_native_dz_over_the_whole_record_is_within_the_limit():
     assert level_limit_problem(Resolution(0.25, 0.21653, -11.086, 99.546), [512]) is None

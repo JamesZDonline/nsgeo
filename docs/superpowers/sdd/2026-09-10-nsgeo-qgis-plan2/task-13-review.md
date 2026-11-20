@@ -86,10 +86,10 @@ Minimum fix (one test, no implementation change):
 
 ```python
 def test_index_lookups_use_the_left_edge_convention():
-    z = FIT.with_window(100.0, 110.0, 0.0, 20.0)  # 80 px per trace
+    z = FIT.with_window(100.0, 110.0, 0.0, 20.0)   # 80 px per trace
     assert z.trace_index_at(0.0) == 100
-    assert z.trace_index_at(41.0) == 100  # fails under round/ceil
-    assert z.trace_index_at(79.9) == 100  # fails under round/ceil
+    assert z.trace_index_at(41.0) == 100           # fails under round/ceil
+    assert z.trace_index_at(79.9) == 100           # fails under round/ceil
     assert z.trace_index_at(80.1) == 101
     assert z.trace_index_at(z.x_of_trace(105) + 0.1) == 105
     # sample axis, off the sample boundary

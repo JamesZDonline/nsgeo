@@ -18,12 +18,8 @@
   ```python
   # smooth.py
   SMOOTH_TRUNCATE_SIGMAS: float = 4.0
-
-
-  def smooth(values: np.ndarray, cell: float, sigma_x_m: float, sigma_y_m: float) -> np.ndarray:
-      ...
+  def smooth(values: np.ndarray, cell: float, sigma_x_m: float, sigma_y_m: float) -> np.ndarray: ...
       # (ny, nx) -> (ny, nx) float32; axis 1 is frame X, axis 0 is frame Y
-
 
   # finish.py
   @dataclass(frozen=True)
@@ -33,12 +29,7 @@
       search_radius_m: float
       smooth_x_m: float = 0.0
       smooth_y_m: float = 0.0
-
-
-  def finish_slice(
-      values: np.ndarray, weights: FillWeights, cell: float, settings: FinishSettings
-  ) -> np.ndarray:
-      ...
+  def finish_slice(values: np.ndarray, weights: FillWeights, cell: float, settings: FinishSettings) -> np.ndarray: ...
       # = smooth(weights.apply(values), cell, settings.smooth_x_m, settings.smooth_y_m)
   ```
 - **`FinishSettings.__post_init__` raises `ValueError` for:**

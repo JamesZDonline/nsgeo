@@ -14,39 +14,21 @@ ext = z["extent"]
 x0, y0 = ext[0], ext[2]
 extent = [0, ext[1] - x0, 0, ext[3] - y0]
 W = z["windows"]
-cols = [
-    ("tape", "Tape grid (wheel, 0.5 m lines)"),
-    ("gps_raw", "GPS as logged"),
-    ("gps_corr", f"GPS corrected ({z['offset'] * 100:.0f} cm + {z['tau']:.2f} s)"),
-]
+cols = [("tape", "Tape grid (wheel, 0.5 m lines)"), ("gps_raw", "GPS as logged"),
+        ("gps_corr", f"GPS corrected ({z['offset']*100:.0f} cm + {z['tau']:.2f} s)")]
 ann, lab = z["ann"], z["ann_lab"]
 
 
 def panel(ax, img, lim, key, xlim=None, ylim=None, marks=True):
-    ax.imshow(
-        img,
-        origin="lower",
-        extent=extent,
-        cmap="gray",
-        vmin=lim[0],
-        vmax=lim[1],
-        interpolation="nearest",
-    )
+    ax.imshow(img, origin="lower", extent=extent, cmap="gray", vmin=lim[0], vmax=lim[1], interpolation="nearest")
     if marks:
         for (a, c), l in zip(ann, lab):
             if l.startswith(key + "|"):
                 ax.plot(c - x0, a - y0, "o", ms=5, mfc="none", mec="red", mew=1)
         # FILE__011 is line index 10
         lc = z["line_c"][[k for k, _ in cols].index(key)][10] - x0
-        ax.annotate(
-            "FILE__011",
-            xy=(lc, extent[3] - 0.3),
-            xytext=(lc + 1.5, extent[3] + 0.8),
-            color="tab:orange",
-            fontsize=7,
-            arrowprops=dict(arrowstyle="-", color="tab:orange", lw=0.8),
-            annotation_clip=False,
-        )
+        ax.annotate("FILE__011", xy=(lc, extent[3] - 0.3), xytext=(lc + 1.5, extent[3] + 0.8), color="tab:orange",
+                    fontsize=7, arrowprops=dict(arrowstyle="-", color="tab:orange", lw=0.8), annotation_clip=False)
     if xlim:
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
@@ -61,11 +43,8 @@ for r, (lo, hi) in enumerate(W):
     for cidx, (k, title) in enumerate(cols):
         panel(axs[r, cidx], z[k][r], lim, k)
         axs[r, cidx].set_title(f"{title}\n{lo}-{hi} ns", fontsize=9)
-fig.suptitle(
-    "Same 60 lines, same cell (0.1 m), same kriging fill, same stretch per row. Local metres in the grid's frame "
-    "(x across lines, y along). Red circles: user marks on FILE__016 / FILE__028.",
-    fontsize=9,
-)
+fig.suptitle("Same 60 lines, same cell (0.1 m), same kriging fill, same stretch per row. Local metres in the grid's frame "
+             "(x across lines, y along). Red circles: user marks on FILE__016 / FILE__028.", fontsize=9)
 fig.tight_layout(rect=[0, 0, 1, 0.985])
 fig.savefig(f"{out_dir}/slices_tape_vs_gps.png", dpi=90)
 
@@ -92,20 +71,9 @@ for rr, r in enumerate((1, 2)):
     stack = np.concatenate([z[k][r][np.isfinite(z[k][r])] for k, _ in cols])
     lim = np.percentile(stack, [1, 99.5])
     for cidx, (k, title) in enumerate(cols):
-        panel(
-            axs[rr, cidx],
-            z[k][r],
-            lim,
-            k,
-            xlim=(cx - half, cx + half),
-            ylim=(cy - half, cy + half),
-            marks=False,
-        )
+        panel(axs[rr, cidx], z[k][r], lim, k, xlim=(cx - half, cx + half), ylim=(cy - half, cy + half), marks=False)
         axs[rr, cidx].set_title(f"{title}\n{W[r][0]}-{W[r][1]} ns (8 m zoom)", fontsize=9)
-fig.suptitle(
-    "Zoom on the strongest compact feature: look for the comb / sawtooth between alternate lines",
-    fontsize=9,
-)
+fig.suptitle("Zoom on the strongest compact feature: look for the comb / sawtooth between alternate lines", fontsize=9)
 fig.tight_layout(rect=[0, 0, 1, 0.98])
 fig.savefig(f"{out_dir}/slices_zoom.png", dpi=90)
 print("zoom centre (local m):", round(cx, 1), round(cy, 1))

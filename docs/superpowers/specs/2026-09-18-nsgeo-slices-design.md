@@ -132,9 +132,9 @@ All of §5 and §6 lives in `nsgeo-core`: numpy only, no QGIS, no Qt.
 ```python
 @dataclass(frozen=True)
 class CubeFrame:
-    origin: tuple[float, float]  # world coordinates of the (0, 0) cell corner
-    azimuth: float  # degrees clockwise from north to +Y, as Grid
-    cell: float  # metres; square cells
+    origin: tuple[float, float]   # world coordinates of the (0, 0) cell corner
+    azimuth: float                # degrees clockwise from north to +Y, as Grid
+    cell: float                   # metres; square cells
     nx: int
     ny: int
     crs: str
@@ -182,8 +182,8 @@ axis is time, only this class does.
 class SliceCube:
     frame: CubeFrame
     z: ZAxis
-    mean: np.ndarray  # (nz, nx*ny) float32, NaN where count == 0
-    count: np.ndarray  # (nx*ny,) int32 — traces contributing to each cell
+    mean: np.ndarray     # (nz, nx*ny) float32, NaN where count == 0
+    count: np.ndarray    # (nx*ny,) int32 — traces contributing to each cell
     provenance: Provenance
 ```
 

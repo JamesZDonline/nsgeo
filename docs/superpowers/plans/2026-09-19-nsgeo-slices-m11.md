@@ -1070,9 +1070,7 @@ def _unpadded_fill(values, counts, radius_cells, min_count=0.5):
     denominator = np.where(finite, counts, 0.0)
     shape = (ny + 2 * r, nx + 2 * r)
     spectrum = np.fft.rfft2(kernel, s=shape)
-    num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)[
-        r : r + ny, r : r + nx
-    ]
+    num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)[r : r + ny, r : r + nx]
     den = np.fft.irfft2(np.fft.rfft2(denominator, s=shape) * spectrum, s=shape)[
         r : r + ny, r : r + nx
     ]
@@ -2037,7 +2035,9 @@ def test_a_line_that_cannot_be_prepared_is_reported_by_name(sourced, tmp_path):
     key = session.keys()[0]
     session.line_for_key(key).path.unlink()  # the file goes away under us
     engine.set_source(
-        SourceChoice(grid_id="A", preset="p", transform="amp_abs", line_keys=tuple(session.keys()))
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_abs", line_keys=tuple(session.keys())
+        )
     )
     assert engine.wait_for_preparation(20_000)
     assert any(key in msg for _, msg in errors), f"no error named {key}: {errors}"
@@ -3655,7 +3655,9 @@ def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
     assert np.nanmax(coverage) >= 1.0
     assert np.allclose(coverage[np.isfinite(coverage)] % 1.0, 0.0), "counts are whole traces"
     dock.coverage_check.setChecked(False)
-    assert not np.allclose(np.nan_to_num(dock.current_values()), np.nan_to_num(coverage))
+    assert not np.allclose(
+        np.nan_to_num(dock.current_values()), np.nan_to_num(coverage)
+    )
 
 
 def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):
@@ -4029,56 +4031,53 @@ MIN_BAND_PX = 2.0
 In `__init__`, `self._slice_band: tuple[float, float] | None = None`. Then:
 
 ```python
-def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
-    """Draw the active slice's time window across this radargram.
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        """Draw the active slice's time window across this radargram.
 
-    Spec 9.3: the only new thing the slice adds to the profile view.
-    It answers "is this anomaly real, or is the fill inventing a
-    feature between two lines?" by pointing at the depths the slice
-    averaged, on data that was never filled.
-    """
-    if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+        Spec 9.3: the only new thing the slice adds to the profile view.
+        It answers "is this anomaly real, or is the fill inventing a
+        feature between two lines?" by pointing at the depths the slice
+        averaged, on data that was never filled.
+        """
+        if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+            self._slice_band = None
+        else:
+            self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
+        self.update()
+
+    def clear_slice_band(self) -> None:
         self._slice_band = None
-    else:
-        self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
-    self.update()
+        self.update()
 
+    def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
+        """Local (unoffset) y-bounds of the band, or None when there is
+        none. Factored out the same way `_selection_bounds` is, and for
+        the same reason: a plain pair a test can assert on without
+        rendering a pixel.
 
-def clear_slice_band(self) -> None:
-    self._slice_band = None
-    self.update()
+        A one-level window has zero time extent -- it averages a single
+        sample, and saying otherwise would overstate what was averaged --
+        so the floor is applied HERE, in pixels, rather than by widening
+        the window the readout reports.
+        """
+        if self._slice_band is None:
+            return None
+        y0 = t.y_of_time(self._slice_band[0])
+        y1 = t.y_of_time(self._slice_band[1])
+        if y1 - y0 < MIN_BAND_PX:
+            centre = (y0 + y1) / 2.0
+            y0, y1 = centre - MIN_BAND_PX / 2.0, centre + MIN_BAND_PX / 2.0
+        return y0, y1
 
-
-def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
-    """Local (unoffset) y-bounds of the band, or None when there is
-    none. Factored out the same way `_selection_bounds` is, and for
-    the same reason: a plain pair a test can assert on without
-    rendering a pixel.
-
-    A one-level window has zero time extent -- it averages a single
-    sample, and saying otherwise would overstate what was averaged --
-    so the floor is applied HERE, in pixels, rather than by widening
-    the window the readout reports.
-    """
-    if self._slice_band is None:
-        return None
-    y0 = t.y_of_time(self._slice_band[0])
-    y1 = t.y_of_time(self._slice_band[1])
-    if y1 - y0 < MIN_BAND_PX:
-        centre = (y0 + y1) / 2.0
-        y0, y1 = centre - MIN_BAND_PX / 2.0, centre + MIN_BAND_PX / 2.0
-    return y0, y1
-
-
-def _paint_slice_band(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
-    bounds = self._slice_band_bounds(t)
-    if bounds is None:
-        return
-    y0, y1 = r.top() + bounds[0], r.top() + bounds[1]
-    p.fillRect(QRectF(r.left(), y0, r.width(), y1 - y0), SLICE_BAND_COLOUR)
-    p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
-    p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
-    p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+    def _paint_slice_band(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        bounds = self._slice_band_bounds(t)
+        if bounds is None:
+            return
+        y0, y1 = r.top() + bounds[0], r.top() + bounds[1]
+        p.fillRect(QRectF(r.left(), y0, r.width(), y1 - y0), SLICE_BAND_COLOUR)
+        p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
+        p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
 ```
 
 Call it in `paintEvent` inside the existing `setClipRect(r)` block, **before**
@@ -4088,12 +4087,11 @@ them. Add `self._slice_band = None` to `clear()`.
 In `profile_dock.py`, two relays, each guarded, and each calling straight through to the view:
 
 ```python
-def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
-    self.view.set_slice_band(lo_ns, hi_ns)
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        self.view.set_slice_band(lo_ns, hi_ns)
 
-
-def clear_slice_band(self) -> None:
-    self.view.clear_slice_band()
+    def clear_slice_band(self) -> None:
+        self.view.clear_slice_band()
 ```
 
 - [ ] **Step 4: Emit the window from the Slices dock and wire it**
@@ -4426,9 +4424,7 @@ def test_a_cube_written_outside_the_project_tree_is_refused(exportable_with_sess
 def test_the_record_survives_a_save_and_reload_of_the_survey(exportable_with_session, tmp_path):
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
-    session.site.cubes["A__default"] = cube_record(
-        session, engine.choice, engine.frame, engine.z, _VIEW, npz
-    )
+    session.site.cubes["A__default"] = cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
     session.save()
     reloaded = load_site(session.json_path)
     assert reloaded.cubes["A__default"]["array"] == "slices/A__default.npz"
@@ -4682,12 +4678,8 @@ def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_sessio
 
     npz = save_cube_npz(engine, session.root / "slices" / "A__first.npz")
     view = ViewSettings(
-        thickness_ns=5.0,
-        step_ns=2.5,
-        radius_m=0.75,
-        palette="amp_heat",
-        stretch="shared",
-        coverage=False,
+        thickness_ns=5.0, step_ns=2.5, radius_m=0.75,
+        palette="amp_heat", stretch="shared", coverage=False,
     )
     record = cube_record(session, engine.choice, engine.frame, engine.z, view, npz)
     session.site.cubes["A__first"] = record
@@ -4733,11 +4725,8 @@ def test_a_record_written_by_an_older_build_still_loads(exportable_with_session)
     opaquely, so an old one arrives here intact and the reader -- not the
     schema -- is what has to tolerate it."""
     old = {
-        "grid_id": "A",
-        "preset": "p",
-        "transform": "amp_envelope",
-        "cell": 0.25,
-        "array": "slices/A__old.npz",
+        "grid_id": "A", "preset": "p", "transform": "amp_envelope",
+        "cell": 0.25, "array": "slices/A__old.npz",
     }
     recipe = recipe_from_record(old)
     assert recipe.choice.grid_id == "A"
@@ -4748,13 +4737,8 @@ def test_a_record_written_by_an_older_build_still_loads(exportable_with_session)
 
 def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session):
     bad = {
-        "grid_id": "A",
-        "preset": "p",
-        "transform": "amp_envelope",
-        "cell": 0.25,
-        "array": "slices/x.npz",
-        "lines": [],
-        "view": {},
+        "grid_id": "A", "preset": "p", "transform": "amp_envelope", "cell": 0.25,
+        "array": "slices/x.npz", "lines": [], "view": {},
         "z": {"t0_ns": 30.0, "t1_ns": 2.0, "dz_ns": 0.5},  # reversed
     }
     with pytest.raises(ValueError, match="z"):

@@ -31,17 +31,11 @@
   - `plan_fill` and `FillWeights` (Task 1).
 - Produces, on `SliceEngine`:
   ```python
-  def finish_settings(self, finish: SliceFinish) -> FinishSettings:
-      ...
+  def finish_settings(self, finish: SliceFinish) -> FinishSettings: ...
       # finish.in_metres(<chosen grid's default_spacing>); RuntimeError with no source
-
-
   def weights_cached(self, finish: SliceFinish) -> bool: ...
-  def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
-      ...
+  def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray: ...
       # finish_slice(values, <cached or new plan_fill(coverage > 0, frame.cell, ...)>, frame.cell, settings)
-
-
   def shared_limit(self, thickness_levels: int, clip: Any, finish: SliceFinish) -> float: ...
   ```
 - **Cache rule.** The cache holds one `(key, FillWeights)` with `key = (frame, settings)`.

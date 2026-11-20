@@ -190,42 +190,30 @@ These are the inputs a person will meet that the spec implies but does not spell
 ```python
 # nsgeo/io/dzg.py
 RTK_FIXED: int = 4
-
-
 class DzgError(ValueError): ...
-
 
 @dataclass(frozen=True)
 class DzgFix:
-    trace: int  # 0-based DZT trace index, from the $GSSIS before the GGA
-    utc_s: float | None  # GGA time, seconds of the UTC day
-    lat: float  # degrees, S negative; NaN when the GGA has no position
-    lon: float  # degrees, W negative; NaN likewise
-    quality: int  # GGA fix quality: 4 RTK fixed, 5 float, 1 GPS, 2 DGPS, 0 none
+    trace: int                # 0-based DZT trace index, from the $GSSIS before the GGA
+    utc_s: float | None       # GGA time, seconds of the UTC day
+    lat: float                # degrees, S negative; NaN when the GGA has no position
+    lon: float                # degrees, W negative; NaN likewise
+    quality: int              # GGA fix quality: 4 RTK fixed, 5 float, 1 GPS, 2 DGPS, 0 none
     n_sats: int | None
     hdop: float | None
-    alt_m: float | None  # antenna altitude above mean sea level (GGA field 9)
-    geoid_m: float | None  # geoid separation (GGA field 11)
-
+    alt_m: float | None       # antenna altitude above mean sea level (GGA field 9)
+    geoid_m: float | None     # geoid separation (GGA field 11)
 
 @dataclass(frozen=True)
 class DzgLog:
-    fixes: tuple[DzgFix, ...]  # in file order; traces strictly rising
+    fixes: tuple[DzgFix, ...]    # in file order; traces strictly rising
     bad_checksum: int
     unpaired: int
-
     @property
-    def n_fixed(self) -> int: ...  # fixes with quality == RTK_FIXED
+    def n_fixed(self) -> int: ...   # fixes with quality == RTK_FIXED
 
-
-def dzg_for(
-    path: str | Path,
-) -> (
-    Path | None
-): ...  # the .DZG beside a .DZT, either case; dzx.sidecar_for's directory-listing rule
-def read_dzg(
-    path: str | Path, n_traces: int | None = None
-) -> DzgLog: ...  # P2; checks the trace range only when n_traces is given
+def dzg_for(path: str | Path) -> Path | None: ...   # the .DZG beside a .DZT, either case; dzx.sidecar_for's directory-listing rule
+def read_dzg(path: str | Path, n_traces: int | None = None) -> DzgLog: ...   # P2; checks the trace range only when n_traces is given
 ```
 
 - [ ] **Step 1: Write the failing tests.**
@@ -270,17 +258,14 @@ def read_dzg(
 
 ```python
 # nsgeo/geometry/track.py
-ToXY = Callable[
-    [np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]
-]  # (lon, lat) degrees -> (x, y) metres
+ToXY = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]   # (lon, lat) degrees -> (x, y) metres
 END_LIMIT_M: float = 2.0
 HEADING_BASE_M: float = 1.0
-
 
 @dataclass(frozen=True)
 class TrackFix:
     trace: int
-    x: float  # metres in the placement's crs; NaN for a fix with no position
+    x: float                  # metres in the placement's crs; NaN for a fix with no position
     y: float
     lat: float
     lon: float
@@ -288,13 +273,11 @@ class TrackFix:
     geoid_m: float | None = None
     quality: int = 4
 
-
 @dataclass(frozen=True)
 class Bridge:
-    first_trace: int  # the anchor before the dropout
-    last_trace: int  # the anchor after it
-    metres: float  # straight distance between the two anchors
-
+    first_trace: int          # the anchor before the dropout
+    last_trace: int           # the anchor after it
+    metres: float             # straight distance between the two anchors
 
 @dataclass(frozen=True)
 class TrackPlacement:
@@ -303,27 +286,15 @@ class TrackPlacement:
     grid_id: str | None = None
     label: str | None = None
     travel_shift: float = 0.0
-
     # __post_init__: P3 + the Copy's ValueErrors (traces strictly rising, >= 2 anchors, not all at one point, finite shift)
     def anchors(self) -> tuple[TrackFix, ...]: ...
-    def bridges(self) -> tuple[Bridge, ...]: ...  # P4, in trace order
-    def positions(
-        self, n_traces: int, header: DztHeader
-    ) -> np.ndarray: ...  # (n, 2) unshifted, P4/P5
-    def end_runs(
-        self, n_traces: int, header: DztHeader
-    ) -> tuple[float, float]: ...  # metres placed before the first / after the last anchor
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray: ...  # P6: c + s
-    def trace_coords(
-        self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
-    ) -> np.ndarray: ...  # P6; frames ignored
+    def bridges(self) -> tuple[Bridge, ...]: ...                                 # P4, in trace order
+    def positions(self, n_traces: int, header: DztHeader) -> np.ndarray: ...     # (n, 2) unshifted, P4/P5
+    def end_runs(self, n_traces: int, header: DztHeader) -> tuple[float, float]: ...  # metres placed before the first / after the last anchor
+    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray: ...     # P6: c + s
+    def trace_coords(self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]) -> np.ndarray: ...  # P6; frames ignored
 
-
-def track_from_log(
-    log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None
-) -> TrackPlacement: ...
-
-
+def track_from_log(log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None) -> TrackPlacement: ...
 # Projects every fix with a position. Raises ValueError("no RTK-fixed position") or ValueError("only one RTK-fixed position")
 # before building, so the import can show those words as they are.
 ```
@@ -381,18 +352,15 @@ def track_from_log(
 
 ```python
 # nsgeo/model/survey.py — Site gains
-crs: str | None = None  # P9; GPS lines are placed in it
+crs: str | None = None        # P9; GPS lines are placed in it
 
 # nsgeo/project.py
-TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1  # 4 (P8, P15)
+TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1        # 4 (P8, P15)
 READABLE_SCHEMA_VERSIONS = (..., TRACK_SCHEMA_VERSION)
 
-
 # nsgeo_qgis/session.py — SiteSession gains
-def site_crs(self) -> str | None: ...  # site.crs, else the first grid's crs, else None
-def set_site_crs(
-    self, crs: str
-) -> None: ...  # ValueError(f"the site already uses {old}") when site_crs() is set; marks dirty
+def site_crs(self) -> str | None: ...          # site.crs, else the first grid's crs, else None
+def set_site_crs(self, crs: str) -> None: ...  # ValueError(f"the site already uses {old}") when site_crs() is set; marks dirty
 ```
 
 - [ ] **Step 1: Write the failing core tests.**
@@ -450,73 +418,37 @@ def set_site_crs(
 # nsgeo_qgis/crs_rule.py  (qgis.core)
 CRS_SCALE_WARN = 0.001
 CRS_SCALE_REFUSE = 0.02
-
-
 def crs_scale_error(crs: QgsCoordinateReferenceSystem, point: QgsPointXY) -> float | None: ...
-def crs_check(
-    crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None
-) -> tuple[str | None, float | None]: ...  # None point: no scale check
-def usable_at(
-    crs: QgsCoordinateReferenceSystem, lonlat: QgsPointXY
-) -> tuple[str | None, float | None]: ...
-def project_reason(
-    crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None
-) -> str: ...
-def choose_crs(
-    site: QgsCoordinateReferenceSystem | None,
-    project: QgsCoordinateReferenceSystem,
-    lonlat: QgsPointXY,
-) -> tuple[
-    QgsCoordinateReferenceSystem, str
-]: ...  # GridDialog._choose_crs's rule and notes, unchanged
-
+def crs_check(crs: QgsCoordinateReferenceSystem, point: QgsPointXY | None) -> tuple[str | None, float | None]: ...  # None point: no scale check
+def usable_at(crs: QgsCoordinateReferenceSystem, lonlat: QgsPointXY) -> tuple[str | None, float | None]: ...
+def project_reason(crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None) -> str: ...
+def choose_crs(site: QgsCoordinateReferenceSystem | None, project: QgsCoordinateReferenceSystem,
+               lonlat: QgsPointXY) -> tuple[QgsCoordinateReferenceSystem, str]: ...   # GridDialog._choose_crs's rule and notes, unchanged
 
 # nsgeo_qgis/gps_import.py  (no Qt, no qgis)
 @dataclass(frozen=True)
 class GpsRow:
     path: Path
-    line: Line | None  # placed at travel_shift 0; None when refused
+    line: Line | None              # placed at travel_shift 0; None when refused
     n_traces: int | None
     n_fixes: int
     n_fixed: int
     bridges: tuple[Bridge, ...]
     end_runs: tuple[float, float]
-    refusal: str | None  # the Copy's refusal words, or None when ready
-
+    refusal: str | None            # the Copy's refusal words, or None when ready
     @property
-    def without_rtk_m(self) -> float: ...  # sum of bridge metres
+    def without_rtk_m(self) -> float: ...          # sum of bridge metres
 
-
-def first_fixed_lonlat(
-    path: Path,
-) -> (
-    tuple[float, float] | None
-): ...  # (lon, lat) of the DZG's first RTK fix; None if unreadable or none
-def plan_gps_rows(
-    paths: Sequence[Path],
-    to_xy: ToXY,
-    crs: str,
-    taken: Callable[[Path], bool],
-    usable: Callable[[float, float], bool],
-) -> list[GpsRow]: ...
-def shifted_lines(
-    rows: Sequence[GpsRow], metres: float
-) -> list[Line]: ...  # ready rows only, travel_shift set
-def import_messages(
-    rows: Sequence[GpsRow], imported: int
-) -> list[str]: ...  # the Copy's after-import messages, in order
-
+def first_fixed_lonlat(path: Path) -> tuple[float, float] | None: ...   # (lon, lat) of the DZG's first RTK fix; None if unreadable or none
+def plan_gps_rows(paths: Sequence[Path], to_xy: ToXY, crs: str,
+                  taken: Callable[[Path], bool],
+                  usable: Callable[[float, float], bool]) -> list[GpsRow]: ...
+def shifted_lines(rows: Sequence[GpsRow], metres: float) -> list[Line]: ...   # ready rows only, travel_shift set
+def import_messages(rows: Sequence[GpsRow], imported: int) -> list[str]: ...  # the Copy's after-import messages, in order
 
 # tests/plugin_testing.py
-def synthetic_gps_dzt(
-    folder: Path,
-    name: str,
-    track: Sequence[tuple[int, float, float, int]],
-    n_traces: int = 200,
-    **kw,
-) -> (
-    Path
-): ...  # DZT via synthetic_dzt + DZG via tests.dzg_data.write_dzg; (trace, lat, lon, quality)
+def synthetic_gps_dzt(folder: Path, name: str, track: Sequence[tuple[int, float, float, int]],
+                      n_traces: int = 200, **kw) -> Path: ...   # DZT via synthetic_dzt + DZG via tests.dzg_data.write_dzg; (trace, lat, lon, quality)
 ```
 
 - **The plugin's `to_xy`:** a `QgsCoordinateTransform` from EPSG:4326 to the chosen CRS over `QgsProject.instance()`. It is applied point by point (about 100 fixes a line), and NaN stays NaN.
@@ -567,29 +499,15 @@ def synthetic_gps_dzt(
 
 ```python
 # layers.py
-TABLES["lines"]  # gains ("placed_by", "str") and ("without_rtk_m", "float"), after "file_name"
-TABLES["rtk_gaps"] = (
-    QgsWkbTypes.Type.LineString,
-    [
-        ("line_key", "str"),
-        ("kind", "str"),
-        ("first_trace", "int"),
-        ("last_trace", "int"),
-        ("metres", "float"),
-    ],
-)
+TABLES["lines"]   # gains ("placed_by", "str") and ("without_rtk_m", "float"), after "file_name"
+TABLES["rtk_gaps"] = (QgsWkbTypes.Type.LineString,
+    [("line_key", "str"), ("kind", "str"), ("first_trace", "int"), ("last_trace", "int"), ("metres", "float")])
 DERIVED = ("grids", "lines", "marks", "cuts", "rtk_gaps")
 LEGEND_ORDER = ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
 NO_GRID_COLOUR = "#636363"
-RTK_GAP_COLOUR = "#e377c2"  # in no grid colour and not the cut colour
-
-
-def _line_crs(
-    self, line: Line
-) -> str | None: ...  # a grid line's grid crs; a GPS line's placement crs
-def _line_points(
-    self, line: Line, frames: dict[str, Grid]
-) -> list[QgsPointXY] | None: ...  # was (line, grid, frames); every caller updated
+RTK_GAP_COLOUR = "#e377c2"     # in no grid colour and not the cut colour
+def _line_crs(self, line: Line) -> str | None: ...          # a grid line's grid crs; a GPS line's placement crs
+def _line_points(self, line: Line, frames: dict[str, Grid]) -> list[QgsPointXY] | None: ...   # was (line, grid, frames); every caller updated
 def refill_rtk_gaps(self) -> None: ...
 ```
 
@@ -635,15 +553,13 @@ def refill_rtk_gaps(self) -> None: ...
 
 ```python
 # session.py
-def is_gps_line(self, key: str) -> bool: ...  # isinstance(placement, TrackPlacement)
+def is_gps_line(self, key: str) -> bool: ...          # isinstance(placement, TrackPlacement)
 def set_travel_shift(self, keys: Iterable[str], metres: float) -> None: ...
-
-
 # All or nothing: KeyError for an unknown key; ValueError(f"{name} is not a GPS line") for a tape line; ValueError for a non-finite value.
 # One dirty mark and one lines_changed; a no-op when nothing would change.
 
 # survey_dock.py
-destagger_requested = pyqtSignal(list)  # GPS line keys
+destagger_requested = pyqtSignal(list)                 # GPS line keys
 ```
 
 - **The guide step** says:

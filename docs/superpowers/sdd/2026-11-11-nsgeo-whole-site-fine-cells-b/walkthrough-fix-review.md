@@ -75,7 +75,7 @@ The tests cannot see this: every case in `test_plugin_temporal_navigation.py:52-
 ```python
 n = len(begins)
 frame = (begins[-1] - begins[0]) / (n - 1) if n > 1 else max(single_band_length, 1000)  # ms, float
-start = begins[0] - 2  # 2 ms lead
+start = begins[0] - 2                                     # 2 ms lead
 end = start + math.floor(n * frame) - 1
 navigation.setFrameDuration(QgsInterval(frame / 1000.0, Qgis.TemporalUnit.Seconds))
 ```

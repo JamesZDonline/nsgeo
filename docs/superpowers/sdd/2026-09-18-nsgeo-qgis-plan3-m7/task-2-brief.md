@@ -97,7 +97,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
 
     session.set_preview(keys[1], 5)
     assert dock._effective_difference_index == -1  # not computed on someone else's stack
-    assert dock._difference_index == 0  # but remembered
+    assert dock._difference_index == 0             # but remembered
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
@@ -181,29 +181,28 @@ In `__init__`, replace `self._key: str | None = None` with:
 Add the property next to the `percentile` / `colormap_name` properties:
 
 ```python
-@property
-def _key(self) -> str | None:
-    """The line being DISPLAYED -- the preview when there is one.
+    @property
+    def _key(self) -> str | None:
+        """The line being DISPLAYED -- the preview when there is one.
 
-    Every read site in this file wants this: a stack_changed on the
-    line currently on screen should re-render it whether that line is
-    the working one or a preview, and `_on_trace_changed`'s key filter
-    should reject the working line's cursor while a preview is up.
-    The two assignment sites became `_working_key` instead.
-    """
-    return self._preview_key or self._working_key
+        Every read site in this file wants this: a stack_changed on the
+        line currently on screen should re-render it whether that line is
+        the working one or a preview, and `_on_trace_changed`'s key filter
+        should reject the working line's cursor while a preview is up.
+        The two assignment sites became `_working_key` instead.
+        """
+        return self._preview_key or self._working_key
 
-
-@property
-def _effective_difference_index(self) -> int:
-    """`-1` while previewing: the difference view is a property of a
-    step in the WORKING line's stack, and `_difference_index` indexes
-    that stack. Computing it against a previewed line's stack would be
-    an index into the wrong list -- at best an IndexError, at worst a
-    plausible-looking image of the wrong subtraction. Kept separate
-    from `_difference_index` itself so the mode is remembered and
-    returns intact when the view snaps back (spec §3.3)."""
-    return -1 if self._preview_key is not None else self._difference_index
+    @property
+    def _effective_difference_index(self) -> int:
+        """`-1` while previewing: the difference view is a property of a
+        step in the WORKING line's stack, and `_difference_index` indexes
+        that stack. Computing it against a previewed line's stack would be
+        an index into the wrong list -- at best an IndexError, at worst a
+        plausible-looking image of the wrong subtraction. Kept separate
+        from `_difference_index` itself so the mode is remembered and
+        returns intact when the view snaps back (spec §3.3)."""
+        return -1 if self._preview_key is not None else self._difference_index
 ```
 
 Change line 268 (`_open`) from `self._key = key or None` to `self._working_key = key or None`, and line 350 (`_clear`) from `self._key = None` to:
@@ -279,53 +278,51 @@ Keep the existing C1 comment block that sits above those two view calls; it expl
 - [ ] **Step 6: Add the preview slot**
 
 ```python
-def _on_preview_changed(self, key: str, trace: int) -> None:
-    try:
-        if key and key != self._working_key:
-            self._enter_preview(key, trace)
-        else:
-            # Either the preview was cleared, or the pointer is over
-            # the line already being worked on -- which is not a
-            # preview at all: showing a banner and hiding the gain
-            # strip for the line the user is editing would be pure
-            # noise, and a re-render of what is already on screen.
-            self._exit_preview()
-    except Exception as exc:  # noqa: BLE001 -- see the module docstring
-        _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
+    def _on_preview_changed(self, key: str, trace: int) -> None:
+        try:
+            if key and key != self._working_key:
+                self._enter_preview(key, trace)
+            else:
+                # Either the preview was cleared, or the pointer is over
+                # the line already being worked on -- which is not a
+                # preview at all: showing a banner and hiding the gain
+                # strip for the line the user is editing would be pure
+                # noise, and a re-render of what is already on screen.
+                self._exit_preview()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
 
-
-def _enter_preview(self, key: str, trace: int) -> None:
-    if self._preview_key is None:
-        self._strip_was_visible = self.gain_strip.isVisible()
-    self._preview_key = key
-    self.gain_strip.hide()
-    self.difference_label.setText("")
-    line = self.session.line_for_key(key)
-    label = getattr(line.placement, "label", None) or line.path.stem
-    self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
-    self._show_line(key)
-    self.view.clear_selection()
-    self.view.set_cursor(trace)
-
-
-def _exit_preview(self) -> None:
-    if self._preview_key is None:
-        return
-    self._preview_key = None
-    self.preview_label.setText("")
-    if self._working_key is None:
-        self._clear_view_only()
-        return
-    self._show_line(self._working_key)
-    self.view.set_cursor(self.session.current_trace)
-    start, end = self.session.selection
-    if start < 0 or end < 0:
+    def _enter_preview(self, key: str, trace: int) -> None:
+        if self._preview_key is None:
+            self._strip_was_visible = self.gain_strip.isVisible()
+        self._preview_key = key
+        self.gain_strip.hide()
+        self.difference_label.setText("")
+        line = self.session.line_for_key(key)
+        label = getattr(line.placement, "label", None) or line.path.stem
+        self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
+        self._show_line(key)
         self.view.clear_selection()
-    else:
-        self.view.set_selection(start, end)
-    if self._strip_was_visible:
-        self.gain_strip.show()
-    self._strip_was_visible = False
+        self.view.set_cursor(trace)
+
+    def _exit_preview(self) -> None:
+        if self._preview_key is None:
+            return
+        self._preview_key = None
+        self.preview_label.setText("")
+        if self._working_key is None:
+            self._clear_view_only()
+            return
+        self._show_line(self._working_key)
+        self.view.set_cursor(self.session.current_trace)
+        start, end = self.session.selection
+        if start < 0 or end < 0:
+            self.view.clear_selection()
+        else:
+            self.view.set_selection(start, end)
+        if self._strip_was_visible:
+            self.gain_strip.show()
+        self._strip_was_visible = False
 ```
 
 `_strip_was_visible` is captured only on the *first* `_enter_preview` of a run: hovering straight from one line to another re-enters without an intervening exit, and re-reading the (now hidden) strip would lose the memory that it had been showing.

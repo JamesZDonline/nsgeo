@@ -14,28 +14,14 @@
 - Consumes: Task 3's `SliceEngine.finish_is_slow`, `preview`, `pending_solve`, `stretch_solves`, `shared_limit(..., preview=)` and `PendingSolve`; Task 2's `Refiner` through `dock.refiner`.
 - Produces, on `SiteEngine`:
   ```python
-  def slice_at(
-      self, top_ns, thickness_ns, *, finish, method, manual, coverage=False, preview: bool = False
-  ) -> SiteSlice:
-      ...
+  def slice_at(self, top_ns, thickness_ns, *, finish, method, manual, coverage=False,
+               preview: bool = False) -> SiteSlice: ...
       # preview=True: each grid whose finish_is_slow shows engine.preview(...); provisional = any grid did
-
-
-  def pending_solves(
-      self, top_ns: float, thickness_ns: float, finish: SliceFinish
-  ) -> list[PendingSolve]:
-      ...
+  def pending_solves(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]: ...
       # every ready grid's uncached slice at this window, in ready_grids order
-
-
-  def stretch_solves(self, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]:
-      ...
+  def stretch_solves(self, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]: ...
       # every ready grid's uncached limit_windows
-
-
-  def shared_limit(
-      self, thickness_ns, clip, *, finish, method, manual, preview: bool = False
-  ) -> float: ...
+  def shared_limit(self, thickness_ns, clip, *, finish, method, manual, preview: bool = False) -> float: ...
   ```
   `SiteScope` gains `provisional: bool`.
 

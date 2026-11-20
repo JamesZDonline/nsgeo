@@ -95,9 +95,7 @@ for k in range(len(L) - 10):
     far.append((F0[k] * F0[k + 10]).sum() / A.size)
 near = [(F0[k] * F0[k + 1]).sum() / A.size for k in range(len(L) - 1)]
 near2 = [(F0[k] * F0[k + 2]).sum() / A.size for k in range(len(L) - 2)]
-print(
-    f"zero-lag patch corr: neighbours k,k+1 {np.mean(near):.3f}; same-direction k,k+2 {np.mean(near2):.3f}; far k,k+10 {np.mean(far):.3f}"
-)
+print(f"zero-lag patch corr: neighbours k,k+1 {np.mean(near):.3f}; same-direction k,k+2 {np.mean(near2):.3f}; far k,k+10 {np.mean(far):.3f}")
 print(f"walking speed median {v_med:.3f} m/s")
 print("time bin (ns) : neighbour correlation at zero lag, tau=0")
 print(" ".join(f"{t_bins[b]:.0f}:{c:.2f}" for b, c in zip(bins_all, coh)))
@@ -125,7 +123,7 @@ for tau in taus:
     res.append((tau, s, h))
 print("\ntau sweep: tau(s)  shift-in-travel-direction vs neighbours (cm)  peak corr")
 for tau, s, h in res:
-    print(f"  {tau:+.2f}  {s * 100:+6.2f}  {h:.3f}")
+    print(f"  {tau:+.2f}  {s*100:+6.2f}  {h:.3f}")
 ts = np.array([r[0] for r in res])
 ss = np.array([r[1] for r in res])
 hs = np.array([r[2] for r in res])
@@ -138,9 +136,7 @@ if i.size:
 tau_peak = ts[int(np.argmax(hs))]
 print(f"\nshift crosses zero at tau = {tau_zero}; max zero... peak corr at tau = {tau_peak}")
 s0 = res[int(np.flatnonzero(ts == 0)[0])][1]
-print(
-    f"at tau=0: shift {s0 * 100:+.2f} cm => tau ~ {-s0 / (2 * v_med):+.3f} s (one-way {abs(s0) / 2 * 100:.1f} cm)"
-)
+print(f"at tau=0: shift {s0*100:+.2f} cm => tau ~ {-s0/(2*v_med):+.3f} s (one-way {abs(s0)/2*100:.1f} cm)")
 
 # uncertainty: per window, halves, bootstrap over lines -- all from the tau=0 curves (shift -> tau via 2v)
 C = curves_by_tau[0.0]
@@ -148,51 +144,28 @@ print("\nper time window (tau=0 curves): shift cm -> tau s")
 for lo, hi in WINDOWS:
     sel = np.flatnonzero((t_bins[bins_all] >= lo) & (t_bins[bins_all] < hi))
     s, h = est_shift(C, sel_bins=sel)
-    print(
-        f"  {lo:>2}-{hi:<2} ns: {s * 100:+6.2f} cm  tau {-s / (2 * v_med):+.3f} s  (peak corr {h:.3f})"
-    )
-for lab, sel in [
-    ("lines 1-30", np.arange(30)),
-    ("lines 31-60", np.arange(30, 60)),
-    ("southbound only", np.flatnonzero(south)),
-    ("northbound only", np.flatnonzero(~south)),
-]:
+    print(f"  {lo:>2}-{hi:<2} ns: {s*100:+6.2f} cm  tau {-s/(2*v_med):+.3f} s  (peak corr {h:.3f})")
+for lab, sel in [("lines 1-30", np.arange(30)), ("lines 31-60", np.arange(30, 60)),
+                 ("southbound only", np.flatnonzero(south)), ("northbound only", np.flatnonzero(~south))]:
     s, h = est_shift(C, sel_lines=sel)
-    print(f"  {lab:16s}: {s * 100:+6.2f} cm  tau {-s / (2 * v_med):+.3f} s")
+    print(f"  {lab:16s}: {s*100:+6.2f} cm  tau {-s/(2*v_med):+.3f} s")
 rng = np.random.default_rng(0)
 boots = []
 for _ in range(500):
     sel = rng.integers(0, len(L), len(L))
     boots.append(est_shift(C, sel_lines=sel)[0])
 boots = np.array(boots)
-print(
-    f"  bootstrap over lines (500): shift {np.mean(boots) * 100:+.2f} cm, 95% [{np.percentile(boots, 2.5) * 100:+.2f}, {np.percentile(boots, 97.5) * 100:+.2f}] cm"
-    f" -> tau 95% [{-np.percentile(boots, 97.5) / (2 * v_med):+.3f}, {-np.percentile(boots, 2.5) / (2 * v_med):+.3f}] s"
-)
+print(f"  bootstrap over lines (500): shift {np.mean(boots)*100:+.2f} cm, 95% [{np.percentile(boots,2.5)*100:+.2f}, {np.percentile(boots,97.5)*100:+.2f}] cm"
+      f" -> tau 95% [{-np.percentile(boots,97.5)/(2*v_med):+.3f}, {-np.percentile(boots,2.5)/(2*v_med):+.3f}] s")
 per_line = np.array([peak(C[k].mean(axis=0))[0] for k in range(len(L))])
-print(
-    f"  per-line shifts: median {np.median(per_line) * 100:+.2f} cm, IQR [{np.percentile(per_line, 25) * 100:+.2f}, {np.percentile(per_line, 75) * 100:+.2f}] cm"
-)
+print(f"  per-line shifts: median {np.median(per_line)*100:+.2f} cm, IQR [{np.percentile(per_line,25)*100:+.2f}, {np.percentile(per_line,75)*100:+.2f}] cm")
 
 # control: tape placement
 Ft = profiles([tape_uv(L, i, south, tf)[0] for i in range(len(L))])
 Ct = shifts(Ft)
 s, h = est_shift(Ct)
 per_line_t = np.array([peak(Ct[k].mean(axis=0))[0] for k in range(len(L))])
-print(
-    f"\nCONTROL tape placement: mean-curve shift {s * 100:+.2f} cm (peak corr {h:.3f}); per-line shifts median {np.median(per_line_t) * 100:+.2f} cm, "
-    f"IQR [{np.percentile(per_line_t, 25) * 100:+.2f}, {np.percentile(per_line_t, 75) * 100:+.2f}], |shift| p90 {np.percentile(np.abs(per_line_t), 90) * 100:.1f} cm"
-)
-print(
-    f"GPS tau=0 per-line |shift| p90 {np.percentile(np.abs(per_line), 90) * 100:.1f} cm; zero-lag corr GPS {C[:, :, MAXLAG].mean():.3f} vs tape {Ct[:, :, MAXLAG].mean():.3f}"
-)
-np.savez(
-    sys.argv[3],
-    taus=ts,
-    shifts=ss,
-    peaks=hs,
-    per_line=per_line,
-    per_line_tape=per_line_t,
-    coh=coh,
-    bins=bins_all,
-)
+print(f"\nCONTROL tape placement: mean-curve shift {s*100:+.2f} cm (peak corr {h:.3f}); per-line shifts median {np.median(per_line_t)*100:+.2f} cm, "
+      f"IQR [{np.percentile(per_line_t,25)*100:+.2f}, {np.percentile(per_line_t,75)*100:+.2f}], |shift| p90 {np.percentile(np.abs(per_line_t),90)*100:.1f} cm")
+print(f"GPS tau=0 per-line |shift| p90 {np.percentile(np.abs(per_line),90)*100:.1f} cm; zero-lag corr GPS {C[:, :, MAXLAG].mean():.3f} vs tape {Ct[:, :, MAXLAG].mean():.3f}")
+np.savez(sys.argv[3], taus=ts, shifts=ss, peaks=hs, per_line=per_line, per_line_tape=per_line_t, coh=coh, bins=bins_all)

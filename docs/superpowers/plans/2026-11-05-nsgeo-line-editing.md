@@ -128,9 +128,7 @@ def test_a_pick_follows_its_line_when_the_grid_moves(populated):
     session.replace_grid(_MOVED_GRID)
     f = _rows(layers)["raw/FILE__001.DZT"]
     pt = f.geometry().asPoint()
-    assert (pt.x(), pt.y()) == pytest.approx(
-        _line_point(session, "raw/FILE__001.DZT", 30), abs=1e-9
-    )
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 30), abs=1e-9)
     assert f["distance_m"] == pytest.approx(0.5)  # trace 30 at 60 traces per metre
     assert (f["trace"], f["note"], f["created"]) == (30, "the wall", "2026-09-19T10:00:00+00:00")
     assert f["time_ns"] == pytest.approx(12.5) and "dewow" in f["stack_json"]
@@ -155,14 +153,8 @@ def test_a_pick_on_a_key_that_is_not_a_site_line_is_left_exactly_as_it_is(popula
     picks = layers.layers["picks"]
     f = QgsFeature(picks.fields())
     f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(1.0, 2.0)))
-    for name, value in (
-        ("line_key", "cut:7"),
-        ("trace", 3),
-        ("time_ns", 5.0),
-        ("distance_m", 9.0),
-        ("depth_m", 0.7),
-        ("velocity_m_ns", 0.1),
-    ):
+    for name, value in (("line_key", "cut:7"), ("trace", 3), ("time_ns", 5.0),
+                        ("distance_m", 9.0), ("depth_m", 0.7), ("velocity_m_ns", 0.1)):
         f[name] = value
     assert picks.dataProvider().addFeatures([f])[0]
     session.replace_grid(_MOVED_GRID)
@@ -381,23 +373,13 @@ def test_flipping_twice_is_no_change_at_all():
 
 def test_snap_puts_each_line_at_its_own_edge():
     assert LineEdit("k", STALE).snapped().placed(FRAMES).start_along == 15.0
-    assert (
-        LineEdit("k", dataclasses.replace(FWD, start_along=0.4))
-        .snapped()
-        .placed(FRAMES)
-        .start_along
-        == 0.0
-    )
+    assert LineEdit("k", dataclasses.replace(FWD, start_along=0.4)).snapped().placed(FRAMES).start_along == 0.0
     assert LineEdit("k", XREV).snapped().placed(FRAMES).start_along == 10.0
 
 
 def test_a_move_keeps_the_inset_against_the_new_grids_length():
-    assert LineEdit("k", REV, grid_id="B").placed(FRAMES) == GridPlacement(
-        "B", "y", 0.75, 9.0, -1, "line 2"
-    )
-    assert LineEdit("k", REV, start_along=14.5).moved_to("B", FRAMES).placed(
-        FRAMES
-    ).start_along == pytest.approx(8.5)
+    assert LineEdit("k", REV, grid_id="B").placed(FRAMES) == GridPlacement("B", "y", 0.75, 9.0, -1, "line 2")
+    assert LineEdit("k", REV, start_along=14.5).moved_to("B", FRAMES).placed(FRAMES).start_along == pytest.approx(8.5)
 
 
 def test_an_inset_start_is_worked_out_against_the_length_when_applied():
@@ -413,32 +395,19 @@ def test_shift_moves_the_offset_and_placed_names_a_missing_grid():
 
 def test_the_note_judges_only_the_start_and_the_offset():
     assert placement_note(STALE, GRID) == "starts 1.00 m past the far edge"
-    assert (
-        placement_note(dataclasses.replace(FWD, start_along=0.4), GRID)
-        == "starts 0.40 m inside the near edge"
-    )
+    assert placement_note(dataclasses.replace(FWD, start_along=0.4), GRID) == "starts 0.40 m inside the near edge"
     assert placement_note(dataclasses.replace(FWD, start_along=0.04), GRID) == ""
-    assert (
-        placement_note(dataclasses.replace(REV, offset=10.3), GRID)
-        == "offset 10.30 m is outside the grid's 10.00 m width"
-    )
+    assert placement_note(dataclasses.replace(REV, offset=10.3), GRID) == "offset 10.30 m is outside the grid's 10.00 m width"
     assert placement_note(REV, GRID) == ""
 
 
 def test_the_messages_say_what_changed_and_name_what_was_left_alone():
     out = EditOutcome(changed=("a", "b"), skipped=(Skipped("c", "line 8", CHANGED_ELSEWHERE),))
-    assert (
-        out.message()
-        == "changed 2 line(s); line 8 changed elsewhere while the table was open, so it was left as it is"
-    )
+    assert out.message() == "changed 2 line(s); line 8 changed elsewhere while the table was open, so it was left as it is"
     assert EditOutcome().message() == "nothing changed"
-    assert (
-        EditOutcome(changed=("a",), reordered=True).message()
-        == "changed 1 line(s) and reordered the lines"
-    )
+    assert EditOutcome(changed=("a",), reordered=True).message() == "changed 1 line(s) and reordered the lines"
     assert GridEditReport("Grid5", moved=(("y", 15.0, 15),)).message() == (
-        "Grid5 is now 15.00 m along y; its 15 reversed line(s) moved with the far edge."
-    )
+        "Grid5 is now 15.00 m along y; its 15 reversed line(s) moved with the far edge.")
     assert GridEditReport("A").message() == ""
 ```
 
@@ -653,33 +622,13 @@ def test_snap_on_every_row_fixes_the_stale_reversed_lines_and_nothing_else(table
     changed = Spy(session.lines_changed)
     dialog.select_keys(keys)
     dialog.snap_to_edge()
-    assert [_cell(dialog, r, COL_START) for r in range(6)] == [
-        "0.00",
-        "15.00",
-        "0.00",
-        "15.00",
-        "0.00",
-        "15.00",
-    ]
+    assert [_cell(dialog, r, COL_START) for r in range(6)] == ["0.00", "15.00", "0.00", "15.00", "0.00", "15.00"]
     assert [dialog.table.item(r, COL_START).background().color() == CHANGED for r in range(6)] == [
-        False,
-        True,
-        False,
-        True,
-        False,
-        False,
-    ]
+        False, True, False, True, False, False]
     assert dialog.status.text() == "2 lines changed · 0 picks will move with them"
     assert session.line_for_key(keys[1]).placement.start_along == 16.0  # nothing before OK
     dialog.accept()
-    assert [session.line_for_key(k).placement.start_along for k in keys] == [
-        0.0,
-        15.0,
-        0.0,
-        15.0,
-        0.0,
-        15.0,
-    ]
+    assert [session.line_for_key(k).placement.start_along for k in keys] == [0.0, 15.0, 0.0, 15.0, 0.0, 15.0]
     assert set(dialog.outcome.changed) == {keys[1], keys[3]} and len(changed.calls) == 1
 ```
 

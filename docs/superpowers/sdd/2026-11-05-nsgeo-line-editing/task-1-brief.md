@@ -44,9 +44,7 @@ def test_a_pick_follows_its_line_when_the_grid_moves(populated):
     session.replace_grid(_MOVED_GRID)
     f = _rows(layers)["raw/FILE__001.DZT"]
     pt = f.geometry().asPoint()
-    assert (pt.x(), pt.y()) == pytest.approx(
-        _line_point(session, "raw/FILE__001.DZT", 30), abs=1e-9
-    )
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 30), abs=1e-9)
     assert f["distance_m"] == pytest.approx(0.5)  # trace 30 at 60 traces per metre
     assert (f["trace"], f["note"], f["created"]) == (30, "the wall", "2026-09-19T10:00:00+00:00")
     assert f["time_ns"] == pytest.approx(12.5) and "dewow" in f["stack_json"]
@@ -71,14 +69,8 @@ def test_a_pick_on_a_key_that_is_not_a_site_line_is_left_exactly_as_it_is(popula
     picks = layers.layers["picks"]
     f = QgsFeature(picks.fields())
     f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(1.0, 2.0)))
-    for name, value in (
-        ("line_key", "cut:7"),
-        ("trace", 3),
-        ("time_ns", 5.0),
-        ("distance_m", 9.0),
-        ("depth_m", 0.7),
-        ("velocity_m_ns", 0.1),
-    ):
+    for name, value in (("line_key", "cut:7"), ("trace", 3), ("time_ns", 5.0),
+                        ("distance_m", 9.0), ("depth_m", 0.7), ("velocity_m_ns", 0.1)):
         f[name] = value
     assert picks.dataProvider().addFeatures([f])[0]
     session.replace_grid(_MOVED_GRID)

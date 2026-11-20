@@ -207,67 +207,64 @@ In `__init__`, after `self._selection`:
 After the `selection` property (~line 136), add:
 
 ```python
-@property
-def preview_key(self) -> str | None:
-    return self._preview_key
+    @property
+    def preview_key(self) -> str | None:
+        return self._preview_key
 
+    @property
+    def preview_trace(self) -> int:
+        return self._preview_trace
 
-@property
-def preview_trace(self) -> int:
-    return self._preview_trace
+    @property
+    def display_key(self) -> str | None:
+        """The line the profile should be SHOWING -- the preview when there
+        is one, otherwise the working line.
 
-
-@property
-def display_key(self) -> str | None:
-    """The line the profile should be SHOWING -- the preview when there
-    is one, otherwise the working line.
-
-    Deliberately distinct from `current_key`, which is the line every
-    write resolves through. A caller that is about to change data wants
-    `current_key`; a caller that is about to draw wants this. Getting
-    those two confused is exactly the C2 defect class (a write target
-    resolved from a different source than the thing the user believes
-    they are editing), so they do not share a name.
-    """
-    return self._preview_key or self._current_key
+        Deliberately distinct from `current_key`, which is the line every
+        write resolves through. A caller that is about to change data wants
+        `current_key`; a caller that is about to draw wants this. Getting
+        those two confused is exactly the C2 defect class (a write target
+        resolved from a different source than the thing the user believes
+        they are editing), so they do not share a name.
+        """
+        return self._preview_key or self._current_key
 ```
 
 In the "current line, samples, cursor" section, after `clear_selection` (~line 632), add:
 
 ```python
-# ---- preview (spec §3.3) ----------------------------------------------
-def set_preview(self, key: str | None, trace: int = -1) -> None:
-    """Set what the pointer is over. NOT a write target, ever.
+    # ---- preview (spec §3.3) ----------------------------------------------
+    def set_preview(self, key: str | None, trace: int = -1) -> None:
+        """Set what the pointer is over. NOT a write target, ever.
 
-    `current_key` is not merely what is displayed: `replace_step`,
-    `apply_to_grid`, `apply_preset` and `remove_step` all resolve
-    their target through it, and the processing dock binds to it. If
-    hovering the map moved `current_key`, moving the pointer would
-    silently repoint every destructive operation in the plugin -- edit
-    a parameter, and it lands on a line the user only passed over,
-    with no error and no cue. That is C2's defect class exactly, and
-    C2 is already on this codebase's record. Hence a second, weaker
-    notion that cannot reach any of those paths.
+        `current_key` is not merely what is displayed: `replace_step`,
+        `apply_to_grid`, `apply_preset` and `remove_step` all resolve
+        their target through it, and the processing dock binds to it. If
+        hovering the map moved `current_key`, moving the pointer would
+        silently repoint every destructive operation in the plugin -- edit
+        a parameter, and it lands on a line the user only passed over,
+        with no error and no cue. That is C2's defect class exactly, and
+        C2 is already on this codebase's record. Hence a second, weaker
+        notion that cannot reach any of those paths.
 
-    Never sets dirty: a preview is a view state, not an edit. Never
-    touches `_current_key`, `_current_trace` or `_selection`.
-    """
-    if key is None:
-        self.clear_preview()
-        return
-    line = self.line_for_key(key)  # raises KeyError before anything changes
-    index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
-    if (key, index) == (self._preview_key, self._preview_trace):
-        return  # loop guard: a marker update that round-trips is a no-op
-    self._preview_key, self._preview_trace = key, index
-    self.preview_changed.emit(key, index)
+        Never sets dirty: a preview is a view state, not an edit. Never
+        touches `_current_key`, `_current_trace` or `_selection`.
+        """
+        if key is None:
+            self.clear_preview()
+            return
+        line = self.line_for_key(key)  # raises KeyError before anything changes
+        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+        if (key, index) == (self._preview_key, self._preview_trace):
+            return  # loop guard: a marker update that round-trips is a no-op
+        self._preview_key, self._preview_trace = key, index
+        self.preview_changed.emit(key, index)
 
-
-def clear_preview(self) -> None:
-    if self._preview_key is None and self._preview_trace == -1:
-        return
-    self._preview_key, self._preview_trace = None, -1
-    self.preview_changed.emit("", -1)
+    def clear_preview(self) -> None:
+        if self._preview_key is None and self._preview_trace == -1:
+            return
+        self._preview_key, self._preview_trace = None, -1
+        self.preview_changed.emit("", -1)
 ```
 
 - [ ] **Step 5: Make `open_line` and `close_site` forget the preview**

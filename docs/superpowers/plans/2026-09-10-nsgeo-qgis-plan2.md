@@ -270,11 +270,7 @@ class ParamSpec:
             raise ValueError(f"param {self.name!r} is a choice but declares no choices")
         if self.kind != "choice" and self.choices:
             raise ValueError(f"param {self.name!r} is {self.kind!r} but declares choices")
-        if (
-            self.kind == "choice"
-            and self.default is not REQUIRED
-            and self.default not in self.choices
-        ):
+        if self.kind == "choice" and self.default is not REQUIRED and self.default not in self.choices:
             raise ValueError(f"param {self.name!r} default {self.default!r} is not in choices")
 
     @property
@@ -317,129 +313,80 @@ def required_params(name: str) -> tuple[str, ...]:
 `timezero.py`, inside `TimeZero` (add the import `from nsgeo.processing.base import ParamSpec, Radargram, register`):
 
 ```python
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(
-            name="mode",
-            kind="choice",
-            label="Mode",
-            default="first_break",
-            choices=("first_break", "sample"),
-            help="Pick the first arrival automatically, or crop at a fixed sample.",
-        ),
-        ParamSpec(
-            name="sample",
-            kind="int",
-            label="Sample",
-            default=0,
-            min=0,
-            help="Used when mode is 'sample'.",
-        ),
-        ParamSpec(
-            name="threshold",
-            kind="float",
-            label="Threshold",
-            default=0.2,
-            min=0.0,
-            max=1.0,
-            help="Fraction of the peak mean amplitude.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="mode",
+                kind="choice",
+                label="Mode",
+                default="first_break",
+                choices=("first_break", "sample"),
+                help="Pick the first arrival automatically, or crop at a fixed sample.",
+            ),
+            ParamSpec(name="sample", kind="int", label="Sample", default=0, min=0,
+                      help="Used when mode is 'sample'."),
+            ParamSpec(name="threshold", kind="float", label="Threshold", default=0.2,
+                      min=0.0, max=1.0, help="Fraction of the peak mean amplitude."),
+        )
 ```
 
 `dewow.py`, inside `Dewow`:
 
 ```python
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(
-            name="window_ns",
-            kind="float",
-            label="Window",
-            default=4.0,
-            unit="ns",
-            min=0.0,
-            help="Running-mean window; must exceed one sample interval.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(name="window_ns", kind="float", label="Window", default=4.0, unit="ns",
+                      min=0.0, help="Running-mean window; must exceed one sample interval."),
+        )
 ```
 
 `gain.py`, inside `GainAgc`:
 
 ```python
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0),
-        ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
-        ParamSpec(
-            name="eps",
-            kind="float",
-            label="Epsilon",
-            default=1e-12,
-            min=0.0,
-            help="Guards all-zero traces at the start of a line.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0),
+            ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
+            ParamSpec(name="eps", kind="float", label="Epsilon", default=1e-12, min=0.0,
+                      help="Guards all-zero traces at the start of a line."),
+        )
 ```
 
 inside `GainParametric`:
 
 ```python
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(
-            name="mode",
-            kind="choice",
-            label="Mode",
-            default="exponential",
-            choices=("exponential", "power"),
-        ),
-        ParamSpec(
-            name="alpha",
-            kind="float",
-            label="Alpha",
-            default=0.05,
-            unit="1/ns",
-            help="Exponential rate; used when mode is 'exponential'.",
-        ),
-        ParamSpec(
-            name="exponent",
-            kind="float",
-            label="Exponent",
-            default=1.0,
-            help="Used when mode is 'power'.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(name="mode", kind="choice", label="Mode", default="exponential",
+                      choices=("exponential", "power")),
+            ParamSpec(name="alpha", kind="float", label="Alpha", default=0.05, unit="1/ns",
+                      help="Exponential rate; used when mode is 'exponential'."),
+            ParamSpec(name="exponent", kind="float", label="Exponent", default=1.0,
+                      help="Used when mode is 'power'."),
+        )
 ```
 
 inside `GainCurve`, replace `__init__` and add `schema`:
 
 ```python
-def __init__(self, points: Sequence[Sequence[float]]) -> None:
-    pts = [[float(t), float(db)] for t, db in points]
-    if len(pts) < 2:
-        raise ValueError("gain_curve needs at least two control points")
-    if not all(math.isfinite(v) for p in pts for v in p):
-        raise ValueError("gain_curve control points must be finite")
-    self.points: list[list[float]] = pts
+    def __init__(self, points: Sequence[Sequence[float]]) -> None:
+        pts = [[float(t), float(db)] for t, db in points]
+        if len(pts) < 2:
+            raise ValueError("gain_curve needs at least two control points")
+        if not all(math.isfinite(v) for p in pts for v in p):
+            raise ValueError("gain_curve control points must be finite")
+        self.points: list[list[float]] = pts
 
-
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(
-            name="points",
-            kind="curve",
-            label="Gain curve",
-            default=REQUIRED,
-            unit="dB",
-            help="(two-way time ns, gain dB) control points on the viewer's time axis.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(name="points", kind="curve", label="Gain curve", default=REQUIRED, unit="dB",
+                      help="(two-way time ns, gain dB) control points on the viewer's time axis."),
+        )
 ```
 
 and remove the now-redundant `if len(self.points) < 2` check from `GainCurve.apply`. Add `import math` and import `REQUIRED, ParamSpec` from base.
@@ -447,36 +394,16 @@ and remove the now-redundant `if len(self.points) < 2` check from `GainCurve.app
 `bandpass.py`, inside `Bandpass`:
 
 ```python
-@classmethod
-def schema(cls) -> tuple[ParamSpec, ...]:
-    return (
-        ParamSpec(
-            name="low_mhz",
-            kind="float",
-            label="Low",
-            default=REQUIRED,
-            unit="MHz",
-            min=0.0,
-            help="No default: a wrong passband silently filters real data.",
-        ),
-        ParamSpec(
-            name="high_mhz",
-            kind="float",
-            label="High",
-            default=REQUIRED,
-            unit="MHz",
-            min=0.0,
-            help="Must be below the Nyquist frequency of the radargram.",
-        ),
-        ParamSpec(
-            name="taper_frac",
-            kind="float",
-            label="Taper",
-            default=0.25,
-            min=0.0,
-            help="Cosine taper width as a fraction of the passband.",
-        ),
-    )
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(name="low_mhz", kind="float", label="Low", default=REQUIRED, unit="MHz", min=0.0,
+                      help="No default: a wrong passband silently filters real data."),
+            ParamSpec(name="high_mhz", kind="float", label="High", default=REQUIRED, unit="MHz", min=0.0,
+                      help="Must be below the Nyquist frequency of the radargram."),
+            ParamSpec(name="taper_frac", kind="float", label="Taper", default=0.25, min=0.0,
+                      help="Cosine taper width as a fraction of the passband."),
+        )
 ```
 
 `background.py`: `BackgroundMean.schema` returns `()`; `BackgroundSliding.schema` returns `(ParamSpec(name="window_traces", kind="int", label="Window", default=200, unit="traces", min=1),)`; `BackgroundSvd.schema` returns `(ParamSpec(name="n_components", kind="int", label="Components removed", default=1, min=0),)`.
@@ -495,11 +422,13 @@ In `packages/nsgeo-core/src/nsgeo/project.py`, replace
 with
 
 ```python
-if "stack" in entry:
-    try:
-        stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ProjectError(f"invalid processing stack for line {entry['path']!r}: {exc}") from exc
+        if "stack" in entry:
+            try:
+                stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(
+                    f"invalid processing stack for line {entry['path']!r}: {exc}"
+                ) from exc
 ```
 
 - [ ] **Step 6: Run the full core suite**
@@ -919,9 +848,7 @@ def test_from_dielectric_matches_c_over_sqrt_epsr():
 def test_two_layers_integrate_piecewise():
     m = VelocityModel(layers=((0.0, 0.1), (20.0, 0.05)))
     np.testing.assert_allclose(m.depth_at(np.array([0.0, 10.0, 20.0, 40.0])), [0.0, 0.5, 1.0, 1.5])
-    np.testing.assert_allclose(
-        m.velocity_at(np.array([-5.0, 5.0, 20.0, 99.0])), [0.1, 0.1, 0.05, 0.05]
-    )
+    np.testing.assert_allclose(m.velocity_at(np.array([-5.0, 5.0, 20.0, 99.0])), [0.1, 0.1, 0.05, 0.05])
     assert not m.is_constant
 
 
@@ -1129,19 +1056,21 @@ def resolve_velocity(line: Any, grid: Any) -> VelocityModel:
 `model/survey.py`: add `from nsgeo.velocity import VelocityModel`; add `velocity: VelocityModel | None = None` as the last field of `Line`; change `Line.open` to
 
 ```python
-@classmethod
-def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:
-    """Read the header and derive the trace count. Reads 1024 bytes plus
-    a stat, regardless of file size."""
-    path = Path(path)
-    header = read_header(path)
-    return cls(
-        path=path,
-        header=header,
-        placement=placement,
-        n_traces=trace_count(path, header),
-        velocity=velocity,
-    )
+    @classmethod
+    def open(
+        cls, path: Path, placement: Placement, velocity: VelocityModel | None = None
+    ) -> Line:
+        """Read the header and derive the trace count. Reads 1024 bytes plus
+        a stat, regardless of file size."""
+        path = Path(path)
+        header = read_header(path)
+        return cls(
+            path=path,
+            header=header,
+            placement=placement,
+            n_traces=trace_count(path, header),
+            velocity=velocity,
+        )
 ```
 
 `project.py`: import `VelocityModel`; in `_grid_to_dict` add `if grid.velocity is not None: doc["velocity"] = grid.velocity.to_dict()` (restructure the literal into a local `doc` first); in `_grid_from_dict` pass `velocity=VelocityModel.from_dict(doc["velocity"]) if "velocity" in doc else None`; in `save_site`'s line loop add `if line.velocity is not None: entry["velocity"] = line.velocity.to_dict()`; in `load_site` pass `velocity=VelocityModel.from_dict(entry["velocity"]) if "velocity" in entry else None` to `Line.open`.
@@ -2096,9 +2025,7 @@ def _lines(folder, n=3):
     out = []
     for i in range(n):
         p = synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60 + i)
-        out.append(
-            Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem))
-        )
+        out.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem)))
     return out
 
 
@@ -2901,9 +2828,7 @@ def trailing_number(stem: str) -> int | None:
 
 def sort_files(paths: Sequence[str | Path]) -> list[Path]:
     ps = [Path(p) for p in paths]
-    return sorted(
-        ps, key=lambda p: (trailing_number(p.stem) is None, trailing_number(p.stem) or 0, p.name)
-    )
+    return sorted(ps, key=lambda p: (trailing_number(p.stem) is None, trailing_number(p.stem) or 0, p.name))
 
 
 @dataclass(frozen=True)
@@ -3416,18 +3341,10 @@ class SiteLayers(QObject):
 
     @staticmethod
     def _table_exists(path: str, name: str) -> bool:
-        return (
-            Path(path).exists()
-            and QgsVectorLayer(f"{path}|layername={name}", name, "ogr").isValid()
-        )
+        return Path(path).exists() and QgsVectorLayer(f"{path}|layername={name}", name, "ogr").isValid()
 
     def _create_table(
-        self,
-        path: str,
-        name: str,
-        wkb: Any,
-        spec: list[tuple[str, str]],
-        crs: QgsCoordinateReferenceSystem,
+        self, path: str, name: str, wkb: Any, spec: list[tuple[str, str]], crs: QgsCoordinateReferenceSystem
     ) -> None:
         opts = QgsVectorFileWriter.SaveVectorOptions()
         opts.driverName = "GPKG"
@@ -3479,9 +3396,7 @@ class SiteLayers(QObject):
         assert site is not None
         feats = []
         for grid in site.grids:
-            local = np.array(
-                [[0.0, 0.0], [grid.size_x, 0.0], [grid.size_x, grid.size_y], [0.0, grid.size_y]]
-            )
+            local = np.array([[0.0, 0.0], [grid.size_x, 0.0], [grid.size_x, grid.size_y], [0.0, grid.size_y]])
             ring = self._points(grid.to_world(local), grid.crs)
             f = QgsFeature(self.layers["grids"].fields())
             f.setGeometry(QgsGeometry.fromPolygonXY([ring]))
@@ -3503,9 +3418,7 @@ class SiteLayers(QObject):
             if grid is None:
                 continue  # trackless lines arrive with TrackPlacement, later
             f = QgsFeature(self.layers["lines"].fields())
-            f.setGeometry(
-                QgsGeometry.fromPolylineXY(self._points(line.trace_coords(site.frames), grid.crs))
-            )
+            f.setGeometry(QgsGeometry.fromPolylineXY(self._points(line.trace_coords(site.frames), grid.crs)))
             p: Any = line.placement
             f["line_key"] = self.session.line_key(line)
             f["grid_id"] = grid.id
@@ -3616,9 +3529,7 @@ from qgis.PyQt.QtCore import Qt
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 
-GRID = Grid(
-    "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
-)
+GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08))
 
 
 @pytest.fixture
@@ -3630,9 +3541,7 @@ def dock(qgis_app, tmp_path):
     lines = []
     for i in range(3):
         p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT")
-        lines.append(
-            Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem))
-        )
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem)))
     session.add_lines(lines)
     return session, dock
 
@@ -3648,11 +3557,7 @@ def test_tree_mirrors_site_grids_and_lines(dock):
     line_item = grid_item.child(1)
     assert line_item.data(0, ROLE_KIND) == "line"
     assert line_item.data(0, ROLE_ID) == "raw/FILE__002.DZT"
-    assert (
-        "FILE__002" in line_item.text(0)
-        and "0.50" in line_item.text(0)
-        and "↓" in line_item.text(0)
-    )
+    assert "FILE__002" in line_item.text(0) and "0.50" in line_item.text(0) and "↓" in line_item.text(0)
 
 
 def test_tree_follows_session_changes(dock):
@@ -3779,9 +3684,7 @@ class SurveyDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
         self.setObjectName("nsgeoSurveyDock")
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.session = session
 
         body = QWidget(self)
@@ -3824,9 +3727,7 @@ class SurveyDock(QgsDockWidget):
         for grid in site.grids:
             v = f" · v {grid.velocity.surface_velocity:.3f}" if grid.velocity else ""
             lines = by_grid[grid.id]
-            text = (
-                f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · {grid.default_spacing:g} m{v}"
-            )
+            text = f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · {grid.default_spacing:g} m{v}"
             if not lines:
                 text += " · empty"
             g_item = QTreeWidgetItem([text])
@@ -4053,9 +3954,7 @@ class NsgeoPlugin:
         assert self.session is not None
         if self.session.dirty and not self.save_with_prompt(ask_first=True):
             return
-        folder = QFileDialog.getExistingDirectory(
-            self.iface.mainWindow(), "Choose an empty folder for the site"
-        )
+        folder = QFileDialog.getExistingDirectory(self.iface.mainWindow(), "Choose an empty folder for the site")
         if not folder:
             return
         try:
@@ -4068,10 +3967,7 @@ class NsgeoPlugin:
         if self.session.dirty and not self.save_with_prompt(ask_first=True):
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.iface.mainWindow(),
-            "Open a survey file",
-            "",
-            f"nsgeo survey ({SURVEY_FILE});;All files (*)",
+            self.iface.mainWindow(), "Open a survey file", "", f"nsgeo survey ({SURVEY_FILE});;All files (*)"
         )
         if not path:
             return
@@ -4091,9 +3987,7 @@ class NsgeoPlugin:
                 self.iface.mainWindow(),
                 "Unsaved changes",
                 "Save the site before continuing?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             )
             if answer == QMessageBox.StandardButton.Cancel:
                 return False
@@ -4243,26 +4137,13 @@ def test_polygon_tab_reads_a_selected_feature(session):
 
 def test_digitised_points_set_origin_and_azimuth(session):
     d = GridDialog(session)
-    d.set_digitised(
-        (500.0, 700.0), (500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30)))
-    )
+    d.set_digitised((500.0, 700.0), (500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30))))
     assert (d.origin_x.value(), d.origin_y.value()) == (500.0, 700.0)
     assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
 
 
 def test_editing_an_existing_grid_prefills_and_keeps_its_id(session):
-    session.add_grid(
-        Grid(
-            "A",
-            (1.0, 2.0),
-            45.0,
-            3.0,
-            4.0,
-            "EPSG:32616",
-            0.25,
-            velocity=VelocityModel.constant(0.1),
-        )
-    )
+    session.add_grid(Grid("A", (1.0, 2.0), 45.0, 3.0, 4.0, "EPSG:32616", 0.25, velocity=VelocityModel.constant(0.1)))
     d = GridDialog(session, grid=session.grid("A"))
     assert d.id_edit.text() == "A" and not d.id_edit.isEnabled()
     assert d.velocity.value() == pytest.approx(0.1)
@@ -4441,9 +4322,7 @@ class GridDialog(QDialog):
         form.addRow("Velocity (m/ns)", vel_row)
         layout.addLayout(form)
 
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -4469,9 +4348,7 @@ class GridDialog(QDialog):
         w = QWidget()
         v = QVBoxLayout(w)
         self.corner_table = QTableWidget(4, 5)
-        self.corner_table.setHorizontalHeaderLabels(
-            ["corner", "local x", "local y", "world E", "world N"]
-        )
+        self.corner_table.setHorizontalHeaderLabels(["corner", "local x", "local y", "world E", "world N"])
         for row, name in enumerate(CORNER_NAMES):
             item = QTableWidgetItem(name)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -4492,11 +4369,7 @@ class GridDialog(QDialog):
     def _build_digitise_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        v.addWidget(
-            QLabel(
-                "Click the grid origin on the map, then a point along the +Y edge. Then enter the sizes."
-            )
-        )
+        v.addWidget(QLabel("Click the grid origin on the map, then a point along the +Y edge. Then enter the sizes."))
         self.digitise_button = QPushButton("Pick on map")
         self.digitise_button.clicked.connect(self.digitise_requested.emit)
         v.addWidget(self.digitise_button)
@@ -4556,9 +4429,7 @@ class GridDialog(QDialog):
         self.azimuth.setValue(fit.azimuth)
         self.size_x.setValue(float(local[:, 0].max()))
         self.size_y.setValue(float(local[:, 1].max()))
-        self.residual_label.setText(
-            f"rigid fit RMS {fit.residual_rms:.3f} m (nonzero = grid not square)"
-        )
+        self.residual_label.setText(f"rigid fit RMS {fit.residual_rms:.3f} m (nonzero = grid not square)")
 
     def set_digitised(self, origin_xy: tuple[float, float], along_xy: tuple[float, float]) -> None:
         dx = along_xy[0] - origin_xy[0]
@@ -4578,9 +4449,7 @@ class GridDialog(QDialog):
         polygon = geom.asPolygon() if not geom.isMultipart() else geom.asMultiPolygon()[0]
         ring = [(p.x(), p.y()) for p in polygon[0]]
         try:
-            corners = corners_from_polygon(
-                ring, self.origin_combo.currentIndex(), self.plus_y_combo.currentIndex()
-            )
+            corners = corners_from_polygon(ring, self.origin_combo.currentIndex(), self.plus_y_combo.currentIndex())
             fit = fit_grid_from_corners(corners.local, corners.world)
         except ValueError as exc:
             self.polygon_status.setText(str(exc))
@@ -4608,12 +4477,7 @@ class GridDialog(QDialog):
             self.velocity.setValue(grid.velocity.surface_velocity)
 
     def _validate(self, *_: Any) -> None:
-        ok = (
-            bool(self.id_edit.text().strip())
-            and self.velocity.value() > 0
-            and self.size_x.value() > 0
-            and self.size_y.value() > 0
-        )
+        ok = bool(self.id_edit.text().strip()) and self.velocity.value() > 0 and self.size_x.value() > 0 and self.size_y.value() > 0
         self.ok_button.setEnabled(ok)
 
     def result_grid(self) -> Grid:
@@ -4636,46 +4500,43 @@ Import `Qt` alongside `pyqtSignal`: `from qgis.PyQt.QtCore import Qt, pyqtSignal
 In `plugin.py`, replace the `open_grid_dialog` stub:
 
 ```python
-def open_grid_dialog(self, grid_id: str | None) -> None:
-    assert self.session is not None
-    if not self.session.is_open:
-        return
-    grid = self.session.grid(grid_id) if grid_id else None
-    suggestion = None
-    if grid is None:
-        lines = self.session.site.lines if self.session.site else []
-        if lines:
-            suggestion = VelocityModel.from_dielectric(lines[0].header.epsr).surface_velocity
-    dialog = GridDialog(
-        self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
-    )
-    dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        return
-    result = dialog.result_grid()
-    try:
+    def open_grid_dialog(self, grid_id: str | None) -> None:
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        grid = self.session.grid(grid_id) if grid_id else None
+        suggestion = None
         if grid is None:
-            self.session.add_grid(result)
-        else:
-            self.session.replace_grid(result)
-    except (ValueError, KeyError) as exc:
-        self.message(str(exc), Qgis.MessageLevel.Critical)
+            lines = self.session.site.lines if self.session.site else []
+            if lines:
+                suggestion = VelocityModel.from_dielectric(lines[0].header.epsr).surface_velocity
+        dialog = GridDialog(self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow())
+        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dialog.result_grid()
+        try:
+            if grid is None:
+                self.session.add_grid(result)
+            else:
+                self.session.replace_grid(result)
+        except (ValueError, KeyError) as exc:
+            self.message(str(exc), Qgis.MessageLevel.Critical)
 
+    def _start_digitise(self, dialog: GridDialog) -> None:
+        canvas = self.iface.mapCanvas()
+        tool = DigitiseGridTool(canvas)
 
-def _start_digitise(self, dialog: GridDialog) -> None:
-    canvas = self.iface.mapCanvas()
-    tool = DigitiseGridTool(canvas)
+        def done(origin: Any, along: Any) -> None:
+            dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
+            dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
+            canvas.unsetMapTool(tool)
+            dialog.show()
+            dialog.raise_()
 
-    def done(origin: Any, along: Any) -> None:
-        dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
-        dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
-        canvas.unsetMapTool(tool)
-        dialog.show()
-        dialog.raise_()
-
-    tool.points_picked.connect(done)
-    dialog.hide()
-    canvas.setMapTool(tool)
+        tool.points_picked.connect(done)
+        dialog.hide()
+        canvas.setMapTool(tool)
 ```
 
 Add the imports `from qgis.PyQt.QtWidgets import QDialog`, `from nsgeo.velocity import VelocityModel`, `from nsgeo_qgis.ui.grid_dialog import GridDialog`, `from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool`.
@@ -4725,14 +4586,7 @@ from qgis.PyQt.QtCore import Qt
 
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.import_dialog import (
-    COL_DIR,
-    COL_INCLUDE,
-    COL_LABEL,
-    COL_NOTE,
-    COL_OFFSET,
-    ImportDialog,
-)
+from nsgeo_qgis.ui.import_dialog import COL_DIR, COL_INCLUDE, COL_LABEL, COL_NOTE, COL_OFFSET, ImportDialog
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -4750,18 +4604,11 @@ def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
     d = ImportDialog(session, grid_id="A")
     d.add_files(files)
     assert d.table.rowCount() == 3
-    assert [d.table.item(r, COL_LABEL).text() for r in range(3)] == [
-        "FILE__001",
-        "FILE__002",
-        "FILE__003",
-    ]
+    assert [d.table.item(r, COL_LABEL).text() for r in range(3)] == ["FILE__001", "FILE__002", "FILE__003"]
     assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.00", "0.50", "1.00"]
     assert d.table.item(1, COL_DIR).text() == "−1"
     d.set_include(1, False)
-    assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == [
-        "0.00",
-        "0.50",
-    ]
+    assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == ["0.00", "0.50"]
     d.set_offset(2, 3.25)
     d.set_include(1, True)
     assert d.rows[2].offset == 3.25 and d.rows[2].offset_edited
@@ -4815,13 +4662,7 @@ def test_axis_and_spacing_options_come_from_the_widgets(session, tmp_path):
     d.direction_forward.setChecked(True)
     d.label_number.setChecked(True)
     o = d.options()
-    assert (o.axis, o.spacing, o.first_offset, o.direction_mode, o.label_source) == (
-        "x",
-        0.25,
-        1.0,
-        "forward",
-        "number",
-    )
+    assert (o.axis, o.spacing, o.first_offset, o.direction_mode, o.label_source) == ("x", 0.25, 1.0, "forward", "number")
     assert o.grid_size_along == 5.0  # size_x when lines run along x
 
 
@@ -4879,46 +4720,16 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.lookup import (
-    ImportOptions,
-    ImportRow,
-    plan_import,
-    recompute_offsets,
-    rows_to_lines,
-)
+from nsgeo_qgis.lookup import ImportOptions, ImportRow, plan_import, recompute_offsets, rows_to_lines
 from nsgeo_qgis.session import SiteSession
 
-(
-    COL_INCLUDE,
-    COL_FILE,
-    COL_LABEL,
-    COL_OFFSET,
-    COL_DIR,
-    COL_START,
-    COL_TRACES,
-    COL_LENGTH,
-    COL_SIDECAR,
-    COL_NOTE,
-) = range(10)
-HEADERS = [
-    "",
-    "File",
-    "Label",
-    "Offset (m)",
-    "Dir",
-    "Start (m)",
-    "Traces",
-    "Length (m)",
-    "Sidecar",
-    "Note",
-]
+COL_INCLUDE, COL_FILE, COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_TRACES, COL_LENGTH, COL_SIDECAR, COL_NOTE = range(10)
+HEADERS = ["", "File", "Label", "Offset (m)", "Dir", "Start (m)", "Traces", "Length (m)", "Sidecar", "Note"]
 EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START}
 
 
 class ImportDialog(QDialog):
-    def __init__(
-        self, session: SiteSession, grid_id: str | None = None, parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, session: SiteSession, grid_id: str | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.session = session
         self.rows: list[ImportRow] = []
@@ -4998,9 +4809,7 @@ class ImportDialog(QDialog):
 
         self.status = QLabel("")
         layout.addWidget(self.status)
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.import_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.import_button.setText("Import")
         self.buttons.accepted.connect(self.accept)
@@ -5012,13 +4821,7 @@ class ImportDialog(QDialog):
             w.currentIndexChanged.connect(self._replan)
         for s in (self.spacing, self.first_offset, self.start_along):
             s.valueChanged.connect(self._replan)
-        for b in (
-            self.direction_alternate,
-            self.direction_forward,
-            self.direction_reverse,
-            self.label_stem,
-            self.label_number,
-        ):
+        for b in (self.direction_alternate, self.direction_forward, self.direction_reverse, self.label_stem, self.label_number):
             b.toggled.connect(self._replan)
         self._grid_changed()
 
@@ -5039,13 +4842,7 @@ class ImportDialog(QDialog):
         along = None
         if grid is not None:
             along = grid.size_y if axis == "y" else grid.size_x
-        mode = (
-            "alternate"
-            if self.direction_alternate.isChecked()
-            else "forward"
-            if self.direction_forward.isChecked()
-            else "reverse"
-        )
+        mode = "alternate" if self.direction_alternate.isChecked() else "forward" if self.direction_forward.isChecked() else "reverse"
         return ImportOptions(
             grid_id=grid.id if grid else "",
             axis=axis,
@@ -5059,9 +4856,7 @@ class ImportDialog(QDialog):
 
     # ---- rows -------------------------------------------------------------
     def _choose_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select DZT files", "", "GSSI DZT (*.DZT *.dzt);;All files (*)"
-        )
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select DZT files", "", "GSSI DZT (*.DZT *.dzt);;All files (*)")
         if paths:
             self.add_files([Path(p) for p in paths])
 
@@ -5117,11 +4912,7 @@ class ImportDialog(QDialog):
             self.table.setRowCount(len(self.rows))
             for r, row in enumerate(self.rows):
                 inc = QTableWidgetItem("")
-                inc.setFlags(
-                    Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                )
+                inc.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 inc.setCheckState(Qt.CheckState.Checked if row.include else Qt.CheckState.Unchecked)
                 if not row.placeable:
                     inc.setFlags(Qt.ItemFlag.ItemIsSelectable)
@@ -5307,9 +5098,7 @@ def test_opening_a_line_loads_it_in_the_background(session, tmp_path):
 def test_reopening_a_loaded_line_does_not_reload(session, tmp_path):
     p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
     q = synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")
-    session.add_lines(
-        [Line.open(p, GridPlacement("A", "y", 0.0)), Line.open(q, GridPlacement("A", "y", 0.5))]
-    )
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0)), Line.open(q, GridPlacement("A", "y", 0.5))])
     a, b = session.keys()
     loader = LineLoader(session)
     session.open_line(a)
@@ -5505,9 +5294,7 @@ import pytest
 
 from nsgeo_qgis.ui.view_transform import MIN_TRACE_SPAN, ViewTransform, nice_ticks
 
-FIT = ViewTransform.fit(
-    n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300
-)
+FIT = ViewTransform.fit(n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300)
 
 
 def test_fit_maps_the_data_extent_onto_the_widget():
@@ -5531,10 +5318,7 @@ def test_index_lookups_clamp_to_the_data():
     assert FIT.trace_index_at(400) == 304
     assert FIT.sample_index_at(-5) == 0
     assert FIT.sample_index_at(300) == 511
-    assert FIT.sample_index_at(150) in (
-        255,
-        256,
-    )  # exactly half the record; float rounding either side
+    assert FIT.sample_index_at(150) in (255, 256)  # exactly half the record; float rounding either side
 
 
 def test_source_rect_is_the_visible_window_in_image_pixels():
@@ -5585,9 +5369,7 @@ def test_resized_keeps_the_window():
 def test_nice_ticks():
     np.testing.assert_allclose(nice_ticks(0.0, 10.13), [0, 2, 4, 6, 8, 10])
     np.testing.assert_allclose(nice_ticks(-11.09, 99.8), [0, 20, 40, 60, 80])
-    np.testing.assert_allclose(
-        nice_ticks(0.0, 4.0, target=8), [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
-    )
+    np.testing.assert_allclose(nice_ticks(0.0, 4.0, target=8), [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
     assert nice_ticks(5.0, 5.0).size == 0
 ```
 
@@ -5700,18 +5482,14 @@ class ViewTransform:
         s_span = (self.time_hi - self.time_lo) / factor
         fx = anchor_x / self.width
         fy = anchor_y / self.height
-        return self.with_window(
-            at - fx * t_span, at - fx * t_span + t_span, tt - fy * s_span, tt - fy * s_span + s_span
-        )
+        return self.with_window(at - fx * t_span, at - fx * t_span + t_span, tt - fy * s_span, tt - fy * s_span + s_span)
 
     def panned(self, dx_px: float, dy_px: float) -> ViewTransform:
         """Drag by (dx, dy) pixels: positive dx moves the data right, i.e.
         the window moves to lower trace indices."""
         dt = -dx_px / self.width * (self.trace_hi - self.trace_lo)
         ds = -dy_px / self.height * (self.time_hi - self.time_lo)
-        return self.with_window(
-            self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
-        )
+        return self.with_window(self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds)
 
     def resized(self, width: int, height: int) -> ViewTransform:
         return replace(self, width=max(1, width), height=max(1, height))
@@ -5834,9 +5612,7 @@ def view(qgis_app):
     v.resize(800, 300)
     v.show()
     rg = _rg()
-    v.set_axes(
-        rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=np.arange(rg.n_traces) / 60.0
-    )
+    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=np.arange(rg.n_traces) / 60.0)
     v.set_image(RadargramImage(rg).image)
     return v, rg
 
@@ -5846,11 +5622,7 @@ def test_paints_the_image_inside_the_margins(view):
     shot = v.grab_image()
     r = v.image_rect()
     assert r.left() == MARGIN_LEFT and r.top() == MARGIN_TOP
-    inside = [
-        QColor(shot.pixel(r.left() + 5 + i, r.top() + 5 + j)).value()
-        for i in range(20)
-        for j in range(20)
-    ]
+    inside = [QColor(shot.pixel(r.left() + 5 + i, r.top() + 5 + j)).value() for i in range(20) for j in range(20)]
     assert np.std(inside) > 5  # radargram texture, not a flat fill
     margin = QColor(shot.pixel(5, r.top() + 5))
     assert margin.red() == margin.green() == margin.blue()  # axis gutter is neutral
@@ -5915,19 +5687,9 @@ def test_drag_selects_a_trace_range(view):
     sel = []
     v.range_selected.connect(lambda a, b: sel.append((a, b)))
     r = v.image_rect()
-    QTest.mousePress(
-        v,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(r.left() + 100, r.top() + 50),
-    )
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() + 100, r.top() + 50))
     QTest.mouseMove(v, QPoint(r.left() + 300, r.top() + 50))
-    QTest.mouseRelease(
-        v,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(r.left() + 300, r.top() + 50),
-    )
+    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() + 300, r.top() + 50))
     assert sel == [(28, 86)]  # floor(100/696*200), floor(300/696*200)
 
 
@@ -5935,9 +5697,7 @@ def test_depth_axis_uses_the_velocity_model(view):
     v, rg = view
     v.set_velocity(VelocityModel.constant(0.1))
     labels = v.depth_tick_labels()
-    assert (
-        labels and labels[0].startswith("-") or labels[0] == "0"
-    )  # top of the record is above time zero
+    assert labels and labels[0].startswith("-") or labels[0] == "0"  # top of the record is above time zero
 
 
 @needs_real_data
@@ -6156,9 +5916,7 @@ class ProfileView(QWidget):
             return
         t = self.transform
         r = self.image_rect()
-        self.transform = ViewTransform.fit(
-            t.n_traces, t.n_samples, t.t0_ns, t.dt_ns, r.width(), r.height()
-        )
+        self.transform = ViewTransform.fit(t.n_traces, t.n_samples, t.t0_ns, t.dt_ns, r.width(), r.height())
         self.view_changed.emit()
         self.update()
 
@@ -6251,45 +6009,25 @@ class ProfileView(QWidget):
         for tick in nice_ticks(t.time_lo, t.time_hi):
             y = r.top() + t.y_of_time(float(tick))
             p.drawLine(QPointF(r.left() - 4, y), QPointF(r.left(), y))
-            p.drawText(
-                QRectF(0, y - 8, r.left() - 6, 16),
-                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                f"{tick:g}",
-            )
-        p.drawText(
-            QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns"
-        )
+            p.drawText(QRectF(0, y - 8, r.left() - 6, 16), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), f"{tick:g}")
+        p.drawText(QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns")
         # right: depth
         p.drawLine(r.topRight(), r.bottomRight())
         if self._velocity is not None:
             for label, y in self._depth_ticks(t):
                 yy = r.top() + y
                 p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                p.drawText(
-                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    label,
-                )
-            p.drawText(
-                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, MARGIN_TOP + 10),
-                int(Qt.AlignmentFlag.AlignLeft),
-                "m",
-            )
+                p.drawText(QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
+            p.drawText(QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignLeft), "m")
         # bottom: distance along the line, or trace index
         p.drawLine(r.bottomLeft(), r.bottomRight())
         for label, x in self._distance_ticks(t):
             xx = r.left() + x
             p.drawLine(QPointF(xx, r.bottom()), QPointF(xx, r.bottom() + 4))
-            p.drawText(
-                QRectF(xx - 30, r.bottom() + 6, 60, 14), int(Qt.AlignmentFlag.AlignHCenter), label
-            )
+            p.drawText(QRectF(xx - 30, r.bottom() + 6, 60, 14), int(Qt.AlignmentFlag.AlignHCenter), label)
         unit = "m" if self._distance is not None else "trace"
         arrow = "→" if self._direction == 1 else "←"
-        p.drawText(
-            QRectF(r.left(), r.bottom() + 14, r.width(), 14),
-            int(Qt.AlignmentFlag.AlignHCenter),
-            f"{unit} along line {arrow}",
-        )
+        p.drawText(QRectF(r.left(), r.bottom() + 14, r.width(), 14), int(Qt.AlignmentFlag.AlignHCenter), f"{unit} along line {arrow}")
 
     def _depth_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         assert self._velocity is not None
@@ -6336,9 +6074,7 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
-                self.pick_requested.emit(
-                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
-                )
+                self.pick_requested.emit(self.transform.trace_index_at(x), self.transform.time_of_y(y))
                 return
             self._press = event_pos(event)
             self._dragging = False
@@ -6434,9 +6170,7 @@ from plugin_testing import synthetic_dzt
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 
-GRID = Grid(
-    "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
-)
+GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08))
 
 
 @pytest.fixture
@@ -6585,9 +6319,7 @@ class ProfileDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
         self.setObjectName("nsgeoProfileDock")
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
-        )
+        self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea)
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
@@ -6679,11 +6411,7 @@ class ProfileDock(QgsDockWidget):
         else:
             self.channel_combo.hide()
             self.view.set_axes(
-                line.n_traces,
-                line.header.n_samples,
-                line.header.position_ns,
-                line.header.dt_ns,
-                line.distance_along(),
+                line.n_traces, line.header.n_samples, line.header.position_ns, line.header.dt_ns, line.distance_along()
             )
             self.view.set_image(None)
         self._refresh_velocity()
@@ -6748,9 +6476,7 @@ class ProfileDock(QgsDockWidget):
             distance = line.distance_along() if rg.n_traces == line.n_traces else None
         else:
             distance = None
-        keep_window = (
-            self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
-        )
+        keep_window = self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
         old = self.view.transform
         self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
         if keep_window and old is not None and old.n_samples == rg.n_samples:
@@ -6908,11 +6634,7 @@ def test_add_remove_toggle_and_reorder(opened):
     assert session.stack_for(key).entries[1][1] is False
     dock.list.setCurrentRow(2)
     dock.move_selected(-1)
-    assert [s.name for s, _ in session.stack_for(key).entries] == [
-        "dewow",
-        "gain_agc",
-        "background_mean",
-    ]
+    assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow", "gain_agc", "background_mean"]
     assert dock.list.currentRow() == 1
     dock.remove_selected()
     assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow", "background_mean"]
@@ -7024,9 +6746,7 @@ class ProcessingDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Processing", parent)
         self.setObjectName("nsgeoProcessingDock")
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.session = session
         self._updating = False
 
@@ -7103,9 +6823,7 @@ class ProcessingDock(QgsDockWidget):
                         | Qt.ItemFlag.ItemIsUserCheckable
                         | Qt.ItemFlag.ItemIsDragEnabled
                     )
-                    item.setCheckState(
-                        Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked
-                    )
+                    item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
                     self.list.addItem(item)
             if 0 <= keep < self.list.count():
                 self.list.setCurrentRow(keep)
@@ -7585,9 +7303,7 @@ class AddStepDialog(QDialog):
         self.facts = QLabel(header_facts(header) if header is not None else "")
         self.facts.setWordWrap(True)
         layout.addWidget(self.facts)
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -7633,73 +7349,66 @@ In `processing_dock.py`, add imports `from nsgeo.processing import Radargram, ge
 and add these methods:
 
 ```python
-def _show_form(self, row: int) -> None:
-    key = self.key()
-    if key is None or row < 0:
-        self.form.clear()
-        return
-    step, _ = self.session.stack_for(key).entries[row]
-    self.form.set_step(step.name, step.params)
+    def _show_form(self, row: int) -> None:
+        key = self.key()
+        if key is None or row < 0:
+            self.form.clear()
+            return
+        step, _ = self.session.stack_for(key).entries[row]
+        self.form.set_step(step.name, step.params)
 
+    def _on_form_committed(self, params: dict[str, Any]) -> None:
+        key = self.key()
+        row = self.list.currentRow()
+        if key is None or row < 0 or self.form.step_name is None:
+            return
+        current = self.session.stack_for(key).entries[row][0]
+        if current.params == params:
+            return
+        self.session.replace_step(key, row, build_step(self.form.step_name, **params))
 
-def _on_form_committed(self, params: dict[str, Any]) -> None:
-    key = self.key()
-    row = self.list.currentRow()
-    if key is None or row < 0 or self.form.step_name is None:
-        return
-    current = self.session.stack_for(key).entries[row][0]
-    if current.params == params:
-        return
-    self.session.replace_step(key, row, build_step(self.form.step_name, **params))
+    def time_axis(self) -> tuple[float, float, int]:
+        """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
+        when loaded, else the header."""
+        key = self.key()
+        assert key is not None
+        source = self.session.stack_for(key).source
+        if source is not None:
+            return source.t0_ns, source.dt_ns, source.n_samples
+        h = self.session.line_for_key(key).header
+        return h.position_ns, h.dt_ns, h.n_samples
 
+    def build_add_dialog(self, name: str) -> AddStepDialog:
+        key = self.key()
+        assert key is not None
+        line = self.session.line_for_key(key)
+        return AddStepDialog(name, header=line.header, radargram=self.session.stack_for(key).source, parent=self)
 
-def time_axis(self) -> tuple[float, float, int]:
-    """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
-    when loaded, else the header."""
-    key = self.key()
-    assert key is not None
-    source = self.session.stack_for(key).source
-    if source is not None:
-        return source.t0_ns, source.dt_ns, source.n_samples
-    h = self.session.line_for_key(key).header
-    return h.position_ns, h.dt_ns, h.n_samples
-
-
-def build_add_dialog(self, name: str) -> AddStepDialog:
-    key = self.key()
-    assert key is not None
-    line = self.session.line_for_key(key)
-    return AddStepDialog(
-        name, header=line.header, radargram=self.session.stack_for(key).source, parent=self
-    )
-
-
-def append_from_dialog(self, dialog: AddStepDialog) -> None:
-    key = self.key()
-    step = dialog.result_step()
-    if key is None or step is None:
-        return
-    self.session.append_step(key, step)
-    self.list.setCurrentRow(self.list.count() - 1)
-
-
-def add_step_with_dialog(self, name: str) -> None:
-    key = self.key()
-    if key is None:
-        return
-    specs = get_step(name).schema()
-    required = [s for s in specs if s.required]
-    if required and all(s.kind == "curve" for s in required):
-        # The identity curve is not a guess: seed it and let the strip edit it.
-        t0, dt, n = self.time_axis()
-        params = {s.name: identity_curve(t0, dt, n) for s in required}
-        params.update(default_params(name))
-        self.session.append_step(key, build_step(name, **params))
+    def append_from_dialog(self, dialog: AddStepDialog) -> None:
+        key = self.key()
+        step = dialog.result_step()
+        if key is None or step is None:
+            return
+        self.session.append_step(key, step)
         self.list.setCurrentRow(self.list.count() - 1)
-        return
-    dialog = self.build_add_dialog(name)
-    if dialog.exec() == QDialog.DialogCode.Accepted:
-        self.append_from_dialog(dialog)
+
+    def add_step_with_dialog(self, name: str) -> None:
+        key = self.key()
+        if key is None:
+            return
+        specs = get_step(name).schema()
+        required = [s for s in specs if s.required]
+        if required and all(s.kind == "curve" for s in required):
+            # The identity curve is not a guess: seed it and let the strip edit it.
+            t0, dt, n = self.time_axis()
+            params = {s.name: identity_curve(t0, dt, n) for s in required}
+            params.update(default_params(name))
+            self.session.append_step(key, build_step(name, **params))
+            self.list.setCurrentRow(self.list.count() - 1)
+            return
+        dialog = self.build_add_dialog(name)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.append_from_dialog(dialog)
 ```
 
 (`QDialog` joins the `qgis.PyQt.QtWidgets` import; `Radargram` is only needed for the type of `source`, drop it if ruff flags it unused.)
@@ -7783,16 +7492,9 @@ def test_dragging_a_handle_moves_its_point_and_emits(strip):
     strip.points_changed.connect(got.append)
     x0, y0 = strip.x_of_db(20.0), strip.y_of_time(100.0)
     assert strip.handle_at(QPoint(int(x0), int(y0))) == 1
-    QTest.mousePress(
-        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0))
-    )
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0)))
     QTest.mouseMove(strip, QPoint(int(strip.x_of_db(30.0)), int(y0)))
-    QTest.mouseRelease(
-        strip,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(int(strip.x_of_db(30.0)), int(y0)),
-    )
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(strip.x_of_db(30.0)), int(y0)))
     assert got and got[-1][1][1] == pytest.approx(30.0, abs=0.5)
     assert strip.points()[1][0] == pytest.approx(100.0, abs=0.5)
 
@@ -7805,12 +7507,7 @@ def test_double_click_adds_and_right_click_removes(strip):
     assert len(strip.points()) == 3 and got[-1][1][0] == pytest.approx(50.0, abs=0.5)
     QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, mid)
     assert len(strip.points()) == 2
-    QTest.mouseClick(
-        strip,
-        Qt.MouseButton.RightButton,
-        Qt.KeyboardModifier.NoModifier,
-        QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0))),
-    )
+    QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0))))
     assert len(strip.points()) == 2  # never below two
 
 
@@ -7830,9 +7527,7 @@ def test_profile_dock_shows_the_strip_only_when_asked(qgis_app, tmp_path):
     assert dock.gain_strip.isHidden()
     dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]])
     assert not dock.gain_strip.isHidden()
-    assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(
-        MARGIN_TOP + dock.view.transform.y_of_time(-11.0)
-    )
+    assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(MARGIN_TOP + dock.view.transform.y_of_time(-11.0))
     changed = []
     dock.gain_points_changed.connect(changed.append)
     dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]])
@@ -8051,18 +7746,17 @@ In `profile_dock.py`: import `GainStrip` and `MARGIN_TOP`; add `gain_points_chan
 and add:
 
 ```python
-def _sync_strip_mapping(self) -> None:
-    if self.view.transform is not None:
-        self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
+    def _sync_strip_mapping(self) -> None:
+        if self.view.transform is not None:
+            self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-
-def show_gain_strip(self, points: list[list[float]] | None) -> None:
-    if points is None or self.view.transform is None:
-        self.gain_strip.hide()
-        return
-    self._sync_strip_mapping()
-    self.gain_strip.set_points(points)
-    self.gain_strip.show()
+    def show_gain_strip(self, points: list[list[float]] | None) -> None:
+        if points is None or self.view.transform is None:
+            self.gain_strip.hide()
+            return
+        self._sync_strip_mapping()
+        self.gain_strip.set_points(points)
+        self.gain_strip.show()
 ```
 
 Also call `self._sync_strip_mapping()` at the end of `_render()` so the strip follows axis changes.
@@ -8079,47 +7773,45 @@ In `plugin.py` `initGui`, after both docks exist:
 and add:
 
 ```python
-@staticmethod
-def _curve_param_name(step: Any) -> str | None:
-    """The name of a step's curve-kind parameter, if it has one. Decided
-    by the schema's kind, never by the step's name."""
-    for spec in type(step).schema():
-        if spec.kind == "curve":
-            return str(spec.name)
-    return None
+    @staticmethod
+    def _curve_param_name(step: Any) -> str | None:
+        """The name of a step's curve-kind parameter, if it has one. Decided
+        by the schema's kind, never by the step's name."""
+        for spec in type(step).schema():
+            if spec.kind == "curve":
+                return str(spec.name)
+        return None
 
+    def _sync_gain_strip(self, row: int) -> None:
+        assert self.session is not None and self.profile_dock is not None
+        key = self.session.current_key
+        if key is None or row < 0:
+            self.profile_dock.show_gain_strip(None)
+            return
+        entries = self.session.stack_for(key).entries
+        if row >= len(entries):
+            self.profile_dock.show_gain_strip(None)
+            return
+        step = entries[row][0]
+        name = self._curve_param_name(step)
+        self.profile_dock.show_gain_strip(step.params[name] if name else None)
 
-def _sync_gain_strip(self, row: int) -> None:
-    assert self.session is not None and self.profile_dock is not None
-    key = self.session.current_key
-    if key is None or row < 0:
-        self.profile_dock.show_gain_strip(None)
-        return
-    entries = self.session.stack_for(key).entries
-    if row >= len(entries):
-        self.profile_dock.show_gain_strip(None)
-        return
-    step = entries[row][0]
-    name = self._curve_param_name(step)
-    self.profile_dock.show_gain_strip(step.params[name] if name else None)
-
-
-def _on_gain_points(self, points: list) -> None:
-    assert self.session is not None and self.processing_dock is not None
-    key = self.session.current_key
-    row = self.processing_dock.current_row()
-    if key is None or row < 0:
-        return
-    step = self.session.stack_for(key).entries[row][0]
-    name = self._curve_param_name(step)
-    if name is None:
-        return
-    params = dict(step.params)
-    params[name] = points
-    try:
-        self.session.replace_step(key, row, build_step(step.name, **params))
-    except ValueError as exc:
-        self.message(str(exc), Qgis.MessageLevel.Warning)
+    def _on_gain_points(self, points: list) -> None:
+        assert self.session is not None and self.processing_dock is not None
+        key = self.session.current_key
+        row = self.processing_dock.current_row()
+        if key is None or row < 0:
+            return
+        step = self.session.stack_for(key).entries[row][0]
+        name = self._curve_param_name(step)
+        if name is None:
+            return
+        params = dict(step.params)
+        params[name] = points
+        try:
+            self.session.replace_step(key, row, build_step(step.name, **params))
+        except ValueError as exc:
+            self.message(str(exc), Qgis.MessageLevel.Warning)
 ```
 
 with `from nsgeo.processing import build_step`.
@@ -8312,10 +8004,7 @@ def test_presets_save_apply_and_persist(plugin, tmp_path):
     s.open_line(other)
     assert pd.list.count() == 0
     pd.apply_preset_named("campus")
-    assert [i.text() for i in (pd.list.item(r) for r in range(pd.list.count()))] == [
-        "dewow",
-        "gain_agc",
-    ]
+    assert [i.text() for i in (pd.list.item(r) for r in range(pd.list.count()))] == ["dewow", "gain_agc"]
     assert [a.text() for a in pd.presets_menu.actions() if a.text() == "campus"]
     s.save()
     assert '"presets"' in (tmp_path / "survey.nsgeo.json").read_text()
@@ -8328,32 +8017,29 @@ def test_presets_save_apply_and_persist(plugin, tmp_path):
 `session.py`: add `presets_changed = pyqtSignal()` and
 
 ```python
-# ---- presets ----------------------------------------------------------
-def preset_names(self) -> list[str]:
-    return sorted(self._require_site().presets)
+    # ---- presets ----------------------------------------------------------
+    def preset_names(self) -> list[str]:
+        return sorted(self._require_site().presets)
 
+    def save_preset(self, name: str, key: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("a preset needs a name")
+        self._require_site().presets[name] = self.stack_for(key).to_dicts()
+        self._set_dirty(True)
+        self.presets_changed.emit()
 
-def save_preset(self, name: str, key: str) -> None:
-    name = name.strip()
-    if not name:
-        raise ValueError("a preset needs a name")
-    self._require_site().presets[name] = self.stack_for(key).to_dicts()
-    self._set_dirty(True)
-    self.presets_changed.emit()
+    def apply_preset(self, name: str, key: str) -> None:
+        site = self._require_site()
+        fresh = StepStack.from_dicts(site.presets[name])
+        self._attach_source(key, fresh)
+        site.stacks[key] = fresh
+        self._touch_stack(key)
 
-
-def apply_preset(self, name: str, key: str) -> None:
-    site = self._require_site()
-    fresh = StepStack.from_dicts(site.presets[name])
-    self._attach_source(key, fresh)
-    site.stacks[key] = fresh
-    self._touch_stack(key)
-
-
-def delete_preset(self, name: str) -> None:
-    self._require_site().presets.pop(name, None)
-    self._set_dirty(True)
-    self.presets_changed.emit()
+    def delete_preset(self, name: str) -> None:
+        self._require_site().presets.pop(name, None)
+        self._set_dirty(True)
+        self.presets_changed.emit()
 ```
 
 `processing_dock.py`: add `difference_toggled = pyqtSignal(int)`; in the top button row add
@@ -8384,39 +8070,35 @@ and in the bottom row
 with methods:
 
 ```python
-def _emit_difference(self, checked: bool) -> None:
-    self.difference_toggled.emit(self.list.currentRow() if checked else -1)
+    def _emit_difference(self, checked: bool) -> None:
+        self.difference_toggled.emit(self.list.currentRow() if checked else -1)
 
+    def _rebuild_presets_menu(self) -> None:
+        self.presets_menu.clear()
+        self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
+        names = self.session.preset_names() if self.session.is_open else []
+        if names:
+            self.presets_menu.addSeparator()
+            for name in names:
+                self.presets_menu.addAction(name, lambda n=name: self.apply_preset_named(n))
+            delete = self.presets_menu.addMenu("Delete")
+            for name in names:
+                delete.addAction(name, lambda n=name: self.session.delete_preset(n))
 
-def _rebuild_presets_menu(self) -> None:
-    self.presets_menu.clear()
-    self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
-    names = self.session.preset_names() if self.session.is_open else []
-    if names:
-        self.presets_menu.addSeparator()
-        for name in names:
-            self.presets_menu.addAction(name, lambda n=name: self.apply_preset_named(n))
-        delete = self.presets_menu.addMenu("Delete")
-        for name in names:
-            delete.addAction(name, lambda n=name: self.session.delete_preset(n))
+    def _save_preset_prompt(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
+        if ok and name.strip():
+            self.save_preset_named(name)
 
+    def save_preset_named(self, name: str) -> None:
+        key = self.key()
+        if key is not None:
+            self.session.save_preset(name, key)
 
-def _save_preset_prompt(self) -> None:
-    name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
-    if ok and name.strip():
-        self.save_preset_named(name)
-
-
-def save_preset_named(self, name: str) -> None:
-    key = self.key()
-    if key is not None:
-        self.session.save_preset(name, key)
-
-
-def apply_preset_named(self, name: str) -> None:
-    key = self.key()
-    if key is not None:
-        self.session.apply_preset(name, key)
+    def apply_preset_named(self, name: str) -> None:
+        key = self.key()
+        if key is not None:
+            self.session.apply_preset(name, key)
 ```
 
 (`QInputDialog` joins the widgets import.) In `_on_current_row`, after emitting `step_selected`, add `if self.diff_button.isChecked(): self._emit_difference(True)` so moving the selection moves the difference view.
@@ -8426,10 +8108,8 @@ def apply_preset_named(self, name: str) -> None:
 `plugin.py` `initGui`:
 
 ```python
-self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
-self.profile_dock.difference_cleared.connect(
-    lambda: self.processing_dock.diff_button.setChecked(False)
-)
+        self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
+        self.profile_dock.difference_cleared.connect(lambda: self.processing_dock.diff_button.setChecked(False))
 ```
 
 `README.md`: replace the status blockquote with

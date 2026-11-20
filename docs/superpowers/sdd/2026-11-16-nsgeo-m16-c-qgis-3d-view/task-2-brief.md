@@ -54,59 +54,40 @@ def test_open_shows_the_scene_grids_picks_and_surfaces(scene):
     pts = list(s3d.picks_layer.getFeatures())
     depths = _depths_of(scene, GRID)  # pick_depths for the grid's line picks, Nones dropped
     assert sorted(f.geometry().constGet().z() for f in pts) == pytest.approx(
-        sorted(-d * 3.0 for d in depths)
-    )
+        sorted(-d * 3.0 for d in depths))
     settings = iface.canvases3d[VIEW_NAME].mapSettings()
     assert settings.terrainRenderingEnabled() is False
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(GRID, 3.0, 0)
     assert len(iface.canvases3d[VIEW_NAME].cameraController().poses) == 1
 
-
-def test_opening_again_reuses_the_view_and_brings_it_forward(scene):
-    ...
+def test_opening_again_reuses_the_view_and_brings_it_forward(scene): ...
     # one canvas created in all; the dialog is raised (isActiveWindow or a recorded raise_)
 
-
-def test_a_view_closed_by_hand_cleans_up_and_opens_again(scene):
-    ...
+def test_a_view_closed_by_hand_cleans_up_and_opens_again(scene): ...
     # iface.closeMapCanvas3D(VIEW_NAME) -> picks layer gone from the project, no surface
     # layer has a renderer3D, is_open() False; open() makes a second canvas
 
-
-def test_a_new_pick_and_a_rebuild_show_without_reopening(scene):
-    ...
+def test_a_new_pick_and_a_rebuild_show_without_reopening(scene): ...
     # write a pick on the grid -> picks_changed -> spin_until a point more; rebuild a surface
     # -> its new layer has the renderer (via add_listener)
 
-
-def test_the_stretch_restretches_picks_and_surfaces(scene):
-    ...
+def test_the_stretch_restretches_picks_and_surfaces(scene): ...
     # session.remember_volume(GRID, stretch=2.0) -> Z values * 2/3, vertical-scale 2, title ×2
 
-
-def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene):
-    ...
+def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene): ...
     # combo to grid B in "grid" scope -> renderers move to B's surfaces, camera framed again;
     # scope "site" then combo to A -> scene stays on B
 
-
-def test_a_stale_surface_is_counted_in_the_title(scene):
-    ...
+def test_a_stale_surface_is_counted_in_the_title(scene): ...
     # change a surface's settings -> title ends "1 surface stale"
 
-
-def test_an_empty_grid_opens_an_empty_scene_with_its_title(scene):
-    ...
+def test_an_empty_grid_opens_an_empty_scene_with_its_title(scene): ...
     # a grid with no picks and no surfaces: picks layer empty, title set, no error
 
-
-def test_a_picks_layer_removed_by_hand_comes_back(scene):
-    ...
+def test_a_picks_layer_removed_by_hand_comes_back(scene): ...
     # project.removeMapLayer(picks layer id) then refresh -> a new picks layer, no raise
 
-
-def test_a_cleared_project_forgets_the_scene_layers(scene):
-    ...
+def test_a_cleared_project_forgets_the_scene_layers(scene): ...
     # QgsProject.instance().clear() -> no raise; picks_layer None; open() again works
 ```
 
