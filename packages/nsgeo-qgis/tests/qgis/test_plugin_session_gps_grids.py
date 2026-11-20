@@ -94,7 +94,7 @@ def test_a_mixed_move_moves_the_tape_line_and_the_gps_line_in_one_change(site):
     changed = Spy(s.lines_changed)
     outcome = s.move_lines([TAPE, IN_A], "B")
     assert set(outcome.changed) == {TAPE, IN_A}
-    assert s.keys_on_grid("B") == [TAPE, IN_A] or set(s.keys_on_grid("B")) == {TAPE, IN_A}
+    assert s.keys_on_grid("B") == [IN_A, TAPE]
     assert len(changed.calls) == 1
 
 
@@ -186,3 +186,17 @@ def test_profiles_stay_in_distance_walked_so_a_gps_line_has_no_ruler(site):
     s.move_lines([IN_A], "B")
     assert dock._ruler_for(tape, tape.distance_along()) == ruler
     dock.deleteLater()
+
+
+def test_a_gps_line_is_not_moved_into_a_grid_in_another_crs_and_the_reason_is_named(site):
+    s = site
+    other = "EPSG:32633"
+    assert other != CRS
+    s.add_grid(dataclasses.replace(GB, id="C", crs=other))
+    before = s.line_for_key(IN_A).placement
+    outcome = s.move_lines([IN_A], "C")
+    assert outcome.changed == ()
+    assert [(x.key, x.reason) for x in outcome.skipped] == [
+        (IN_A, f"its new grid 'C' is in {other}, the line in {CRS}")
+    ]
+    assert s.line_for_key(IN_A).placement == before

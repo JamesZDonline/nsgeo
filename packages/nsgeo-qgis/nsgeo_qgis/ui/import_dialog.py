@@ -151,6 +151,10 @@ class GridImportPage(QWidget):
         #: (and nobody has chosen another since): Import refuses rather than
         #: quietly going into whichever grid the combo fell back to.
         self._lost: str | None = None
+        #: Whether the combo's grid is one somebody chose (the user, a retarget,
+        #: or the grid the dialog opened on) and not one it filled in by itself
+        #: from an empty site; only a chosen grid can be "lost".
+        self._chosen = False
         layout = QVBoxLayout(self)
         #: The hand-on banner (amber), hidden until `hand_on`.
         self.banner = QLabel("")
@@ -165,6 +169,7 @@ class GridImportPage(QWidget):
         self._fill_grid_combo()
         if grid_id:
             self.grid_combo.setCurrentIndex(max(0, self.grid_combo.findData(grid_id)))
+        self._chosen = bool(self.grid_combo.currentData())
         self.axis_combo = QComboBox()
         self.axis_combo.addItem("y (lines run along Y, offsets across X)", "y")
         self.axis_combo.addItem("x (lines run along X, offsets across Y)", "x")
@@ -430,10 +435,12 @@ class GridImportPage(QWidget):
         index = self.grid_combo.findData(grid_id)
         if index >= 0:
             self._lost = None
+            self._chosen = True
             self.grid_combo.setCurrentIndex(index)
 
     def _picked(self, *_: Any) -> None:
         self._lost = None
+        self._chosen = True
 
     def _on_grids_changed(self) -> None:
         # A slot (session.grids_changed): guarded, see the module docstring.
@@ -448,8 +455,15 @@ class GridImportPage(QWidget):
             finally:
                 self.grid_combo.blockSignals(False)
             now = self.grid_combo.currentData()
-            if before and now != before:
+            if before and now != before and self._chosen:
                 self._lost = before
+            if before and now != before:
+                self._chosen = False
+            if not before and now:
+                # The combo filled itself from an empty site: not a choice,
+                # and whatever was lost before is no longer what it shows.
+                self._lost = None
+                self._chosen = False
             if now != before:
                 self._grid_changed()
             else:

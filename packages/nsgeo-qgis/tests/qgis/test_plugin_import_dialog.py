@@ -1098,3 +1098,68 @@ def test_a_preset_that_cannot_be_applied_is_reported_and_the_import_stands(
     assert d.imported_keys == session.keys_on_grid("A")
     assert "could not be applied" in d.status.text()
     assert "no disk" in d.status.text()
+
+
+# ---- final review F2: only a grid somebody chose can be "lost" ----------------
+
+
+def _gridless(qgis_app, tmp_path):
+    s = SiteSession()
+    s.new_site(tmp_path)
+    return s
+
+
+def test_a_grid_the_combo_filled_in_by_itself_and_lost_again_is_not_a_loss(qgis_app, tmp_path):
+    # The GPS page's add_grid() on a gridless site fills this page's empty
+    # combo; its rollback removes the grid again. Nothing was ever chosen.
+    s = _gridless(qgis_app, tmp_path)
+    dlg = AddDataDialog(s, grid_id=None, mode=MODE_GRID)
+    page = dlg.grid_page
+    s.add_grid(GRID)
+    assert page.grid_combo.currentData() == "A"
+    s.remove_grid("A")
+    assert page._lost is None
+    s.add_grid(GRID_B)
+    assert page._lost is None
+    page.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    page.import_lines()
+    assert "no longer exists" not in page.status.text()
+
+
+def test_last_grid_removed_then_a_new_one_added_does_not_refuse_naming_the_old(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    s.add_grid(GRID)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    s.add_grid(GRID_B)
+    assert page.grid_combo.currentData() == "B"
+    assert page._lost is None
+    page.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    assert page.import_lines() is True
+
+
+def test_a_user_pick_clears_the_loss(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    for g in (GRID, GRID_B, GRID_C):
+        s.add_grid(g)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    page.grid_combo.activated.emit(page.grid_combo.findData("C"))
+    page.grid_combo.setCurrentIndex(page.grid_combo.findData("C"))
+    assert page._lost is None
+
+
+def test_a_retarget_clears_the_loss(qgis_app, tmp_path):
+    s = _gridless(qgis_app, tmp_path)
+    for g in (GRID, GRID_B):
+        s.add_grid(g)
+    dlg = AddDataDialog(s, grid_id="A", mode=MODE_GRID)
+    page = dlg.grid_page
+    s.remove_grid("A")
+    assert page._lost == "A"
+    page.retarget("B")
+    assert page._lost is None

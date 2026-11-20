@@ -847,8 +847,10 @@ class SiteSession(QObject):
         §3 call 14). The table that built the edits may be stale, so each
         edit is re-checked here and a line is skipped, and named in the
         outcome, when it was removed (`REMOVED`), when its placement is no
-        longer the one the table saw (`CHANGED_ELSEWHERE`), or when its new
-        grid no longer exists. The rest still apply.
+        longer the one the table saw (`CHANGED_ELSEWHERE`), when its new
+        grid no longer exists, or (a GPS line's `TrackEdit`) when its new
+        grid is in another CRS than the line's track. The rest still apply.
+        A `TrackEdit` changes only a GPS line's grid, label and destagger.
 
         A key is the file path, so editing never changes one: the current
         and preview lines, stacks, profiles, velocity, fits and channels all
@@ -890,6 +892,18 @@ class SiteSession(QObject):
                 gone = edit.grid_id or current.grid_id
                 skipped.append(Skipped(edit.key, label, f"its new grid {gone!r} no longer exists"))
                 continue
+            if isinstance(edit, TrackEdit) and edit.grid_id is not None:
+                grid_crs = frames[edit.grid_id].crs
+                if grid_crs != current.crs:
+                    skipped.append(
+                        Skipped(
+                            edit.key,
+                            label,
+                            f"its new grid {edit.grid_id!r} is in {grid_crs}, "
+                            f"the line in {current.crs}",
+                        )
+                    )
+                    continue
             if not edit.changes(frames):  # current == edit.seen was checked above
                 continue
             applied.append((edit.key, current, new))
