@@ -2482,3 +2482,18 @@ def test_the_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatc
     monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(42.0))
     _hover_at(v, 100, 40)
     assert v.readout_text().startswith("42.00 m along")
+
+
+def test_set_axes_refuses_a_non_finite_clock_and_changes_nothing(view):
+    v, rg = view
+    before = (v.transform, v._distance, v.ruler)
+    v.set_axes(
+        rg.n_traces,
+        rg.n_samples,
+        float("nan"),
+        rg.dt_ns,
+        distance_along=np.arange(rg.n_traces) / 30.0,
+    )
+    assert (v.transform, v._distance, v.ruler) == before
+    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, float("inf"))
+    assert (v.transform, v._distance, v.ruler) == before

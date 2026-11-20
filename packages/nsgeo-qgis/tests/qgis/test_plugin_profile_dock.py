@@ -703,27 +703,22 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     dock.deleteLater()
 
 
-def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
-    """Findings 2 and 5's fixed-width/eliding-label machinery is gone
-    entirely now (Finding 7) -- `minimumSizeHint().width()` should be
-    close to the ~658px Finding 5 already measured with `_ElidingLabel`
-    in place (measured here: 662px -- a plain, empty `QLabel("")` costs a
-    few px more than `_ElidingLabel`'s `Ignored` policy did, which is
-    expected and harmless), and nowhere near the ~1098px either
-    `setFixedWidth` version reached. The toolbar's widget set is now
-    IDENTICAL to what it was before any of this episode:
-    `difference_label` is back to a plain, unreserved `QLabel`, and there
-    is no preview label in the row at all any more.
-
-    Re-pinned for spec section 4.1: the Slice band button took the row to
-    766px, then the velocity label became an eliding one (it asks for no
-    width) and Fit became a split button; measured then 684px. The Fit button
-    now holds the width of its widest label ("Fit height"), so a pick never
-    moves the buttons after it: measured now 740px, so the bound is 740 (the
-    measurement rounded up to the next 10px)."""
+def test_the_toolbar_minimum_width_holds_in_any_font(qgis_app):
+    """The row's minimum width, checked in ways that hold in any font (pixel
+    bounds measured on one machine failed on CI's QGIS 3.44, 723 against 684).
+    The velocity label is an `ElidedLabel` (`Ignored`) and asks for no width,
+    and `difference_label` is a plain `QLabel`: long texts in both raise the
+    minimum by no more than the Difference label's own growth. And the row
+    stays within 900px, the docked width the M7 walkthrough used."""
     session = SiteSession()
     dock = ProfileDock(session)
-    assert dock.minimumSizeHint().width() <= 740
+    base = dock.minimumSizeHint().width()
+    label_before = dock.difference_label.sizeHint().width()
+    dock.difference_label.setText("Difference: " + "w" * 60)
+    dock.velocity_label.setText("Velocity " + "w" * 200)
+    grown = dock.difference_label.sizeHint().width() - label_before
+    assert dock.minimumSizeHint().width() <= base + grown
+    assert base <= 900
     dock.hide()
     dock.deleteLater()
 
@@ -2774,6 +2769,34 @@ def test_a_same_line_take_down_then_render_keeps_the_radar_window(opened):
     dock._show_steps_refused(key, is_preview=False)
     dock._render()
     assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_same_line_take_down_through_rule_1_does_not_set_the_header_flag(opened):
+    """The re-review's probe: a line with no steps, a zoom mid-record, a refused
+    steps path, then a Time zero appended. The take-down's axes went through
+    rule 1 on the same line's picture, so they are not header-only and the
+    render after must not move the radar window by the new zero."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    dock._show_steps_refused(key, is_preview=False)
+    session.append_step(key, build_step("time_zero", mode="sample", sample=20))
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_the_fit_button_keeps_its_widest_width_after_a_font_change(opened):
+    session, dock, key, line = opened
+    f = dock.fit_button.font()
+    f.setPointSizeF(f.pointSizeF() * 1.25)
+    dock.fit_button.setFont(f)
+    QTest.qWait(50)
+    xs = set()
+    for action in (dock.fit_all_action, dock.fit_width_action, dock.fit_height_action):
+        action.trigger()
+        QTest.qWait(50)
+        xs.add(dock.one_to_one_button.x())
+    assert len(xs) == 1
 
 
 def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened):

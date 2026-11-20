@@ -201,8 +201,11 @@ class ProfileView(QWidget):
         # both already reject `dt_ns <= 0`), but `set_axes` is a public entry
         # point with no caller between it and a header value, so it enforces
         # its own contract rather than trust every future caller to.
-        if not dt_ns > 0:
-            _log(f"set_axes: dt_ns must be positive, got {dt_ns}; axes left unchanged")
+        if not (math.isfinite(t0_ns) and math.isfinite(dt_ns) and dt_ns > 0):
+            _log(
+                f"set_axes: need finite t0_ns and positive finite dt_ns, got {t0_ns}, "
+                f"{dt_ns}; axes left unchanged"
+            )
             return
         # C1a: a `distance_along` of the wrong length reaches `_distance_ticks`
         # unvalidated and raises `ValueError: fp and xp are not of the same
@@ -482,17 +485,26 @@ class ProfileView(QWidget):
         self.view_changed.emit()
         self.update()
 
+    def _window_metres_per_trace_unit(self) -> float | None:
+        """Metres per trace unit across the current window, or None without a
+        transform or metres along the line. May be zero or non-finite where
+        the radar stood still across the window."""
+        t = self.transform
+        if t is None:
+            return None
+        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
+        if lo is None or hi is None:
+            return None
+        return abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
+
     def _true_scale_inputs(self) -> tuple[float, float] | None:
         """(metres per trace unit across, ns per metre down) for the current
         window, or None where a true scale cannot be worked out."""
         t = self.transform
         if t is None or self._velocity is None:
             return None
-        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
-        if lo is None or hi is None:
-            return None
-        per_unit = abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
-        if not (math.isfinite(per_unit) and per_unit > 0):
+        per_unit = self._window_metres_per_trace_unit()
+        if per_unit is None or not (math.isfinite(per_unit) and per_unit > 0):
             return None
         h = t.dt_ns
         tm = max((t.time_lo + t.time_hi) / 2, h)
@@ -509,10 +521,9 @@ class ProfileView(QWidget):
         t = self.transform
         if t is None or self._velocity is None:
             return False
-        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
-        if lo is None or hi is None:
+        per_unit = self._window_metres_per_trace_unit()
+        if per_unit is None:
             return False
-        per_unit = abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
         return not (math.isfinite(per_unit) and per_unit > 0)
 
     def can_true_scale(self) -> bool:

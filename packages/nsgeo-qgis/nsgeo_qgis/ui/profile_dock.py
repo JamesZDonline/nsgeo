@@ -112,7 +112,7 @@ from nsgeo.velocity_fit import (
 from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis, QgsSettings
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import QPoint, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
@@ -289,6 +289,46 @@ def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
     return f"header ε {line.header.epsr:g}, {line_label(line)}"
 
 
+class _FitButton(QToolButton):
+    """The Fit split button, holding the width of its widest action label.
+    The width is worked out again on a font or style change, which alter what
+    each label needs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._actions: tuple[Any, ...] = ()
+        self._busy = False
+
+    def set_actions(self, actions: tuple[Any, ...]) -> None:
+        self._actions = actions
+        self._hold_widest()
+
+    def _hold_widest(self) -> None:
+        if not self._actions or self._busy:
+            return
+        self._busy = True
+        try:
+            # A new button starts on the last action given (plain Fit).
+            current = self.defaultAction() or self._actions[-1]
+            self.setMinimumWidth(0)
+            widest = 0
+            for action in self._actions:
+                self.setDefaultAction(action)
+                widest = max(widest, self.sizeHint().width())
+            self.setDefaultAction(current)
+            self.setMinimumWidth(widest)
+        finally:
+            self._busy = False
+
+    def event(self, e: Any) -> bool:
+        try:
+            if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+                self._hold_widest()
+        except Exception as exc:  # an override that raises is a hard crash
+            _log(f"fit button width: {exc!r}")
+        return super().event(e)
+
+
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
@@ -418,7 +458,7 @@ class ProfileDock(QgsDockWidget):
         # any of this: a plain `QLabel`, immediately before `fit_button`.
         self.difference_label = QLabel("")
         bar.addWidget(self.difference_label)
-        self.fit_button = QToolButton()
+        self.fit_button = _FitButton()
         self.fit_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.fit_menu = QMenu(self.fit_button)
         self.fit_menu.setToolTipsVisible(True)
@@ -431,12 +471,11 @@ class ProfileDock(QgsDockWidget):
         self.fit_button.setMenu(self.fit_menu)
         # Not remembered between sessions: a new dock starts with Fit.
         # The button's width follows its default action's text, so a pick would
-        # move the buttons after it. Give it the width of its widest state now.
-        widest = 0
-        for action in (self.fit_height_action, self.fit_width_action, self.fit_all_action):
-            self.fit_button.setDefaultAction(action)
-            widest = max(widest, self.fit_button.sizeHint().width())
-        self.fit_button.setMinimumWidth(widest)
+        # move the buttons after it. It holds the width of its widest state,
+        # recomputed on a font or style change (see `_FitButton`).
+        self.fit_button.set_actions(
+            (self.fit_height_action, self.fit_width_action, self.fit_all_action)
+        )
         self.one_to_one_button = QToolButton()
         self.one_to_one_button.setText("1:1")
         bar.addWidget(self.fit_button)
@@ -960,6 +999,12 @@ class ProfileDock(QgsDockWidget):
         self._cutoff_step = None
         self._shown_radargram = None
         self.view.set_cutoff(None)
+        # Header axes are the radar clock, unless this same line's processed
+        # picture was up (rule 1 carries its window onto them, rule 2 holds it
+        # or the view stays as it was): then the window is still the one the
+        # user zoomed on, and the render that follows must carry it again.
+        # Checked before the call, which resets the flag.
+        from_processed = self._axes_key == key and not self._axes_from_header
         self._set_axes_holding(
             key,
             line.n_traces,
@@ -968,10 +1013,7 @@ class ProfileDock(QgsDockWidget):
             line.header.dt_ns,
             self._safe_distance(line),
         )
-        # Header axes are the radar clock, unless the clock rule just carried
-        # this same line's window onto them: then the window is still the one
-        # the user zoomed on, and the render that follows must carry it again.
-        self._axes_from_header = not self._clock_carried  # also `_show_steps_refused`
+        self._axes_from_header = not from_processed  # also `_show_steps_refused`
         self.view.set_image(None)
         self._sync_true_scale_button()
 
