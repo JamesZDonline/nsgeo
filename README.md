@@ -128,8 +128,8 @@ release's notes list everything in it.
   shared colour stretch worked out in the background, is being built.
 - **A 3D Analysis drop-down on the toolbar** ([#227]): Surface from picks…, 3D
   view and Export for ParaView… move into one drop-down after Cut, and
-  ParaView… leaves the Slices panel. Design approved and plan written; being
-  built.
+  ParaView… leaves the Slices panel. Built and reviewed; the walkthrough is
+  next.
 - **The profile: axes, zoom and time zero by eye** ([#131], [#5], [#11],
   [#14], [#158], and the last part of [#163]). A button that hides the slice
   band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
