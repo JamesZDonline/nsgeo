@@ -1174,7 +1174,9 @@ def test_depth_axis_uses_the_velocity_model(view):
     # pinned constant. Values below computed independently (np.linspace/
     # depth_at/y_of_time), not by calling `_depth_ticks` itself.
     ys = [y for _, y in v._depth_ticks(v.transform)]
-    assert ys == [pytest.approx(expected) for expected in (16.5, 57.75, 99.0, 140.25, 181.5, 222.75, 264.0)]
+    assert ys == [
+        pytest.approx(expected) for expected in (16.5, 57.75, 99.0, 140.25, 181.5, 222.75, 264.0)
+    ]
 
 
 def test_time_ticks_use_the_actual_time_range_and_positions(view):
