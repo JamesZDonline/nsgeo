@@ -112,6 +112,7 @@ release's notes list everything in it.
 | M16 | Cuts in 3-D, M16's fourth and last plan: picks made on a cut join surfaces, the ParaView export's picks and the 3-D view, on the clock the cut was made on; deleting a cut marks its surfaces stale and a rebuild says which picks it left out. Walls in the ParaView export were built and dropped at the walkthrough ([#229]) | next release |
 | M17b | Add data and GPS grids, M17's second plan: one Add data ▾ ▸ GPR… dialog with a Grid / GPS switch; GPS lines go into an existing grid or a new one fitted around their tracks, holding every trace and previewed on the map; files GPS cannot place are handed on to Grid mode with their direction and first line guessed; GPS lines in Edit lines, Move to grid and Fit to these tracks; a site with only GPS lines hides them when you zoom out ([#222], [#233]) | next release |
 | | A 3D Analysis ▾ drop-down on the toolbar, after Cut, holds Surface from picks…, 3D view and Export for ParaView…; ParaView… leaves the Slices panel ([#227]) | next release |
+| | Whole site never stuck, never frozen: a fine cell no longer freezes QGIS while its fill and colour stretch are worked out, in Whole site or This grid; the work happens in the background with its progress, a Cancel that puts the picture's settings back, and the last picture kept until the new one lands (Whole site at 0.02 m on ten grids: 197 s frozen before, now the picture in about 93 s with QGIS responsive). Also: a stuck site wait names what holds it, the stretch's memory peak is lower, Export is greyed while an export runs, and the site engine's review follow-ups ([#193], [#166], [#75], [#157], [#235]) | next release |
 
 ### In progress
 
@@ -121,14 +122,6 @@ release's notes list everything in it.
   is **Add data ▾ ▸ Magnetometer…**, and a site with mag saves as schema 5. Awaiting its
   walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
-- **Whole site: never stuck, never frozen** ([#166], [#193], parts of [#75]
-  and [#157]). Whole site no longer sits at "preparing" now and then, and a
-  fine cell no longer freezes QGIS while its fill is worked out, in Whole
-  site or This grid: the fill is worked out in the background, with its
-  progress and a Cancel. Also the site engine's review follow-ups. In two
-  plans: Plan A, the engine, is built (one moved-grid hang found and fixed;
-  the local loop never reproduced #166). Plan B, the fill and then the
-  shared colour stretch worked out in the background, is being built.
 - **The profile: axes, zoom and time zero by eye** ([#131], [#5], [#11],
   [#14], [#158], and the last part of [#163]). A button that hides the slice
   band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
@@ -199,14 +192,16 @@ Grouped by area. The order within a group is not a priority.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]); lines processed differently in
   one cube, such as migration at each line's own velocity ([#178]); whole site
-  at fine cells, the follow-ups: averaged previews ([#157]; its edge lines and
-  memory estimate are in progress above); exports of
+  at fine cells, the follow-ups: averaged previews ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
   ([#167]); move the colour ramp's stops and watch the slice recolour as you
-  drag ([#183]); a fine cell no longer freezes QGIS while its fill is worked
-  out, about 105 s for Whole site at 0.02 m on ten grids ([#193], in progress
-  above); choose a
-  grid's preset straight from the Whole site grid list ([#199]).
+  drag ([#183]); choose a
+  grid's preset straight from the Whole site grid list ([#199]); the fine-cell
+  follow-ups from making the fill background work: a cut's section and the
+  ParaView export still build their fills in the foreground, the ordinary
+  slider tick at 0.02 m (about 0.6 s on Whole site), the old picture following
+  the slider while a new fill works, and the colour stretch's remaining memory
+  ([#236]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]); cuts that show the wiggle, read from the lines they cross with
@@ -323,6 +318,8 @@ Grouped by area. The order within a group is not a priority.
 [#230]: https://github.com/JamesZDonline/nsgeo/issues/230
 [#231]: https://github.com/JamesZDonline/nsgeo/issues/231
 [#233]: https://github.com/JamesZDonline/nsgeo/pull/233
+[#235]: https://github.com/JamesZDonline/nsgeo/pull/235
+[#236]: https://github.com/JamesZDonline/nsgeo/issues/236
 [#232]: https://github.com/JamesZDonline/nsgeo/issues/232
 
 ## Why
