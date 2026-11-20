@@ -149,14 +149,26 @@ def _level(
     return Level(tuple(offsets), coefficients, active, scale)
 
 
-def _coarsen(level: Level) -> Level:
-    """The Galerkin coarse level of `level`, found by probing it."""
+def _coarsen(
+    level: Level,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> Level:
+    """The Galerkin coarse level of `level`, found by probing it.
+
+    `should_stop` is asked before every probe (each is a pass over the fine
+    level, a second or so at 1000 x 800 cells); True raises `SolveStopped`.
+    `progress` gets the share of probes done."""
     shape = level.active.shape
     cs = coarse_shape(shape)
     mask = level.active.astype(np.float32)
     coef = np.zeros((len(COARSE_OFFSETS), cs[0], cs[1]), np.float32)
     for py in range(_PERIOD):
         for px in range(_PERIOD):
+            if should_stop is not None and should_stop():
+                raise SolveStopped
+            if progress is not None:
+                progress((py * _PERIOD + px) / (_PERIOD * _PERIOD))
             probe = np.zeros(cs, np.float32)
             probe[py::_PERIOD, px::_PERIOD] = 1.0
             image = apply_stencil(level.offsets, level.coefficients, prolong(probe, shape) * mask)
@@ -337,17 +349,27 @@ def build_hierarchy(
     active: np.ndarray,
     *,
     should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> Hierarchy:
     """Coarsen the operator until `COARSEST_UNKNOWNS` remain, then invert that.
 
     `coefficients` itself becomes level 0's, with no copy, and goes read-only;
-    `active` is copied. `should_stop` is asked once per level; True raises
-    `SolveStopped`. The dense inverse of the coarsest level cannot be stopped.
+    `active` is copied. `should_stop` is asked before every probe of every
+    level's coarsening; True raises `SolveStopped`. `progress` gets fractions
+    in [0, 1) that never fall, weighting a level at a quarter of the one above
+    it. The dense inverse of the coarsest level cannot be stopped.
     """
     levels = [_level(offsets, coefficients, active.copy())]
     while int(levels[-1].active.sum()) > COARSEST_UNKNOWNS and levels[-1].active.shape != (1, 1):
         if should_stop is not None and should_stop():
             raise SolveStopped
-        levels.append(_coarsen(levels[-1]))
+        n = len(levels) - 1
+        done, share = 1.0 - 0.25**n, 0.75 * 0.25**n
+
+        def level_progress(f: float, done: float = done, share: float = share) -> None:
+            if progress is not None:
+                progress(done + share * f)
+
+        levels.append(_coarsen(levels[-1], should_stop, level_progress))
     cells, inverse = _coarsest_inverse(levels[-1])
     return Hierarchy(tuple(levels), cells, inverse)

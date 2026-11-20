@@ -441,7 +441,7 @@ def plan_curvature(
     finite within `max_distance_m` of a data cell, as IDW's and kriging's are.
 
     `should_stop` is asked between the stages, between the offsets of the
-    reach, the terms of the stencil and the levels of the hierarchy; True
+    reach, the terms of the stencil and the probes of the hierarchy; True
     raises `SolveStopped`. `progress` gets fractions that never fall and end
     at exactly 1.0: the reach is the first tenth, growing it to 0.15, the
     stencil to 0.4, and the hierarchy the rest. The dense solve on the coarsest
@@ -468,7 +468,13 @@ def plan_curvature(
     unknown = domain & ~pop2
     coefficients = _stencil(domain, unknown, should_stop)
     report(0.4)
-    hierarchy = build_hierarchy(_OFFSETS, coefficients, unknown, should_stop=should_stop)
+    hierarchy = build_hierarchy(
+        _OFFSETS,
+        coefficients,
+        unknown,
+        should_stop=should_stop,
+        progress=lambda fraction: report(0.4 + 0.6 * fraction),
+    )
     plan = CurvaturePlan(
         shape=(int(pop2.shape[0]), int(pop2.shape[1])),
         populated=pop2.ravel(),

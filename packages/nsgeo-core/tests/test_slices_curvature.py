@@ -339,6 +339,58 @@ def test_max_distance_zero_returns_the_data_alone():
     assert np.isnan(out[~pop]).all()
 
 
+def _stop_after(trigger, extra_calls=0):
+    """A `should_stop` and a progress sink: True on the call `extra_calls`
+    after the first progress report at or above `trigger` (0 = the next)."""
+    seen = []
+    state = {"after": 0}
+
+    def stop():
+        if seen and seen[-1] >= trigger:
+            state["after"] += 1
+            return state["after"] > extra_calls
+        return False
+
+    return stop, seen.append, seen
+
+
+def test_a_plan_stops_mid_stencil():
+    """The stencil's three terms each ask. Two pass and the third stops, so
+    the last report is the grow's 0.15 and the hierarchy never started."""
+    pop = lines(ny=80, nx=90)
+    stop, progress, seen = _stop_after(0.15, extra_calls=2)
+    with pytest.raises(SolveStopped):
+        plan_curvature(pop, STEP, 0.25, should_stop=stop, progress=progress)
+    assert seen[-1] == 0.15
+
+
+def test_a_plan_stops_mid_coarsening(monkeypatch):
+    """A probe of level 0's coarsening is a pass over the whole frame: a stop
+    asked for after the first probe must land inside that level (progress
+    below 0.4 + 0.6 * 0.75), not wait for the next level's first check."""
+    monkeypatch.setattr(multigrid, "COARSEST_UNKNOWNS", 50)
+    pop = lines(ny=80, nx=90)
+    stop, progress, seen = _stop_after(0.4 + 1e-9, extra_calls=2)
+    with pytest.raises(SolveStopped):
+        plan_curvature(pop, STEP, 0.25, should_stop=stop, progress=progress)
+    assert 0.4 < seen[-1] < 0.4 + 0.6 * 0.75
+
+
+def test_the_hierarchy_progress_never_falls_and_stays_below_one(monkeypatch):
+    monkeypatch.setattr(multigrid, "COARSEST_UNKNOWNS", 50)
+    pop = lines(ny=80, nx=90)
+    levels = []
+    c = np.zeros((len(_OFFSETS), 80, 90), np.float32)
+    c[len(_OFFSETS) // 2] = 1.0
+    seen = []
+    h = multigrid.build_hierarchy(_OFFSETS, c, pop, progress=seen.append)
+    levels.append(len(h.levels))
+    assert levels[0] > 2
+    assert seen == sorted(seen)
+    assert seen[0] >= 0.0 and seen[-1] < 1.0
+    assert seen[-1] > 0.75
+
+
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_a_solve_stops_when_asked(dtype):
     """Task 2 runs solves on a worker thread, so a stop must land between

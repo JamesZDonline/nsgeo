@@ -184,13 +184,14 @@ def _reach(
 ) -> np.ndarray:
     """Cells with a data cell within the offsets (data cells included).
 
-    `should_stop` is asked every `_PRUNE_EVERY` offsets; True raises `SolveStopped`."""
+    `should_stop` is asked before every offset (a pass over the frame costs far
+    more than the question); True raises `SolveStopped`."""
     ny, nx = pop2.shape
     reach = pop2.copy()
     # zip without strict=: that is Python 3.10+, and the core supports 3.9.
     # The offsets come in equal-length arrays by construction.
-    for i, (oy, ox) in enumerate(zip(dy.tolist(), dx.tolist())):
-        if should_stop is not None and i % _PRUNE_EVERY == 0 and should_stop():
+    for oy, ox in zip(dy.tolist(), dx.tolist()):
+        if should_stop is not None and should_stop():
             raise SolveStopped
         # reach[y, x] |= pop[y + oy, x + ox], reading False outside the frame
         ys, ye = max(0, -oy), min(ny, ny - oy)
@@ -227,9 +228,10 @@ def _neighbourhoods(
 ) -> np.ndarray:
     """Per target, the K nearest data cells in each quadrant as flat ids (-1 = empty).
 
-    Every `_PRUNE_EVERY` offsets `should_stop` is asked (True raises
-    `SolveStopped`) and `progress` gets the share of offsets done, which the
-    early exit when every quadrant is full does not top up."""
+    `should_stop` is asked before every offset (True raises `SolveStopped`): at
+    fine cells one offset's pass over the targets takes tens of milliseconds.
+    Every `_PRUNE_EVERY` offsets `progress` gets the share of offsets done,
+    which the early exit when every quadrant is full does not top up."""
     ny, nx = pop2.shape
     k = NEIGHBOURS_PER_QUADRANT
     # int32 throughout, as `sources` already is: half the working set of intp.
@@ -241,11 +243,10 @@ def _neighbourhoods(
     active = np.arange(targets.size, dtype=np.int32)
     total = max(1, dy.size)
     for i, (oy, ox, q) in enumerate(zip(dy.tolist(), dx.tolist(), quad.tolist())):  # 3.9: no strict
-        if i % _PRUNE_EVERY == 0:
-            if should_stop is not None and should_stop():
-                raise SolveStopped
-            if progress is not None:
-                progress(i / total)
+        if should_stop is not None and should_stop():
+            raise SolveStopped
+        if i % _PRUNE_EVERY == 0 and progress is not None:
+            progress(i / total)
         if i % _PRUNE_EVERY == 0 and i:
             active = active[(count[active] < k).any(axis=1)]
             if not active.size:
