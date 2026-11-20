@@ -250,7 +250,8 @@ class ProfileView(QWidget):
     def metres_at_trace_units(self, u: Any) -> Any:
         """Metres along the line at the `ViewTransform` horizontal coordinate `u`
         (a number or an array); None without a distance of at least 2 traces.
-        The one road from trace units to metres."""
+        The one road from trace units to metres. The pair is where M17c swaps
+        traces for distance."""
         if self._distance is None or len(self._distance) < 2:
             return None
         return metres_at(self._distance, u)
@@ -469,7 +470,8 @@ class ProfileView(QWidget):
         return per_unit, 1.0 / slope
 
     def can_true_scale(self) -> bool:
-        """True with a transform, a velocity and metres along the line."""
+        """True with a transform, a velocity and metres along the line, and a
+        non-zero, finite metre span across the current window."""
         return self._true_scale_inputs() is not None
 
     def true_scale(self) -> None:

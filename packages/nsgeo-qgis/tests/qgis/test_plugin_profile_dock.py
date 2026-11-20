@@ -586,6 +586,31 @@ def test_true_scale_is_greyed_without_a_velocity(opened, monkeypatch):
     assert not dock.one_to_one_button.isEnabled()
 
 
+def test_true_scale_is_greyed_with_no_line_and_after_the_view_is_cleared(bare, opened):
+    _, dock, _ = bare
+    assert not dock.one_to_one_button.isEnabled()
+    assert dock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_GREYED_TIP
+    session, odock, key, line = opened
+    assert odock.one_to_one_button.isEnabled()
+    session.close_site()
+    assert not odock.one_to_one_button.isEnabled()
+    assert odock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_GREYED_TIP
+
+
+def test_true_scale_greys_when_the_window_moves_onto_a_flat_run(opened, monkeypatch):
+    session, dock, key, line = opened
+    v = dock.view
+    assert dock.one_to_one_button.isEnabled()
+    n = line.n_traces
+    flat = np.r_[np.arange(n // 2, dtype=float), np.full(n - n // 2, n // 2 - 1.0)] / 60.0
+    v._distance = flat
+    v.transform = v.transform.with_window(
+        n * 0.6, n * 0.9, v.transform.time_lo, v.transform.time_hi
+    )
+    v.view_changed.emit()
+    assert not dock.one_to_one_button.isEnabled()
+
+
 def test_true_scale_is_greyed_on_a_line_with_no_metres(opened):
     session, dock, key, line = opened
     k2, _ = _add_line(

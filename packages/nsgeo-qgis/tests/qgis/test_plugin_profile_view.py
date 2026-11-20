@@ -2154,3 +2154,13 @@ def test_the_metre_helpers_carry_the_held_window(ruled, monkeypatch):
     lo, hi = v.window_m()
     v.set_window_m(lo + 0.5, hi - 0.5, v.transform.time_lo, v.transform.time_hi)
     assert fwd and back  # window_m and set_window_m both went through the pair
+
+
+def test_true_scale_is_off_where_the_metre_span_is_not_finite(make_view):
+    v = make_view()
+    v.set_axes(200, 128, -4.0, 0.5, distance_along=np.r_[np.arange(199.0), np.inf] / 60.0)
+    v.set_velocity(VelocityModel.constant(0.1))
+    assert not v.can_true_scale()
+    before = v.transform
+    v.true_scale()
+    assert v.transform == before

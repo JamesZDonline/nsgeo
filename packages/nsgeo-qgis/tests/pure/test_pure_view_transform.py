@@ -354,11 +354,12 @@ def test_true_scale_on_a_mirrored_ruler_keeps_the_mirror():
     assert s.mirrored and s.bounds == (-20.0, 260.0)
 
 
-def test_true_scale_at_the_clamps_does_not_raise():
+def test_true_scale_at_the_clamps_hits_both_minimum_spans():
     t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264).with_window(0.0, 4.0, 0.0, 0.8)
-    s = true_scale_window(t, 1 / 60, 2000.0)  # absurdly slow ground
-    assert s.time_hi - s.time_lo >= 4 * 0.2 - 1e-9
-    assert s.trace_hi - s.trace_lo >= 4.0 - 1e-9
+    s = true_scale_window(t, 1 / 60, 20.0)  # asks for 0.506 ns: the minimum time span wins
+    assert s.time_hi - s.time_lo == pytest.approx(4 * 0.2)
+    s = true_scale_window(ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264), 1 / 60, 20000.0)
+    assert s.trace_hi - s.trace_lo == pytest.approx(4.0)  # asks for 0.81 traces
 
 
 def test_resized_keeps_the_mirror_and_the_bounds():

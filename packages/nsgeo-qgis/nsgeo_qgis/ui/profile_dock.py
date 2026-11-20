@@ -507,6 +507,8 @@ class ProfileDock(QgsDockWidget):
         self.save_fit_button.clicked.connect(self._save_velocity_fit)
         self.clear_velocity_button.clicked.connect(self._clear_velocity_points)
         self.view.view_changed.connect(self._sync_strip_mapping)
+        # True scale depends on the window (a flat stretch has no metres).
+        self.view.view_changed.connect(self._sync_true_scale_button)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
         self.gain_strip.reset_requested.connect(self.gain_reset_requested.emit)
@@ -524,6 +526,7 @@ class ProfileDock(QgsDockWidget):
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
         self._sync_slice_band_button()
+        self._sync_true_scale_button()
 
     def set_cut_sections(self, sections: CutSections) -> None:
         """Where a cut's section comes from. Its `section_changed` redraws the cut on show."""
@@ -1194,6 +1197,7 @@ class ProfileDock(QgsDockWidget):
         self._reset_box_state()
         self._update_velocity_fit()
         self.channel_combo.hide()
+        self._sync_true_scale_button()
 
     # ---- preview (M7, spec §3.3) ----------------------------------------
     def _on_preview_changed(self, key: str, trace: int) -> None:
