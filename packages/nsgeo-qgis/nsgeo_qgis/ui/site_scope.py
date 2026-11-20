@@ -1409,6 +1409,12 @@ class SiteScope:
                 dock.stretch_combo.currentIndex() != 1
                 and not dock.own_colours_on()  # #180: no shared stretch to measure
                 and not refine.stretch_final(self.stretch_key(z))
+                # Every grid's window, not only the shown ones': a grid whose fill
+                # the flow is still working out would be built here, on the GUI
+                # thread, and its worker's landing refused. The landing redraw or
+                # the provisional stretch landing arms the rest again.
+                and not dock.fill_flow.working
+                and self.engine.weights_cached(finish)
             ):
                 stretch = self.engine.stretch_solves(thickness_ns, finish)
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):

@@ -57,7 +57,7 @@ QUICK_CELL = 0.1
 MID_CELL = 0.018
 MIN_SLOW_S = 1.0
 #: Whole site: the cell at which the three grids' fills together take about
-#: 4.4 s here (CI at 0.47 of that, 2.1 s, about 0.7 s a grid against the 0.25 s
+#: 4.4 s here (CI at 0.47 of that, 2.1 s, about 0.7 s a grid against the 0.3 s
 #: gap limit). Measured per cell: 0.08 m 1.0 s, 0.06 m 2.5 s, 0.05 m 4.4 s, in
 #: the three grids' sum.
 SITE_SLOW_CELL = 0.05
@@ -1425,3 +1425,47 @@ def test_the_cancel_link_tooltip_fits_a_cancel_with_and_without_a_picture(site_q
     _, dock = site_quick
     tip = dock.cancel_link.toolTip()
     assert "picture" in tip and "without one" in tip
+
+
+def test_a_slider_move_mid_fill_never_makes_the_rest_build_the_grid_still_filling(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    """R1: A and B have landed, C (above the shown depth) is still on the worker; a
+    slider move draws a preview and arms the rest, whose stretch solves would
+    build C's plan on the GUI thread and refuse the worker's landing."""
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        _assert_slow_site(dock)
+        flow, engine = dock.fill_flow, dock.site_engine
+        _, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        panel = dock.site_finish
+        panel.method_combo.setCurrentIndex(panel.method_combo.findData("min_curvature"))
+        _wait_for_refine(dock, 120.0)
+        main, worker = _main_thread_builds(monkeypatch)
+        lands: list[tuple[str, bool]] = []
+        real_land = FillJob.land
+        monkeypatch.setattr(
+            FillJob,
+            "land",
+            lambda self: lands.append((self.grid_id, real_land(self))) or lands[-1][1],
+        )
+        _site_cell(dock, SITE_SLOW_CELL)
+        assert spin_until(lambda: flow.working and flow._landed >= 2, 120_000)
+        assert flow._landed < flow._total, "C must still be filling"
+        dock.slice_slider.setValue(min(dock.slice_slider.maximum(), outside + 1))
+        dock._site.tick.stop()
+        dock._site.refresh_slice()
+        dock._site.refine.rest.stop()
+        dock._site._on_rest()  # the rest ran out while C is still filling
+        _wait_idle(dock)
+        spin_until(lambda: False, 300)
+        assert main == [], "the rest built a plan on the GUI thread"
+        assert ("C", True) in lands, lands
+        assert ("C", False) not in lands, lands
+        assert engine.engine_for("C").weights_cached(dock.site_finish.value())
+    finally:
+        _close(plugin, answer_modal)
