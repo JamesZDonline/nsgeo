@@ -170,3 +170,15 @@ def test_a_refused_landing_lets_go_of_the_fill(sourced):  # noqa: F811
     engine.clear()
     assert job.land() is False
     assert job.fill is None and job.preview is None
+
+
+def test_an_installed_landing_keeps_the_fill_a_refused_one_lets_go(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    job, cov, finish = _held_job(engine, session)
+    assert job.land() is True
+    assert job.fill is not None
+    assert job.fill is engine._weights[1]
+    stale, _, _ = _held_job(engine, session)
+    engine.clear()
+    assert stale.land() is False
+    assert stale.fill is None

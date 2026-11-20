@@ -69,12 +69,21 @@ class FillJob:
         self.fraction = 1.0
 
     def land(self) -> bool:
-        """GUI thread: hold the fill if the engine still wants it. Either way
-        the job lets go of its fill, preview and mask, so a stale job kept by
-        a caller never holds a refused fill beside the next build."""
+        """GUI thread: hold the fill if the engine still wants it.
+
+        Installed: the job keeps its `fill` and `preview` (the engine holds the
+        same objects, so nothing is freed by letting go), because a later job
+        may read them on the worker. Refused: the job lets go of its fill,
+        preview and mask, so a stale job kept by a caller never holds a refused
+        fill beside the next build. A reader must therefore treat
+        `fill is None` as "this work is stale: measure nothing".
+        """
+        installed = False
         try:
-            return self._engine._land_fill(self)
+            installed = self._engine._land_fill(self)
+            return installed
         finally:
-            self.fill = None
-            self.preview = None
-            self._populated = np.zeros(0, dtype=bool)
+            if not installed:
+                self.fill = None
+                self.preview = None
+                self._populated = np.zeros(0, dtype=bool)
