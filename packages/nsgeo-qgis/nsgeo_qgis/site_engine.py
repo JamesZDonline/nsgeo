@@ -1087,8 +1087,12 @@ class SiteEngine(QObject):
         manual: Mapping[str, float],
         coverage: bool = False,
         preview: bool = False,
+        sliced: _Sliced | None = None,
     ) -> SiteSlice:
         """One tick: every ready grid's window, normalised, filled and composed.
+
+        `sliced` is this tick's `sliced(top_ns, thickness_ns)` when the caller took
+        it already (to ask `fills_missing`): the tick then slices each grid once.
 
         Spec 4.3: the same time window in every grid (`window_on`); a grid
         whose range misses it is absent (`windows[g] is None`) and nodata.
@@ -1109,7 +1113,7 @@ class SiteEngine(QObject):
             self._site_seams()
         previewed: dict[str, PreviewedGrid] = {}
         started = time.perf_counter()
-        sliced = self._sliced(top_ns, thickness_ns)
+        sliced = sliced if sliced is not None else self._sliced(top_ns, thickness_ns)
         # A coverage tick finishes nothing, so it hashes nothing either.
         live = preview and not coverage
         draw = self._draw_live(finish, sliced[1], previewed) if live else self._draw_full(finish)
@@ -1206,21 +1210,69 @@ class SiteEngine(QObject):
             slices.extend(shown.values())
         return limit_of(slices, clip)
 
-    def fills_missing(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[str]:
-        """The ready grids, in `ready_grids` order, whose fill for this window's
-        covered cells is not held (#193): a draw at this window would build it.
-        Slices through `_sliced`, as the draw does anyway. A grid whose axis
-        misses the window builds nothing, so it is never missing."""
+    def sliced(self, top_ns: float, thickness_ns: float) -> _Sliced:
+        """Each ready grid's window at this site time and each present grid's
+        binned slice: what a tick draws from, taken once and passed to
+        `fills_missing`, `fill_jobs` and `slice_at`."""
         self._require_lattice()
-        _, binned = self._sliced(top_ns, thickness_ns)
-        return [
-            g for g in self.ready_grids if g in binned and not self._fill_held(g, binned, finish)
-        ]
+        return self._sliced(top_ns, thickness_ns)
 
-    def _fill_held(
-        self, grid_id: str, binned: Mapping[str, tuple[np.ndarray, np.ndarray]], finish: SliceFinish
-    ) -> bool:
-        return self._engines[grid_id].fill_held(binned[grid_id][1], finish)
+    def _coverage_for(
+        self, grid_id: str, thickness_ns: float, sliced: _Sliced
+    ) -> np.ndarray | None:
+        """`grid_id`'s covered cells for its fill: its slice at the shown window
+        when it has one, else at the first window the shared stretch measures it
+        in. Within a grid the covered cells are the same in every window (the
+        binner rejects lines that do not span the axis), so any will do; None when
+        no window reaches the grid."""
+        binned = sliced[1]
+        if grid_id in binned:
+            return binned[grid_id][1]
+        for top, thickness in self._limit_windows_ns(thickness_ns):
+            window = self._grid_window(grid_id, top, thickness)
+            if window is not None:
+                return self._engines[grid_id].slice_at(window)[1]
+        return None
+
+    def _fill_targets(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        sliced: _Sliced | None,
+        every_grid: bool,
+    ) -> list[tuple[str, np.ndarray]]:
+        """`(grid id, covered cells)` for each grid whose fill is not held, in
+        `ready_grids` order: the grids with a window at this time, or with
+        `every_grid` every ready grid with an axis (what the shared stretch and
+        its rest need: a fill for each, or the job builds one itself while the
+        engine still holds the old, and the rest builds it on the GUI thread)."""
+        self._require_lattice()
+        taken = sliced if sliced is not None else self._sliced(top_ns, thickness_ns)
+        grids = (
+            self.fills_wanted() if every_grid else [g for g in self.ready_grids if g in taken[1]]
+        )
+        targets = []
+        for g in grids:
+            cover = self._coverage_for(g, thickness_ns, taken)
+            if cover is not None and not self._engines[g].fill_held(cover, finish):
+                targets.append((g, cover))
+        return targets
+
+    def fills_missing(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        *,
+        sliced: _Sliced | None = None,
+        every_grid: bool = False,
+    ) -> list[str]:
+        """The ready grids, in `ready_grids` order, whose fill is not held (#193):
+        those with a window at this time, or every one with `every_grid`. A grid
+        whose axis misses the window builds nothing there, so it is only ever
+        missing with `every_grid`."""
+        return [g for g, _ in self._fill_targets(top_ns, thickness_ns, finish, sliced, every_grid)]
 
     def fills_wanted(self) -> list[str]:
         """The ready grids that have a time axis, in `ready_grids` order: the
@@ -1231,16 +1283,21 @@ class SiteEngine(QObject):
         self._require_lattice()
         return [g for g in self.ready_grids if self._engines[g].z is not None]
 
-    def fill_jobs(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[FillJob]:
+    def fill_jobs(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        *,
+        sliced: _Sliced | None = None,
+        every_grid: bool = False,
+    ) -> list[FillJob]:
         """One `FillJob` per missing grid, in `fills_missing` order. Making a job
         drops that engine's held fill, as `_fill_for` does, so call this only
         when the work will start."""
-        self._require_lattice()
-        _, binned = self._sliced(top_ns, thickness_ns)
         return [
-            self._engines[g].fill_job(binned[g][1], finish)
-            for g in self.ready_grids
-            if g in binned and not self._fill_held(g, binned, finish)
+            self._engines[g].fill_job(cover, finish)
+            for g, cover in self._fill_targets(top_ns, thickness_ns, finish, sliced, every_grid)
         ]
 
     def fill_keys(self, grids: Sequence[str], finish: SliceFinish) -> tuple[Any, ...]:

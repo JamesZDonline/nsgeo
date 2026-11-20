@@ -71,6 +71,7 @@ class FillFlow(QObject):
         #: The fills of the running request and how many have landed.
         self._key: Hashable | None = None
         self._fills: list[FillJob] = []
+        self._total = 0
         self._landed = 0
         self._working = False
         #: The stretch to start once the last fill has landed, the stretch
@@ -113,8 +114,8 @@ class FillFlow(QObject):
         counts the grid being filled rather than a percentage."""
         if self._working:
             if grids:
-                n = min(self._landed + 1, len(self._fills))
-                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=len(self._fills))
+                n = min(self._landed + 1, self._total)
+                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=self._total)
             fraction = 0.0
             if self._landed < len(self._fills):
                 fraction = self._fills[self._landed].fraction
@@ -150,6 +151,7 @@ class FillFlow(QObject):
             return True
         self._key = key
         self._fills = fills
+        self._total = len(fills)
         self._landed = 0
         self._working = True
         self._pending_stretch = stretch
@@ -219,6 +221,7 @@ class FillFlow(QObject):
         self._working = False
         self._stretching = False
         self._fills = []
+        self._total = 0
         self._landed = 0
         self._key = None
         self._pending_stretch = None
@@ -243,8 +246,11 @@ class FillFlow(QObject):
             except Exception as exc:  # noqa: BLE001 -- a refused landing is stale work
                 _log(f"could not land a fill: {exc}")
             self._landed += 1
-            if self._landed < len(self._fills):
+            if self._landed < self._total:
                 return
+            # Let go of the landed jobs: each holds the fill it built, which an
+            # engine since removed or unticked would otherwise keep alive.
+            self._fills = []
             self._working = False
             self._all_landed = True
             if self._requesting:

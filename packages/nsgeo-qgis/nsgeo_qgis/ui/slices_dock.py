@@ -600,7 +600,8 @@ class SlicesDock(QgsDockWidget):
         self.cancel_link = QLabel(f'<a href="cancel">{FILL_CANCEL_LINK}</a>')
         self.cancel_link.setTextFormat(Qt.TextFormat.RichText)
         self.cancel_link.setToolTip(
-            "Stop working out this fill and go back to the picture on screen."
+            "Stop working out this fill. With a picture on screen its settings come back; "
+            "without one nothing is drawn until you change the cell or the interpolation."
         )
         # Its height is the row's, never a reason to grow it (W1).
         self.cancel_link.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Ignored)
@@ -3617,7 +3618,7 @@ class SlicesDock(QgsDockWidget):
         # Measured on the worker (#193): the map keeps the limit it has until the
         # stretch lands, and the dock then re-emits `slice_changed`. Not before
         # the fill it reads is held (or being worked out).
-        if self.fill_flow.working or self.engine.weights_cached(finish):
+        if self.engine.weights_cached(finish):
             self.fill_flow.request_stretch(
                 key, lambda: self.engine.stretch_job(window.n_levels, clip, finish)
             )

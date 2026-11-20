@@ -1160,7 +1160,9 @@ class SiteScope:
             coverage = dock.coverage_check.isChecked()
             span = thickness * z.dz_ns
             dock.fill_picture.check_owner(SITE_OWNER)
-            if not coverage and not self._fills_ready(top, span, finish, z):
+            # Each grid is sliced once per tick: for the fills it needs, then the draw.
+            sliced = None if coverage else self.engine.sliced(top, span)
+            if sliced is not None and not self._fills_ready(top, span, finish, z, sliced):
                 dock.show_refine()
                 return
             # Every fill it needs is held now (`_fills_ready`), so the draw builds
@@ -1175,6 +1177,7 @@ class SiteScope:
                 manual=self.gains(),
                 coverage=coverage,
                 preview=curvature,
+                sliced=sliced,
             )
             self.slice = shown
             self.window = window
@@ -1212,7 +1215,9 @@ class SiteScope:
             dock.error.emit(str(exc))
 
     # ---- #193: the fills and the stretch, worked out in the background --------
-    def _fills_ready(self, top: float, span: float, finish: SliceFinish, z: ZAxis) -> bool:
+    def _fills_ready(
+        self, top: float, span: float, finish: SliceFinish, z: ZAxis, sliced: Any
+    ) -> bool:
         """Whether the tick draws now: every fill it needs is held, or lands
         within the flow's budget. Otherwise the flow works them out on the fill
         worker, grid after grid in `ready_grids` order, and then the shared
@@ -1220,13 +1225,20 @@ class SiteScope:
         (cancelled) site starts nothing and draws nothing new."""
         dock = self.dock
         flow = dock.fill_flow
-        if not self.engine.fills_missing(top, span, finish):
+        if not self.engine.fills_missing(top, span, finish, sliced=sliced):
             return True
         if flow.latched:
             return False
-        engine = self.engine
         # A running refine list was made on the plans about to be dropped.
         self.refine.before_draw(rebuilds=True)
+        return self._request_fills(top, span, finish, z, sliced)
+
+    def _request_fills(
+        self, top: float, span: float, finish: SliceFinish, z: ZAxis, sliced: Any = None
+    ) -> bool:
+        """Start the fills (and the stretch) on the flow; its answer."""
+        flow = self.dock.fill_flow
+        engine = self.engine
         # Not what is still missing (it shrinks as each grid lands) and not what
         # the window needs (it moves with the slider and the thickness, as a
         # grid's axis ends): neither may restart the grid in flight. The key
@@ -1237,18 +1249,27 @@ class SiteScope:
         key = (engine.lattice, tuple(wanted), engine.fill_keys(wanted, finish))
         return flow.request(
             key,
-            lambda: self._fill_jobs(top, span, finish, z),
+            lambda: self._fill_jobs(top, span, finish, z, sliced),
             stretch_key=self.stretch_key(z),
         )
 
-    def _fill_jobs(self, top: float, span: float, finish: SliceFinish, z: ZAxis) -> list[Any]:
+    def _fill_jobs(
+        self, top: float, span: float, finish: SliceFinish, z: ZAxis, sliced: Any = None
+    ) -> list[Any]:
         """The missing fills, then the shared stretch measured over them when
         one applies. The fill jobs first: making one drops that grid's held
         fill, and the stretch job reads each job's result (its docstring's
-        obligation: a job for EVERY grid whose fill is not held)."""
-        fills = self.engine.fill_jobs(top, span, finish)
+        obligation: a job for EVERY grid whose fill is not held). So with a shared
+        stretch every ready grid's missing fill is made, including a grid whose
+        axis ends above the shown depth: left out, its stretch stays stale, the
+        rest builds its plan on the GUI thread and memory peaks at old plus new.
+        The stretch job is left out when the one held is for this very key (a
+        final one would be replaced by a provisional one)."""
+        shared = self._shared_stretch_wanted()
+        fills = self.engine.fill_jobs(top, span, finish, sliced=sliced, every_grid=shared)
         jobs: list[Any] = list(fills)
-        if self._shared_stretch_wanted():
+        held = self.refine.stretch
+        if shared and not (held is not None and held[0] == self.stretch_key(z)):
             jobs.append(self._stretch_job(z, {job.grid_id: job for job in fills}))
         return jobs
 
@@ -1512,8 +1533,14 @@ class SiteScope:
         # `slice_changed`. Not before the fills it reads are held (or being
         # worked out: the stretch follows them in the flow).
         flow = self.dock.fill_flow
-        if flow.working or self.engine.weights_cached(finish):
+        if self.engine.weights_cached(finish):
             flow.request_stretch(key, lambda: self._stretch_job(z))
+        elif not flow.working and not flow.latched and self.drawn_at is not None:
+            # Some grid has no fill for these settings (its axis ends above the
+            # shown depth): ask for it, with the stretch after it, rather than
+            # leave the stretch stale.
+            top, span = self.drawn_at
+            self._request_fills(top, span, finish, z)
         if self.limit_shown is not None:
             return self.limit_shown
         return limit_over_slices((shown.array,), clip)

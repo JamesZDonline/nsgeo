@@ -408,6 +408,19 @@ def test_a_plan_with_stop_and_progress_is_bit_identical(method):
 
 
 @ALL
+def test_the_reach_reports_progress_inside_its_tenth(method):
+    """At a fine cell the reach alone takes seconds: the line must move inside it
+    (0 to 0.1), without changing the plan."""
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    seen = []
+    got = plan_fill(pop, 0.1, method, 0.5, 1.0, progress=seen.append)
+    _same_plan(got, plan_fill(pop, 0.1, method, 0.5, 1.0))
+    inside = [f for f in seen if 0.0 < f < 0.1]
+    assert len(inside) >= 2, seen
+    assert seen == sorted(seen)
+
+
+@ALL
 def test_a_plan_stops_when_asked(method):
     pop = np.random.default_rng(5).random((60, 70)) < 0.12
     calls = []

@@ -181,18 +181,24 @@ def _reach(
     dy: np.ndarray,
     dx: np.ndarray,
     should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> np.ndarray:
     """Cells with a data cell within the offsets (data cells included).
 
     `should_stop` is asked before every offset (a pass over the frame costs far
-    more than the question); True raises `SolveStopped`."""
+    more than the question); True raises `SolveStopped`. `progress` gets the
+    share of offsets done, every `_PRUNE_EVERY` offsets and never 1.0: at a
+    fine cell the reach alone takes seconds. It changes no result."""
     ny, nx = pop2.shape
     reach = pop2.copy()
+    total = max(1, len(dy))
     # zip without strict=: that is Python 3.10+, and the core supports 3.9.
     # The offsets come in equal-length arrays by construction.
-    for oy, ox in zip(dy.tolist(), dx.tolist()):
+    for i, (oy, ox) in enumerate(zip(dy.tolist(), dx.tolist())):
         if should_stop is not None and should_stop():
             raise SolveStopped
+        if progress is not None and i % _PRUNE_EVERY == 0:
+            progress(i / total)
         # reach[y, x] |= pop[y + oy, x + ox], reading False outside the frame
         ys, ye = max(0, -oy), min(ny, ny - oy)
         xs, xe = max(0, -ox), min(nx, nx - ox)
@@ -207,15 +213,16 @@ def reach_mask(
     max_distance_m: float,
     *,
     should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> np.ndarray:
     """(ny, nx) bool: data cells, and every cell within `max_distance_m` of one.
 
     The one reach rule: the cells IDW and kriging fill and the cells minimum
     curvature shows are the same, so every method blanks in the same place
-    (interpolation spec §5.2). `should_stop` True raises `SolveStopped`.
+    (interpolation spec §5.2). `should_stop` True raises `SolveStopped`; `progress` as `_reach`'s.
     """
     ry, rx, _ = _disc_offsets(max_distance_m, cell)
-    return _reach(np.asarray(populated, dtype=bool), ry, rx, should_stop)
+    return _reach(np.asarray(populated, dtype=bool), ry, rx, should_stop, progress)
 
 
 def _neighbourhoods(
@@ -382,7 +389,16 @@ def plan_fill(
         report(1.0)
         return empty
     targets = np.flatnonzero(
-        (reach_mask(pop2, cell, max_distance_m, should_stop=should_stop) & ~pop2).ravel()
+        (
+            reach_mask(
+                pop2,
+                cell,
+                max_distance_m,
+                should_stop=should_stop,
+                progress=lambda f: report(f * _REACH_DONE),
+            )
+            & ~pop2
+        ).ravel()
     )
     report(_REACH_DONE)
     if not targets.size:

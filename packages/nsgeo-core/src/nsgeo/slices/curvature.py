@@ -461,7 +461,9 @@ def plan_curvature(
 
     pop2 = pop2.astype(bool)
     report(0.0)
-    reach = reach_mask(pop2, cell, max_distance_m, should_stop=should_stop)
+    reach = reach_mask(
+        pop2, cell, max_distance_m, should_stop=should_stop, progress=lambda f: report(f * 0.1)
+    )
     report(0.1)
     domain = _grow(reach, SOLVE_MARGIN_CELLS, should_stop)
     report(0.15)
