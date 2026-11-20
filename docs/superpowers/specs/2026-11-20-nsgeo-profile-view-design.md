@@ -41,8 +41,9 @@ What success looks like to the user:
 | Q4 | #11: where the units are chosen, and where the read-out goes | **Click an axis to choose its units.** Its unit name shows "ns ▾" and right-click works too. The **read-out goes at the top right**, in the row above the image. |
 | Q5a | #158: a new by-eye mode, or a drag on `sample` | **A drag on `sample`.** There is one hand mode: type the row or drag the line, and both change the same number. |
 | Q5b | #158: what selecting the Time zero row shows | **The cropped rows come into view, and the line reads 0.** The profile stays on the line's own clock (§4.11). |
+| Q6 | #158, raised by the design review: which record is drawn while Time zero is selected | **What Time zero receives (its input),** not every step except Time zero, which migration refuses (§4.11). |
 | Build 1 | How a step says "drag me" | **The step's schema.** Each parameter names the modes it belongs to, and there is a new `row` kind (§4.9). |
-| Build 2 | How the selected view reads on the line's clock | **Relabel the bypass record** onto the line's zero before it reaches the view (§4.11). |
+| Build 2 | How the selected view reads on the line's clock | **Relabel the drawn record** onto the line's zero before it reaches the view (§4.11). |
 
 The user also agreed to these, which were offered as my calls:
 
@@ -87,14 +88,14 @@ The user also agreed to these, which were offered as my calls:
   distance in one place.
 - **Time zero spec, 2026-11-10 design, §4.3 and §5.3.** Every value written from the profile
   reaches the step on its input axis, through the radar clock. A `row` value is a row of the
-  step's input record, so no clock conversion applies. Rows are counted on the bypass record,
-  which has the same rows as Time zero's input (§4.12).
+  step's input record, so no clock conversion applies. While the row is selected the profile
+  draws exactly that input (§4.11, §4.12).
 - **Processing panel spec, 2026-11-18 design, §6.2.** With Difference on, selecting Time zero
   turns Difference off:
   - one toast;
   - the button unchecks and the label clears;
-  - the profile shows the ordinary view: the result, or the bypass while a handle row is
-    selected.
+  - the profile shows the ordinary view: the result, the cutoff's bypass while a cutoff row is
+    selected, or Time zero's input while its row is selected.
 - **Turns with G and Q.** G and Q take turns with F, so don't start Q while F is open.
 - **CI and tests.**
   - CI runs QGIS 3.44 and 4.2.
@@ -102,7 +103,11 @@ The user also agreed to these, which were offered as my calls:
     `-m real_data` tests (see the test-suite-speed recipe).
 - **Open branches that overlap,** checked against origin/main on 2026-11-20:
   - `nsgeo-site-never-stuck` (H) and `nsgeo-m19-mag` (M19a) edit `plugin.py`, and the #227
-    branch is planned to. None of them edits the other files F touches.
+    branch is planned to.
+  - H, M19a and `nsgeo-3d-menu` all edit `ui/slices_dock.py`. H edits just above
+    `ElidedLabel` (about line 153). So F imports `ElidedLabel` from `slices_dock` and does not
+    move it.
+  - None of them edits the other files F touches.
   - `nsgeo-help-pages` (stale since 2026-10-22) edits `ui/processing_dock.py`. Its
     `docs/guide/getting-started.md` describes 1:1 as "one trace per screen pixel". Whichever of
     the two merges second fixes that line. F does not touch that branch.
@@ -126,8 +131,7 @@ Display gain [slider] 99.0 % [colormap] [Difference label] [Fit|▾] [1:1] [Slic
 - **Fit** is a `QToolButton` in `MenuButtonPopup` mode (§4.3).
 - **1:1** is a `QToolButton` (§4.4).
 - **Slice band** is a checkable `QToolButton` (§4.2).
-- The velocity label becomes an elided label, like `slices_dock.ElidedLabel` (reuse it, or move
-  it to a shared module). It takes the remaining width with stretch 1, elides on the right, and
+- The velocity label becomes a `slices_dock.ElidedLabel`, imported, not moved (see §3.1). It takes the remaining width with stretch 1, elides on the right, and
   keeps its full text in its tooltip. The spacer before it goes.
 
 Measured at 1361 px in the worst case (a long Difference label, plus a velocity label that names
@@ -233,8 +237,8 @@ log as now.
     column centres. Labels are integers, from `nice_ticks` over the visible row range.
   - **What the count means:**
     - After Time zero, row 0 is the zero row.
-    - In the Time zero bypass view (§4.11), row 0 is the record's first row, so the number
-      equals the step's `sample` field.
+    - While the Time zero row is selected (§4.11), row 0 is the first row of the step's input,
+      so the number equals the step's `sample` field.
     - In a difference view, the rows are the difference's rows.
 - **Depth (m):** today's right axis (`_depth_ticks`).
   - Blank when there is no velocity.
@@ -242,8 +246,14 @@ log as now.
 
 **Defaults** are left ns and right m, as today.
 
-**The caption** in the top row reads "ns ▾", "sample ▾" or "m ▾". It must fit `MARGIN_LEFT` (56)
-and `MARGIN_RIGHT` (48) at the current 8 pt font; "sample ▾" does.
+**The caption** in the top row reads "ns ▾", "sample ▾" or "m ▾".
+
+- "sample ▾" measures 46 px at the 8 pt axis font (Qt offscreen, Noto Sans).
+- The left caption's rect is `MARGIN_LEFT − 6` = 50 px, so it fits there.
+- The right one is `MARGIN_RIGHT − 8` = 40 px, so it doesn't, and drawText clips it. **Make
+  `MARGIN_RIGHT` equal to `MARGIN_LEFT` (56).**
+  - At the user's size the image becomes 1241 px wide, not 1249. §4.4's numbers barely move.
+  - Re-pin any test that hard-codes the right margin or the image width.
 
 **Choosing:**
 
@@ -265,10 +275,13 @@ and `MARGIN_RIGHT` (48) at the current 8 pt font; "sample ▾" does.
 
 ### 4.7 #11: the cursor read-out
 
-**Where it goes.** In the row above the image (`CAPTION_ROW`, inside `MARGIN_TOP`), right-aligned
-to the image's right edge, with a gap before the right axis's caption.
+**Where it goes.** In the strip above the image, right-aligned to the image's right edge, with a
+gap before the right axis's caption.
 
 - It is painted by `ProfileView`, at 9 pt in the axis colour.
+- Its rect is the whole `MARGIN_TOP` height (22 px), not `CAPTION_ROW` (14): 9 pt text is
+  18 px tall. Over the image's width that strip holds nothing else. The topmost tick labels
+  overhang only into the side margins.
 - The bottom-right placement was mocked up and rejected. There, a distance tick label ran into
   it, and its descenders were clipped by the panel's edge.
 
@@ -295,13 +308,20 @@ they agree with each other and with the axes.
 - It clears when the pointer leaves the image, including onto the margins.
 - It has no switch.
 
-**One place for position along the line.**
+**One place for position along the line, both ways.**
 
-- Add one `ProfileView` helper, `(metres or None, trace) at a trace coordinate`, built on
-  `metres_at(self._distance, …)`.
-- `_distance_ticks`, the read-out, Fit width and 1:1 all call it. `_distance_ticks` already
-  uses `metres_at` and `trace_units_at`, so put the helper beside them.
-- That helper is where M17c swaps traces for distance. Its docstring says so.
+- Add one pair of `ProfileView` helpers:
+  - trace coordinate → metres along (None with no metres);
+  - metres along → trace coordinate.
+  They are built on today's `metres_at` and `trace_units_at` over `self._distance`.
+- **Every** conversion between traces and metres in the view goes through the pair:
+  - `_distance_ticks` (both directions);
+  - `window_m` and `set_window_m` (the held windows);
+  - the read-out;
+  - Fit width;
+  - 1:1, including its narrowing along the line.
+- The pair is where M17c swaps traces for distance. Its docstring says so.
+- **Test:** monkeypatch the pair and see the ticks, the read-out and `window_m` all follow.
 
 ### 4.8 #163 item 2: a time zoom survives a clock change on the same line
 
@@ -312,10 +332,23 @@ they agree with each other and with the axes.
   slides by the zero change.
 - **With no ruler,** rule 3 needs equal axes, so the view goes back to Fit and the zoom is lost.
 
-**The rule.** When the key is the same and the shown radargram's `zero_ns` changed:
+**When it applies.** The key is the same, `n_traces` and `dt_ns` are equal, and any of `t0_ns`,
+`n_samples` or the shown `zero_ns` changed.
 
-- Shift the held time window by the change, `t' = retime_ns(t, old_zero, new_zero)`. The
-  features on screen then stay where they were, and the tick labels move by the change.
+This is deliberately broad, and it is my call. It also applies to:
+- adding, editing, selecting or deselecting a time cutoff;
+- turning a step on or off;
+- turning Difference on or off on a step that crops.
+
+On a line with no ruler, these now keep the zoom where today they go back to Fit. That's the
+point of #163, and nothing the user asked for needs the reset. Today's tests that pin a reset to
+Fit there get re-pinned, and the plan names each one.
+
+**The rule.**
+
+- Shift the held time window by the zero change, `t' = retime_ns(t, old_zero, new_zero)`. The
+  shift is 0 when only `t0`/`n_samples` changed. The features on screen then stay where they
+  were, and the tick labels move by the change.
 - **Top stays top.** If the old window started at the old record's top (`time_lo <= t0 + dt/2`),
   the new window starts at the new record's top with the same span.
 - **A whole-record window** (filed as None) stays whole.
@@ -325,9 +358,14 @@ they agree with each other and with the axes.
 - **The trace window** is kept as today.
 - **Clamping** is left to `with_window`.
 
-`old_zero` is the zero of the radargram that was showing, which the dock knows as `_shown_radargram`
-before `_render` replaces it. Give the view or dock what it needs to compare the two zeros. That is
-a builder's choice.
+`old_zero` is the zero of the radargram that was showing. **Trap:** capture it before
+`_shown_radargram` is reassigned.
+
+- `_render` sets `_shown_radargram = rg` (about line 1924) before it calls
+  `_set_axes_holding` (about line 1925).
+- `_take_down_picture` sets it to None (about line 849) before its own call.
+
+How the zeros reach `_set_axes_holding` is the builder's choice.
 
 §4.11 and §4.12 reuse this rule for selecting and deselecting the Time zero row and for releasing
 a drag. It is the only mechanism for "what stays put".
@@ -381,8 +419,19 @@ Nothing else is needed for it now.
   - The input record is `stack.intermediate(row − 1)`, or the source for row 0. Where the seed
     lives is the builder's call; `step_inputs` is the natural home. Today `seed_params` only
     covers `migrate_fk`.
-- **The clock is unknown before the samples load** (`clock_unknown`), so the switch seeds
-  nothing. The form re-shows on `line_loaded` as today.
+- **When no seed can be found,** the switch still commits, keeps the stored `sample`, and shows
+  one toast naming the row it kept. Do not snap the mode back: the hand mode is the way out when
+  the automatic pick fails. That's my call. The cases:
+  - the samples haven't loaded;
+  - the input has no arrival (`_first_break_or_none` is None);
+  - the stack above the step doesn't run.
+- **Re-show on `line_loaded`.** Today `ProcessingDock._on_line_loaded` re-shows only forms
+  flagged `_form_axis_unknown`. That flag is set only for steps with a `time`-kind field
+  (`processing_dock.py` about lines 594–614), so a Time zero form is never re-shown. Extend
+  the flag to forms with a `row`-kind field, so that once the samples arrive, the row's upper
+  bound and the profile line appear.
+- `clock_unknown` is no help here. It looks only for Time zero steps above the row, so it is
+  False for the first Time zero itself. What's missing before the load is the source.
 
 ### 4.11 #158: the profile handle, and the selected view on the line's clock
 
@@ -406,19 +455,34 @@ Nothing else is needed for it now.
   The tag stays white on magenta, as now.
 - **Colour.** The line and dimming use today's `CUTOFF_COLOUR` and `CUTOFF_DIM`.
 
+**Which record is drawn while the row is selected (Q6, the user's pick after the review).**
+
+- **`time` handle (the cutoff):** unchanged. The profile draws `stack.result_bypassing(row)`,
+  i.e. every step except the cutoff.
+- **`row` handle (Time zero):** the profile draws **what the step receives**,
+  `stack.intermediate(row − 1)`, or the source for row 0.
+  - On the user's lines Time zero is first, so that is the record as recorded. The direct wave,
+    which the zero is judged by, is drawn plainly.
+  - Nothing after Time zero runs, so nothing can refuse it.
+  - Its rows are exactly the step's rows.
+- **Why not the bypass.** `migrate_fk` refuses a record that starts more than 2 ns from zero
+  (`MAX_T0_NS`, `nsgeo/processing/migration.py`). With Time zero skipped, the record starts at
+  −11.09 ns, so the bypass fails on every line that is migrated. That was found in the design
+  review and shown to the user, side by side, on a GPS line.
+- **The display limit** for this view is taken from the drawn record itself, as for a
+  difference view. `_scale_reference` must not run the stack below it.
+
 **The selected view is on the line's clock (Build 2).**
 
-- While a handle row is selected, the profile shows `stack.result_bypassing(row)` as today. When
-  the bypassed step sets the clock (Time zero), that record's `zero_ns` is the input's, not the
-  line's.
-- Before it reaches `_render`, **relabel** it onto the line's zero:
+- The input's `zero_ns` is the input's, not the line's. Before it reaches `_render`,
+  **relabel** it onto the line's zero:
   - `t0' = t0 + (rg.zero_ns − line_zero)`;
   - `zero_ns' = line_zero`;
   - the data and row count are unchanged.
   - The line's zero is the result's `zero_ns`, i.e. `stack.zero_ns()` or `session.line_zero`.
 - So the line reads 0 ns, the cropped rows read below zero, and everything under the line keeps
   its numbers.
-- The cutoff's bypass doesn't change the clock, so for it the relabel is a no-op.
+- The cutoff's bypass doesn't change the clock, so the same relabel, applied there, is a no-op.
 - `shown_zero_ns()` then returns the line's zero. Picks, the slice band, velocity fits and the
   gain strip's points already convert through it (`profile_dock.py` and `plugin.py`, 10 call
   sites), so they need no change.
@@ -465,9 +529,8 @@ Real numbers, for the tests and the walkthrough:
 
 **Typing a row in the form** goes through the same stack change, so the line moves to it.
 
-**Rows count from the bypass record's top.** For Time zero those are its input's rows, as long as
-no step after Time zero crops the top of the record. None does today; the time cutoff crops the
-bottom. Note this in the code where the row is computed.
+**Rows count from the top of the drawn record,** which is Time zero's input (§4.11). So the row
+under the line is exactly the step's `sample`, with nothing in between.
 
 ### 4.13 E's Difference rule holds
 
@@ -475,11 +538,17 @@ Selecting Time zero with Difference on:
 
 1. `stack.difference(row)` raises `ValueError`, because the sample count changes.
 2. `_decline_difference` runs: one toast, the button unchecks, the label clears.
-3. `current_radargram` falls through to the handle row's bypass, relabelled (§4.11).
+3. `current_radargram` falls through to the step's input, relabelled (§4.11).
 
-So the user sees the toast, then the line view. Nothing in F may return early before that
-fall-through. The plugin-level pin from session E stays green. One new pin covers sample mode:
-toast, button off, line up.
+So the user sees the toast, then the line view.
+
+- The input lies upstream of the difference, so a failure there would already have failed the
+  difference with the same text. `declined` suppresses the repeat, so there is never a second
+  toast.
+- Nothing in F may return early before that fall-through.
+- The plugin-level pin from session E stays green.
+- One new pin covers `sample` mode on a line with migration after Time zero: exactly one toast,
+  the button off, and the line up.
 
 ## 5. Tests to pin
 
@@ -527,6 +596,8 @@ lines:
   - Switching to `sample` seeds the first-break row.
   - The line shows only in `sample` mode, while the row is selected.
   - Selecting shows the line at 0 ns on the line's clock, with the dimming above it.
+  - Selecting draws Time zero's input, not the bypass. On a line with `migrate_fk` after Time
+    zero this shows the input, where the bypass would have refused.
   - The drag snaps to rows and stays in range.
   - A released drag writes `sample`, and the form shows it.
   - A typed `sample` moves the line.
@@ -573,6 +644,5 @@ Merging asks the user first. On merge, close #131, #5, #11, #14, #158 and #163. 
 - Names: the `when` field, the position helper, the signals, and the `QSettings` keys.
 - Where the seed for switching into `sample` lives (§4.10).
 - How the dock gives `_set_axes_holding` the old and new zeros (§4.8).
-- Whether `ElidedLabel` moves to a shared module or is imported from `slices_dock`.
 - Tooltip wording, within the plain-language style of the plugin's other tooltips.
 - Whether the handle draws for a disabled Time zero step. Match what the cutoff does today.
