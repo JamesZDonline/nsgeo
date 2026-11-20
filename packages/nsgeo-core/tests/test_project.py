@@ -1363,3 +1363,50 @@ def test_view_stretch_round_trips_and_a_bad_one_is_dropped(tmp_path):
     doc["slice_sources"] = {"A": {"view_stretch": 0}, "B": {"view_stretch": -2.0}}
     path.write_text(json.dumps(doc))
     assert load_site(path).slice_sources == {"A": {}, "B": {}}
+
+
+# ---- #129: the preset each import last chose ------------------------------------------
+
+
+def test_import_presets_round_trip(tmp_path):
+    site = _two_grid_site()
+    gid = site.grids[0].id
+    site.import_presets = {"grids": {gid: "A", site.grids[1].id: None}, "site": "A"}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert json.loads(path.read_text())["import_presets"] == site.import_presets
+    assert load_site(path).import_presets == site.import_presets
+
+
+def test_import_presets_are_read_tolerantly(tmp_path):
+    site = _two_grid_site()
+    gid = site.grids[0].id
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["import_presets"] = {"grids": {gid: "A", "nowhere": "B", site.grids[1].id: 7}, "site": 3}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).import_presets == {"grids": {gid: "A"}}
+    doc["import_presets"] = ["not", "an", "object"]
+    path.write_text(json.dumps(doc))
+    assert load_site(path).import_presets == {}
+
+
+def test_import_presets_do_not_change_the_schema_version(tmp_path):
+    plain = tmp_path / "a.nsgeo.json"
+    with_presets = tmp_path / "b.nsgeo.json"
+    save_site(_two_grid_site(), plain)
+    site = _two_grid_site()
+    site.import_presets = {"site": "A"}
+    save_site(site, with_presets)
+    assert (
+        json.loads(plain.read_text())["schema_version"]
+        == json.loads(with_presets.read_text())["schema_version"]
+    )
+
+
+def test_an_empty_import_presets_is_not_written(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_two_grid_site(), path)
+    assert "import_presets" not in json.loads(path.read_text())
+    assert load_site(path).import_presets == {}

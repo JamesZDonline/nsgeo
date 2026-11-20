@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement
+from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement, measure_spacing
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Cut, Line, is_cut_key
 from nsgeo.processing import retime_ns
@@ -228,7 +228,9 @@ _GROUP_TOKEN = "nsgeo/site_group"
 # a moire pattern over the slice, from about 1:400 at 0.5 m spacing by the
 # user's eye (lines about 4.7 px apart on a 96 dpi screen). Lines and their
 # marks hide beyond this scale denominator per metre of the finest line
-# spacing among the grids that have lines (see `_hide_when_lines_crowd`).
+# spacing among the lines: each line's grid's default spacing (tape or GPS
+# alike), and for GPS lines in no grid the spacing measured from their tracks
+# (see `_hide_when_lines_crowd`).
 HIDE_LINES_BEYOND_SCALE_PER_M = 800.0
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
@@ -426,6 +428,9 @@ class SiteLayers(QObject):
         # that may report what following changed (line editing spec §4.4).
         self._report_follow = False
         self.layers: dict[str, QgsVectorLayer] = {}
+        # Depth counter: >0 while the `lines` table is being refilled, so MapLink
+        # can tell a refill's selection change from the user's gesture (#57).
+        self._refilling_lines = 0
         self._group: Any = None
         self._group_token = ""
         # Finding A: which `picks` QgsVectorLayer object `_on_picks_edited`
@@ -1553,7 +1558,22 @@ class SiteLayers(QObject):
             return None
         return self._points(xy, crs)
 
+    @property
+    def refilling_lines(self) -> int:
+        """Truthy while the `lines` layer is being refilled (read-only, for MapLink)."""
+        return self._refilling_lines
+
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
+        if name != "lines":
+            self._refill_table(name, features)
+            return
+        self._refilling_lines += 1
+        try:
+            self._refill_table(name, features)
+        finally:
+            self._refilling_lines -= 1
+
+    def _refill_table(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
         target = self.crs()
         # A table whose own prep failed this cycle (ensure_tables()
@@ -2303,7 +2323,7 @@ class SiteLayers(QObject):
             if isinstance(p, TrackPlacement):
                 # P12: the tape-only fields stay NULL; the length is walked.
                 walked = p.distance_along(line.n_traces, line.header)
-                f["grid_id"] = ""
+                f["grid_id"] = p.grid_id or ""
                 f["length_m"] = float(walked[-1] - walked[0]) if len(walked) else 0.0
                 f["placed_by"] = "gps"
                 f["without_rtk_m"] = float(sum(b.metres for b in p.bridges()))
@@ -2497,10 +2517,18 @@ class SiteLayers(QObject):
         closely spaced lines start to run together."""
         spacings = set()
         keys = self.session.keys()
+        loose: list[Any] = []  # GPS lines in no grid: their spacing is measured (#222)
         for key in keys:
-            grid = self.session.grid_for_line(self.session.line_for_key(key))
+            line = self.session.line_for_key(key)
+            grid = self.session.grid_for_line(line)
             if grid is not None:
                 spacings.add(grid.default_spacing)
+            elif isinstance(line.placement, TrackPlacement) and line.placement.grid_id is None:
+                loose.append(line.trace_coords({}))
+        if len(loose) >= 2:
+            measured = measure_spacing(loose)
+            if measured is not None:
+                spacings.add(measured)
         layer = self.layers[name]
         if not spacings:
             layer.setScaleBasedVisibility(False)

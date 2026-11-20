@@ -9,6 +9,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.survey_dock import (
     CUT_ONE_PICK_TEXT,
@@ -736,6 +737,14 @@ def _texts(menu):
     return [a.text() for a in menu.actions() if not a.isSeparator()]
 
 
+_BULK = ("Apply preset", "Apply steps", "Set velocity for", "Clear velocity")
+
+
+def _texts_before_bulk(menu):
+    """`_texts` without the bulk items (#58), for tests that pin the older ones."""
+    return [t for t in _texts(menu) if not t.startswith(_BULK)]
+
+
 def _right_click(dock, item):
     """Right-click `item` (or empty space, for None) and return the menu
     that was built for it.
@@ -769,7 +778,7 @@ def test_the_context_menu_offers_the_right_actions_for_each_kind_of_item(
     assert _texts(_right_click(dock, grid_item)) == [
         "Edit grid…",
         "Edit lines…",
-        "Import DZT files…",
+        "Add GPR data…",
         "Set velocity…",
         "Remove grid",
     ]
@@ -819,7 +828,7 @@ def test_every_context_menu_action_is_wired_to_the_slot_it_names(dock, answer_mo
 
     _action(_right_click(dock, root), "Add grid…").trigger()
     menu = _right_click(dock, grid_item)
-    for text in ("Edit grid…", "Import DZT files…", "Set velocity…", "Remove grid"):
+    for text in ("Edit grid…", "Add GPR data…", "Set velocity…", "Remove grid"):
         _action(menu, text).trigger()
     menu = _right_click(dock, line_item)
     for text in ("Open", "Set velocity override…", "Remove line from site"):
@@ -1034,7 +1043,11 @@ def test_the_menu_on_a_selection_offers_one_removal_for_all_of_it(dock, answer_m
     _select(dock, first, second)
 
     menu = _right_click(dock, first)
-    assert _texts(menu) == ["Edit 2 lines…", "Move 2 lines to grid", "Remove 2 lines from site"]
+    assert _texts_before_bulk(menu) == [
+        "Edit 2 lines…",
+        "Move 2 lines to grid",
+        "Remove 2 lines from site",
+    ]
     assert menu.actions()[-2].isSeparator()  # the destructive one stands apart
 
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
@@ -1249,7 +1262,7 @@ def test_a_selection_spanning_grids_offers_move_but_no_edit(dock, answer_modal, 
     b_key = session.keys_on_grid("B")[0]
     _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(b_key))
     menu = _right_click(dock, dock.item_for_key(KEYS[0]))
-    assert _texts(menu) == ["Move 2 lines to grid", "Remove 2 lines from site"]
+    assert _texts_before_bulk(menu) == ["Move 2 lines to grid", "Remove 2 lines from site"]
 
 
 def test_the_move_submenu_lists_every_grid_and_greys_the_one_they_are_on(
@@ -1288,7 +1301,11 @@ def test_a_grid_row_plus_one_line_reads_in_the_singular(dock, answer_modal):
     answer_modal(QMenu, "exec", None)
     _select(dock, _grid_item(dock, "A"), dock.item_for_key(KEYS[0]))
     menu = _right_click(dock, dock.item_for_key(KEYS[0]))
-    assert _texts(menu) == ["Edit 1 line…", "Move 1 line to grid", "Remove 1 line from site"]
+    assert _texts_before_bulk(menu) == [
+        "Edit 1 line…",
+        "Move 1 line to grid",
+        "Remove 1 line from site",
+    ]
 
 
 def test_a_grid_is_greyed_only_when_every_selected_line_is_already_on_it(
@@ -1544,7 +1561,7 @@ def test_a_range_of_lines_never_sweeps_in_the_cuts_it_crosses(dock, tmp_path, an
     assert grids == [] and cut not in keys and b_line in keys
     answer_modal(QMenu, "exec", None)
     menu = _right_click(dock, dock.item_for_key(b_line))
-    assert _texts(menu)[-2:] == ["Move 3 lines to grid", "Remove 3 lines from site"]
+    assert _texts_before_bulk(menu)[-2:] == ["Move 3 lines to grid", "Remove 3 lines from site"]
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
     _press(dock, Qt.Key.Key_Delete)
     assert "Cut 1" not in yes[0][0][2]
@@ -1684,7 +1701,7 @@ def test_a_gps_line_sits_under_the_site_when_it_names_no_grid(gps_dock):
     assert [dock.key_of(root.child(i)) for i in range(root.childCount())] == KEYS
 
 
-def test_a_gps_line_menu_offers_destagger_not_edit_or_move(gps_dock, answer_modal, message_log):
+def test_a_gps_line_menu_offers_destagger_move_and_fit(gps_dock, answer_modal, message_log):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     menu = _right_click(dock, dock.item_for_key(KEYS[0]))
@@ -1692,33 +1709,92 @@ def test_a_gps_line_menu_offers_destagger_not_edit_or_move(gps_dock, answer_moda
         "Open",
         "Set velocity override…",
         "Set destagger…",
+        "Move to grid",
+        "Fit a grid to this track…",
         "Remove line from site",
     ]
     assert menu.actions()[-2].isSeparator()
-    assert menu.findChildren(QMenu) == []  # no Move to grid submenu either
     fired = []
     dock.destagger_requested.connect(fired.append)
     _action(menu, "Set destagger…").trigger()
     assert fired == [[KEYS[0]]]
+    fits = []
+    dock.fit_tracks_requested.connect(fits.append)
+    _action(menu, "Fit a grid to this track…").trigger()
+    assert fits == [[KEYS[0]]]
     assert message_log == []
 
 
-def test_a_gps_only_selection_offers_destagger_for_all(gps_dock, answer_modal, message_log):
+def test_move_to_grid_is_greyed_on_a_site_with_no_grid_and_wakes_with_one(
+    gps_dock, answer_modal, tmp_path
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert not _action(menu, "Move to grid").isEnabled()
+    _add_tape_line(session, tmp_path)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(menu, "Move to grid").isEnabled()
+
+
+def test_a_gps_line_in_a_grid_sits_under_that_grids_item(gps_dock, tmp_path):
+    from plugin_testing import CRS
+
+    session, dock = gps_dock
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    session.move_lines([KEYS[0]], "A")
+    assert session.line_for_key(KEYS[0]).placement.grid_id == "A"
+    grid_item = _grid_item(dock, "A")
+    under = [dock.key_of(grid_item.child(i)) for i in range(grid_item.childCount())]
+    assert KEYS[0] in under
+    root = dock.tree.topLevelItem(0)
+    loose = [dock.key_of(root.child(i)) for i in range(root.childCount())]
+    assert KEYS[0] not in loose
+
+
+def test_moving_a_gps_line_from_its_menu_goes_through_move_lines(
+    gps_dock, answer_modal, tmp_path, message_log
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    _add_tape_line(session, tmp_path)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    sub = _action(menu, "Move to grid").menu()
+    # A line in no grid is "on" none: every grid is offered.
+    assert [(a.text(), a.isEnabled()) for a in sub.actions()] == [("A", True)]
+    moves = []
+    dock.move_lines_requested.connect(lambda k, g: moves.append((k, g)))
+    sub.actions()[0].trigger()
+    assert moves == [([KEYS[0]], "A")]
+    assert message_log == []
+
+
+def test_a_gps_only_selection_offers_destagger_move_and_fit(gps_dock, answer_modal, message_log):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
     _select(dock, first, second)
     menu = _right_click(dock, first)
-    assert _texts(menu) == ["Set destagger for 2 GPS lines…", "Remove 2 lines from site"]
-    assert menu.actions()[1].isSeparator()
-    fired = []
+    assert _texts_before_bulk(menu) == [
+        "Set destagger for 2 GPS lines…",
+        "Move 2 lines to grid",
+        "Fit a grid to these 2 tracks…",
+        "Remove 2 lines from site",
+    ]
+    assert menu.actions()[3].isSeparator()
+    fired, fits = [], []
     dock.destagger_requested.connect(fired.append)
+    dock.fit_tracks_requested.connect(fits.append)
     _action(menu, "Set destagger for 2 GPS lines…").trigger()
+    _action(menu, "Fit a grid to these 2 tracks…").trigger()
     assert fired == [[KEYS[0], KEYS[1]]]
+    assert fits == [[KEYS[0], KEYS[1]]]
     assert message_log == []
 
 
-def test_a_mixed_selection_offers_only_removal(gps_dock, tmp_path, answer_modal, message_log):
+def test_a_mixed_selection_in_no_one_grid_offers_move_and_removal(
+    gps_dock, tmp_path, answer_modal, message_log
+):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     tape = _add_tape_line(session, tmp_path)
@@ -1726,7 +1802,32 @@ def test_a_mixed_selection_offers_only_removal(gps_dock, tmp_path, answer_modal,
     _unfold(second)
     _select(dock, first, second)
     menu = _right_click(dock, first)
-    assert _texts(menu) == ["Remove 2 lines from site"]
+    assert _texts_before_bulk(menu) == ["Move 2 lines to grid", "Remove 2 lines from site"]
+    assert message_log == []
+
+
+def test_a_mixed_selection_on_one_grid_offers_edit_and_move(
+    gps_dock, tmp_path, answer_modal, message_log
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    from plugin_testing import CRS
+
+    # one grid in the site's CRS (a GPS line only joins a grid in its own CRS)
+    session.add_grid(Grid("S", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+    session.add_lines([Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))])
+    tape = "raw/FILE__009.DZT"
+    session.move_lines([KEYS[0]], "S")
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(tape)
+    _unfold(first)
+    _select(dock, first, second)
+    menu = _right_click(dock, first)
+    assert _texts_before_bulk(menu) == [
+        "Edit 2 lines…",
+        "Move 2 lines to grid",
+        "Remove 2 lines from site",
+    ]
     assert message_log == []
 
 
@@ -1735,7 +1836,7 @@ def test_a_tape_only_selection_still_offers_edit_and_move(dock, answer_modal):
     answer_modal(QMenu, "exec", None)
     first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
     _select(dock, first, second)
-    assert _texts(_right_click(dock, first)) == [
+    assert _texts_before_bulk(_right_click(dock, first)) == [
         "Edit 2 lines…",
         "Move 2 lines to grid",
         "Remove 2 lines from site",
@@ -1809,3 +1910,544 @@ def test_set_destagger_names_one_line_in_the_label_and_the_message(
     )
     plugin.session.save()
     plugin.unload()
+
+
+# ---- bulk actions on a selection, and Remove naming what goes (#58, #221) ---
+
+
+MODEL = VelocityModel.constant(0.095)
+
+
+def _presets(session):
+    """Two presets: 'Migrate' (an enabled Migration step at 0.1) and 'Plain'."""
+    session.append_step(KEYS[0], build_step("migrate_fk", velocity_m_ns=0.1))
+    session.save_preset("Migrate", KEYS[0])
+    session.remove_step(KEYS[0], 0)
+    session.append_step(KEYS[0], build_step("dewow"))
+    session.save_preset("Plain", KEYS[0])
+    session.remove_step(KEYS[0], 0)
+
+
+def _with_fit_record(session, key):
+    fit_id = session.add_velocity_fit(key, _fit(30.0))
+    member = SourceFit.of(key, fit_id, "FILE", _fit(30.0))
+    session.apply_line_velocity(
+        key, VelocityModel.constant(0.09), VelocitySource.from_fits([member], None)
+    )
+
+
+def _selected_menu(dock, keys):
+    _select(dock, *(dock.item_for_key(k) for k in keys))
+    return _right_click(dock, dock.item_for_key(keys[0]))
+
+
+def test_a_selection_menu_offers_the_bulk_items_per_kind(dock, answer_modal, tmp_path):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _presets(session)
+    session.open_line(KEYS[0])
+    menu = _selected_menu(dock, KEYS)
+    assert _texts(menu) == [
+        "Edit 3 lines…",
+        "Move 3 lines to grid",
+        "Apply preset to 3 lines",
+        "Apply steps from FILE__001 to 2 lines…",
+        "Set velocity for 3 lines…",
+        "Clear velocity override on 3 lines",
+        "Remove 3 lines from site",
+    ]
+    assert [a.isSeparator() for a in menu.actions()] == [
+        False,
+        False,
+        True,
+        False,
+        False,
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    sub = _action(menu, "Apply preset to 3 lines").menu()
+    assert [a.text() for a in sub.actions()] == ["Migrate", "Plain"]
+    # Across grids: no Edit, Move stays.
+    _add_grid_b(session, tmp_path, with_line=True)
+    b_key = session.keys_on_grid("B")[0]
+    menu = _selected_menu(dock, [KEYS[0], b_key])
+    assert _texts(menu) == [
+        "Move 2 lines to grid",
+        "Apply preset to 2 lines",
+        "Apply steps from FILE__001 to 1 line…",
+        "Set velocity for 2 lines…",
+        "Clear velocity override on 2 lines",
+        "Remove 2 lines from site",
+    ]
+
+
+def test_the_bulk_items_follow_gps_and_mixed_selections(gps_dock, answer_modal, tmp_path):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    menu = _selected_menu(dock, KEYS[:2])
+    assert _texts(menu) == [
+        "Set destagger for 2 GPS lines…",
+        "Move 2 lines to grid",
+        "Fit a grid to these 2 tracks…",
+        "Apply preset to 2 lines",
+        "Apply steps from the open line…",
+        "Set velocity for 2 lines…",
+        "Clear velocity override on 2 lines",
+        "Remove 2 lines from site",
+    ]
+    _add_tape_line(session, tmp_path)
+    menu = _selected_menu(dock, [KEYS[0], "raw/FILE__009.DZT"])
+    assert _texts(menu) == [
+        "Move 2 lines to grid",
+        "Apply preset to 2 lines",
+        "Apply steps from the open line…",
+        "Set velocity for 2 lines…",
+        "Clear velocity override on 2 lines",
+        "Remove 2 lines from site",
+    ]
+    assert not menu.actions()[0].isSeparator()
+
+
+def test_bulk_items_grey_out_as_the_spec_says(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    menu = _selected_menu(dock, KEYS)
+    assert not _action(menu, "Apply preset to 3 lines").isEnabled()
+    assert not _action(menu, "Apply steps from the open line…").isEnabled()
+    assert not _action(menu, "Clear velocity override on 3 lines").isEnabled()
+    assert _action(menu, "Set velocity for 3 lines…").isEnabled()
+    _presets(session)
+    session.set_line_velocity(KEYS[1], MODEL)
+    session.open_line(KEYS[0])
+    menu = _selected_menu(dock, KEYS)
+    assert _action(menu, "Apply preset to 3 lines").isEnabled()
+    assert _action(menu, "Apply steps from FILE__001 to 2 lines…").isEnabled()
+    assert _action(menu, "Clear velocity override on 3 lines").isEnabled()
+
+
+def test_apply_steps_is_greyed_when_a_cut_is_open_or_no_one_else_is_selected(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    session.open_line(KEYS[0])
+    _select(dock, dock.item_for_key(KEYS[0]), _grid_item(dock, "A"))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert not _action(menu, "Apply steps from the open line…").isEnabled()
+    cut = session.add_cut("A", [(1.0, 1.0), (6.0, 1.0)])
+    session.open_line(cut)
+    menu = _selected_menu(dock, KEYS)
+    assert not _action(menu, "Apply steps from the open line…").isEnabled()
+
+
+def test_apply_preset_action_asks_with_the_count_and_reaches_exactly_the_selection(
+    dock, answer_modal
+):
+    session, dock = dock
+    _presets(session)
+    session.save()
+    reports = []
+    dock.report.connect(reports.append)
+    others = session.stack_for(KEYS[2])
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    assert dock.apply_preset_action(KEYS[:2], "Migrate") == []
+    assert not session.dirty and reports == []
+    assert len(no) == 1
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    assert dock.apply_preset_action(KEYS[:2], "Migrate") == KEYS[:2]
+    text = yes[0][0][2]
+    assert text.startswith("Replace the processing of 2 lines with preset Migrate?")
+    assert "Its Migration (Stolt f-k) step uses 0.100 m/ns, the velocity it was saved with." in text
+    for k in KEYS[:2]:
+        assert session.stack_for(k).to_dicts() == session.site.presets["Migrate"]
+    assert session.stack_for(KEYS[2]) is others and session.dirty
+    assert reports == ["preset Migrate applied to 2 lines"]
+    dock.apply_preset_action(KEYS, "Plain")
+    assert yes[1][0][2] == "Replace the processing of 3 lines with preset Plain?"
+    assert reports[-1] == "preset Plain applied to 3 lines"
+
+
+def test_apply_steps_action_leaves_the_open_line_out(dock, answer_modal):
+    session, dock = dock
+    session.append_step(KEYS[0], build_step("migrate_fk", velocity_m_ns=0.1))
+    session.open_line(KEYS[0])
+    session.save()
+    reports = []
+    dock.report.connect(reports.append)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    assert dock.apply_steps_action(KEYS) == []
+    assert not session.dirty and len(no) == 1
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    assert dock.apply_steps_action(KEYS) == KEYS[1:]
+    text = yes[0][0][2]
+    assert text.startswith("Replace the processing of 2 lines with the steps on FILE__001?")
+    assert "FILE__001 itself is left as it is." in text
+    assert "Its Migration (Stolt f-k) step uses 0.100 m/ns." in text
+    for k in KEYS[1:]:
+        assert session.stack_for(k).to_dicts() == session.stack_for(KEYS[0]).to_dicts()
+    assert reports == ["steps from FILE__001 applied to 2 lines"]
+    # Not selected: no "left as it is" line.
+    dock.apply_steps_action(KEYS[1:])
+    assert "itself is left" not in yes[1][0][2]
+
+
+def test_clear_velocity_action_names_how_many_and_the_fits(dock, answer_modal):
+    session, dock = dock
+    _with_fit_record(session, KEYS[0])
+    session.set_line_velocity(KEYS[1], MODEL)
+    session.save()
+    reports, changes = [], []
+    dock.report.connect(reports.append)
+    session.lines_changed.connect(lambda: changes.append(1))
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    assert dock.clear_velocity_action(KEYS) == []
+    assert not session.dirty and len(no) == 1
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    assert dock.clear_velocity_action(KEYS) == KEYS[:2]
+    text = yes[0][0][2]
+    assert text.startswith(
+        "Clear the velocity override on 2 of these 3 lines? "
+        "They go back to their grid's velocity, or the one in the file's header."
+    )
+    assert "1 of them has a velocity from its saved fits; the fits stay saved." in text
+    assert all(session.line_for_key(k).velocity is None for k in KEYS)
+    assert session.line_for_key(KEYS[0]).velocity_fits  # the fits stay
+    assert len(changes) == 1
+    assert reports == ["velocity override cleared on 2 lines"]
+    assert dock.clear_velocity_action(KEYS) == []  # nothing left: asks nothing
+    assert len(yes) == 1
+
+
+def test_set_velocity_item_requests_the_plugin_dialog(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    fired = []
+    dock.bulk_velocity_requested.connect(fired.append)
+    menu = _selected_menu(dock, KEYS)
+    _action(menu, "Set velocity for 3 lines…").trigger()
+    assert fired == [KEYS]
+
+
+def test_the_bulk_items_never_offer_a_cut_key(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    c1 = session.add_cut("A", [(1.0, 1.0), (6.0, 1.0)])
+    c2 = session.add_cut("A", [(1.0, 2.0), (6.0, 2.0)])
+    _select(dock, dock.item_for_key(c1), dock.item_for_key(c2))
+    menu = _right_click(dock, dock.item_for_key(c1))
+    assert _texts(menu) == ["Remove 2 cuts from site"]
+    assert dock.selected_line_keys() == []
+    _select(dock, dock.item_for_key(KEYS[1]), dock.item_for_key(c1), dock.item_for_key(KEYS[0]))
+    assert dock.selected_line_keys() == [KEYS[0], KEYS[1]]
+
+
+def test_removal_text_names_what_goes_with_one_line(dock):
+    session, dock = dock
+    key = KEYS[0]
+    assert "Also removed" not in dock._removal_text([], [key])
+    session.append_step(key, build_step("dewow"))
+    session.set_line_velocity(key, MODEL)
+    for t in (30.0, 40.0):
+        session.add_velocity_fit(key, _fit(t))
+    text = dock._removal_text([], [key])
+    assert (
+        "Also removed: its processing steps, its velocity override and its 2 saved velocity fits."
+        in text
+    )
+    assert text.index("Also removed") < text.index("The DZT file on disk")
+    session.remove_step(key, 0)  # a stack with no step is nothing to lose
+    session.set_line_velocity(key, None)
+    assert "Also removed: its 2 saved velocity fits." in dock._removal_text([], [key])
+
+
+def test_removal_text_names_what_goes_with_several_lines(dock):
+    session, dock = dock
+    for k in KEYS[:2]:
+        session.append_step(k, build_step("dewow"))
+    session.set_line_velocity(KEYS[0], MODEL)
+    for t in (30.0, 40.0):
+        session.add_velocity_fit(KEYS[0], _fit(t))
+    session.add_velocity_fit(KEYS[1], _fit(30.0))
+    text = dock._removal_text([], KEYS)
+    assert (
+        "Also removed: processing steps on 2 of them, velocity override on 1, "
+        "and 3 saved velocity fits on 2." in text
+    )
+    assert text.index(KEYS[2]) < text.index("Also removed")
+
+
+def test_removal_text_names_what_goes_with_a_grid(dock):
+    session, dock = dock
+    session.append_step(KEYS[0], build_step("dewow"))
+    session.append_step(KEYS[1], build_step("dewow"))
+    assert "Also removed: processing steps on 2 of them." in dock._removal_text(["A"], [])
+
+
+def test_removal_text_says_nothing_extra_when_nothing_goes(dock):
+    session, dock = dock
+    assert "Also removed" not in dock._removal_text([], KEYS)
+    assert "Also removed" not in dock._removal_text(["A"], [])
+
+
+def test_remove_defaults_to_no_only_when_a_fit_would_go(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+
+    def default_of(call):
+        args, kwargs = call
+        return kwargs.get("defaultButton", args[4] if len(args) > 4 else None)
+
+    dock.remove_line_action(KEYS[1])
+    dock.remove_grid_action("A")
+    dock.remove_selected_action()
+    assert [default_of(c) for c in calls[:2]] == [QMessageBox.StandardButton.Yes] * 2
+    session.add_velocity_fit(KEYS[0], _fit(30.0))
+    dock.remove_line_action(KEYS[0])
+    dock.remove_line_action(KEYS[1])
+    dock.remove_grid_action("A")
+    assert [default_of(c) for c in calls[-3:]] == [
+        QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+        QMessageBox.StandardButton.No,
+    ]
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    dock.remove_selected_action()
+    assert default_of(calls[-1]) == QMessageBox.StandardButton.No
+    assert len(session.keys()) == 3  # every answer was No
+
+
+def test_bulk_velocity_dialog_sets_the_number_and_warns_about_fits(
+    fake_iface, tmp_path, answer_modal
+):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    try:
+        session = plugin.session
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        session.add_lines(
+            [
+                Line.open(
+                    p := synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT"),
+                    GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem),
+                )
+                for i in (1, 2, 3)
+            ]
+        )
+        _with_fit_record(session, KEYS[0])
+        session.save()
+        calls = answer_modal(QInputDialog, "getDouble", (0.095, False))
+        plugin.survey_dock.bulk_velocity_requested.emit(KEYS)
+        (args, _kw) = calls[0]
+        label = args[2]
+        assert label.startswith("Velocity for 3 lines (m/ns):")
+        assert (
+            "1 of these lines has a velocity from its saved fits; it will be replaced. "
+            "The fits stay saved on the lines." in label
+        )
+        assert "Migration steps keep their own velocity." in label
+        assert args[3:7] == (
+            0.09,
+            0.0,
+            0.3,
+            4,
+        )  # the shared override is the line's own: only one has one
+        assert not session.dirty  # Cancel changes nothing
+        assert session.line_for_key(KEYS[0]).velocity_source is not None
+
+        calls = answer_modal(QInputDialog, "getDouble", (0.095, True))
+        plugin.survey_dock.bulk_velocity_requested.emit(KEYS)
+        for k in KEYS:
+            line = session.line_for_key(k)
+            assert line.velocity == VelocityModel.constant(0.095)
+            assert line.velocity_source is None
+        assert session.line_for_key(KEYS[0]).velocity_fits
+        assert fake_iface.messageBar().currentItem().text() == "velocity 0.095 m/ns set on 3 lines"
+        # Everyone at 0.095 with no record: the box starts there, and no warning.
+        plugin.survey_dock.bulk_velocity_requested.emit(KEYS)
+        assert calls[1][0][3] == 0.095 and "saved fits" not in calls[1][0][2]
+        # Two with records: plural wording.
+        _with_fit_record(session, KEYS[1])
+        _with_fit_record(session, KEYS[2])
+        plugin.survey_dock.bulk_velocity_requested.emit(KEYS)
+        assert (
+            "2 of these lines have a velocity from their saved fits; it will be replaced."
+            in (calls[2][0][2])
+        )
+    finally:
+        plugin.session.save()  # unload would ask about unsaved changes
+        plugin.unload()
+
+
+# --- #57: one line selection with the map -----------------------------------
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+
+
+def _selected_keys(dock):
+    return dock.selected_line_keys()
+
+
+def _recorded(dock):
+    got = []
+    dock.line_selection_changed.connect(got.append)
+    return got
+
+
+def test_select_lines_selects_exactly_those_rows_unfolds_their_grids_and_opens_nothing(dock):
+    session, dock = dock
+    session.open_line(KEYS[0])
+    grid_item = _grid_item(dock, "A")
+    grid_item.setExpanded(False)
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    dock.select_lines([KEYS[2], KEYS[1]])
+
+    assert _selected_keys(dock) == [KEYS[1], KEYS[2]]  # tree order
+    assert [it for it in dock.tree.selectedItems() if dock.key_of(it) is None] == []
+    assert grid_item.isExpanded()
+    assert opened == [] and session.current_key == KEYS[0]
+
+
+def test_select_lines_does_not_announce_back(dock):
+    session, dock = dock
+    got = _recorded(dock)
+
+    dock.select_lines(KEYS)
+    dock.select_lines([KEYS[0]])
+    dock.select_lines([])
+
+    assert got == []
+    assert _selected_keys(dock) == []
+
+
+def test_a_shift_click_after_select_lines_ranges_from_the_selected_row(dock):
+    session, dock = dock
+    dock.select_lines([KEYS[1]])
+
+    _click(dock, dock.item_for_key(KEYS[2]), Qt.KeyboardModifier.ShiftModifier)
+
+    assert _selected_keys(dock) == [KEYS[1], KEYS[2]]
+
+
+def test_a_ctrl_click_announces_the_new_line_selection(dock):
+    session, dock = dock
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    _click(dock, dock.item_for_key(KEYS[1]), CTRL)
+    assert got[-1] == [KEYS[0], KEYS[2]]
+    _click(dock, dock.item_for_key(KEYS[0]), CTRL)
+    assert got[-1] == [KEYS[2]]  # one line left: still nothing opens
+    assert opened == [] and session.current_key is None
+
+
+def test_a_grid_or_cut_selection_announces_no_lines(dock):
+    session, dock = dock
+    cut = session.add_cut("A", _CUT)
+    dock.select_lines([KEYS[0]])
+    got = _recorded(dock)
+
+    _click(dock, _grid_item(dock, "A"))
+    assert got[-1] == []
+    dock.select_lines([KEYS[0]])
+    _click(dock, dock.item_for_key(cut))
+    assert got[-1] == []
+
+
+def test_the_line_selection_survives_a_rebuild(dock):
+    session, dock = dock
+    session.open_line(KEYS[1])
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.set_lines_velocity(KEYS, VelocityModel.constant(0.1))
+
+    assert _selected_keys(dock) == KEYS
+    assert dock.tree.currentItem() is dock.item_for_key(KEYS[1])
+    assert got[-1] == KEYS  # announced once the rebuild is done, for the map
+
+
+def test_a_rebuild_with_no_line_selected_follows_the_open_line(dock):
+    session, dock = dock
+    session.open_line(KEYS[1])
+    dock.select_lines([])
+    session.set_lines_velocity([KEYS[0]], VelocityModel.constant(0.1))
+    assert _selected_keys(dock) == [KEYS[1]]
+
+
+def test_opening_a_line_makes_it_the_selection_and_announces_it(dock):
+    session, dock = dock
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.open_line(KEYS[2])
+
+    assert _selected_keys(dock) == [KEYS[2]]
+    assert got[-1] == [KEYS[2]]
+
+
+def test_opening_a_cut_announces_an_empty_line_selection(dock):
+    session, dock = dock
+    cut = session.add_cut("A", _CUT)
+    dock.select_lines(KEYS)
+    got = _recorded(dock)
+
+    session.open_line(cut)
+
+    assert got[-1] == []
+    assert _selected_keys(dock) == []
+
+
+def test_a_rebuild_keeps_a_grid_the_user_folded_and_its_selected_lines(dock):
+    session, dock = dock
+    dock.select_lines([KEYS[0], KEYS[1]])  # from the map: unfolds the grid
+    grid_item = _grid_item(dock, "A")
+    assert grid_item.isExpanded()
+    grid_item.setExpanded(False)  # folded by hand
+
+    session.set_lines_velocity([KEYS[0], KEYS[1]], VelocityModel.constant(0.1))
+
+    assert not _grid_item(dock, "A").isExpanded()
+    assert _selected_keys(dock) == [KEYS[0], KEYS[1]]
+
+
+@pytest.mark.parametrize("how", ["new_site", "close_site"])
+def test_a_site_switch_with_lines_selected_and_none_open_rebuilds_cleanly(
+    dock, message_log, tmp_path, how
+):
+    session, dock = dock
+    assert session.current_key is None  # nothing open: a map rectangle opens nothing
+    dock.select_lines(KEYS[:2])
+    assert len(dock.selected_line_keys()) == 2
+    if how == "new_site":
+        (tmp_path / "other").mkdir()
+        session.new_site(tmp_path / "other")
+    else:
+        session.close_site()
+    assert [m for m in message_log if "could not rebuild" in m] == []
+    assert message_log == []
+    assert "survey tree error" not in dock.status.text()
+    assert dock.selected_line_keys() == []
+
+
+def test_the_menu_and_removal_text_ignore_selected_keys_that_are_not_lines(
+    dock, answer_modal, message_log, monkeypatch
+):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    monkeypatch.setattr(dock, "_selected_targets", lambda: ([], ["mag/FILE_M.dat"]))
+    item = dock.item_for_key(KEYS[0])
+    _select(dock, item, dock.item_for_key(KEYS[1]))
+    menu = _right_click(dock, item)
+    assert _texts(menu) == ["Remove 1 line from site"]
+    assert dock._fits_would_go([], ["mag/FILE_M.dat"]) is False
+    assert dock._lines_going([], ["mag/FILE_M.dat"]) == []
+    assert message_log == []

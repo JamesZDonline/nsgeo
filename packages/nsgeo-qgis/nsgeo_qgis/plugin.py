@@ -31,8 +31,8 @@ down any state the dialog armed, deleteLater()) moved onto dialog.finished
 rather than living after a blocking call, and a single `self._grid_dialog`
 tracking slot so a second one isn't opened on top of the first.
 
-Task 11's ImportDialog copies the same show()/finished pattern
-(`self._import_dialog`) even though nothing in its own flow needs the
+Task 11's import dialog (now Add data's pages) copies the same show()/finished pattern
+(`self._add_data_dialog`) even though nothing in its own flow needs the
 canvas or anything else mid-dialog: an application-modal exec() would have
 blocked the toolbar and dock for as long as it was open, which would have
 been a real (if accidental) way to avoid the races below rather than one
@@ -41,7 +41,7 @@ for every dialog, so a stray exec() staying modal by oversight is not a
 failure mode reachable here -- and modeless does mean the site can be
 closed or replaced, or the very grid an open import is targeting can be
 removed (the dock's "Remove grid" has no guard against an import in
-flight), before Import is clicked. ImportDialog's own accept() re-checks
+flight), before Import is clicked. The import pages' own import_lines() re-check
 all three before writing anything (see its module docstring) rather than
 lean on exec() to make them unreachable.
 """
@@ -59,12 +59,13 @@ from typing import Any
 
 import nsgeo
 import numpy as np
-from nsgeo.geometry import Grid
+from nsgeo.geometry import Grid, fit_frame, measure_spacing
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_windows
+from nsgeo.velocity import VelocityModel
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
@@ -90,7 +91,7 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
 )
 
-from nsgeo_qgis import build_label, own_colours, plugin_version
+from nsgeo_qgis import build_label, own_colours, plugin_version, step_inputs
 from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
 from nsgeo_qgis.export_style import write_style
@@ -104,7 +105,7 @@ from nsgeo_qgis.export_task import (
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.lookup import CORNER_ROLES
+from nsgeo_qgis.lookup import CORNER_ROLES, identity_curve
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
@@ -150,12 +151,11 @@ from nsgeo_qgis.surface_plan import (
     write_failure_text,
 )
 from nsgeo_qgis.surfaces import Surfaces
+from nsgeo_qgis.ui.add_data_dialog import AddDataDialog, opening_mode
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
-from nsgeo_qgis.ui.gps_import_dialog import GpsImportDialog
-from nsgeo_qgis.ui.grid_dialog import GridDialog
-from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.grid_dialog import DEFAULT_SPACING, GridDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
@@ -168,7 +168,13 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
-IMPORT_GPS_TIP = "Imports DZT files with a DZG beside them, each placed along its RTK GPS track."
+ADD_DATA_TIP = "Add survey data to the site: GPR lines placed by a grid's tapes or by GPS."
+ANALYSIS_3D_TIP = "3-D tools: a surface from picks, the 3D view, and the export for ParaView."
+SURFACE_TIP = "Make a surface from the picks selected on the map (the picks layer current)."
+PARAVIEW_TIP = (
+    "Write one grid's volume for ParaView: a block to slice, an isosurface, and its picks, "
+    "lines and surfaces."
+)
 VELOCITY_TIP = (
     "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
     "or drag a box around it to trace it. Right-click a point to remove it. "
@@ -266,6 +272,10 @@ def launch_paraview(paraview: str, folder: Path) -> bool:
     return bool(started[0] if isinstance(started, tuple) else started)
 
 
+RESET_TITLE = "Reset gain curve"
+RESET_QUESTION = "Reset the gain curve to a flat 0 dB? Its {n} points will be lost."
+
+
 class NsgeoPlugin:
     def __init__(self, iface: Any) -> None:
         self.iface = iface
@@ -303,13 +313,22 @@ class NsgeoPlugin:
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
-        self.act_import: QAction | None = None
-        self.act_import_gps: QAction | None = None
+        #: The toolbar's Add data button (its own action for it), and the
+        #: menu entry GPR… it drops down. See `_build_add_data_button`.
+        self.act_add_data: QAction | None = None
+        self.act_add_gpr: QAction | None = None
+        self.add_data_menu: QMenu | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
+        #: The toolbar's 3D Analysis button (its own action for it), the
+        #: menu it drops down, and that menu's three entries (#227). See
+        #: `_build_analysis3d_button`.
+        self.act_analysis3d: QAction | None = None
+        self.analysis3d_menu: QMenu | None = None
         self.act_surface: QAction | None = None
         self.act_view3d: QAction | None = None
+        self.act_paraview: QAction | None = None
         #: QGIS's 3-D view of the Slices panel's grid (M16 C).
         self.scene3d: Scene3D | None = None
         #: The Cut map tool while the toggle is on (cut spec §4.1).
@@ -322,8 +341,7 @@ class NsgeoPlugin:
         #: The running map pick's instruction in the message bar, if any.
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
-        self._import_dialog: ImportDialog | None = None
-        self._gps_import_dialog: GpsImportDialog | None = None
+        self._add_data_dialog: AddDataDialog | None = None
         self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -388,9 +406,7 @@ class NsgeoPlugin:
         self.act_save = self._toolbar_action("Save site", self.save_with_prompt)
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
-        self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
-        self.act_import_gps = self._toolbar_action("Import GPS lines…", self.open_gps_import_dialog)
-        self.act_import_gps.setToolTip(IMPORT_GPS_TIP)
+        self._build_add_data_button()
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -403,12 +419,8 @@ class NsgeoPlugin:
         self.act_cut = self._toolbar_action("Cut", self._toggle_cut_tool)
         self.act_cut.setCheckable(True)
         self.act_cut.setToolTip(CUT_TIP)
-        self.act_surface = self._toolbar_action("Surface from picks…", self.new_surface)
-        self.act_surface.setToolTip(
-            "Make a surface from the picks selected on the map (the picks layer current)."
-        )
-        self.act_view3d = self._toolbar_action("3D view", self.open_view3d)
-        self.act_view3d.setToolTip(BUTTON_TIP)
+        self.toolbar.addSeparator()
+        self._build_analysis3d_button()
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -418,12 +430,18 @@ class NsgeoPlugin:
         self.survey_dock = SurveyDock(self.session, main)
         self.survey_dock.add_grid_requested.connect(lambda: self.open_grid_dialog(None))
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
-        self.survey_dock.import_requested.connect(self.open_import_dialog)
+        self.survey_dock.import_requested.connect(self._add_data_from_survey)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_velocity_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
         self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
+        self.survey_dock.fit_tracks_requested.connect(self.fit_tracks)
+        self.survey_dock.bulk_velocity_requested.connect(self.open_bulk_velocity_dialog)
+        self.survey_dock.report.connect(self.message)
+        # One line selection, both ways (#57); the map link exists already (above).
+        self.map_link.lines_selected.connect(self.survey_dock.select_lines)
+        self.survey_dock.line_selection_changed.connect(self.map_link.select_lines)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -443,7 +461,6 @@ class NsgeoPlugin:
         self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
         self.slices_dock.save_cube_requested.connect(self.save_cube)
         self.slices_dock.export_requested.connect(self.export_geotiff)
-        self.slices_dock.paraview_requested.connect(self.export_paraview)
         self.scene3d = Scene3D(
             self.session,
             self.layers,
@@ -539,6 +556,7 @@ class NsgeoPlugin:
             lambda: self.processing_dock.diff_button.setChecked(False)
         )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
+        self.profile_dock.gain_reset_requested.connect(self._on_gain_reset)
         # ProfileDock re-renders on line_loaded, but ProcessingDock does not
         # re-check the gain strip on it (it reacts only to re-show a form with
         # a time field and an enabled Time zero above its row, built before
@@ -614,6 +632,52 @@ class NsgeoPlugin:
                 f"could not tab the Slices and Surfaces panels: {exc}", Qgis.MessageLevel.Warning
             )
 
+    def _build_add_data_button(self) -> None:
+        """The toolbar's Add data button, after Add grid…: an instant-popup menu
+        (the Panels button's pattern) holding GPR…, with room for the
+        magnetometer's entry (M19a) beside it."""
+        menu = QMenu(self.iface.mainWindow())
+        self.act_add_gpr = menu.addAction("GPR…")
+        self.act_add_gpr.triggered.connect(self._add_data_from_toolbar)
+        self.act_add_data = self._toolbar_menu_button("Add data", ADD_DATA_TIP, menu)
+        self.add_data_menu = menu
+
+    def _build_analysis3d_button(self) -> None:
+        """#227: the toolbar's 3D Analysis button, after Cut: an instant-popup
+        menu holding Surface from picks…, 3D view and Export for ParaView…,
+        with room for later 3-D tools. Each entry keeps its tooltip, and the
+        menu shows them, so the 3D view still says which grid it shows."""
+        menu = QMenu(self.iface.mainWindow())
+        menu.setToolTipsVisible(True)
+        self.act_surface = menu.addAction("Surface from picks…")
+        self.act_surface.setToolTip(SURFACE_TIP)
+        self.act_surface.triggered.connect(self.new_surface)
+        self.act_view3d = menu.addAction("3D view")
+        self.act_view3d.setToolTip(BUTTON_TIP)
+        self.act_view3d.triggered.connect(self.open_view3d)
+        self.act_paraview = menu.addAction("Export for ParaView…")
+        self.act_paraview.setToolTip(PARAVIEW_TIP)
+        self.act_paraview.triggered.connect(self.export_paraview)
+        self.act_analysis3d = self._toolbar_menu_button("3D Analysis", ANALYSIS_3D_TIP, menu)
+        self.analysis3d_menu = menu
+
+    def _toolbar_menu_button(self, text: str, tip: str, menu: QMenu) -> QAction:
+        """A toolbar button of our own that drops `menu` down on one click.
+
+        A button of our own, not an action given a menu: the popup mode
+        belongs to the button, and QToolBar would make that button itself,
+        with a split arrow whose main half does nothing here. Returns the
+        toolbar's action for the button; callers add their own separator.
+        """
+        button = QToolButton(self.toolbar)
+        button.setText(text)
+        button.setToolTip(tip)
+        button.setMenu(menu)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        action = self.toolbar.addWidget(button)
+        self.toolbar_actions.append(action)
+        return action
+
     def _build_panels_menu(self) -> None:
         """#84: the toolbar's Panels button -- each panel by name, then
         three layouts.
@@ -657,17 +721,10 @@ class NsgeoPlugin:
         )
         menu.addAction("Show all").triggered.connect(self._show_all_panels)
 
-        # A button of our own, not an action given a menu: the popup mode
-        # belongs to the button, and QToolBar would make that button
-        # itself, with a split arrow whose main half does nothing here.
-        button = QToolButton(self.toolbar)
-        button.setText("Panels")
-        button.setToolTip("Show or hide the nsgeo panels, or switch to a layout")
-        button.setMenu(menu)
-        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.toolbar.addSeparator()
-        self.act_panels = self.toolbar.addWidget(button)
-        self.toolbar_actions.append(self.act_panels)
+        self.act_panels = self._toolbar_menu_button(
+            "Panels", "Show or hide the nsgeo panels, or switch to a layout", menu
+        )
         self.panels_menu = menu
 
     def _set_panel_open(self, dock: Any, entry: QAction, checked: bool) -> None:
@@ -770,16 +827,13 @@ class NsgeoPlugin:
         # work in exactly the state its own feature creates.
         if self._grid_dialog is not None:
             self._grid_dialog.reject()
-        # Same reasoning as GridDialog just above: ImportDialog is
-        # modeless too, so it can still be open here, and reject() (not
-        # close(), for the same hidden-dialog reason) is what runs its
-        # finished-signal cleanup instead of leaving it dangling with a
-        # reference to a session this method is about to tear down.
-        if self._import_dialog is not None:
-            self._import_dialog.reject()
-        # And the GPS import, for the same reason.
-        if self._gps_import_dialog is not None:
-            self._gps_import_dialog.reject()
+        # Same reasoning as GridDialog just above: Add data is modeless
+        # too, so it can still be open here, and reject() (not close(), for
+        # the same hidden-dialog reason) is what runs its finished-signal
+        # cleanup instead of leaving it dangling with a reference to a
+        # session this method is about to tear down.
+        if self._add_data_dialog is not None:
+            self._add_data_dialog.reject()
         # Same reasoning again: Edit lines tables are modeless too, one per
         # grid, and reject() (not close()) runs each one's finished-signal
         # cleanup instead of leaving it dangling with a reference to a
@@ -853,6 +907,9 @@ class NsgeoPlugin:
         self.docks.clear()
         self.survey_dock = None
         self.profile_dock = None
+        # The strip's owner token and step go with the dock they described.
+        self._gain_owner = None
+        self._gain_step = None
         self.processing_dock = None
         self.slices_dock = None
         self.surfaces_dock = None
@@ -867,13 +924,25 @@ class NsgeoPlugin:
         self.act_open = None
         self.act_save = None
         self.act_add_grid = None
-        self.act_import = None
-        self.act_import_gps = None
+        self.act_add_data = None
+        self.act_add_gpr = None
+        if self.add_data_menu is not None:
+            # Parented to the main window, which outlives this plugin; its
+            # GPR… entry is its child and goes with it.
+            self.add_data_menu.deleteLater()
+            self.add_data_menu = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
+        self.act_analysis3d = None
         self.act_surface = None
         self.act_view3d = None
+        self.act_paraview = None
+        if self.analysis3d_menu is not None:
+            # Parented to the main window, which outlives this plugin; its
+            # entries are its children and go with it.
+            self.analysis3d_menu.deleteLater()
+            self.analysis3d_menu = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -950,10 +1019,11 @@ class NsgeoPlugin:
             for act in (
                 self.act_save,
                 self.act_add_grid,
-                self.act_import,
-                self.act_import_gps,
+                self.act_add_data,
+                self.act_analysis3d,
                 self.act_surface,
                 self.act_view3d,
+                self.act_paraview,
             ):
                 if act is not None:
                     act.setEnabled(is_open)
@@ -1001,40 +1071,67 @@ class NsgeoPlugin:
         # module docstring); None-guard the same way _update_enabled does.
         if self.session is None or self.profile_dock is None:
             return
-        key = self.session.current_key
-        if key is None or row < 0:
-            self.profile_dock.show_gain_strip(None)
-            return
-        entries = self.session.stack_for(key).entries
-        if row >= len(entries):
-            self.profile_dock.show_gain_strip(None)
-            return
-        step = entries[row][0]
-        name = self._curve_param_name(step)
-        if name is None:
-            self.profile_dock.show_gain_strip(None)
-            return
-        # The owner token the strip compares against the one already on
-        # screen, so it can end a gesture that belongs to a curve no
-        # longer displayed (see the gain strip module docstring's fourth
-        # invariant). It cannot simply be the step object: every move of a
-        # drag replaces the step, so the token has to stay stable across
-        # this strip's *own* edits or the very first move would end its
-        # own gesture. It cannot be (key, row) alone either: a stack
-        # mutation that swaps a different step into the same row leaves
-        # that pair unchanged, and the payload would then be refused
-        # mid-drag while the write target had already moved -- exactly the
-        # failure this fixes, one row along. So: (key, row) plus a
-        # generation bumped whenever a genuinely different step object
-        # arrives. `_on_gain_points` records the object it is about to
-        # write *before* writing it, which is what keeps a drag's own echo
-        # from reading as a different step here.
-        if step is not self._gain_step:
-            self._gain_generation += 1
-        self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
-        self.profile_dock.show_gain_strip(
-            step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
-        )
+        try:
+            key = self.session.current_key
+            if key is None or row < 0:
+                self.profile_dock.show_gain_strip(None)
+                return
+            entries = self.session.stack_for(key).entries
+            if row >= len(entries):
+                self.profile_dock.show_gain_strip(None)
+                return
+            step = entries[row][0]
+            name = self._curve_param_name(step)
+            if name is None:
+                self.profile_dock.show_gain_strip(None)
+                return
+            stack = self.session.stack_for(key)
+            if self._refusal_above(row):
+                # A step above the curve refuses, so the curve's input clock
+                # is unknown (the zero falls back to 0.0): a strip drawn now
+                # would draw and write on the wrong clock. Shown again once
+                # the refusal is fixed (the rebuild re-selects the row).
+                # Decided from the panel's note, no stack evaluation.
+                self.profile_dock.show_gain_strip(None)
+                return
+            if step_inputs.clock_unknown(stack, row):
+                # The step's clock is not known yet (samples still loading
+                # behind an enabled Time zero): a strip drawn now would sit on
+                # the wrong clock. `_resync_gain_strip` shows it on
+                # `line_loaded`. Decided without evaluating the stack: this
+                # runs on every drag echo, and evaluating a refusing stack
+                # logs a warning each time.
+                self.profile_dock.show_gain_strip(None)
+                return
+            # The owner token the strip compares against the one already on
+            # screen, so it can end a gesture that belongs to a curve no
+            # longer displayed (see the gain strip module docstring's fourth
+            # invariant). It cannot simply be the step object: every move of a
+            # drag replaces the step, so the token has to stay stable across
+            # this strip's *own* edits or the very first move would end its
+            # own gesture. It cannot be (key, row) alone either: a stack
+            # mutation that swaps a different step into the same row leaves
+            # that pair unchanged, and the payload would then be refused
+            # mid-drag while the write target had already moved -- exactly the
+            # failure this fixes, one row along. So: (key, row) plus a
+            # generation bumped whenever a genuinely different step object
+            # arrives. `_on_gain_points` records the object it is about to
+            # write *before* writing it, which is what keeps a drag's own echo
+            # from reading as a different step here.
+            if step is not self._gain_step:
+                self._gain_generation += 1
+            self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
+            self.profile_dock.show_gain_strip(
+                step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
+            )
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not show the gain curve: {exc}", Qgis.MessageLevel.Warning)
+
+    def _refusal_above(self, row: int) -> bool:
+        """True when the Processing panel notes a refusal at a row above
+        `row` (so the step at `row` has no known input clock)."""
+        refusal = self.processing_dock.refusal() if self.processing_dock is not None else None
+        return refusal is not None and refusal.index < row
 
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
@@ -1048,7 +1145,10 @@ class NsgeoPlugin:
             return
         if key != self.session.current_key:
             return
-        self._sync_gain_strip(self.processing_dock.current_row())
+        try:
+            self._sync_gain_strip(self.processing_dock.current_row())
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not show the gain curve: {exc}", Qgis.MessageLevel.Warning)
 
     def _resync_slice_band(self, key: str) -> None:
         """Re-announce the slice window onto a freshly opened line.
@@ -1068,70 +1168,134 @@ class NsgeoPlugin:
         """`[time_ns, gain_db]` points with the times moved between clocks."""
         return [[float(retime_ns(float(t), from_zero_ns, to_zero_ns)), float(g)] for t, g in points]
 
+    def _replace_gain_step(self, key: str, row: int, old: Any, new: Any) -> None:
+        """`session.replace_step`, putting `_gain_step` back to `old` if it
+        raises: otherwise the identity barrier would refuse every later gain
+        write against a step that never reached the stack."""
+        try:
+            self.session.replace_step(key, row, new)
+        except Exception:
+            if self._gain_step is new:
+                self._gain_step = old
+            raise
+
     def _on_gain_points(self, points: list) -> None:
         if self.session is None or self.processing_dock is None:
             return
-        key = self.session.current_key
-        row = self.processing_dock.current_row()
-        if key is None or row < 0:
-            return
-        step = self.session.stack_for(key).entries[row][0]
-        # The second barrier against writing one curve onto another. The
-        # first is the strip's own owner check, which ends a gesture whose
-        # curve has left the screen; this one refuses the write itself
-        # unless the selected row still holds the very step object
-        # `_sync_gain_strip` built the strip from. Identity, not name: two
-        # `gain_curve` steps in one stack share a name and are not the
-        # same step. Kept even though the first barrier should make it
-        # unreachable, for the reason the module docstring gives for
-        # `mouseMoveEvent`'s buttons() check -- this failure is silent
-        # (no error, no log, no undo, and the strip goes on displaying the
-        # curve it did not write), and a silent one is worth two barriers.
-        # It is also the only barrier that covers `points_changed` being a
-        # public signal on a public widget: an emit that never came from a
-        # gesture at all never passes through the strip's owner check.
-        if step is not self._gain_step:
-            return
-        name = self._curve_param_name(step)
-        if name is None:
-            return
-        shown, input_zero = (
-            self.profile_dock.shown_zero_ns(),
-            self.profile_dock.step_input_zero_ns(row),
-        )
         try:
-            # Compared on the shown clock: an unmoved handle writes nothing.
-            if [[float(a), float(b)] for a, b in points] == self._points_on_clock(
-                step.params[name], input_zero, shown
-            ):
+            key = self.session.current_key
+            row = self.processing_dock.current_row()
+            if key is None or row < 0:
                 return
-            params = dict(step.params)
-            params[name] = self._points_on_clock(points, shown, input_zero)
-        except (TypeError, ValueError) as exc:
-            self.message(f"bad gain curve points: {exc}", Qgis.MessageLevel.Warning)
-            return
-        if step.params == params:
-            # No actual change -- e.g. a plain click on a handle with no
-            # movement, which GainStrip.mouseReleaseEvent still emits
-            # unconditionally. Matches ProcessingDock._on_form_committed's
-            # own no-op guard: a replace_step here would still dirty the
-            # session and earn the user a save prompt for an edit they
-            # never made.
+            step = self.session.stack_for(key).entries[row][0]
+            # The second barrier against writing one curve onto another. The
+            # first is the strip's own owner check, which ends a gesture whose
+            # curve has left the screen; this one refuses the write itself
+            # unless the selected row still holds the very step object
+            # `_sync_gain_strip` built the strip from. Identity, not name: two
+            # `gain_curve` steps in one stack share a name and are not the
+            # same step. Kept even though the first barrier should make it
+            # unreachable, for the reason the module docstring gives for
+            # `mouseMoveEvent`'s buttons() check -- this failure is silent
+            # (no error, no log, no undo, and the strip goes on displaying the
+            # curve it did not write), and a silent one is worth two barriers.
+            # It is also the only barrier that covers `points_changed` being a
+            # public signal on a public widget: an emit that never came from a
+            # gesture at all never passes through the strip's owner check.
+            if step is not self._gain_step:
+                return
+            name = self._curve_param_name(step)
+            if name is None:
+                return
+            shown, input_zero = (
+                self.profile_dock.shown_zero_ns(),
+                self.profile_dock.step_input_zero_ns(row),
+            )
+            try:
+                # Compared on the shown clock: an unmoved handle writes nothing.
+                if [[float(a), float(b)] for a, b in points] == self._points_on_clock(
+                    step.params[name], input_zero, shown
+                ):
+                    return
+                params = dict(step.params)
+                params[name] = self._points_on_clock(points, shown, input_zero)
+            except (TypeError, ValueError) as exc:
+                self.message(f"bad gain curve points: {exc}", Qgis.MessageLevel.Warning)
+                return
+            if step.params == params:
+                # No actual change -- e.g. a plain click on a handle with no
+                # movement, which GainStrip.mouseReleaseEvent still emits
+                # unconditionally. Matches ProcessingDock._on_form_committed's
+                # own no-op guard: a replace_step here would still dirty the
+                # session and earn the user a save prompt for an edit they
+                # never made.
+                return
+            try:
+                new = build_step(step.name, **params)
+            except ValueError as exc:
+                self.message(str(exc), Qgis.MessageLevel.Warning)
+                # Snap the strip back to the step's own curve: it still shows
+                # the refused one (#49).
+                self.profile_dock.show_gain_strip(
+                    step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
+                )
+                return
+            # Recorded before replace_step, exactly as
+            # ProcessingDock._on_form_committed records `_shown_step`: the
+            # stack_changed -> rebuild() -> step_selected echo this triggers
+            # runs synchronously and reports this very object back to
+            # _sync_gain_strip, which must recognise it as the curve already
+            # on screen rather than bump the generation and end the drag that
+            # is still in progress.
+            self._gain_step = new
+            self._replace_gain_step(key, row, step, new)
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not change the gain curve: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_gain_reset(self) -> None:
+        """The strip's Reset: the step's curve becomes a flat 0 dB across its
+        input axis, after asking when that would lose a non-zero point."""
+        if self.session is None or self.processing_dock is None:
             return
         try:
+            key = self.session.current_key
+            row = self.processing_dock.current_row()
+            if key is None or row < 0:
+                return
+            if self._refusal_above(row):  # the strip is hidden on a refusal above
+                return
+            step = self.session.stack_for(key).entries[row][0]
+            if step is not self._gain_step:  # same barrier as _on_gain_points
+                return
+            name = self._curve_param_name(step)
+            if name is None:
+                return
+            axis = self.processing_dock.input_axis(row)
+            if axis is None:
+                return
+            flat = identity_curve(*axis)
+            current = step.params[name]
+            if [[float(t), float(g)] for t, g in current] == flat:
+                return
+            if any(float(g) != 0.0 for _t, g in current):
+                answer = QMessageBox.question(
+                    self.iface.mainWindow(),
+                    RESET_TITLE,
+                    RESET_QUESTION.format(n=len(current)),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            params = dict(step.params)
+            params[name] = flat
             new = build_step(step.name, **params)
-        except ValueError as exc:
-            self.message(str(exc), Qgis.MessageLevel.Warning)
-            return
-        # Recorded before replace_step, exactly as
-        # ProcessingDock._on_form_committed records `_shown_step`: the
-        # stack_changed -> rebuild() -> step_selected echo this triggers
-        # runs synchronously and reports this very object back to
-        # _sync_gain_strip, which must recognise it as the curve already
-        # on screen rather than bump the generation and end the drag that
-        # is still in progress.
-        self._gain_step = new
-        self.session.replace_step(key, row, new)
+            # Recorded before replace_step, as _on_gain_points does: the echo
+            # must read as the curve already on screen.
+            self._gain_step = new
+            self._replace_gain_step(key, row, step, new)
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not reset the gain curve: {exc}", Qgis.MessageLevel.Warning)
 
     def _on_slice_changed(self) -> None:
         try:
@@ -1435,8 +1599,8 @@ class NsgeoPlugin:
         return callback, dialog
 
     def export_paraview(self) -> None:
-        """The Slices panel's "ParaView..." button: the dialog, then the export behind the
-        progress dialog, then (when asked) ParaView on the folder (M16 A)."""
+        """The 3D Analysis menu's Export for ParaView… (#227): the dialog, then the export
+        behind the progress dialog, then (when asked) ParaView on the folder (M16 A)."""
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
                 return
@@ -1551,11 +1715,17 @@ class NsgeoPlugin:
             fids = self.layers.selected_pick_ids()
             check = self.surfaces.check(fids)
             labels = []
+            cut_names = []
+            deleted_cuts = set()
             for row in self.layers.pick_rows(fids):
-                # A pick on a cut or on a line no longer in the site has no label: the check
-                # says why it cannot be used.
+                # A pick on a line no longer in the site has no label: the check says why it
+                # cannot be used. A cut is named as a cut, apart from the lines.
+                key = row.pick.line_key
+                if is_cut_key(key) and key not in self.session.cut_keys():
+                    deleted_cuts.add(key)
+                    continue
                 with contextlib.suppress(KeyError):
-                    labels.append(self.surfaces.line_label(row.pick.line_key))
+                    (cut_names if is_cut_key(key) else labels).append(self.surfaces.line_label(key))
             hint = resolution_hint(None)
             if check.grid_id is not None:
                 try:
@@ -1565,7 +1735,7 @@ class NsgeoPlugin:
                     pass  # the generic line; the build will say what is wrong
             dialog = NewSurfaceDialog(
                 check,
-                selection_label(check.n, check.grid_id, labels),
+                selection_label(check.n, check.grid_id, labels, cut_names, len(deleted_cuts)),
                 self.iface.mainWindow(),
                 taken=[r.name for r in self.surfaces.records()],
                 hint=hint,
@@ -2608,7 +2778,13 @@ class NsgeoPlugin:
             return False
 
     # ---- dialogs (provided by later tasks) --------------------------------
-    def open_grid_dialog(self, grid_id: str | None) -> None:
+    def open_grid_dialog(
+        self,
+        grid_id: str | None,
+        *,
+        proposed: Grid | None = None,
+        move_keys: Sequence[str] = (),
+    ) -> None:
         # Fix round 4, Finding 1 (critical): GridDialog must be
         # modeless. QDialog.exec()'s application-modal event loop
         # terminates the instant the dialog is hidden -- verified
@@ -2626,6 +2802,12 @@ class NsgeoPlugin:
         # closed any other way.
         assert self.session is not None
         if not self.session.is_open:
+            return
+        if self._grid_dialog is not None and (proposed is not None or move_keys):
+            # Fit to these tracks while another grid dialog is open: showing the
+            # open one would drop this request, and its OK could then move the
+            # wrong lines. Refuse, and leave the open dialog's own request alone.
+            self.message("Close the open grid dialog first.", Qgis.MessageLevel.Warning)
             return
         if self._grid_dialog is not None:
             # Modeless means the toolbar and dock stay clickable while
@@ -2658,6 +2840,7 @@ class NsgeoPlugin:
             grid=grid,
             parent=self.iface.mainWindow(),
             canvas=self.iface.mapCanvas(),
+            proposed=proposed,
         )
         # Fix round 5, Finding 2: modeless means the toolbar stays
         # clickable while the dialog is open, so the site it was opened
@@ -2706,6 +2889,8 @@ class NsgeoPlugin:
                         try:
                             if grid is None:
                                 self.session.add_grid(new_grid)
+                                if move_keys:
+                                    self._moved_into(move_keys, new_grid.id)
                             else:
                                 new_grid = self._edited_grid_velocity(dialog, new_grid)
                                 report = self.session.replace_grid(new_grid)
@@ -3005,106 +3190,99 @@ class NsgeoPlugin:
         else:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 
-    def _import_from_toolbar(self) -> None:
-        # #61: into the grid the Survey panel points at, not always the
-        # first one. None when it points at none, and the dialog then
-        # falls back to the first grid.
-        dock = self.survey_dock
-        self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
+    def _add_data_from_toolbar(self, *_: Any) -> None:
+        # A slot (triggered). #61: tape lines into the grid the Survey panel
+        # points at, not always the first one; GPS lines into New grid
+        # (walkthrough W5); the mode is the remembered one.
+        try:
+            dock = self.survey_dock
+            self.open_add_data_dialog(
+                dock.target_grid_id() if dock is not None else None, gps_on_grid=False
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
-    def open_gps_import_dialog(self, *_: Any) -> None:
-        """Import GPS lines…: modeless and single-instance, open_import_dialog()'s
-        shape. It needs an open site and no grid."""
+    def _add_data_from_survey(self, grid_id: str) -> None:
+        # A slot (the Survey panel's import_requested): that grid, in the mode
+        # its lines point to (decision 15).
         try:
             assert self.session is not None
-            if not self.session.is_open:
-                return
-            if self._gps_import_dialog is not None:
-                self._gps_import_dialog.show()
-                self._gps_import_dialog.raise_()
-                self._gps_import_dialog.activateWindow()
-                return
-            dialog = GpsImportDialog(self.session, parent=self.iface.mainWindow())
+            self.open_add_data_dialog(grid_id, opening_mode(self.session, grid_id))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Add data: {exc}", Qgis.MessageLevel.Warning)
 
-            def finished(result: int) -> None:
-                # A slot on dialog.finished: see the module docstring.
-                # GpsImportDialog.accept() already wrote the site, and left
-                # the words to say in dialog.messages.
-                try:
-                    if result == QDialog.DialogCode.Accepted:
-                        # The count is plain news; everything after it
-                        # (a bridge, a long end run, a refusal) is a warning.
-                        for i, text in enumerate(dialog.messages):
-                            self.message(
-                                text,
-                                Qgis.MessageLevel.Info if i == 0 else Qgis.MessageLevel.Warning,
-                            )
-                except Exception as exc:  # noqa: BLE001 -- see the module docstring
-                    self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
-                finally:
-                    dialog.deleteLater()
-                    self._gps_import_dialog = None
-
-            def clear_if_current() -> None:
-                # See open_grid_dialog()'s clear_if_current.
-                if self._gps_import_dialog is dialog:
-                    self._gps_import_dialog = None
-
-            dialog.finished.connect(finished)
-            dialog.destroyed.connect(clear_if_current)
-            self._gps_import_dialog = dialog
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-        except Exception as exc:  # noqa: BLE001 -- a slot (triggered): see the module docstring
-            self.message(f"could not open the GPS import: {exc}", Qgis.MessageLevel.Warning)
-
-    def open_import_dialog(self, grid_id: str | None) -> None:
-        # Modeless -- see the module docstring and open_grid_dialog() above,
-        # whose shape this copies: single-instance tracking on
-        # self._import_dialog, lifecycle on dialog.finished rather than
-        # after a blocking exec(), deleteLater() plus a destroyed() guard
-        # against a dialog torn down some other way.
+    def open_add_data_dialog(
+        self, grid_id: str | None = None, mode: str | None = None, *, gps_on_grid: bool = True
+    ) -> None:
+        """Add data ▸ GPR…: modeless and single-instance, open_grid_dialog()'s
+        shape. An open dialog is raised, retargeted (only while its page has no
+        files) and switched to `mode` when one is asked for. `gps_on_grid`
+        False keeps `grid_id` off the GPS page (AddDataDialog's docstring)."""
+        # Modeless -- see the module docstring and open_grid_dialog() above:
+        # single-instance tracking on self._add_data_dialog, lifecycle on
+        # dialog.finished rather than after a blocking exec(), deleteLater()
+        # plus a destroyed() guard against a dialog torn down some other way.
         assert self.session is not None
         if not self.session.is_open:
             return
-        if not (self.session.site and self.session.site.grids):
-            self.message("Add a grid before importing lines.", Qgis.MessageLevel.Warning)
-            return
-        if self._import_dialog is not None:
+        if self._add_data_dialog is not None:
             if grid_id is not None:
-                self._import_dialog.retarget(grid_id)
-            self._import_dialog.show()
-            self._import_dialog.raise_()
-            self._import_dialog.activateWindow()
+                self._add_data_dialog.retarget(grid_id, gps=gps_on_grid)
+            if mode is not None:
+                self._add_data_dialog.set_mode(mode)
+            self._add_data_dialog.show()
+            self._add_data_dialog.raise_()
+            self._add_data_dialog.activateWindow()
             return
-        dialog = ImportDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+        dialog = AddDataDialog(
+            self.session,
+            grid_id=grid_id,
+            mode=mode,
+            gps_on_grid=gps_on_grid,
+            canvas=self.iface.mapCanvas(),
+            parent=self.iface.mainWindow(),
+        )
+
+        def imported(batch: list[tuple[str, bool]]) -> None:
+            # A slot on dialog.imported (a pyqtSignal): see the module
+            # docstring. The first item of a batch is plain news; the rest are
+            # warnings when flagged.
+            try:
+                for i, (text, warning) in enumerate(batch):
+                    warn = warning and i > 0
+                    self.message(
+                        text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info
+                    )
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
 
         def finished(result: int) -> None:
-            # `finished` is a slot on dialog.finished (a pyqtSignal): an
-            # uncaught exception here would be swallowed by Qt (see the
-            # module docstring). ImportDialog.accept() already did the
-            # actual session write (and its own identity/grid re-checks --
-            # see its module docstring) before emitting Accepted, so there
-            # is nothing left to guard here beyond reporting the count.
+            # A slot on dialog.finished: see the module docstring. The page
+            # already did the session write (and its own identity re-checks).
             try:
-                if result == QDialog.DialogCode.Accepted:
-                    self.message(f"imported {len(dialog.imported_keys)} line(s)")
-            finally:
+                dialog.dispose_overlay()  # the preview leaves the map, however it closed
                 dialog.deleteLater()
-                self._import_dialog = None
+            finally:
+                self._add_data_dialog = None
 
         def clear_if_current() -> None:
             # Same reasoning as open_grid_dialog()'s clear_if_current: only
             # compare identity, never touch `dialog` (already gone by the
             # time destroyed() fires), and only clear the tracker if it
             # still points at *this* dialog.
-            if self._import_dialog is dialog:
-                self._import_dialog = None
+            if self._add_data_dialog is dialog:
+                self._add_data_dialog = None
+            # The preview's canvas item belongs to the canvas: a dialog
+            # destroyed without finished() still gives it back (idempotent,
+            # held by a local reference since `dialog` is gone).
+            if overlay is not None:
+                overlay.dispose()
 
+        overlay = dialog.overlay
+        dialog.imported.connect(imported)
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
-        self._import_dialog = dialog
+        self._add_data_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -3118,7 +3296,7 @@ class NsgeoPlugin:
             self.message(f"could not open Edit lines: {exc}", Qgis.MessageLevel.Critical)
 
     def _open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
-        # Modeless, one table per grid -- open_import_dialog()'s shape: a
+        # Modeless, one table per grid -- open_add_data_dialog()'s shape: a
         # second request for the same grid raises the open table and selects
         # the lines asked for (line editing spec §4.1).
         assert self.session is not None
@@ -3167,6 +3345,40 @@ class NsgeoPlugin:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def fit_tracks(self, keys: list[str]) -> None:
+        """Fit a grid to GPS tracks, from the Survey panel: Add grid… filled in
+        with the fitted rectangle, and OK adds the grid and moves the lines
+        into it. A slot: it never raises."""
+        try:
+            assert self.session is not None
+            crs = self.session.site_crs()
+            tracks = [self.session.line_for_key(k).trace_coords({}) for k in keys]
+            if not tracks:
+                return
+            if crs is None:
+                self.message("Fit a grid: the site has no CRS yet", Qgis.MessageLevel.Critical)
+                return
+            spacing = measure_spacing(tracks) or DEFAULT_SPACING
+            proposed = fit_frame(tracks, spacing).as_grid("_", crs, spacing)
+            self.open_grid_dialog(None, proposed=proposed, move_keys=keys)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise into Qt
+            self.message(f"could not fit a grid to the tracks: {exc}", Qgis.MessageLevel.Critical)
+
+    def _moved_into(self, keys: Sequence[str], grid_id: str) -> None:
+        """Move GPS lines into a grid just added and say so (Fit to these tracks)."""
+        try:
+            outcome = self.session.move_lines(keys, grid_id)
+        except Exception as exc:  # noqa: BLE001 -- finished() is a slot: never raise
+            self.message(
+                f"grid {grid_id} was added, but the lines could not be moved into it: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
+            return
+        text = f"moved {len(outcome.changed)} GPS line(s) into {grid_id}"
+        for s in outcome.skipped:
+            text += f"; {s.label} {s.reason}, so it was left as it is"
+        self.message(text, Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info)
 
     def move_lines(self, keys: list[str], grid_id: str) -> None:
         """Move lines to another grid, from the Survey panel's Move to grid.
@@ -3239,6 +3451,54 @@ class NsgeoPlugin:
             self.message(f"could not set the destagger: {exc}", Qgis.MessageLevel.Critical)
             return
         self.message(f"destagger set to {value:+.2f} m on {len(keys)} GPS line(s)")
+
+    def open_bulk_velocity_dialog(self, keys: list[str]) -> None:
+        """Ask for one velocity and set it as the override of every line in `keys`
+        (Survey panel, Set velocity for N lines…). OK is the confirmation. A slot:
+        it never raises, and reports on the message bar. The box starts at the lines'
+        shared override, else at the velocity the first line resolves to. A velocity
+        from a line's saved fits is replaced (the fits stay), and the label says so."""
+        try:
+            assert self.session is not None
+            session = self.session
+            models = {session.line_for_key(k).velocity for k in keys}
+            start_model = (
+                models.pop()
+                if len(models) == 1 and None not in models
+                else session.resolved_velocity(keys[0])
+            )
+            n_src = sum(1 for k in keys if session.line_for_key(k).velocity_source is not None)
+            label = [f"Velocity for {len(keys)} line{'s' if len(keys) != 1 else ''} (m/ns):"]
+            if n_src:
+                label.append(
+                    f"{n_src} of these lines "
+                    + ("has" if n_src == 1 else "have")
+                    + " a velocity from "
+                    + ("its" if n_src == 1 else "their")
+                    + " saved fits; it will be replaced. The fits stay saved on the lines."
+                )
+            label.append("Migration steps keep their own velocity.")
+            value, accepted = QInputDialog.getDouble(
+                self.iface.mainWindow(),
+                "Velocity",
+                "\n".join(label),
+                start_model.surface_velocity,
+                0.0,
+                0.3,
+                4,
+                Qt.WindowType(0),  # no flags: the step comes after them in the overload
+                0.001,
+            )
+            if not accepted:
+                return
+            session.set_lines_velocity(keys, VelocityModel.constant(value))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"could not set the velocity: {what}", Qgis.MessageLevel.Critical)
+            return
+        self.message(
+            f"velocity {value:.3f} m/ns set on {len(keys)} line{'s' if len(keys) != 1 else ''}"
+        )
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a
@@ -3323,7 +3583,7 @@ class NsgeoPlugin:
         dialog on top of the first; the result is committed on `finished`
         rather than after a blocking call, and the dock is re-read then
         rather than captured now, because the site can change while this
-        is open. Follows `open_import_dialog` exactly -- fix round 1, M4:
+        is open. Follows `open_add_data_dialog` exactly -- fix round 1, M4:
         an earlier version of this method omitted `destroyed.connect(...)`
         (a dialog destroyed some other way then leaves
         `self._line_choice_dialog` pointing at a dead wrapper, wedging the
@@ -3394,7 +3654,7 @@ class NsgeoPlugin:
                     self._line_choice_dialog = None
 
             def clear_if_current() -> None:
-                # Same reasoning as open_grid_dialog()/open_import_dialog()'s
+                # Same reasoning as open_grid_dialog()/open_add_data_dialog()'s
                 # own clear_if_current: only compare identity, never touch
                 # `dialog` (already gone by the time destroyed() fires), and
                 # only clear the tracker if it still points at THIS dialog.

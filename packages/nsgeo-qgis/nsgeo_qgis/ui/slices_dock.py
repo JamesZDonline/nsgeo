@@ -287,7 +287,6 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
-    paraview_requested = pyqtSignal()
     #: #180: open the slice layer's Symbology page (the plugin has `iface`).
     symbology_requested = pyqtSignal()
 
@@ -868,13 +867,8 @@ class SlicesDock(QgsDockWidget):
         self.export_button = QPushButton("Export GeoTIFF…")
         self.save_button.setEnabled(False)
         self.export_button.setEnabled(False)
-        # The 3-D export prepares its own volume (it needs no prepared source), so it is
-        # on whenever a site is open, in either scope.
-        self.paraview_button = QPushButton("ParaView\u2026")
-        self.paraview_button.setEnabled(session.is_open)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.export_button)
-        button_row.addWidget(self.paraview_button)
         outer.addLayout(button_row)
 
         outer.addStretch(1)
@@ -923,7 +917,6 @@ class SlicesDock(QgsDockWidget):
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
         self.export_button.clicked.connect(lambda: self.export_requested.emit())
-        self.paraview_button.clicked.connect(lambda: self.paraview_requested.emit())
         self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
@@ -933,6 +926,7 @@ class SlicesDock(QgsDockWidget):
         session.grids_changed.connect(self.rebuild_source)
         session.lines_changed.connect(self.rebuild_source)
         session.presets_changed.connect(self.rebuild_source)
+        session.slice_sources_changed.connect(self._follow_remembered_preset)
 
         # Position is cheap (0.6-4 ms, the module docstring's own figure):
         # every tick redraws directly, with no debounce.
@@ -1063,7 +1057,6 @@ class SlicesDock(QgsDockWidget):
             # nothing to choose lines FROM without a site open.
             self.choose_button.setEnabled(self.session.is_open)
             self.site_scope_button.setEnabled(self.session.is_open)
-            self.paraview_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared
@@ -1335,6 +1328,30 @@ class SlicesDock(QgsDockWidget):
             finally:
                 self._updating -= 1
         self._read_remembered_lines(grid_id)
+
+    def _follow_remembered_preset(self, grid_id: str) -> None:
+        """#129: a preset written for the grid This grid shows (an import's
+        first lines) is a choice made elsewhere; switch the combo to it as a
+        hand choice would (restore-pending values dropped, preparation re-run),
+        so the new lines are prepared with it and `_remember_source` does not
+        write the first preset by name back over it. Does nothing in Whole site
+        scope, for another grid, while the panel refills its own widgets (its
+        own writes), or when the remembered preset is missing or already shown."""
+        try:
+            if self._scope != "grid" or self._updating or not self.session.is_open:
+                return
+            if grid_id != self.grid_combo.currentText():
+                return
+            preset = (self.session.slice_source(grid_id) or {}).get("preset")
+            if (
+                not preset
+                or preset == self.preset_combo.currentText()
+                or self.preset_combo.findText(preset) < 0
+            ):
+                return
+            self.preset_combo.setCurrentText(preset)
+        except Exception as exc:  # noqa: BLE001 -- a slot on slice_sources_changed
+            _log(f"could not follow a remembered preset: {exc}")
 
     def _read_remembered_lines(self, grid_id: str | None) -> None:
         """This grid's reading of the grid's remembered lines, the one

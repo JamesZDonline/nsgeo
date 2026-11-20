@@ -2803,3 +2803,114 @@ def test_dispose_is_idempotent_and_setters_then_do_nothing(session, project_crs,
     d.overlay.dispose()
     _type_row(d, 0, *SITE_CORNERS[0])  # a late slot must not raise
     assert d.overlay.corners == [None] * 4
+
+
+# ---- M17b Task 6: a proposed grid, and Fit a grid to these tracks -------------------
+PROPOSED = Grid("_", (500_010.0, 5_000_020.0), 12.5, 3.5, 17.0, "EPSG:32632", 0.7)
+
+
+def test_a_proposed_grid_fills_every_field_but_the_id(session):
+    d = GridDialog(session, proposed=PROPOSED)
+    assert d.id_edit.text() == "" and d.id_edit.isEnabled()
+    assert (d.origin_x.value(), d.origin_y.value()) == (500_010.0, 5_000_020.0)
+    assert d.azimuth.value() == pytest.approx(12.5)
+    assert (d.size_x.value(), d.size_y.value()) == (3.5, 17.0)
+    assert d.spacing.value() == pytest.approx(0.7)
+    assert d.crs_widget.crs().authid() == "EPSG:32632"
+    assert not d.ok_button.isEnabled()
+    d.id_edit.setText("F1")
+    assert d.ok_button.isEnabled()
+
+
+def _fit_plugin(fake_iface, tmp_path, n=3):
+    import nsgeo_qgis
+    from plugin_testing import M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.set_site_crs("EPSG:32632")
+    dlon = 0.5 / (M_PER_DEG * 0.7036)
+    lines = []
+    for i in range(n):
+        track = [(t, 45.2 + t * 0.1 / M_PER_DEG, 10.5 + i * dlon, 4) for t in (25, 75, 125, 175)]
+        p = synthetic_gps_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", track, traces_per_metre=10.0)
+        lines.append(open_gps(p, "EPSG:32632"))
+    plugin.session.add_lines(lines)
+    keys = [plugin.session.line_key(ln) for ln in lines]
+    return plugin, keys
+
+
+def test_fit_to_these_tracks_opens_the_grid_dialog_and_ok_moves_the_lines(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    before = [plugin.session.line_for_key(k).trace_coords({}) for k in keys]
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.fit_tracks(keys)
+    dialog = plugin._grid_dialog
+    assert dialog is not None
+    assert dialog.id_edit.text() == "" and dialog.spacing.value() == pytest.approx(0.5, abs=0.02)
+    assert dialog.size_x.value() == pytest.approx(1.5, abs=0.05)  # 3 lines, 0.5 m apart
+    dialog.id_edit.setText("F1")
+    dialog.accept()
+    assert plugin.session.grid("F1").default_spacing == pytest.approx(0.5, abs=0.02)
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {"F1"}
+    after = [plugin.session.line_for_key(k).trace_coords({}) for k in keys]
+    assert all(np.array_equal(a, b) for a, b in zip(before, after))
+    assert shown == ["moved 3 GPS line(s) into F1"]
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_cancelling_fit_to_these_tracks_adds_and_moves_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    plugin.fit_tracks(keys)
+    plugin._grid_dialog.reject()
+    assert plugin.session.site.grids == []
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {None}
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fitting_one_track_proposes_the_default_spacing_and_one_spacing_of_width(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path, n=1)
+    plugin.fit_tracks(keys)
+    dialog = plugin._grid_dialog
+    assert dialog.spacing.value() == 0.5
+    assert dialog.size_x.value() == pytest.approx(0.5, abs=0.02)
+    dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_these_tracks_with_a_grid_dialog_open_refuses_and_keeps_the_open_one(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, keys = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.open_grid_dialog(None)
+    first = plugin._grid_dialog
+    plugin.fit_tracks(keys)
+    assert plugin._grid_dialog is first
+    assert shown == ["Close the open grid dialog first."]
+    first.id_edit.setText("X")
+    first.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32632"))
+    first.accept()  # the plain Add grid: it must not move the fit's lines
+    assert {plugin.session.line_for_key(k).placement.grid_id for k in keys} == {None}
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_fit_to_no_tracks_says_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, _ = _fit_plugin(fake_iface, tmp_path)
+    shown: list[str] = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)
+    plugin.fit_tracks([])
+    assert shown == [] and plugin._grid_dialog is None
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()

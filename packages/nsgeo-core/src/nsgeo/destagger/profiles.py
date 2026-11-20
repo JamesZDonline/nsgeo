@@ -15,7 +15,7 @@ after its neighbours are corrected by shifting the curves instead of
 recomputing the profiles. Lines are visited in offset order and only two
 lines' transforms are held at once. What is kept grows with the grid, but
 slowly: n_bins x (6 x search range + 1) values per pair of lines (about 5 MB
-for Nashville Grid 1's 60 lines, about 30 MB for 200 lines of 50 m), against
+for GPS survey Grid 1's 60 lines, about 30 MB for 200 lines of 50 m), against
 every line's whole transform before.
 """
 
@@ -276,7 +276,7 @@ def peak(curve: np.ndarray) -> tuple[float, float]:
 SHOULDER_M = 0.12
 #: The highest other local maximum must be at most this fraction of the peak.
 CLEAR_RATIO = 0.8
-#: The peak must be at least this correlation coefficient. On Nashville, unrelated lines
+#: The peak must be at least this correlation coefficient. On the GPS survey, unrelated lines
 #: (Grid 1 and Grid 2 alternating) give a grid curve peaking at 0.04 to 0.05, and the real
 #: grids 0.27 to 0.43; one line against its neighbours peaks at 0.1 to 0.8 when it matches.
 MIN_CORRELATION = 0.10

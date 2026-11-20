@@ -106,18 +106,15 @@ stay exactly where they are.
 | **Open site…** | Opens an existing site by its `survey.nsgeo.json` file. |
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
-| **Import DZT…** | Imports DZT files into a grid. |
-| **Import GPS lines…** | Imports DZT files that have a DZG beside them, each placed along its RTK GPS track (see [Step 3a](#step-3a-import-gps-lines)). |
+| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: DZT files placed by a grid's tapes (see [Step 3](#step-3-import-dzt-files)), or placed along their RTK GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
-| **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
-| **3D view** | Opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). |
+| **3D Analysis ▾** | The 3-D tools. **Surface from picks…** makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). **3D view** opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). **Export for ParaView…** writes one grid's volume for ParaView (see [Step 9](#step-9-export-for-paraview)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…**, **Import GPS lines…**, **Cut**, **Surface from
-picks…** and **3D view** stay greyed out until a site is open, and **Pick** and **Velocity** until a
-line is open.
+**Save site**, **Add grid…**, **Add data**, **Cut** and **3D Analysis** stay greyed
+out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -126,7 +123,7 @@ any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
   Click a line to open it. Right-click a grid for **Edit grid…**, **Edit
-  lines…**, **Import DZT files…**, **Set velocity…** and **Remove grid**, which
+  lines…**, **Add GPR data…**, **Set velocity…** and **Remove grid**, which
   removes the grid along with its lines. **Edit lines…** is greyed out while the
   grid has no lines. Right-click a line for **Open**, **Edit line…**, **Set
   velocity override…**, **Move to grid** and **Remove line from site**. To work
@@ -305,10 +302,13 @@ you move the group, it stays where you put it.
 
 ### Step 3: Import DZT files
 
-Click **Import DZT…** (or right-click the grid, then **Import DZT files…**).
-The toolbar button opens on the grid selected in **nsgeo Survey**, or the grid
-of the selected lines, or the grid of the line that is open. The dialog's title
-and its **Import** button name the grid the lines will go into.
+Click **Add data ▾**, then **GPR…** (or right-click the grid, then **Add GPR
+data…**), and leave **Place lines by** on **Grid**. The toolbar button opens on
+the grid selected in **nsgeo Survey**, or the grid of the selected lines, or the
+grid of the line that is open. The dialog's title and its **Import** button name
+the grid the lines will go into. On a site with no grid yet the page says so;
+add a grid first, or place the lines by GPS. When some of the files have a GPS
+log beside them, a note beside the switch says how many.
 
 1. Choose the **Target grid**, and say which way **Lines run along** (the grid's
    Y or X axis).
@@ -357,6 +357,12 @@ changes as one step. Picks move with their lines.
 
 Changing a grid's length in **Edit grid…** moves its reversed lines with the far
 edge. The message bar tells you how many moved.
+
+A GPS line can be in the table too. It is placed by its track, so its **Offset**,
+**Dir**, **Start** and **Scale** read **—** and cannot change; only its **Label**,
+**Destagger** and **Grid** can. A change to a whole selection and **Measure**
+leave GPS rows alone and say so: "Left 3 GPS line(s) alone: Offset applies to tape
+lines only."
 
 A wheel on rough ground, or one that is slightly out of calibration, makes a
 line read longer or shorter than the grid. **Scale** is the number that corrects
@@ -408,7 +414,10 @@ Some surveys were walked with an RTK GPS on the cart. The radar then writes a
 trace being recorded when it arrived. If your lines have DZG files, you can
 place them by where the cart really went instead of by tapes and a grid.
 
-Click **Import GPS lines…**. It needs an open site; a grid is not needed.
+Click **Add data ▾**, then **GPR…**, and switch **Place lines by** to **GPS**. It
+needs an open site; it does not need a grid yet, because the lines can make
+their own. Switching keeps the files you have added, so you do not add them
+again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
    with the same name. A row shows the number of traces, how many fixes were RTK
@@ -417,11 +426,42 @@ Click **Import GPS lines…**. It needs an open site; a grid is not needed.
    first line lies, and the dialog says which. Every later import goes into that
    system. A file that cannot be placed in it is refused, with the reason in its
    **Status** cell.
-3. Set **Destagger (m)** if you already know it. It applies to every line in
+3. Choose the **Target grid**. GPS lines always go into a grid: pick one the site
+   already has, or **New grid** and type a **Name** for it. From the toolbar the
+   GPS mode opens on **New grid**; from a grid's **Add GPR data…** in **nsgeo
+   Survey** it opens on that grid.
+   * With an existing grid the lines go in as they are. An **Outside** column
+     shows how many metres of each line lie outside the grid's rectangle (those
+     metres are left out of its slices). A line that lies wholly outside is
+     refused.
+   * With **New grid**, nsgeo fits a rectangle around the tracks, turned to the
+     direction the lines share. Its sides sit half a **Spacing** outside the outer
+     lines, or further where a line wanders past that, and its ends at the
+     furthest traces along the lines, so every trace is inside the grid. The
+     spacing is measured from the tracks and shown so you can type over it; with
+     one line, or lines that share no direction, there is nothing to measure and
+     you type one. **Fitted** says the size and angle, and while the dialog is
+     open the new grid is drawn dashed on the map. A refused file never
+     stretches it: the grid is made from the ready rows only.
+4. Set **Destagger (m)** if you already know it. It applies to every line in
    the import, and you can change it per line afterwards (below).
-4. Click **Import**.
+5. Click **Import**. The button names what it will do, for example **Import 60
+   line(s) into new grid North**. A new grid is made and the lines are added in
+   one step; if adding the lines fails, the new grid is taken away again.
 
-The lines are drawn along the walk, in the **No grid** colour, so the turns at
+Files GPS cannot place (no DZG beside them, or no RTK-fixed position) are not
+dropped. After the GPS lines go in, the dialog stays open, switched to **Grid**
+on the same grid, holding only those files. Each one's **Offset** and **Dir**
+are guessed from the GPS lines either side of it in file order and shown in
+amber, with a note in the **Note** column (for example *between FILE__003 and
+FILE__005*); **Direction** and **First line at** are hidden while they stand.
+Check them against your tapes and change any that are wrong (changing a row's
+**Offset** or **Dir** takes the amber and the note off both of that row's cells),
+then click **Import** to place them by the tapes, or
+**Cancel** to leave them out; the GPS lines stay either way. No guess is made
+when the lines either side do not run along one of the grid's axes.
+
+The lines are drawn along the walk, in their grid's colour, so the turns at
 the line ends show. Only RTK-fixed positions place a line. Past the first and
 last of them, the line carries on in a straight line by the wheel. If the log
 loses its RTK fix part way, the traces in between are spread along the straight
@@ -433,18 +473,32 @@ than 2 m.
 
 **nsgeo Survey** shows a GPS line as its label, **GPS**, its walked length and
 any **without RTK** length. Its profile reads in distance walked, one column to
-each trace. A line with no grid has no ruler. A hyperbola fit measures along the walked
+each trace. A GPS line, in a grid or not, has no ruler: it is drawn in distance
+walked until true-distance profiles arrive. A hyperbola fit measures along the walked
 distance at the points you click, so fit hyperbolae away from stretches without
 RTK and away from lifts of the cart until true-distance profiles arrive.
 
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
-cannot yet measure the destagger from GPS lines; that comes with GPS areas.
-**Edit line…** and **Move to grid** are also for tape-placed lines only, for now.
+cannot yet measure the destagger from GPS lines; that comes with true-distance
+profiles.
+
+To put lines that have no grid (or the wrong one) into a grid fitted around
+them, select only GPS lines in **nsgeo Survey**, right-click, and choose **Fit
+a grid to these tracks…** (or **Fit a grid to this track…** for one line). **Add
+grid** opens with the fitted rectangle and spacing filled in and the **Id**
+blank. Type an Id and click OK: the grid is added and the lines move into it,
+their tracks unchanged. With one line there is no spacing to measure, so the
+dialog starts from its usual spacing.
+
+**Move to grid** works for GPS lines too. It changes only the grid: the line
+stays where its track put it, so a grid the track does not cross leaves it outside.
+A grid in a different coordinate system than the track is refused, and the
+message bar says so.
 
 A line is placed either by tapes or by GPS, not both. To switch a tape-placed
-line to its GPS track, remove it and import it again with **Import GPS lines…**.
-**Import DZT…** keeps placing by the tapes, even when a DZG sits beside the
+line to its GPS track, remove it and import it again with **Place lines by:
+GPS**. The **Grid** page keeps placing by the tapes, even when a DZG sits beside the
 file.
 
 ### Step 4: Open a line and use the map
@@ -476,15 +530,22 @@ them in the usual processing order, in four groups:
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
 
+The panel names, at its top, the line its steps belong to, and the line a map
+hover is previewing when that is another one.
+
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
 
 A setting that cannot work (for example a window shorter than two samples on
-this line) is refused with a message saying which setting to change. If a
-project you open holds a setting nsgeo no longer accepts at all, such as an
-epsilon of 0 or a missing value, that step is turned off, reset or removed,
-and the nsgeo log says what changed.
+this line) is refused with a message saying which setting to change. The reason
+stays in a Warnings box under the step list, with the step marked ⛔, until you
+fix the setting, remove the step, turn it off, or open another line. When you
+open or hover over a line whose steps can't run, the Profile panel says so
+instead of showing the previous line's picture. If a project you open holds a
+setting nsgeo no longer accepts at all, such as an epsilon of 0 or a missing
+value, that step is turned off, reset or removed, and the nsgeo log says what
+changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
@@ -498,7 +559,9 @@ and the nsgeo log says what changed.
   loudest parts of the line are at each depth, and the black line is the trace
   under the cursor. The dotted lines are the limits of what the profile can
   show. Anything past them is drawn red, and is solid black or white on the
-  profile.
+  profile. The strip stops at 120 dB either way. A point outside the record
+  sits on the strip's edge, where you can drag it in or right-click it away.
+  **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.
@@ -771,14 +834,15 @@ table, and they come back when you turn the setting back.
 
 ### Step 9: Export for ParaView
 
-ParaView is a free program for looking at 3-D data. **ParaView…** on the
-**nsgeo Slices** panel (beside **Save cube…** and **Export GeoTIFF…**) writes one
-grid's volume for it: a block you can slice, and an isosurface that draws each
-strong reflection as a surface. The button is on whenever a site is open, in
-either scope, and it needs no prepared slice source. Exporting never changes
-what the Slices panel shows.
+ParaView is a free program for looking at 3-D data. **Export for ParaView…**, in
+the **3D Analysis ▾** drop-down on the nsgeo toolbar, writes one grid's volume for
+it: a block you can slice, and an isosurface that draws each strong reflection as
+a surface. It is on whenever a site is open, in either scope of the Slices panel,
+and it needs no prepared slice source. Exporting never changes what the Slices
+panel shows.
 
-1. Click **ParaView…**. The dialog opens on the panel's grid.
+1. Click **3D Analysis ▾**, then **Export for ParaView…**. The dialog opens on
+   the Slices panel's grid.
    - **3-D resolution** is this grid's own **Cell** and **Depth step**, kept
      apart from the Slices panel's, which the hint beside each box shows. Cells
      finer than the panel's make a bigger, sharper block. A cell so fine the
@@ -851,16 +915,18 @@ by depth, goes into the next ParaView export (Step 9), and stays listed in the
 **Pick only where the reflection is clear, and the same part of the wave each
 time.** A surface is only as good as its picks: pick the same peak or trough on
 every line, and leave a line out where you cannot tell. Picks on one grid only.
-Picks on cuts cannot be used yet.
+Picks on cuts join surfaces like picks on lines, as long as they were made
+on the clock the grid's preset uses now.
 
 1. Make the **picks** layer current in QGIS and select picks with QGIS's own
    Select tool: a box, a polygon, or by expression. At least three, not all in a
    straight line, and saved (an unsaved pick is refused until you save the picks
    layer's edits).
-2. Click **Surface from picks…**. Name the surface. **Settings** are folded away
-   and show their values; open them only to change how the surface is drawn
-   between your picks, how far it may follow the reflection from a pick (the
-   window), or the strength test that decides which cells are holes.
+2. Click **3D Analysis ▾**, then **Surface from picks…**. Name the surface.
+   **Settings** are folded away and show their values; open them only to change
+   how the surface is drawn between your picks, how far it may follow the
+   reflection from a pick (the window), or the strength test that decides which
+   cells are holes.
    A pick can belong to several surfaces, so picks already in another surface join
    this one and stay in the other; the dialog says which.
 3. Click **Create and build**. It builds at the grid's 3-D resolution, the one its
@@ -878,6 +944,8 @@ Picks on cuts cannot be used yet.
 5. **Rebuild after changes.** Changing a surface's picks, its settings, or the
    grid's processing, lines, 3-D cell or velocity makes it **stale**: the map and
    the next export keep showing the last build, and the panel says what changed.
+   Deleting a cut, or drawing it again, does the same to the surfaces holding its
+   picks (the panel says "its picks changed"), and a rebuild reports those picks.
    Nothing rebuilds by itself, so a scene never changes in the middle of showing it.
    Select the surface (or several) and click **Rebuild**. Browsing slices never
    makes a surface stale.
@@ -888,9 +956,9 @@ deleting a surface never deletes a pick.
 
 ### The 3D view
 
-Click **3D view** to open QGIS's own 3-D view of one grid: its saved picks as
-spheres at their depths, and its surfaces. Nothing in it is saved, and opening or
-closing it never marks the site changed.
+Click **3D Analysis ▾**, then **3D view**, to open QGIS's own 3-D view of one
+grid: its saved picks as spheres at their depths, and its surfaces. Nothing in it
+is saved, and opening or closing it never marks the site changed.
 
 - **Which grid.** The grid the Slices panel shows. In **This grid** the view follows
   the panel's grid combo. In **Whole site** it keeps the last grid it showed.
@@ -904,9 +972,10 @@ closing it never marks the site changed.
 - **It follows your work.** A new pick appears, and a rebuilt surface is replaced in
   place. A **stale** surface is labelled in the Layers panel, and the title counts
   the stale surfaces on the grid.
-- **Which picks.** Only picks on the grid's lines. Picks on cuts are not shown, and neither
-  are picks on lines you left out of the grid's slices (**Choose lines…**).
-- **What it leaves out.** It shows no slices and no walls. ParaView does those better
+- **Which picks.** The grid's picks on its lines, and its picks on cuts as long as they
+  were made on the clock the grid's preset uses now. Picks on lines you left out of the
+  grid's slices (**Choose lines…**) are not shown.
+- **What it leaves out.** It shows no slices. ParaView does those better
   (see [Step 9](#step-9-export-for-paraview)).
 - **QGIS's own controls.** Rotating, zooming and **Save as image** are QGIS's, not
   nsgeo's.
@@ -931,7 +1000,7 @@ Everything for a site lives in its site folder:
 | `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**, and the list of your surfaces. |
 | `surfaces` | One folder per grid with each surface's last build: a mesh, its depths and a fit report. Regenerable: **Rebuild** writes them again. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
-| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
+| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **Export for ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,

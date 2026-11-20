@@ -29,7 +29,7 @@ from nsgeo.geometry import TrackPlacement
 from nsgeo.model import is_cut_key
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QObject, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QItemSelection, QItemSelectionModel, QObject, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -47,6 +47,7 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.line_edit import SAME_M
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.preset_box import migration_note
 from nsgeo_qgis.velocity_records import line_label
 
 ROLE_KIND = int(Qt.ItemDataRole.UserRole)
@@ -71,6 +72,29 @@ GRID_CUTS_ONE_TEXT = "{its} 1 cut is deleted too"
 GRID_CUTS_TEXT = "{its} {n} cuts are deleted too"
 GRID_CUT_PICK_TAIL = "; {they} 1 pick stays on the map."
 GRID_CUT_PICKS_TAIL = "; {they} {m} picks stay on the map."
+# Remove: what goes with the lines (#221). Each part appears only when true.
+ALSO_REMOVED_TEXT = "Also removed: {parts}."
+# Bulk actions on a selection of lines (#58). One constant each, so the tests quote them.
+APPLY_PRESET_MENU = "Apply preset to {lines}"
+APPLY_STEPS_MENU = "Apply steps from {open} to {lines}…"
+APPLY_STEPS_MENU_GREY = "Apply steps from the open line…"
+SET_VELOCITY_MENU = "Set velocity for {lines}…"
+CLEAR_VELOCITY_MENU = "Clear velocity override on {lines}"
+APPLY_PRESET_TITLE = "Apply preset"
+APPLY_PRESET_TEXT = "Replace the processing of {lines} with preset {name}?"
+APPLY_PRESET_REPORT = "preset {name} applied to {lines}"
+APPLY_STEPS_TITLE = "Apply steps"
+APPLY_STEPS_TEXT = "Replace the processing of {lines} with the steps on {open}?"
+APPLY_STEPS_LEFT_TEXT = "{open} itself is left as it is."
+APPLY_STEPS_REPORT = "steps from {open} applied to {lines}"
+CLEAR_VELOCITY_TITLE = "Clear velocity override"
+CLEAR_VELOCITY_TEXT = (
+    "Clear the velocity override on {n} of these {lines}? "
+    "They go back to their grid's velocity, or the one in the file's header."
+)
+CLEAR_VELOCITY_FITS_ONE_TEXT = "1 of them has a velocity from its saved fits; the fits stay saved."
+CLEAR_VELOCITY_FITS_TEXT = "{n} of them have a velocity from their saved fits; the fits stay saved."
+CLEAR_VELOCITY_REPORT = "velocity override cleared on {lines}"
 # How many line keys a removal prompt lists before it summarises the rest.
 _LISTED_KEYS = 10
 # Moving the current item to a line must select just that line. A bare
@@ -87,6 +111,7 @@ class SurveyDock(QgsDockWidget):
     add_grid_requested = pyqtSignal()
     edit_grid_requested = pyqtSignal(str)
     import_requested = pyqtSignal(str)
+    fit_tracks_requested = pyqtSignal(list)  # keys of the GPS lines (M17b)
     grid_velocity_requested = pyqtSignal(str)
     line_velocity_requested = pyqtSignal(str)
     # (grid id, line keys to select); keys may be empty (line editing spec §3 call 7).
@@ -95,6 +120,13 @@ class SurveyDock(QgsDockWidget):
     move_lines_requested = pyqtSignal(list, str)
     # GPS line keys whose destagger is to be set (M17a P13).
     destagger_requested = pyqtSignal(list)
+    # Line keys whose velocity is to be set in one go: the plugin asks for the number (#58).
+    bulk_velocity_requested = pyqtSignal(list)
+    # One message-bar line, answered by the plugin (#58).
+    report = pyqtSignal(str)
+    #: The selected line keys, tree order, whenever the selection changed by the
+    #: user's hand, an open, or a finished rebuild; never for `select_lines` (#57).
+    line_selection_changed = pyqtSignal(list)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
@@ -103,6 +135,10 @@ class SurveyDock(QgsDockWidget):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self.session = session
+        # Depth counter: >0 while the tree's selection is being changed by us
+        # (`select_lines`, a rebuild, an open), so it is not announced half-done.
+        self._selection_quiet = 0
+        self._captured_line_keys: list[str] = []
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -112,6 +148,7 @@ class SurveyDock(QgsDockWidget):
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.itemClicked.connect(self._on_item_clicked)
+        self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         self.tree.installEventFilter(self)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         # One menu, repopulated per right-click, rather than a fresh
@@ -133,6 +170,8 @@ class SurveyDock(QgsDockWidget):
         # spec §3 call 7).
         self.context_menu = QMenu(self)
         self.move_menu = QMenu("Move to grid", self)
+        # Made once, like move_menu: clear() would not delete a submenu per click.
+        self.preset_menu = QMenu("Apply preset", self)
         layout.addWidget(self.tree)
         self.status = QLabel(body)
         layout.addWidget(self.status)
@@ -150,7 +189,7 @@ class SurveyDock(QgsDockWidget):
     # ---- building ---------------------------------------------------------
     def rebuild(self) -> None:
         try:
-            self._rebuild()
+            self._rebuild_announcing()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring:
             # a slot's exception never reaches whatever emitted the signal,
             # so this is the only chance to tell the user the tree could not
@@ -327,6 +366,7 @@ class SurveyDock(QgsDockWidget):
                     grid_id = self.grid_id_of(child)
                     if grid_id is not None:
                         known_grids[grid_id] = child.isExpanded()
+        self._capture_line_keys()
         return root_expanded, known_grids, self._identity(self.tree.currentItem())
 
     def _identity(self, item: QTreeWidgetItem | None) -> tuple[str, str | None] | None:
@@ -357,9 +397,11 @@ class SurveyDock(QgsDockWidget):
         return None
 
     def _restore_selection(self, previous: tuple[str, str | None] | None) -> None:
-        # The session's current line always wins: whatever the user last
-        # clicked in the tree before an unrelated rebuild is a weaker claim
-        # than "this is the line open in the profile view right now".
+        # Order of claims: the lines that were selected before the rebuild
+        # (spec 3.4), then the session's current line, then whatever the user
+        # last clicked: each is a weaker claim than the one before it.
+        if self._restore_line_selection():
+            return
         key = self.session.current_key
         if key:
             self.tree.setCurrentItem(self.item_for_key(key), 0, _SELECT_ONLY)
@@ -451,12 +493,9 @@ class SurveyDock(QgsDockWidget):
     def _follow_current(self, key: str) -> None:
         try:
             item = self.item_for_key(key) if key else None
-            # Twice on purpose. The bare call is the only one that moves
-            # Qt's Shift anchor (a later Shift-click must range from this
-            # line); the explicit command then undoes the toggle a held
-            # Ctrl would have made of it (see _SELECT_ONLY).
-            self.tree.setCurrentItem(item)
-            self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
+            # Makes `item` the only selected row, moves Qt's Shift anchor to
+            # it and announces the selection (see _select_only_announcing).
+            self._select_only_announcing(item)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
                 f"could not follow the current line in the tree: {exc}", Qgis.MessageLevel.Critical
@@ -486,17 +525,26 @@ class SurveyDock(QgsDockWidget):
                 # Qt before this runs: the press selects just that item.
                 # Editing and moving are for recorded lines; a selection that
                 # holds a cut offers removal only.
-                gps = [k for k in keys if self._is_gps(k)]
+                # Only keys the session knows as lines get line items: a
+                # selection may carry other kinds of file (magnetometer).
+                only_lines = self._line_keys_only(keys) == keys
+                gps = [k for k in keys if only_lines and self._is_gps(k)]
                 if keys and gps and len(gps) == len(keys):
-                    # Only GPS lines: destagger is all they have until GPS areas (M17c).
+                    phrase = self._count_phrase(grid_ids, keys)
                     menu.addAction(
                         f"Set destagger for {len(keys)} GPS lines…",
                         lambda: self._request_destagger(keys),
                     )
-                elif keys and not gps and not any(is_cut_key(k) for k in keys):
-                    grids = {self._grid_of_key(k) for k in keys}
-                    if len(grids) == 1:
-                        grid = grids.pop()
+                    self._add_move_menu(menu, keys, f"Move {phrase} to grid")
+                    menu.addAction(
+                        f"Fit a grid to these {len(keys)} tracks…",
+                        lambda: self._request_fit(keys),
+                    )
+                elif keys and only_lines:
+                    # Tape lines, or tape and GPS lines together.
+                    grids = {self._grid_of_line(k) for k in keys}
+                    if len(grids) == 1 and None not in grids:
+                        grid = str(grids.pop())
                         menu.addAction(
                             f"Edit {self._count_phrase(grid_ids, keys)}…",
                             lambda: self._request_edit(grid, keys),
@@ -504,6 +552,8 @@ class SurveyDock(QgsDockWidget):
                     self._add_move_menu(
                         menu, keys, f"Move {self._count_phrase(grid_ids, keys)} to grid"
                     )
+                if keys and only_lines:
+                    self._add_bulk_items(menu, keys)
                 menu.addSeparator()
                 menu.addAction(
                     f"Remove {self._count_phrase(grid_ids, keys)} from site",
@@ -516,7 +566,7 @@ class SurveyDock(QgsDockWidget):
                 menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
                 edit_lines = menu.addAction("Edit lines…", lambda: self._request_edit(gid, []))
                 edit_lines.setEnabled(bool(self.session.keys_on_grid(gid)))
-                menu.addAction("Import DZT files…", lambda: self.import_requested.emit(gid))
+                menu.addAction("Add GPR data…", lambda: self.import_requested.emit(gid))
                 menu.addAction("Set velocity…", lambda: self.grid_velocity_requested.emit(gid))
                 menu.addSeparator()
                 menu.addAction("Remove grid", lambda: self.remove_grid_action(gid))
@@ -530,11 +580,13 @@ class SurveyDock(QgsDockWidget):
                 key = self.key_of(item) or ""
                 menu.addAction("Open", lambda: self._open_line(key))
                 if self._is_gps(key):
-                    # Edit line… and Move to grid are tape-only until M17c.
+                    # Edit line… is tape-only until M17c.
                     menu.addAction(
                         "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
                     )
                     menu.addAction("Set destagger…", lambda: self._request_destagger([key]))
+                    self._add_move_menu(menu, [key], "Move to grid")
+                    menu.addAction("Fit a grid to this track…", lambda: self._request_fit([key]))
                 else:
                     # Worked out here, inside the guard, not when the action fires.
                     grid = self._grid_of_key(key)
@@ -550,7 +602,8 @@ class SurveyDock(QgsDockWidget):
             _log(f"could not build the survey tree context menu: {exc}", Qgis.MessageLevel.Critical)
 
     def _grid_of_key(self, key: str) -> str:
-        return str(getattr(self.session.line_for_key(key).placement, "grid_id", ""))
+        """The grid a line is on, "" for a GPS line in none."""
+        return str(getattr(self.session.line_for_key(key).placement, "grid_id", None) or "")
 
     def _is_gps(self, key: str) -> bool:
         return not is_cut_key(key) and self.session.is_gps_line(key)
@@ -561,6 +614,13 @@ class SurveyDock(QgsDockWidget):
             self.destagger_requested.emit(list(keys))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not open the destagger dialog: {exc}", Qgis.MessageLevel.Critical)
+
+    def _request_fit(self, keys: list[str]) -> None:
+        # A menu action's slot: guarded, as _on_context_menu's comment asks.
+        try:
+            self.fit_tracks_requested.emit(list(keys))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not start Fit to these tracks: {exc}", Qgis.MessageLevel.Critical)
 
     def _request_edit(self, grid_id: str, keys: list[str]) -> None:
         # A menu action's slot: guarded, as _on_context_menu's comment asks.
@@ -588,7 +648,254 @@ class SurveyDock(QgsDockWidget):
         for grid in site.grids if site is not None else []:
             action = sub.addAction(grid.id, lambda g=grid.id: self._request_move(keys, g))
             action.setEnabled(any(g != grid.id for g in on.values()))
+        # The submenu object is reused, so a gridless site greys it and the
+        # next fill (with a grid) wakes it again.
+        sub.menuAction().setEnabled(bool(site is not None and site.grids))
         menu.addMenu(sub)
+
+    # ---- one line selection with the map (#57) -----------------------------------
+    def _on_selection_changed(self) -> None:
+        try:
+            if not self._selection_quiet:
+                self.line_selection_changed.emit(self.selected_line_keys())
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not announce the line selection: {exc}", Qgis.MessageLevel.Critical)
+
+    def _announce_line_selection(self) -> None:
+        self.line_selection_changed.emit(self.selected_line_keys())
+
+    def _rebuild_announcing(self) -> None:
+        """`_rebuild` with the tree's selection quiet, then one announcement of
+        the selection it ended with, for the map to follow."""
+        self._selection_quiet += 1
+        try:
+            self._rebuild()
+        finally:
+            self._selection_quiet -= 1
+        self._announce_line_selection()
+
+    def _select_only_announcing(self, item: QTreeWidgetItem | None) -> None:
+        """Make `item` the current item and the only selected one (an open),
+        announcing the result once."""
+        self._selection_quiet += 1
+        try:
+            # Twice on purpose. The bare call is the only one that moves
+            # Qt's Shift anchor (a later Shift-click must range from this
+            # line); the explicit command then undoes the toggle a held
+            # Ctrl would have made of it (see _SELECT_ONLY).
+            self.tree.setCurrentItem(item)
+            self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
+        finally:
+            self._selection_quiet -= 1
+        self._announce_line_selection()
+
+    def _capture_line_keys(self) -> None:
+        self._captured_line_keys = self.selected_line_keys()
+
+    def _restore_line_selection(self) -> bool:
+        """Re-select the lines that were selected before a rebuild and are still
+        in the site; False (nothing done) when there were none."""
+        keys = [k for k in self._captured_line_keys if self.item_for_key(k) is not None]
+        self._captured_line_keys = []
+        if not keys:
+            return False
+        open_key = self.session.current_key
+        self._select_rows(keys, open_key if open_key in keys else keys[0], unfold=False)
+        return True
+
+    def select_lines(self, keys: list[str]) -> None:
+        """Make exactly the line rows in `keys` the selection, as the map's
+        selection arrives (#57). Opens nothing, announces nothing, and unfolds
+        the grids that hold them. Keys that are not line rows are ignored."""
+        try:
+            self._selection_quiet += 1
+            try:
+                present = [k for k in keys if self.key_of(self.item_for_key(k)) is not None]
+                self._select_rows(present, present[0] if present else None, unfold=True)
+            finally:
+                self._selection_quiet -= 1
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not select the lines in the tree: {exc}", Qgis.MessageLevel.Critical)
+
+    def _select_rows(self, keys: list[str], current: str | None, *, unfold: bool) -> None:
+        """Select exactly the rows of `keys`, with the current item (and so the
+        Shift anchor) on `current`. The selection is set through the model with
+        explicit flags, so a modifier key held down cannot toggle a row."""
+        self._selection_quiet += 1
+        try:
+            items = [it for it in (self.item_for_key(k) for k in keys) if it is not None]
+            for item in items if unfold else []:  # only a selection from the map unfolds
+                parent = item.parent()
+                if parent is not None:
+                    parent.setExpanded(True)
+            cur = self.item_for_key(current) if current else None
+            if cur is not None:
+                self.tree.setCurrentItem(cur)  # moves the anchor; may toggle: fixed below
+            chosen = QItemSelection()
+            for item in items:
+                index = self.tree.indexFromItem(item)
+                chosen.select(index, index)
+            self.tree.selectionModel().select(
+                chosen,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        finally:
+            self._selection_quiet -= 1
+
+    # ---- bulk actions on a selection of lines (#58) ----------------------------
+    def selected_line_keys(self) -> list[str]:
+        """The keys of the selected line rows, in tree order. Grid, cut and site
+        rows, and rows already gone from the session, are left out."""
+        if not self.session.is_open:  # a site closing: the rows are about to go
+            return []
+        keys: list[str] = []
+        it = QTreeWidgetItemIterator(self.tree, QTreeWidgetItemIterator.IteratorFlag.Selected)
+        while it.value():
+            key = self.key_of(it.value())
+            if key is not None:
+                try:
+                    self.session.line_for_key(key)
+                except KeyError:
+                    key = None
+                if key is not None:
+                    keys.append(key)
+            it += 1
+        return keys
+
+    @staticmethod
+    def _lines_phrase(n: int) -> str:
+        return f"{n} line{'s' if n != 1 else ''}"
+
+    def _open_line_key(self) -> str | None:
+        """The open line's key; None when nothing, or a cut, is open."""
+        key = self.session.current_key
+        if not key or is_cut_key(key):
+            return None
+        try:
+            self.session.line_for_key(key)
+        except KeyError:
+            return None
+        return key
+
+    def _add_bulk_items(self, menu: QMenu, keys: list[str]) -> None:
+        """Apply preset, Apply steps, Set velocity and Clear velocity override for
+        a selection of lines (spec §4.1). Built inside `_on_context_menu`'s guard."""
+        lines = self._lines_phrase(len(keys))
+        if menu.actions():
+            menu.addSeparator()
+        sub = self.preset_menu
+        sub.clear()
+        sub.setTitle(APPLY_PRESET_MENU.format(lines=lines))
+        names = self.session.preset_names()
+        for name in names:
+            sub.addAction(name, lambda n=name: self.apply_preset_action(keys, n))
+        menu.addMenu(sub).setEnabled(bool(names))
+        open_key = self._open_line_key()
+        others = [k for k in keys if k != open_key]
+        if open_key is None or not others:
+            menu.addAction(APPLY_STEPS_MENU_GREY).setEnabled(False)
+        else:
+            label = line_label(self.session.line_for_key(open_key))
+            menu.addAction(
+                APPLY_STEPS_MENU.format(open=label, lines=self._lines_phrase(len(others))),
+                lambda: self.apply_steps_action(keys),
+            )
+        menu.addSeparator()
+        menu.addAction(
+            SET_VELOCITY_MENU.format(lines=lines), lambda: self._request_bulk_velocity(keys)
+        )
+        clear = menu.addAction(
+            CLEAR_VELOCITY_MENU.format(lines=lines), lambda: self.clear_velocity_action(keys)
+        )
+        clear.setEnabled(any(self.session.line_for_key(k).velocity is not None for k in keys))
+
+    def _request_bulk_velocity(self, keys: list[str]) -> None:
+        try:
+            self.bulk_velocity_requested.emit(list(keys))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
+
+    def _ask(self, title: str, text: str) -> bool:
+        answer = QMessageBox.question(self, title, text)
+        return bool(answer == QMessageBox.StandardButton.Yes)
+
+    def apply_preset_action(self, keys: list[str], name: str, *, confirm: bool = True) -> list[str]:
+        """Replace the processing of `keys` with preset `name`, after one question.
+        A menu action's slot, so guarded. Returns the keys changed."""
+        try:
+            lines = self._lines_phrase(len(keys))
+            if confirm:
+                text = APPLY_PRESET_TEXT.format(lines=lines, name=name)
+                note = migration_note(self.session.site.presets[name], saved=True)  # type: ignore[union-attr]
+                if note:
+                    text += "\n\n" + note
+                if not self._ask(APPLY_PRESET_TITLE, text):
+                    return []
+            changed = self.session.apply_preset_to(name, keys)
+            self.report.emit(APPLY_PRESET_REPORT.format(name=name, lines=lines))
+            return changed
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the preset: {exc}", Qgis.MessageLevel.Critical)
+            return []
+
+    def apply_steps_action(self, keys: list[str], *, confirm: bool = True) -> list[str]:
+        """Copy the open line's steps onto the rest of `keys`, after one question.
+        The open line is left as it is. A menu action's slot, so guarded."""
+        try:
+            open_key = self._open_line_key()
+            if open_key is None:
+                return []
+            others = [k for k in keys if k != open_key]
+            if not others:
+                return []
+            label = line_label(self.session.line_for_key(open_key))
+            if confirm:
+                text = APPLY_STEPS_TEXT.format(lines=self._lines_phrase(len(others)), open=label)
+                if open_key in keys:
+                    text += "\n\n" + APPLY_STEPS_LEFT_TEXT.format(open=label)
+                note = migration_note(
+                    self.session.stack_for(open_key, insert=False).to_dicts(), saved=False
+                )
+                if note:
+                    text += "\n\n" + note
+                if not self._ask(APPLY_STEPS_TITLE, text):
+                    return []
+            changed = self.session.apply_stack_to(open_key, others)
+            self.report.emit(
+                APPLY_STEPS_REPORT.format(open=label, lines=self._lines_phrase(len(others)))
+            )
+            return changed
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the steps: {exc}", Qgis.MessageLevel.Critical)
+            return []
+
+    def clear_velocity_action(self, keys: list[str], *, confirm: bool = True) -> list[str]:
+        """Clear the velocity override of the lines in `keys` that have one, after
+        one question. Saved fits stay. A menu action's slot, so guarded."""
+        try:
+            having = [k for k in keys if self.session.line_for_key(k).velocity is not None]
+            if not having:
+                return []
+            if confirm:
+                text = CLEAR_VELOCITY_TEXT.format(
+                    n=len(having), lines=self._lines_phrase(len(keys))
+                )
+                n_src = sum(
+                    1 for k in having if self.session.line_for_key(k).velocity_source is not None
+                )
+                if n_src == 1:
+                    text += "\n\n" + CLEAR_VELOCITY_FITS_ONE_TEXT
+                elif n_src:
+                    text += "\n\n" + CLEAR_VELOCITY_FITS_TEXT.format(n=n_src)
+                if not self._ask(CLEAR_VELOCITY_TITLE, text):
+                    return []
+            changed = self.session.set_lines_velocity(having, None)
+            self.report.emit(CLEAR_VELOCITY_REPORT.format(lines=self._lines_phrase(len(changed))))
+            return changed
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the velocity override: {exc}", Qgis.MessageLevel.Critical)
+            return []
 
     def remove_line_action(self, key: str, *, confirm: bool = True) -> None:
         self._remove([], [key], confirm=confirm, title="Remove line")
@@ -624,7 +931,16 @@ class SurveyDock(QgsDockWidget):
             return
         try:
             if confirm:
-                answer = QMessageBox.question(self, title, self._removal_text(grid_ids, keys))
+                buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                # No is the default only when a saved fit would go with the lines (#221).
+                default = (
+                    QMessageBox.StandardButton.No
+                    if self._fits_would_go(grid_ids, keys)
+                    else QMessageBox.StandardButton.Yes
+                )
+                answer = QMessageBox.question(
+                    self, title, self._removal_text(grid_ids, keys), buttons, default
+                )
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             line_keys = [k for k in keys if not is_cut_key(k)]
@@ -731,6 +1047,67 @@ class SurveyDock(QgsDockWidget):
             return text + GRID_CUT_PICK_TAIL.format(they=they)
         return text + GRID_CUT_PICKS_TAIL.format(they=they, m=m)
 
+    def _line_keys_only(self, keys: list[str]) -> list[str]:
+        """`keys` that are lines the session knows (not cuts, nor any other
+        kind of file a selection may carry), in order."""
+        if not self.session.is_open:
+            return []
+        known = set(self.session.keys())
+        return [k for k in keys if k in known]
+
+    def _lines_going(self, grid_ids: list[str], keys: list[str]) -> list[str]:
+        """Every line a removal takes: the selected lines and the grids' lines."""
+        going = self._line_keys_only(keys)
+        for grid_id in grid_ids:
+            going += self.session.keys_on_grid(grid_id)
+        return going
+
+    def _fits_would_go(self, grid_ids: list[str], keys: list[str]) -> bool:
+        try:
+            return any(
+                self.session.line_for_key(k).velocity_fits
+                for k in self._lines_going(grid_ids, keys)
+            )
+        except Exception as exc:  # noqa: BLE001 -- only picks the default button
+            _log(f"could not look for saved fits: {exc}", Qgis.MessageLevel.Warning)
+            return False
+
+    def _lost_with_lines_text(self, keys: list[str], *, grid: bool = False) -> str:
+        """ "Also removed: ..." -- what goes with `keys` beyond the lines themselves
+        (#221). Empty when there is nothing to lose. One line (not a grid's) is
+        told in the singular, several as counts."""
+        site = self.session.site
+        if site is None or not keys:
+            return ""
+        lines = [self.session.line_for_key(k) for k in keys]
+        n_steps = sum(1 for k in keys if len(getattr(site.stacks.get(k), "entries", ())) > 0)
+        n_overrides = sum(1 for line in lines if line.velocity is not None)
+        fit_counts = [len(line.velocity_fits) for line in lines]
+        n_fits, n_fit_lines = sum(fit_counts), sum(1 for n in fit_counts if n)
+        parts: list[str] = []
+        if len(keys) == 1 and not grid:
+            if n_steps:
+                parts.append("its processing steps")
+            if n_overrides:
+                parts.append("its velocity override")
+            if n_fits:
+                parts.append(f"its {n_fits} saved velocity fit{'s' if n_fits != 1 else ''}")
+        else:
+            if n_steps:
+                parts.append(f"processing steps on {n_steps} of them")
+            if n_overrides:
+                parts.append(f"velocity override{'s' if n_overrides != 1 else ''} on {n_overrides}")
+            if n_fits:
+                parts.append(
+                    f"{n_fits} saved velocity fit{'s' if n_fits != 1 else ''} on {n_fit_lines}"
+                )
+        if not parts:
+            return ""
+        joined = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+        if len(parts) == 3 and not (len(keys) == 1 and not grid):
+            joined = ", ".join(parts[:-1]) + ", and " + parts[-1]
+        return ALSO_REMOVED_TEXT.format(parts=joined)
+
     def _removal_text(self, grid_ids: list[str], keys: list[str]) -> str:
         """The confirmation for a removal: exactly what goes, and what
         does not (#31)."""
@@ -769,6 +1146,9 @@ class SurveyDock(QgsDockWidget):
             if len(keys) > _LISTED_KEYS:
                 listed += f"\n… and {len(keys) - _LISTED_KEYS} more"
             parts.append(listed)
+        lost = self._lost_with_lines_text(self._lines_going(grid_ids, keys), grid=bool(grid_ids))
+        if lost:
+            parts.append(lost)
         if n_lines == 1:
             parts.append(
                 "The DZT file on disk is not touched, and picks on this line "

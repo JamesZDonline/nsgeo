@@ -50,7 +50,7 @@ Before any qgis-tier count is trusted, also run the suite once with an autouse f
 
 ## Shared test geometry
 
-Several tasks use one real-world grid near Nashville, 20 × 20 m at azimuth 10°. Define it once in `tests/qgis/test_plugin_grid_dialog.py`:
+Several tasks use one real-world grid near the author's surveys, 20 × 20 m at azimuth 10°. Define it once in `tests/qgis/test_plugin_grid_dialog.py`:
 
 ```python
 SITE = Grid("S", (518_204.112, 4_000_731.508), 10.0, 20.0, 20.0, "EPSG:32616", 0.5)

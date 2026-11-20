@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.destagger import EnvelopeBins
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -65,6 +65,7 @@ from nsgeo_qgis.line_edit import (
     SAME_M,
     EditOutcome,
     LineEdit,
+    TrackEdit,
     length_along,
     placement_note,
     same_placement,
@@ -122,6 +123,10 @@ MEASURE_TIP = (
     "Destagger box gets the grid's value and each selected row its line's value. "
     "Nothing changes until OK."
 )
+GPS_TIP = "A GPS line is placed by its track: Offset, Dir, Start and Scale do not apply."
+GPS_SKIP = "Left {n} GPS line(s) alone: {what} applies to tape lines only."
+# The cells a GPS row cannot change: the track places it, not a tape.
+GPS_BLANK = (COL_OFFSET, COL_DIR, COL_START, COL_SCALE)
 MEASURE_PROGRESS_MS = 200
 MEASURE_STOPPED = "Measure stopped. Nothing was changed."
 MEASURE_DISCARDED = (
@@ -144,6 +149,7 @@ class _MeasureRun:
     labels: dict[str, str]
     job: MeasureJob
     paths: dict[str, str]  # row key -> resolved file path, the cache's key
+    gps_note: str = ""  # the GPS rows Measure left alone
 
 
 class _PopupFocusCombo(QComboBox):
@@ -195,7 +201,8 @@ class EditLinesDialog(QDialog):
         self._opened_against = session.json_path
         self._updating = False
         self._order: list[str] = []
-        self._edits: dict[str, LineEdit] = {}
+        self._edits: dict[str, LineEdit | TrackEdit] = {}
+        self._walked: dict[str, float] = {}  # a GPS row's walked length, m, without its destagger
         self._traces: dict[str, int] = {}
         self._per_metre: dict[str, float] = {}
         self._picks: dict[str, int] = {}
@@ -211,7 +218,12 @@ class EditLinesDialog(QDialog):
             for key in session.keys_on_grid(grid_id):
                 line = session.line_for_key(key)
                 self._order.append(key)
-                self._edits[key] = LineEdit(key, seen=line.placement)  # type: ignore[arg-type]
+                if isinstance(line.placement, TrackPlacement):
+                    self._edits[key] = TrackEdit(key, seen=line.placement)
+                    walked = line.distance_along()
+                    self._walked[key] = float(walked[-1] - walked[0]) if len(walked) else 0.0
+                else:
+                    self._edits[key] = LineEdit(key, seen=line.placement)  # type: ignore[arg-type]
                 self._traces[key] = line.n_traces
                 self._per_metre[key] = line.header.traces_per_metre
                 self._picks[key] = len(session.picks_for(key))
@@ -368,7 +380,7 @@ class EditLinesDialog(QDialog):
     def keys(self) -> list[str]:
         return list(self._order)
 
-    def edit_for(self, key: str) -> LineEdit:
+    def edit_for(self, key: str) -> LineEdit | TrackEdit:
         return self._edits[key]
 
     def _unavailable(self, exc: Exception | None = None) -> str:
@@ -385,19 +397,21 @@ class EditLinesDialog(QDialog):
         return f"grid {self.grid_id!r} no longer exists"
 
     @staticmethod
-    def _target_gone(edit: LineEdit, frames: Mapping[str, Grid]) -> bool:
+    def _target_gone(edit: LineEdit | TrackEdit, frames: Mapping[str, Grid]) -> bool:
         """The grid the row was sent to has since left the site."""
         return (edit.grid_id or edit.seen.grid_id) not in frames
 
-    def _live(self, edit: LineEdit, frames: Mapping[str, Grid]) -> LineEdit:
+    def _live(self, edit: LineEdit | TrackEdit, frames: Mapping[str, Grid]) -> LineEdit | TrackEdit:
         """`edit` without a move to a grid that no longer exists, so the row
         can still be read and acted on (moved back, flipped). The Start a move
         derived goes with it; the rest of the edit stays."""
         if edit.grid_id is None or not self._target_gone(edit, frames):
             return edit
+        if isinstance(edit, TrackEdit):
+            return dataclasses.replace(edit, grid_id=None)
         return dataclasses.replace(edit, grid_id=None, start_along=None)
 
-    def _changes(self, edit: LineEdit, frames: Mapping[str, Grid]) -> bool:
+    def _changes(self, edit: LineEdit | TrackEdit, frames: Mapping[str, Grid]) -> bool:
         """Whether OK has something to do for `edit`. A move to a grid that is
         gone counts, so `edit_lines` skips it and names it (spec call 14)."""
         return self._target_gone(edit, frames) and edit.grid_id is not None or edit.changes(frames)
@@ -459,15 +473,28 @@ class EditLinesDialog(QDialog):
         self.down_button.setEnabled(bool(rows) and max(rows) < len(self._order) - 1)
 
     # ---- acting on the selection ------------------------------------------------
-    def _apply(self, change: Callable[[LineEdit, Mapping[str, Grid]], LineEdit]) -> None:
+    def _apply(
+        self,
+        change: Callable[[Any, Mapping[str, Grid]], Any],
+        *,
+        tape_only: str | None = None,
+    ) -> None:
+        """Apply `change` to every selected row. With `tape_only` (what the change
+        is called on the status line), GPS rows are counted and left alone."""
         try:
             frames = self._frames()
             dropped: list[str] = []
+            gps = 0
             for key in self.selected_keys():
                 edit = self._edits[key]
+                if tape_only is not None and isinstance(edit, TrackEdit):
+                    gps += 1
+                    continue
                 if edit.grid_id is not None and self._target_gone(edit, frames):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = change(self._live(edit, frames), frames)
+            if tape_only is not None and gps:
+                dropped.append(GPS_SKIP.format(n=gps, what=tape_only))
         except (KeyError, ProjectError) as exc:
             self._say(self._unavailable(exc))
             return
@@ -476,15 +503,17 @@ class EditLinesDialog(QDialog):
             return
         self._refresh("; ".join(dropped) if dropped else None)
 
-    def _drop_note(self, key: str, edit: LineEdit) -> str:
+    def _drop_note(self, key: str, edit: LineEdit | TrackEdit) -> str:
         label = self._label_of(key)
         return f"grid {edit.grid_id!r} no longer exists; {label} stays on {edit.seen.grid_id}"
 
     def set_start(self, value: float) -> None:
-        self._apply(lambda e, f: dataclasses.replace(e, start_along=float(value)))
+        self._apply(
+            lambda e, f: dataclasses.replace(e, start_along=float(value)), tape_only="Start"
+        )
 
     def set_scale(self, value: float) -> None:
-        self._apply(lambda e, f: dataclasses.replace(e, scale=float(value)))
+        self._apply(lambda e, f: dataclasses.replace(e, scale=float(value)), tape_only="Scale")
 
     def set_destagger(self, value: float) -> None:
         self._apply(lambda e, f: dataclasses.replace(e, travel_shift=float(value)))
@@ -497,8 +526,12 @@ class EditLinesDialog(QDialog):
             frames = self._frames()
             dropped: list[str] = []
             skipped: list[str] = []
+            gps = 0
             for key in self.selected_keys():
                 edit = self._edits[key]
+                if isinstance(edit, TrackEdit):
+                    gps += 1
+                    continue
                 span = span_m(self._traces[key], self._per_metre[key])
                 if not span > 0:  # also catches a NaN from a corrupt header
                     skipped.append(
@@ -516,16 +549,18 @@ class EditLinesDialog(QDialog):
             self._failed(exc)
             return
         notes = dropped + skipped
+        if gps:
+            notes.append(GPS_SKIP.format(n=gps, what="Fit to grid edges"))
         self._refresh("; ".join(notes) if notes else None)
 
     def snap_to_edge(self) -> None:
-        self._apply(lambda e, f: e.snapped())
+        self._apply(lambda e, f: e.snapped(), tape_only="Start")
 
     def shift_offset(self, delta: float) -> None:
-        self._apply(lambda e, f: e.shifted(delta, f))
+        self._apply(lambda e, f: e.shifted(delta, f), tape_only="Offset")
 
     def flip(self) -> None:
-        self._apply(lambda e, f: e.flipped(f))
+        self._apply(lambda e, f: e.flipped(f), tape_only="Dir")
 
     def move_to(self, grid_id: str) -> None:
         self._apply(lambda e, f: e.moved_to(grid_id, f))
@@ -583,16 +618,24 @@ class EditLinesDialog(QDialog):
         except (KeyError, ProjectError) as exc:
             self._say(self._unavailable(exc))
             return
-        targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
-        if not targets:  # every selected row now sits on another grid: nothing to fill
-            self._say(MEASURE_NO_TARGETS)
+        gps = sum(isinstance(self._edits[k], TrackEdit) for k in targets)
+        gps_note = GPS_SKIP.format(n=gps, what="Measure") if gps else ""
+        tapes = [k for k in targets if not isinstance(self._edits[k], TrackEdit)]
+        targets = [k for k in tapes if k in snapshot]  # P6: not rows sent to another grid
+        if not targets:
+            # Nothing to fill: GPS rows are left alone, and any tape row now sits on
+            # another grid (or none was selected).
+            parts = [gps_note] if gps_note else []
+            if tapes or not gps_note:
+                parts.append(MEASURE_NO_TARGETS)
+            self._say(" ".join(parts))
             return
         labels = {k: self._label_of(k) for k in self._order}
         # Cached by the file, not the row key: keys repeat from site to site.
         paths = {ln.key: str(ln.path.resolve()) for ln in lines}
         cached = {k: self._bins[p] for k, p in paths.items() if p in self._bins}
         job = MeasureJob(lines, cached)
-        self._run = run = _MeasureRun(site, snapshot, targets, labels, job, paths)
+        self._run = run = _MeasureRun(site, snapshot, targets, labels, job, paths, gps_note)
         self._measurer.start(
             [job],
             lambda landed: self._measure_landed(run, landed),
@@ -611,7 +654,10 @@ class EditLinesDialog(QDialog):
         the fields a measure ignores or an edit of which must not discard it."""
         out: dict[str, GridPlacement] = {}
         for key in self._order:
-            placed = self._live(self._edits[key], frames).placed(frames)
+            edit = self._edits[key]
+            if isinstance(edit, TrackEdit):
+                continue  # a GPS row is never handed to the measure
+            placed = self._live(edit, frames).placed(frames)
             if placed.grid_id == self.grid_id:
                 out[key] = dataclasses.replace(placed, travel_shift=0.0, label=None)
         return out
@@ -670,16 +716,20 @@ class EditLinesDialog(QDialog):
         result = job.result
         for key in run.targets:
             value = result.lines[key].destagger if key in result.lines else None
-            if value is not None:
+            if value is not None and isinstance(self._edits[key], LineEdit):
                 edit = self._live(self._edits[key], frames)
                 self._edits[key] = dataclasses.replace(edit, travel_shift=round(value, 3))
         box = box_value(result)
         if box is not None:
             self.destagger_spin.setValue(round(box, 3))
         summary = measure_summary(result, run.targets, job.unreadable, run.labels)
+        if run.gps_note:
+            summary = f"{summary} {run.gps_note}"
         self._refresh(summary)
         # The visible line names at most six per group; the tooltip names them all.
         full = measure_summary(result, run.targets, job.unreadable, run.labels, limit=None)
+        if run.gps_note:
+            full = f"{full} {run.gps_note}"
         self.status.setToolTip(full if full != summary else "")
 
     def done(self, r: int) -> None:
@@ -712,7 +762,11 @@ class EditLinesDialog(QDialog):
                 # reported as a line changed elsewhere (Review Focus 1).
                 e = self._edits[k]
                 if not self._changes(e, frames):
-                    self._edits[k] = LineEdit(k, seen=e.seen)
+                    self._edits[k] = (
+                        TrackEdit(k, seen=e.seen)
+                        if isinstance(e, TrackEdit)
+                        else LineEdit(k, seen=e.seen)
+                    )
             self._render(frames, grid)
             n, m = self._counts(frames)
         except (KeyError, ProjectError) as exc:
@@ -737,13 +791,19 @@ class EditLinesDialog(QDialog):
         moving = 0
         for k in changed:
             e = self._live(self._edits[k], frames)
+            if isinstance(e, TrackEdit):
+                # a track never moves with its grid; only the destagger moves its traces
+                shift = e.placed(frames).travel_shift
+                if abs(shift - e.seen.travel_shift) > SAME_M:
+                    moving += self._picks[k]
+                continue
             placed = dataclasses.replace(e.placed(frames), label=e.seen.label)
             if not same_placement(placed, e.seen):
                 moving += self._picks[k]
         return len(changed), moving
 
     def _render(self, frames: Mapping[str, Grid], grid: Grid) -> None:
-        axes = {self._edits[k].seen.axis for k in self._order}
+        axes = {e.seen.axis for e in self._edits.values() if isinstance(e, LineEdit)}
         n = len(self._order)
         if len(axes) == 1:
             a = next(iter(axes))
@@ -763,37 +823,60 @@ class EditLinesDialog(QDialog):
                 seen = edit.seen
                 gone = edit.grid_id is not None and self._target_gone(edit, frames)
                 p = self._live(edit, frames).placed(frames)
-                per_metre = self._per_metre[key]
-                length = self._traces[key] / per_metre if per_metre > 0 else 0.0
-                differs = {
-                    COL_LABEL: p.label != seen.label,
-                    COL_OFFSET: abs(p.offset - seen.offset) > SAME_M,
-                    COL_DIR: p.direction != seen.direction,
-                    COL_START: abs(p.start_along - seen.start_along) > SAME_M,
-                    COL_SCALE: abs(p.scale - seen.scale) > SAME_M,
-                    COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
-                    COL_GRID: gone or p.grid_id != seen.grid_id,
-                }
-                values = {
-                    COL_LABEL: p.label or Path(key).stem,
-                    COL_OFFSET: f"{p.offset:.2f}",
-                    COL_DIR: "+1" if p.direction == 1 else "−1",
-                    COL_START: f"{p.start_along:.2f}",
-                    COL_SCALE: f"{p.scale:.4f}",
-                    COL_DESTAGGER: f"{p.travel_shift:.2f}",
-                    COL_GRID: edit.grid_id if gone else p.grid_id,
-                    COL_ALONG: p.axis,
-                    COL_TRACES: str(self._traces[key]),
-                    COL_LENGTH: f"{length:.2f}" if length > 0 else "",
-                    COL_PICKS: str(self._picks[key]),
-                    COL_NOTE: f"grid {edit.grid_id!r} no longer exists"
-                    if gone
-                    else placement_note(p, frames[p.grid_id]),
-                }
+                gone_note = f"grid {edit.grid_id!r} no longer exists" if gone else None
+                if isinstance(p, TrackPlacement):
+                    assert isinstance(seen, TrackPlacement)
+                    length = self._walked[key]
+                    differs = {
+                        COL_LABEL: p.label != seen.label,
+                        COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
+                        COL_GRID: gone or p.grid_id != seen.grid_id,
+                    }
+                    values = {
+                        COL_LABEL: p.label or Path(key).stem,
+                        **dict.fromkeys(GPS_BLANK, "—"),
+                        COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_GRID: edit.grid_id if gone else p.grid_id,
+                        COL_ALONG: "GPS",
+                        COL_TRACES: str(self._traces[key]),
+                        COL_LENGTH: f"{length:.2f}" if length > 0 else "",
+                        COL_PICKS: str(self._picks[key]),
+                        COL_NOTE: gone_note or "",
+                    }
+                else:
+                    assert isinstance(seen, GridPlacement)
+                    per_metre = self._per_metre[key]
+                    length = self._traces[key] / per_metre if per_metre > 0 else 0.0
+                    differs = {
+                        COL_LABEL: p.label != seen.label,
+                        COL_OFFSET: abs(p.offset - seen.offset) > SAME_M,
+                        COL_DIR: p.direction != seen.direction,
+                        COL_START: abs(p.start_along - seen.start_along) > SAME_M,
+                        COL_SCALE: abs(p.scale - seen.scale) > SAME_M,
+                        COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
+                        COL_GRID: gone or p.grid_id != seen.grid_id,
+                    }
+                    values = {
+                        COL_LABEL: p.label or Path(key).stem,
+                        COL_OFFSET: f"{p.offset:.2f}",
+                        COL_DIR: "+1" if p.direction == 1 else "−1",
+                        COL_START: f"{p.start_along:.2f}",
+                        COL_SCALE: f"{p.scale:.4f}",
+                        COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_GRID: edit.grid_id if gone else p.grid_id,
+                        COL_ALONG: p.axis,
+                        COL_TRACES: str(self._traces[key]),
+                        COL_LENGTH: f"{length:.2f}" if length > 0 else "",
+                        COL_PICKS: str(self._picks[key]),
+                        COL_NOTE: gone_note or placement_note(p, frames[p.grid_id]),
+                    }
+                is_gps = isinstance(p, TrackPlacement)
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
-                    if col not in EDITABLE:
+                    if col not in EDITABLE or (is_gps and col in GPS_BLANK):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if is_gps and col in GPS_BLANK:
+                        item.setToolTip(GPS_TIP)
                     if differs.get(col):
                         item.setBackground(CHANGED)
                     self.table.setItem(r, col, item)
@@ -856,6 +939,9 @@ class EditLinesDialog(QDialog):
             edit = self._edits[key]
             frames = self._frames()
             note = None
+            if isinstance(edit, TrackEdit) and c in GPS_BLANK:
+                self._refresh()  # back to "—": a TrackEdit takes only Label, Destagger, Grid
+                return
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
             elif c == COL_SCALE:

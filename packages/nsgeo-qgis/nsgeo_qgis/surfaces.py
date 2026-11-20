@@ -52,11 +52,14 @@ from nsgeo_qgis.surface_plan import (
     INPUTS,
     KIND_SURFACE,
     MULTI_GRID_REFUSAL,
+    WHY_NO_CUT,
     WHY_NO_DEPTH,
     WHY_NO_LINE,
     WHY_NO_POSITION,
+    WHY_OTHER_CLOCK,
     FeatureRecord,
     clean_name,
+    cut_pick_on_clock,
     feature_ids,
     grid_mismatch_refusal,
     input_hash,
@@ -82,6 +85,14 @@ _FILL_SHARE = 80
 _VOLUME_SHARE = 95
 
 _OWN_FILES = re.compile(r"[0-9a-f]{32}(-[0-9a-f]{8}\.(npz|2dm|dat)|\.json)(\.part)?")
+
+
+def _vertices_of(session: SiteSession, key: str) -> list[list[float]] | None:
+    """A cut's vertices in grid metres, or None when the cut is gone."""
+    try:
+        return [list(v) for v in session.cut_for_key(key).vertices]
+    except KeyError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -161,7 +172,12 @@ class Surfaces:
         return self.layers.members_by_feature().get(feature_id, [])
 
     def _grid_of(self, key: str) -> str | None:
-        """The id of the grid line `key` is on, or None (no such line, or no grid)."""
+        """The id of the grid line or cut `key` is on, or None (no such line or cut, or no grid)."""
+        if is_cut_key(key):
+            try:
+                return str(self.session.cut_for_key(key).grid_id)
+            except KeyError:
+                return None
         try:
             grid = self.session.grid_for_line(self.session.line_for_key(key))
         except KeyError:
@@ -179,16 +195,16 @@ class Surfaces:
         rows = self.layers.pick_rows(saved)
         unreadable = self.layers.unreadable_pick_ids(saved)
         unsaved = len(fids) - len(rows) - len(unreadable)
-        on_cuts = 0
         no_grid = 0
+        deleted_cut = 0
         grids: set[str] = set()
         placed: list[tuple[float, float]] = []
         for row in rows:
             key = row.pick.line_key
-            if is_cut_key(key):
-                on_cuts += 1
-                continue
             grid_id = self._grid_of(key)
+            if is_cut_key(key) and grid_id is None:
+                deleted_cut += 1
+                continue
             if grid_id is None or row.point is None:
                 no_grid += 1
                 continue
@@ -201,8 +217,8 @@ class Surfaces:
         refusal = selection_refusal(
             n=len(fids),
             unsaved=unsaved,
-            on_cuts=on_cuts,
             no_grid=no_grid,
+            deleted_cut=deleted_cut,
             unreadable=len(unreadable),
             grids=grids,
             spans_area=spans,
@@ -338,10 +354,21 @@ class Surfaces:
         held = self.members(feature_id) if members is None else members.get(feature_id, [])
         # The radar time, not the stored time and zero: #97 re-measures a line's older picks
         # from its time zero when the line opens, which moves neither the pick nor the surface.
-        picks = sorted([r.pick.line_key, r.pick.trace, round(r.pick.radar_ns, 6)] for r in held)
+        # A cut pick is its distance along the cut: its column is a record of the section only.
+        picks = sorted(
+            [r.pick.line_key, round(float(r.pick.distance_m or 0.0), 4), round(r.pick.radar_ns, 6)]
+            if is_cut_key(r.pick.line_key)
+            else [r.pick.line_key, r.pick.trace, round(r.pick.radar_ns, 6)]
+            for r in held
+        )
         keys = sorted(source.line_keys)
+        cut_keys = {r.pick.line_key for r in held if is_cut_key(r.pick.line_key)}
+        cuts = sorted([k, _vertices_of(session, k)] for k in cut_keys)
         return {
-            "picks": input_hash(picks),
+            # A cut pick's cut is part of what its pick means, so a deleted or redrawn cut reads
+            # "its picks changed". Only a surface with cut picks hashes the cuts, so one built
+            # before cut picks could join surfaces keeps the hashes it was built with (R7, R18).
+            "picks": input_hash(picks) if not cuts else input_hash({"picks": picks, "cuts": cuts}),
             "settings": input_hash(record.settings.to_dict()),
             "source": input_hash(
                 {
@@ -578,11 +605,34 @@ class Surfaces:
         out: dict[str, dict[str, Any]] = {}
         for k, record in enumerate(records):
             rows = [(r.pick.line_key, r.pick) for r in members[record.feature_id]]
-            placed = place_picks(rows, got.lines, got.prov, got.frame, got.velocity)
+            cuts = {}
+            for key, _ in rows:
+                if is_cut_key(key) and key not in cuts:
+                    with contextlib.suppress(KeyError):
+                        cut = self.session.cut_for_key(key)
+                        # Only a cut on this grid, as the export and `pick_depths` take.
+                        if cut.grid_id == grid_id:
+                            cuts[key] = cut
+            placed = place_picks(
+                rows,
+                got.lines,
+                got.prov,
+                got.frame,
+                got.velocity,
+                cuts=cuts,
+                grid=self.session.grid(grid_id),
+            )
             used: list[tuple[Any, Any]] = []
             skipped: list[dict[str, str]] = []
             for (key, pick), spot in zip(rows, placed):
-                if spot is None:
+                if spot is None and is_cut_key(key):
+                    if key not in cuts:
+                        why = WHY_NO_CUT
+                    elif not cut_pick_on_clock(pick, got.prov.steps):
+                        why = WHY_OTHER_CLOCK
+                    else:
+                        why = WHY_NO_DEPTH
+                elif spot is None:
                     why = WHY_NO_LINE if key not in prepared else WHY_NO_DEPTH
                 elif not (math.isfinite(spot.x_m) and math.isfinite(spot.y_m)):
                     why = WHY_NO_POSITION
@@ -616,6 +666,8 @@ class Surfaces:
         return choice, out
 
     def line_label(self, key: str) -> str:
+        if is_cut_key(key):
+            return str(self.session.cut_for_key(key).name)
         line = self.session.line_for_key(key)
         return str(getattr(line.placement, "label", None) or line.path.stem)
 

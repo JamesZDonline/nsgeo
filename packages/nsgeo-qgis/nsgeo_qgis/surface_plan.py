@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import time_base_of
 from nsgeo.slices import SurfaceSettings
 
 KIND_SURFACE = "surface"
@@ -116,15 +117,15 @@ def selection_refusal(
     *,
     n: int,
     unsaved: int,
-    on_cuts: int,
     grids: Collection[str],
     spans_area: bool,
     no_grid: int = 0,
+    deleted_cut: int = 0,
     unreadable: int = 0,
     minimum: int = MIN_PICKS,
 ) -> str:
     """Why the selected picks cannot make (or join) a surface, or "". Checked
-    in order: none selected, unsaved, on cuts, not on a grid's line, two grids,
+    in order: none selected, unsaved, unreadable, not on a grid's line, two grids,
     too few or in a straight line. `minimum` is 3 for a new surface and 1 for
     picks added to one."""
     if n <= 0:
@@ -142,10 +143,10 @@ def selection_refusal(
             f"{_count(unreadable, 'has', 'have')} no trace or time; edit or delete "
             f"{'it' if unreadable == 1 else 'them'} in the picks layer."
         )
-    if on_cuts:
+    if deleted_cut:
         return (
-            f"{_count(on_cuts, 'is', 'are')} on a cut. "
-            "Picks on cuts can join surfaces in a later version."
+            f"{_count(deleted_cut, 'is', 'are')} on a cut that has been deleted, so "
+            f"{'it' if deleted_cut == 1 else 'they'} cannot be placed."
         )
     if no_grid:
         return (
@@ -245,6 +246,25 @@ MULTI_GRID_REFUSAL = "A build is of one grid's surfaces; these are on more than 
 WHY_NO_LINE = "their line isn't in this grid's slices"
 WHY_NO_DEPTH = "their depth could not be found"
 WHY_NO_POSITION = "their position on the line could not be found"
+WHY_OTHER_CLOCK = "they were made on a cut on another clock"
+WHY_NO_CUT = "their cut has been deleted"
+
+
+def cut_pick_base(pick: Any) -> str:
+    """The time base a cut pick was made on, from the section's provenance in its `stack_json`
+    (`"time_zero"` or `"radar"`); `"radar"` when that is empty, unreadable or names none."""
+    try:
+        base = json.loads(pick.stack_json or "")["time_base"]
+    except (ValueError, KeyError, TypeError):
+        return "radar"
+    return base if isinstance(base, str) and base else "radar"
+
+
+def cut_pick_on_clock(pick: Any, steps: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether a cut pick can be placed on the cube's clock: it has a distance along its cut and
+    was made on the time base the preset's `steps` use now. The one rule `place_picks`,
+    `pick_depths`, the export's counts and the surface build share."""
+    return pick.distance_m is not None and cut_pick_base(pick) == time_base_of(steps)
 
 
 def skipped_text(skipped: Sequence[Mapping[str, Any]]) -> str:
@@ -473,19 +493,37 @@ def merge_range(shared: tuple[float, float] | None, low: float, high: float) -> 
 
 
 # ---- the New surface dialog and the Surfaces panel ---------------------------------------
-def selection_label(n: int, grid_id: str | None, labels: Sequence[str]) -> str:
-    """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033).`"""
+def selection_label(
+    n: int,
+    grid_id: str | None,
+    labels: Sequence[str],
+    cuts: Sequence[str] = (),
+    deleted_cuts: int = 0,
+) -> str:
+    """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033; cut Cut 1).` `labels`
+    are line names, `cuts` cut names; each is named for what it is. `deleted_cuts` counts the cuts
+    the picks name that no longer exist."""
     if n <= 0:
         return "No picks selected."
     text = f"{n} pick{'' if n == 1 else 's'} selected"
     if grid_id is None:
         return text + "."
     labels = sorted(set(labels))
+    cuts = sorted(set(cuts))
     where = f"on Grid {grid_id}" if n == 1 else f"all on Grid {grid_id}"
+    parts = []
     if len(labels) == 1:
-        return f"{text}, {where} (line {labels[0]})."
-    if len(labels) > 1:
-        return f"{text}, {where} (lines {labels[0]} to {labels[-1]})."
+        parts.append(f"line {labels[0]}")
+    elif len(labels) > 1:
+        parts.append(f"lines {labels[0]} to {labels[-1]}")
+    if len(cuts) == 1:
+        parts.append(f"cut {cuts[0]}")
+    elif len(cuts) > 1:
+        parts.append(f"cuts {', '.join(cuts)}")
+    if deleted_cuts:
+        parts.append("a deleted cut" if deleted_cuts == 1 else f"{deleted_cuts} deleted cuts")
+    if parts:
+        return f"{text}, {where} ({'; '.join(parts)})."
     return f"{text}, {where}."
 
 

@@ -13,7 +13,12 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
-from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
+from nsgeo_qgis.ui.profile_dock import (
+    PREVIEW_STEPS_REFUSED_TEXT,
+    STEPS_REFUSED_TEXT,
+    ProfileDock,
+    velocity_source,
+)
 from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
@@ -471,6 +476,24 @@ def test_a_declined_difference_falls_back_to_the_ordinary_result(opened):
     np.testing.assert_array_equal(dock.image.rg.data, stack.result().data)
     assert dock.difference_label.text() == ""
     assert len(errors) == 1 and "sample count" in errors[0]
+    assert cleared == [1]
+
+
+def test_clear_resets_the_difference_view(opened):
+    """#20 item 4. No real path reaches `_clear` with a Difference view
+    showing today (`close_site` goes through `_open("")` first, which resets
+    it), so this calls it directly: a guard for the day one does. It fails
+    without the `_difference_index = -1` / label reset in `_clear`."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("background_mean"))
+    dock.set_difference_index(1)
+    cleared = []
+    dock.difference_cleared.connect(lambda: cleared.append(1))
+    dock._clear()
+    assert dock._difference_index == -1
+    assert dock.difference_label.text() == ""
     assert cleared == [1]
 
 
@@ -2198,6 +2221,68 @@ def test_a_relabelled_axis_with_no_ruler_is_not_put_back(opened):
     dock._set_axes_holding("", 100, 200, 0.0, 0.2, None)
     assert dock.view.transform is not before
     assert dock.view.transform.t0_ns == 0.0
+
+
+# ---- a line whose steps can't run says so (#197) -------------------------
+
+
+def _bandpass_past_nyquist():
+    return build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0)
+
+
+@pytest.fixture
+def two_lines(bare):
+    """Lines A (open, rendering) and B, both with their samples loaded."""
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    lines = []
+    for i, label in enumerate(("FILE__001", "FILE__002")):
+        p = synthetic_dzt(tmp_path / "raw", f"{label}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, -1, label)))
+    session.add_lines(lines)
+    key_a, key_b = session.keys()
+    for key, line in zip((key_a, key_b), lines, strict=True):
+        session.set_profiles(key, line.load())
+    session.open_line(key_a)
+    return session, dock, key_a, key_b
+
+
+def test_opening_a_line_whose_steps_refuse_shows_why_not_the_last_picture(two_lines):
+    session, dock, key_a, key_b = two_lines
+    assert dock.view._image is not None
+    session.append_step(key_b, _bandpass_past_nyquist())
+    session.open_line(key_b)
+    assert dock.view._image is None
+    assert dock.view._message == STEPS_REFUSED_TEXT
+
+
+def test_a_preview_of_a_line_whose_steps_refuse_says_so(two_lines):
+    session, dock, key_a, key_b = two_lines
+    session.append_step(key_b, _bandpass_past_nyquist())
+    session.set_preview(key_b, 3)
+    assert dock.view._image is None
+    assert dock.view._message == PREVIEW_STEPS_REFUSED_TEXT.format(name="FILE__002")
+
+
+def test_back_from_a_preview_to_a_refusing_line_shows_why(two_lines):
+    session, dock, key_a, key_b = two_lines
+    session.set_preview(key_b, 3)
+    session.append_step(key_a, _bandpass_past_nyquist())
+    session.set_preview(None)
+    assert dock.view._image is None
+    assert dock.view._message == STEPS_REFUSED_TEXT
+
+
+def test_a_bad_edit_on_the_open_line_keeps_its_last_picture(two_lines):
+    """Guard: a refusing edit to the line being worked on leaves its last
+    picture up (the toast says why). Fails if `_show_steps_refused` also runs
+    on `stack_changed`, which would blank the picture on every bad keystroke."""
+    session, dock, key_a, _ = two_lines
+    before = dock.view._image
+    assert before is not None
+    session.append_step(key_a, _bandpass_past_nyquist())
+    assert dock.view._image is before
 
 
 # ---- M17a P14: a GPS line in the profile ----------------------------------------------

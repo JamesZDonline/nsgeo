@@ -1,4 +1,4 @@
-"""The grid-wide destagger value, measured on the real Nashville grids (#159).
+"""The grid-wide destagger value, measured on the real GPS survey grids (#159).
 
 Expected values are the 2026-11-11 spike's, which the user's by-eye values
 agree with on Grid 1 unfitted. Real files only: a skipped test validated nothing.

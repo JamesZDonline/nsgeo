@@ -1103,3 +1103,100 @@ def test_pick_depths_are_none_where_they_cannot_be_found(synth_site):
     got = export.pick_depths(GRID.id, rows)
     assert got[:3] == [None, None, None]
     assert isinstance(got[3], float) and math.isfinite(got[3]) and got[3] > 0.0
+
+
+# ---- picks on cuts (M16 D Task 2) --------------------------------------------------------
+
+
+def test_cut_picks_are_in_picks_vtp_with_their_cut(built_site):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+    from tests.vtk_reader import read_vtk_xml
+
+    session, _, export, layers, _ = built_site
+    cut_key = _cut_along_line_0(session)
+    cut = session.cut_for_key(cut_key)
+    _write_cut_picks(layers, cut_key, [(3.0, 10.4), (8.0, 11.0)])
+    # a line pick too, so line and cut rows share the file
+    _surface_picks(layers, session, [(0, 5, 10.0)])
+    folder = export.run(GRID.id, export.defaults(GRID.id), progress=_noop)
+    doc = read_vtk_xml(folder / "picks.vtp")
+    cut_col, line_col = doc["point_data"]["cut"], doc["point_data"]["line"]
+    assert cut_col.dtype == np.int32 and len(cut_col) == 3
+    assert sorted(cut_col.tolist()) == [-1, 0, 0]
+    assert sorted(line_col[cut_col == 0].tolist()) == [-1, -1]
+    assert all(line_col[cut_col == -1] >= 0)
+    got = export.fill(GRID.id, export.defaults(GRID.id), progress=_noop)
+    rows = [(cut_key, p) for p in session.picks_for(cut_key)]
+    placed = place_picks(
+        rows,
+        got.lines,
+        got.prov,
+        got.frame,
+        got.velocity,
+        cuts={cut_key: cut},
+        grid=session.grid(GRID.id),
+    )
+    del got
+    want = sorted(p.depth_m for p in placed)
+    np.testing.assert_allclose(
+        sorted(doc["point_data"]["true_depth_m"][cut_col == 0].tolist()), want, rtol=1e-5
+    )
+    record = json.loads((folder / "export.json").read_text())
+    assert record["cuts"] == [{"index": 0, "key": cut_key, "name": "Cut 1"}]
+    assert record["n_picks"] == 3
+    assert export.summary(GRID.id, export.defaults(GRID.id)).n_picks == 3
+
+
+def test_a_cut_with_no_picks_is_still_listed_and_no_cut_gives_an_empty_list(built_site):
+    from test_plugin_surface_build import _cut_along_line_0
+
+    session, _, export, _, _ = built_site
+    folder = export.run(GRID.id, export.defaults(GRID.id), progress=_noop)
+    assert json.loads((folder / "export.json").read_text())["cuts"] == []
+    cut_key = _cut_along_line_0(session)
+    folder = export.run(GRID.id, export.defaults(GRID.id), progress=_noop)
+    assert json.loads((folder / "export.json").read_text())["cuts"] == [
+        {"index": 0, "key": cut_key, "name": "Cut 1"}
+    ]
+
+
+def test_a_cut_pick_on_another_clock_is_left_out_of_the_export(built_site):
+    from test_plugin_surface_build import _cut_along_line_0, _write_cut_picks
+    from tests.vtk_reader import read_vtk_xml
+
+    session, _, export, layers, _ = built_site
+    cut_key = _cut_along_line_0(session)
+    _write_cut_picks(layers, cut_key, [(3.0, 10.4)])
+    _write_cut_picks(layers, cut_key, [(8.0, 11.0)], base="radar")
+    # the dialog's count leaves the off-clock pick out too, as picks.vtp does
+    assert export.summary(GRID.id, export.defaults(GRID.id)).n_picks == 1
+    folder = export.run(GRID.id, export.defaults(GRID.id), progress=_noop)
+    doc = read_vtk_xml(folder / "picks.vtp")
+    cut_col = doc["point_data"]["cut"]
+    assert doc["NumberOfPoints"] == 1 and cut_col.tolist() == [0]
+    want = float(session.grid_depth_velocity(GRID.id).depth_at(np.asarray([10.4]))[0])
+    assert float(doc["point_data"]["true_depth_m"][0]) == pytest.approx(want, rel=1e-5)
+    assert json.loads((folder / "export.json").read_text())["n_picks"] == 1
+
+
+def test_pick_depths_answer_cut_keys_by_the_exports_rule(built_site):
+    from test_plugin_surface_build import _cut_along_line_0, _cut_pick
+
+    session, _, export, _, _ = built_site
+    cut_key = _cut_along_line_0(session)
+    session.add_grid(Grid("Grid B", (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    elsewhere = session.add_cut("Grid B", [(0.5, 0.5), (0.5, 5.5)])
+    gone = session.add_cut(GRID.id, [(1.5, 0.5), (1.5, 5.5)])
+    gone_pick = _cut_pick(gone, 3.0, 10.4)
+    session.remove_cut(gone)
+    rows = [
+        (cut_key, _cut_pick(cut_key, 3.0, 10.4)),
+        (cut_key, _cut_pick(cut_key, 3.0, 10.4, base="radar")),
+        (elsewhere, _cut_pick(elsewhere, 3.0, 10.4)),
+        (gone, gone_pick),
+    ]
+    got = export.pick_depths(GRID.id, rows)
+    want = float(session.grid_depth_velocity(GRID.id).depth_at(np.asarray([10.4]))[0])
+    assert got[0] == pytest.approx(want)
+    # another clock, a cut on another grid, a deleted cut
+    assert got[1:] == [None, None, None]

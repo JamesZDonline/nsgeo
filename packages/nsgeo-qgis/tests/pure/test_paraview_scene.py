@@ -428,3 +428,15 @@ def test_scene_record_requires_features_and_checks_them():
         scene_record(**{**FIELDS, "features": [{**entry, "index": 1}]})
     with pytest.raises(ValueError):
         scene_record(**{**FIELDS, "features": "Bowl"})
+
+
+def test_scene_record_validates_cuts():
+    assert scene_record(**FIELDS)["cuts"] == []
+    entry = {"index": 0, "key": "cut:a", "name": "Cut 1"}
+    assert scene_record(**{**FIELDS, "cuts": [entry]})["cuts"] == [entry]
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "cuts": [{**entry, "extra": 1}]})
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "cuts": [{**entry, "index": 1}]})
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "cuts": "Cut 1"})
