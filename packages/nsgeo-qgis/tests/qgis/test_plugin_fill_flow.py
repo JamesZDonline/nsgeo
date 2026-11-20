@@ -2,13 +2,19 @@
 
 The dock on a synthetic grid at a cell fine enough that the interpolation fill
 takes seconds. `SLOW_CELL` is calibrated once (`_assert_slow`) so the hazard
-cannot silently shrink: on a CI-class core the fill takes about 2 s; this
-machine, loaded by other sessions, measured 2.0 to 2.2 s. The fixture asserts at
-least 1.5 s here.
+cannot silently shrink. CI's runners (QGIS 3.44 and 4.2 alike) build the same
+fill in about 0.65 of this machine's time: at 0.017 m, 1.25 s there against
+1.9 to 2.2 s here. At 0.016 m CI measures about 1.6 s and this loaded machine
+about 2.5 s. The floor only has to make a GUI-thread fill impossible to miss
+against the 0.25 s gap limit, so it is `MIN_SLOW_S` = 1.0 s (four times the gap
+limit). `MID_CELL` (0.022 m) takes about 0.75 s here and about 0.5 s on CI, over
+twice the 0.2 s budget on both.
 """
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 
 import pytest
@@ -44,10 +50,10 @@ from test_plugin_slices_dock import (  # noqa: F401 -- fixture
     docked,
 )
 
-SLOW_CELL = 0.017
+SLOW_CELL = 0.016
 QUICK_CELL = 0.1
-MID_CELL = 0.025
-MIN_SLOW_S = 1.5
+MID_CELL = 0.022
+MIN_SLOW_S = 1.0
 GAP_LIMIT_S = 0.25
 
 _CALIBRATED: list[float] = []
@@ -68,11 +74,11 @@ def _wait_idle(dock) -> None:
 
 def _assert_slow(dock) -> None:
     """The synchronous builds of the fixture's cells are slow enough to tell
-    anything. SLOW_CELL takes at least MIN_SLOW_S: the brief asked for 2 s on
-    CI, and this loaded machine measures 1.9 to 2.2 s, so 1.5 s keeps the check
-    from flaking while a fast runner still fails loudly. MID_CELL must exceed
-    twice the 0.2 s budget, or the cancel tests would draw it in the same tick
-    and pass vacuously."""
+    anything. SLOW_CELL takes at least MIN_SLOW_S (four times the gap limit; CI
+    measures about 0.65 of this machine's time, so 1.0 s there still fails
+    loudly on a much faster runner). MID_CELL must exceed twice the 0.2 s
+    budget, or the cancel tests would draw it in the same tick and pass
+    vacuously."""
     if _CALIBRATED:
         return
     from nsgeo_qgis.slices_engine import build_fill
@@ -106,6 +112,24 @@ def _assert_slow(dock) -> None:
     _CALIBRATED.append(took[SLOW_CELL])
 
 
+def _release(dock) -> None:
+    """Join this dock's own worker threads (both `Refiner`s). Safe twice."""
+    dock.refiner.shutdown()
+    dock.fill_worker.shutdown()
+
+
+def _calibrated(dock, check=None) -> None:
+    """`_assert_slow` (or `check`), and a failed one never leaks: the dock's
+    workers are joined before the failure is raised, so a runner that is too
+    fast for the fixture reports that, not a stray `nsgeo-refine` thread in
+    some later test."""
+    try:
+        (check or _assert_slow)(dock)
+    except BaseException:
+        _release(dock)
+        raise
+
+
 @pytest.fixture
 def quick(docked):  # noqa: F811
     """A prepared dock with a picture at a coarse cell."""
@@ -121,7 +145,7 @@ def quick(docked):  # noqa: F811
 @pytest.fixture
 def slow(quick):
     dock, session = quick
-    _assert_slow(dock)
+    _calibrated(dock)
     return dock, session
 
 
@@ -445,7 +469,7 @@ def test_cancel_with_only_a_preview_since_opening_does_not_latch(tmp_path, qgis_
         assert spin_until(lambda: dock.current_values() is not None, 60_000)
         assert dock.provisional
         _wait_idle(dock)
-        _assert_slow(dock)
+        _calibrated(dock)
         _edit_cell(dock, SLOW_CELL)
         assert spin_until(lambda: dock.fill_flow.working, 10_000)
         dock.cancel_link.linkActivated.emit("cancel")
@@ -783,3 +807,20 @@ def test_a_failed_fill_is_reported_and_clears_the_state(flow_probe):
     assert flow.request("k", [Failing()], stretch_key="s") is False
     assert not flow.working
     assert ("error", "fill", "ValueError: no room") in log
+
+
+def test_a_failed_calibration_leaves_no_worker_threads(docked, monkeypatch):  # noqa: F811
+    dock, _ = docked
+    _ready(dock)
+    monkeypatch.setattr(sys.modules[__name__], "MIN_SLOW_S", 1e9)
+    monkeypatch.setattr(sys.modules[__name__], "_CALIBRATED", [])
+    for worker in (dock.refiner, dock.fill_worker):
+        worker._executor.submit(lambda: None).result()  # start its thread
+    threads = list(dock.refiner._executor._threads) + list(dock.fill_worker._executor._threads)
+    assert len(threads) == 2
+    assert {t.name.split("_")[0] for t in threads} >= {"nsgeo-fill"}
+    with pytest.raises(AssertionError, match="shrunk"):
+        _calibrated(dock)
+    assert not any(t.is_alive() for t in threads)
+    assert dock.refiner._closed and dock.fill_worker._closed
+    assert not [t for t in threading.enumerate() if t in threads]
