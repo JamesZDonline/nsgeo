@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -293,10 +293,24 @@ def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     return plan
 
 
-def warm_north_up_plan(frame: CubeFrame) -> None:
+def warm_north_up_plan(frame: CubeFrame, should_stop: Callable[[], bool] | None = None) -> None:
     """Build and keep `frame`'s north-up plan, so the first `to_north_up` on it
-    is one sample. Safe off the GUI thread (the cache is lock-guarded)."""
-    _north_up_plan(frame)
+    is one sample. Safe off the GUI thread (the cache is lock-guarded). The
+    build cannot be interrupted, so `should_stop` is asked once more after it:
+    a stopped warm inserts nothing, and never pushes a shown frame's plan out
+    of the two slots."""
+    with _plans_lock:
+        if frame in _plans:
+            _plans.move_to_end(frame)
+            return
+    plan = _build_north_up_plan(frame)
+    if should_stop is not None and should_stop():
+        return
+    with _plans_lock:
+        _plans[frame] = plan
+        _plans.move_to_end(frame)
+        while len(_plans) > _NORTH_UP_PLANS:
+            _plans.popitem(last=False)
 
 
 def north_up_plans_nbytes() -> int:

@@ -432,3 +432,15 @@ def test_an_exact_north_up_plan_holds_no_ids_or_weights():
     taps = _north_up_plan(f)[0]
     assert taps.exact and taps.ids.size == 0 and taps.weights.size == 0
     assert taps.nbytes < 4_000_000
+
+
+def test_a_stopped_warm_inserts_no_plan_and_a_warm_one_is_kept():
+    from nsgeo.slices import display
+
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=12.0, cell=0.5, nx=9, ny=7, crs="EPSG:32633")
+    display.clear_north_up_plans()
+    display.warm_north_up_plan(frame, lambda: True)
+    assert display.north_up_plans_nbytes() == 0
+    display.warm_north_up_plan(frame, lambda: False)
+    assert display.north_up_plans_nbytes() > 0
+    display.clear_north_up_plans()

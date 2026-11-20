@@ -18,6 +18,7 @@ from nsgeo.slices import (
     FillWeights,
     FinishSettings,
     SliceFill,
+    warm_north_up_plan,
 )
 
 if TYPE_CHECKING:
@@ -45,8 +46,9 @@ class FillJob:
     ) -> None:
         self._engine = engine
         #: This grid's: also plan the north-up resample for `frame` after the
-        #: fill, so the landing draw's first `to_north_up` is one sample. A fill
-        #: refused at landing leaves the plan as an extra LRU entry, harmless.
+        #: fill, so the landing draw's first `to_north_up` is one sample. A stopped
+        #: job inserts nothing; a fill refused at landing (stale) still leaves
+        #: its plan in one of the two LRU slots until the next frame replaces it.
         self.warm_north_up = warm_north_up
         self._populated = populated
         self._settings = settings
@@ -77,9 +79,7 @@ class FillJob:
             progress=report,
         )
         if self.warm_north_up and not should_stop():
-            from nsgeo.slices import warm_north_up_plan
-
-            warm_north_up_plan(self.frame)
+            warm_north_up_plan(self.frame, should_stop)
         self.fraction = 1.0
 
     def land(self) -> bool:

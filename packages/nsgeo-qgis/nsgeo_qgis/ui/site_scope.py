@@ -1248,6 +1248,10 @@ class SiteScope:
             return True
         if flow.latched:
             return False
+        if flow.working:
+            # A running request (the fills, then these footprints) draws on
+            # landing; a request of another key would cancel it.
+            return False
         return flow.request(
             (engine.lattice, "footprints"),
             engine.footprint_jobs,

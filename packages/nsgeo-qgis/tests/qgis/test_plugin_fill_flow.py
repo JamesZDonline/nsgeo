@@ -1578,3 +1578,24 @@ def test_this_grids_first_north_up_plan_is_built_on_the_worker(
         assert all(name.startswith("nsgeo-fill") for name in mine), builds
     finally:
         _close(plugin, answer_modal)
+
+
+def test_ticking_coverage_mid_fill_never_restarts_the_work(site_slow):
+    """Coverage needs no fills, only footprints: a coverage draw while the
+    flow works must leave the running list alone (a request of another key
+    would cancel it and restart the grid in flight)."""
+    _, dock = site_slow
+    flow = dock.fill_flow
+    _site_cell(dock, SITE_SLOW_CELL)
+    assert spin_until(lambda: flow.working and flow._landed >= 1, 60_000)
+    jobs = [id(job) for job in flow._fills]
+    assert len(jobs) == 6
+    dock.coverage_check.setChecked(True)
+    dock._site.tick.stop()
+    dock._site.refresh_slice()
+    dock._site.refresh_slice()
+    assert [id(job) for job in flow._fills] == jobs, "the coverage tick restarted the work"
+    assert spin_until(lambda: not flow.working, 120_000)
+    _wait_idle(dock)
+    site = dock.site_engine
+    assert set(site._gathers) == set(site.ready_grids)

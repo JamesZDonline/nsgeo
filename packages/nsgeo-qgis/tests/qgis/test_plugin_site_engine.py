@@ -1524,3 +1524,67 @@ def test_the_busy_report_reports_a_failing_probe_instead_of_raising(site3, make_
     report = site.busy_report()
     assert isinstance(report, str)
     assert report.startswith("could not describe the site: probe broke")
+
+
+def _footprint_job(site, grid_id):
+    job = next(j for j in site.footprint_jobs() if j.grid_id == grid_id)
+    job.run(lambda: False)
+    assert job.footprint is not None
+    return job
+
+
+def test_footprints_missing_lists_ready_grids_without_a_gather_in_order(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    assert site.footprints_missing(site.lattice) == ["A", "B", "C"]
+    assert [j.grid_id for j in site.footprint_jobs()] == ["A", "B", "C"]
+    site.slice_at(20.0, 5.0, **TICK)
+    assert site.footprints_missing(site.lattice) == []
+    del site._gathers["C"], site._gathers["A"]
+    assert site.footprints_missing(site.lattice) == ["A", "C"]
+    other = dataclasses.replace(site.lattice, pixel=site.lattice.pixel * 2)
+    assert site.footprints_missing(other) == []
+
+
+def test_a_footprint_lands_when_nothing_has_moved(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "B")
+    assert job.land() is True
+    assert site._gathers["B"] is job.footprint
+
+
+def test_a_footprint_for_another_lattice_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "B")
+    site.set_resolution(dataclasses.replace(RES, cell=RES.cell * 2))
+    assert job.land() is False
+    assert job.footprint is None
+    assert "B" not in site._gathers
+
+
+def test_a_footprint_for_a_grid_no_longer_ready_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "C")
+    site.set_source(site3.source("AB"))
+    wait_for_site(site, 60_000)
+    assert "C" not in site.ready_grids
+    assert job.land() is False
+    assert job.footprint is None
+    assert "C" not in site._gathers
+
+
+def test_a_footprint_for_a_frame_that_moved_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "A")
+    engine = site.engine_for("A")
+    engine._frame = dataclasses.replace(engine.frame, origin=(engine.frame.origin[0] + 1.0, 0.0))
+    assert job.land() is False
+    assert job.footprint is None
+    assert "A" not in site._gathers
+
+
+def test_a_footprint_for_a_disposed_engine_is_refused(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    job = _footprint_job(site, "A")
+    site.dispose()
+    assert job.land() is False
+    assert job.footprint is None
