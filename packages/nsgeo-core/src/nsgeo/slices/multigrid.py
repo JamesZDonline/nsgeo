@@ -34,10 +34,12 @@ caller lends it as `spare`, and allocates its own scratch.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
+
+from nsgeo.slices.stopping import SolveStopped
 
 COARSEST_UNKNOWNS: int = 500  # coarsening stops at this many unknowns, read at call time
 SMOOTHING_DEGREE: int = 2  # Chebyshev steps a smooth
@@ -330,15 +332,22 @@ def _coarsest_inverse(level: Level) -> tuple[np.ndarray, np.ndarray]:
 
 
 def build_hierarchy(
-    offsets: Sequence[tuple[int, int]], coefficients: np.ndarray, active: np.ndarray
+    offsets: Sequence[tuple[int, int]],
+    coefficients: np.ndarray,
+    active: np.ndarray,
+    *,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Hierarchy:
     """Coarsen the operator until `COARSEST_UNKNOWNS` remain, then invert that.
 
     `coefficients` itself becomes level 0's, with no copy, and goes read-only;
-    `active` is copied.
+    `active` is copied. `should_stop` is asked once per level; True raises
+    `SolveStopped`. The dense inverse of the coarsest level cannot be stopped.
     """
     levels = [_level(offsets, coefficients, active.copy())]
     while int(levels[-1].active.sum()) > COARSEST_UNKNOWNS and levels[-1].active.shape != (1, 1):
+        if should_stop is not None and should_stop():
+            raise SolveStopped
         levels.append(_coarsen(levels[-1]))
     cells, inverse = _coarsest_inverse(levels[-1])
     return Hierarchy(tuple(levels), cells, inverse)

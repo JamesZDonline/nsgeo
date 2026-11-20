@@ -16,7 +16,7 @@ from nsgeo.slices.binning import (
     stream_slice,
 )
 from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
-from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
+from nsgeo.slices.curvature import CurvaturePlan, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
     clear_north_up_plans,
@@ -81,6 +81,7 @@ from nsgeo.slices.site import (
     window_on,
 )
 from nsgeo.slices.smooth import smooth
+from nsgeo.slices.stopping import SolveStopped
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 from nsgeo.slices.surface import (
     FIT_CLOSE_M,
