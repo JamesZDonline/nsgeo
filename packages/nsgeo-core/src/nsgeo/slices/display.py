@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from nsgeo.render import Normalizer
+from nsgeo.render import Normalizer, sample_stride
 from nsgeo.slices.cube import SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
@@ -144,7 +144,31 @@ def limit_over_slices(slices: Iterable[np.ndarray], clip: Normalizer) -> float:
         raise ValueError("limit_over_slices needs at least one slice")
     if all(part.size == 0 for part in finite):
         return clip.limit(np.array([], dtype=float))
-    return clip.limit(np.concatenate(finite))
+    return clip.limit(_what_the_clip_reads(finite, clip))
+
+
+def _what_the_clip_reads(parts: list[np.ndarray], clip: Normalizer) -> np.ndarray:
+    """The values `clip.limit` measures of the parts joined end to end.
+
+    A clip with a `max_samples` budget (`PercentileClip`, `UnipolarClip`) reads
+    only a strided subsample (`sample_stride`), so those values are taken from
+    each part where they fall rather than from one joined copy of every finite
+    value, which on a fine site was as large again as the parts themselves
+    (walkthrough, 0.02 m Whole site). What is handed over is within the budget,
+    so the clip strides by 1 and measures exactly these: the limit is unchanged.
+    Any other clip gets every value, joined.
+    """
+    budget = getattr(clip, "max_samples", None)
+    total = sum(part.size for part in parts)
+    if not isinstance(budget, int) or budget < 1 or total <= budget:
+        return np.concatenate(parts)
+    stride = sample_stride(total, budget)
+    picked = []
+    start = 0  # the joined index of this part's first value
+    for part in parts:
+        picked.append(part[(-start) % stride :: stride])
+        start += part.size
+    return np.concatenate(picked)
 
 
 def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> float:

@@ -279,9 +279,9 @@ class StretchJob:
                 self.fraction = done / total
 
         def pass_(mode: str) -> float:
-            # The slice scope streams, as `SliceEngine.shared_limit` does; the
-            # site lists its slices, as `SiteEngine._measure` does.
-            return limit_of(windows(mode) if not self._site else list(windows(mode)), self._clip)
+            # Both scopes stream, as `SliceEngine.shared_limit` and
+            # `SiteEngine._measure` do: one window's slices alive at a time.
+            return limit_of(windows(mode), self._clip)
 
         if not self._curvature:
             self.limit, self.final = pass_("fill"), True

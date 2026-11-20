@@ -217,6 +217,55 @@ def test_limit_over_slices_refuses_an_empty_sequence():
         limit_over_slices([], PercentileClip())
 
 
+def _ragged_parts() -> list[np.ndarray]:
+    """Slices of many sizes, some empty or all nodata, with NaN and inf scattered."""
+    rng = np.random.default_rng(3)
+    parts = []
+    for n in (0, 1, 5, 13, 64, 200, 3, 999, 7, 450):
+        a = rng.normal(size=n) * 10.0
+        a[rng.random(n) < 0.3] = np.nan
+        a[rng.random(n) < 0.02] = np.inf
+        parts.append(a.reshape(n, 1) if n % 2 else a)
+    parts.append(np.full((4, 4), np.nan))
+    return parts
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        PercentileClip(percentile=97.0, max_samples=7),
+        UnipolarClip(percentile=90.0, max_samples=50),
+        UnipolarClip(max_samples=1),
+        PercentileClip(max_samples=1_000),
+        PercentileClip(),
+    ],
+)
+def test_limit_over_slices_equals_the_clip_over_every_finite_value(clip):
+    parts = _ragged_parts()
+    every = np.concatenate([p.ravel()[np.isfinite(p.ravel())] for p in parts])
+    assert every.size > 1_000  # so the small budgets above subsample
+    assert limit_over_slices(iter(parts), clip) == clip.limit(every)
+
+
+def test_limit_over_slices_hands_a_subsampling_clip_no_more_than_it_reads():
+    """The clip strides down to `max_samples` values, so joining every finite value
+    into one array first only doubled the peak: on the walkthrough's 0.02 m Whole
+    site that was the colour stretch pushing a full machine into swap."""
+    seen: list[int] = []
+
+    @dataclasses.dataclass(frozen=True)
+    class _Spy(PercentileClip):
+        def limit(self, data: np.ndarray) -> float:
+            seen.append(np.asarray(data).size)
+            return super().limit(data)
+
+    parts = _ragged_parts()
+    every = np.concatenate([p.ravel()[np.isfinite(p.ravel())] for p in parts])
+    expected = PercentileClip(max_samples=100).limit(every)
+    assert limit_over_slices(parts, _Spy(max_samples=100)) == expected
+    assert seen and max(seen) <= 100
+
+
 def _ramp_frame(azimuth: float = 0.0) -> tuple[CubeFrame, np.ndarray]:
     """A frame and a values array whose rows are all different, so a
     vertical flip is visible. `values[0]` is frame-local y index 0."""

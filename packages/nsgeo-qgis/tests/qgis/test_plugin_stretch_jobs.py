@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import SliceWindow, SolveStopped, plan_fill
-from nsgeo_qgis import slices_engine, stretch_jobs
+from nsgeo_qgis import site_engine, slices_engine, stretch_jobs
 from nsgeo_qgis.slices_plan import SliceFinish
 from test_plugin_site_engine import FINISH, MC, prepared
 from test_plugin_slices_engine import _prepare, sourced  # noqa: F401 -- fixture
@@ -246,6 +246,51 @@ def test_this_grids_stretch_job_streams_its_windows(sourced, monkeypatch):  # no
     assert len(ahead) > 3
     assert max(ahead) == 0, "a window was finished before the last was consumed"
     assert job.limit == engine.shared_limit(THICKNESS, PercentileClip(), finish)
+
+
+@pytest.mark.parametrize("synchronous", [False, True], ids=["job", "stretch_limit"])
+def test_the_sites_stretch_streams_its_windows(site3, make_site, monkeypatch, synchronous):
+    """One window's grids alive at a time, not every window's: listing them all
+    first held a full copy of every measured slice, which on the walkthrough's
+    0.02 m Whole site helped push a full machine into swap."""
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": FINISH, "method": "background", "manual": {"B": 2.5}}
+    expected = site.stretch_limit(2.0, clip, **tick)
+    ahead: list[int] = []
+    drawn: list[int] = []
+    real_shown = stretch_jobs.shown_window
+
+    def counting_shown(binned, *a, **k):
+        drawn.append(len(binned))
+        return real_shown(binned, *a, **k)
+
+    real_limit = stretch_jobs.limit_over_slices
+
+    def watching(slices, clip):
+        consumed = 0
+
+        def counted():
+            nonlocal consumed
+            for item in slices:
+                consumed += 1
+                ahead.append(sum(drawn) - consumed)
+                yield item
+
+        return real_limit(counted(), clip)
+
+    monkeypatch.setattr(stretch_jobs, "shown_window", counting_shown)
+    monkeypatch.setattr(site_engine, "shown_window", counting_shown)
+    monkeypatch.setattr(stretch_jobs, "limit_over_slices", watching)
+    if synchronous:
+        got = site.stretch_limit(2.0, clip, **tick)
+    else:
+        job = site.stretch_job(2.0, clip, **tick)
+        job.run(lambda: False)
+        got = (job.limit, job.final)
+    assert len(drawn) > 2, "the site's stretch measured fewer than three windows"
+    assert max(ahead) < max(drawn), "a later window was drawn before this one was consumed"
+    assert got == expected
 
 
 def test_a_finished_stretch_job_lets_go_of_what_it_captured(sourced):  # noqa: F811

@@ -90,7 +90,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -1247,12 +1247,15 @@ class SiteEngine(QObject):
         self, thickness_ns: float, clip: Any, method: str, manual: Mapping[str, float], draw: _Draw
     ) -> float:
         """`clip`'s limit over every present grid's slice, as `draw` draws it,
-        at each window the stretch is measured over (`_limit_windows_ns`)."""
-        slices: list[np.ndarray] = []
-        for top, thickness in self._limit_windows_ns(thickness_ns):
-            _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
-            slices.extend(shown.values())
-        return limit_of(slices, clip)
+        at each window the stretch is measured over (`_limit_windows_ns`).
+        Streamed: one window's slices alive at a time, as `StretchJob` measures."""
+
+        def slices() -> Iterator[np.ndarray]:
+            for top, thickness in self._limit_windows_ns(thickness_ns):
+                _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
+                yield from shown.values()
+
+        return limit_of(slices(), clip)
 
     def sliced(self, top_ns: float, thickness_ns: float) -> _Sliced:
         """Each ready grid's window at this site time and each present grid's

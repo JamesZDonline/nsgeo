@@ -241,6 +241,7 @@ Amplitude to pixels, with no Qt.
 | `display_range` | The colour range for an array by one of QGIS's computed rules: minimum and maximum, cumulative cut, or mean ± standard deviations. |
 | `gradient_stops` | The fewest colour stops that redraw a lookup table by straight-line blending, for a GIS gradient editor. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
+| `sample_stride` | The step of the strided subsample a clip measures a large array by; `limit_over_slices` takes the same values without joining its slices. |
 | `section_rgba8` | A section's values to (H, W, 4) uint8, transparent wherever blank, in either polarity. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
 | `to_index8_unipolar` | Map 0..limit to 0..255. |
