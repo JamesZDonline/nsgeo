@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-19.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-20.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -126,6 +126,10 @@ release's notes list everything in it.
   plans: Plan A, the engine, is built (one moved-grid hang found and fixed;
   the local loop never reproduced #166). Plan B, the fill and then the
   shared colour stretch worked out in the background, is being built.
+- **A 3D Analysis drop-down on the toolbar** ([#227]): Surface from picks…, 3D
+  view and Export for ParaView… move into one drop-down after Cut, and
+  ParaView… leaves the Slices panel. Design approved and plan written; being
+  built.
 
 ### Next, in order
 
@@ -210,9 +214,7 @@ Grouped by area. The order within a group is not a priority.
   read time zero from the same channel the volume is built from ([#218]); a
   line whose time zero can't be read is not re-read on every 3-D view refresh
   ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]);
-  a 3D Analysis drop-down on the toolbar for Surface from picks, the 3D view
-  and the ParaView export, which leaves the Slices panel ([#227]); Plan D's
-  tidy-ups: cut-pick reasons, one time-base reader, the outlier cursor ([#228]).
+  Plan D's tidy-ups: cut-pick reasons, one time-base reader, the outlier cursor ([#228]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
