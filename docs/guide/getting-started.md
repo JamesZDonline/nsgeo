@@ -142,9 +142,16 @@ any other QGIS panel.
   leaves hatched blank space. Zoom and pan stay on the same stretch of ground
   when another line on the same grid, parallel to it and walked in either
   direction, opens or is hovered on the map, and they come back after a glance
-  at a cross-line. **Fit** shows the whole grid length, and **1:1** shows one trace
-  per screen pixel. The arrow under the distance axis shows which way the line
-  was walked. The mouse wheel zooms, and dragging with the middle button pans.
+  at a cross-line. **Fit** is a button with a menu (**Fit**, **Fit width** and
+  **Fit height**): it shows the whole grid length and the whole record, or just
+  one of the two, and the button repeats whichever you picked last. **1:1**
+  shows true scale, a metre down as long as a metre along the line, at the
+  line's velocity; it is greyed out where the line has no velocity or no
+  distance along it. **Slice band** hides or shows the depth window of the slice
+  on the profile. Click an axis beside the profile to show it in ns, samples or
+  metres of depth. The read-out above the profile gives the position under the
+  pointer in those units. The arrow under the distance axis shows which way the
+  line was walked. The mouse wheel zooms, and dragging with the middle button pans.
 - **nsgeo Processing** (right) holds the processing steps for the open line:
   **Add step**, **Remove**, **↑** and **↓**, **Difference**, **Apply to grid…** and
   **Presets**.
