@@ -15,14 +15,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from nsgeo.slices import (
     CubeFrame,
-    CurvaturePlan,
     FillWeights,
     FinishSettings,
     SliceFill,
-    plan_fill,
 )
-
-from nsgeo_qgis.slices_plan import PREVIEW_METHOD
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,39 +51,30 @@ class FillJob:
 
     def run(self, should_stop: Callable[[], bool]) -> None:
         """Worker thread. Raises `SolveStopped` when stopped and holds nothing."""
-        s = self._settings
-        md, sr = s.max_distance_m, s.search_radius_m
-        cell = self.frame.cell
-        curvature = s.method == "min_curvature"
-        # Minimum curvature also builds the kriging preview; progress covers both.
-        share = 0.7 if curvature else 1.0
+
+        # Lazy: the engine imports this module. The one fill rule lives there,
+        # beside `_fill_for`, so both paths share it and its test seams.
+        from nsgeo_qgis.slices_engine import build_fill
 
         def report(part: float) -> None:
-            self.fraction = max(self.fraction, min(share, part * share))
+            self.fraction = max(self.fraction, part)
 
-        fill = plan_fill(
-            self._populated, cell, s.method, md, sr, should_stop=should_stop, progress=report
+        self.fill, self.preview = build_fill(
+            self._populated,
+            self.frame.cell,
+            self._settings,
+            should_stop=should_stop,
+            progress=report,
         )
-        preview: FillWeights | None = None
-        if isinstance(fill, CurvaturePlan):
-
-            def report_preview(part: float) -> None:
-                self.fraction = max(self.fraction, min(1.0, share + part * (1.0 - share)))
-
-            built = plan_fill(
-                self._populated,
-                cell,
-                PREVIEW_METHOD,
-                md,
-                sr,
-                should_stop=should_stop,
-                progress=report_preview,
-            )
-            assert isinstance(built, FillWeights)  # kriging plans weights
-            preview = built
-        self.fill, self.preview = fill, preview
         self.fraction = 1.0
 
     def land(self) -> bool:
-        """GUI thread: hold the fill if the engine still wants it."""
-        return self._engine._land_fill(self)
+        """GUI thread: hold the fill if the engine still wants it. Either way
+        the job lets go of its fill, preview and mask, so a stale job kept by
+        a caller never holds a refused fill beside the next build."""
+        try:
+            return self._engine._land_fill(self)
+        finally:
+            self.fill = None
+            self.preview = None
+            self._populated = np.zeros(0, dtype=bool)

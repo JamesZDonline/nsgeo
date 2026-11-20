@@ -27,6 +27,7 @@ def test_a_fill_job_builds_what_fill_for_builds(sourced, monkeypatch, method):  
     values, cov = engine.slice_at(SliceWindow(4, 14))
     finish = _finish(method)
     expected = engine.finish(values, cov, finish)
+    expected_preview = engine.preview(values, cov, finish) if method == "min_curvature" else None
     engine._drop_fill()
     assert not engine.fill_held(cov, finish)
     job = engine.fill_job(cov, finish)
@@ -41,6 +42,9 @@ def test_a_fill_job_builds_what_fill_for_builds(sourced, monkeypatch, method):  
     )
     assert np.array_equal(engine.finish(values, cov, finish), expected, equal_nan=True)
     assert calls == []
+    if expected_preview is not None:
+        assert np.array_equal(engine.preview(values, cov, finish), expected_preview, equal_nan=True)
+        assert calls == []
 
 
 def _held_job(engine, session):
@@ -130,3 +134,39 @@ def test_the_fill_worker_names_its_threads(qgis_app, tmp_path):
         assert names[0].startswith("nsgeo-fill")
     finally:
         gen.close()
+
+
+def test_a_min_curvature_job_reports_the_plan_then_the_preview(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    _, cov = engine.slice_at(SliceWindow(4, 14))
+    job = engine.fill_job(cov, _finish("min_curvature"))
+    seen: list[tuple[str, float]] = []
+    original = slices_engine.plan_fill
+
+    def spy(populated, cell, method, md, sr, *, should_stop=None, progress=None):
+        def tap(p):
+            progress(p)
+            seen.append((method, job.fraction))
+
+        return original(populated, cell, method, md, sr, should_stop=should_stop, progress=tap)
+
+    slices_engine.plan_fill = spy
+    try:
+        job.run(lambda: False)
+    finally:
+        slices_engine.plan_fill = original
+    plan = [f for m, f in seen if m == "min_curvature"]
+    kriging = [f for m, f in seen if m == "kriging"]
+    assert plan and kriging
+    assert max(plan) <= 0.7 + 1e-9
+    assert min(kriging) >= 0.7 - 1e-9
+    assert job.fraction == 1.0
+
+
+def test_a_refused_landing_lets_go_of_the_fill(sourced):  # noqa: F811
+    engine, session, _, _ = sourced
+    job, cov, finish = _held_job(engine, session)
+    engine.clear()
+    assert job.land() is False
+    assert job.fill is None and job.preview is None

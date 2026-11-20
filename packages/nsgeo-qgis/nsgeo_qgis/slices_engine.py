@@ -299,6 +299,48 @@ class PendingSolve:
         return self._engine._land(self._plan, self.key, self.solved, self.ms)
 
 
+#: The share of a minimum-curvature fill's progress that is the plan itself.
+CURVATURE_SHARE = 0.7
+
+
+def build_fill(
+    populated: np.ndarray,
+    cell: float,
+    settings: FinishSettings,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> tuple[SliceFill, FillWeights | None]:
+    """The one fill rule (plan call 5): the fill for these settings and, for
+    minimum curvature, the kriging stand-in at the same max distance and
+    search radius. Progress covers both: the plan to `CURVATURE_SHARE`, the
+    preview after it, ending at 1.0."""
+    md, sr = settings.max_distance_m, settings.search_radius_m
+    curvature = settings.method == "min_curvature"
+    share = CURVATURE_SHARE if curvature else 1.0
+
+    def first(part: float) -> None:
+        if progress is not None:
+            progress(part * share)
+
+    fill = plan_fill(
+        populated, cell, settings.method, md, sr, should_stop=should_stop, progress=first
+    )
+    preview: FillWeights | None = None
+    if isinstance(fill, CurvaturePlan):
+
+        def second(part: float) -> None:
+            if progress is not None:
+                progress(share + part * (1.0 - share))
+
+        built = plan_fill(
+            populated, cell, PREVIEW_METHOD, md, sr, should_stop=should_stop, progress=second
+        )
+        assert isinstance(built, FillWeights)  # kriging plans weights
+        preview = built
+    return fill, preview
+
+
 class SliceEngine(QObject):
     """Everything between a chosen source and a slice. Owns no widgets."""
 
@@ -1491,13 +1533,7 @@ class SliceEngine(QObject):
         # the new ones are built would double the peak, about 0.9 GB more at
         # the cell cap (`MAX_FRAME_CELLS`).
         self._drop_fill()
-        md, sr = settings.max_distance_m, settings.search_radius_m
-        fill = plan_fill(populated, frame.cell, settings.method, md, sr)
-        preview: FillWeights | None = None
-        if isinstance(fill, CurvaturePlan):
-            built = plan_fill(populated, frame.cell, PREVIEW_METHOD, md, sr)
-            assert isinstance(built, FillWeights)  # kriging plans weights
-            preview = built
+        fill, preview = build_fill(populated, frame.cell, settings)
         self._weights = (self._weights_key(frame, settings), fill, preview)
         return fill, preview
 
