@@ -569,6 +569,12 @@ changed.
   profile. The strip stops at 120 dB either way. A point outside the record
   sits on the strip's edge, where you can drag it in or right-click it away.
   **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
+- Select a **Time cutoff** step, or a **Time zero** step set to **sample**, and
+  a line on the profile marks it. Drag the line or type the value, and the two
+  always agree. While Time zero is selected the profile shows the record it
+  receives, with the rows it crops dimmed above the line, which reads 0 ns.
+  Switching its **Mode** to **sample** starts the row at the automatic first
+  break, so nothing moves until you drag.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

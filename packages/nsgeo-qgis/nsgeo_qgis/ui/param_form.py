@@ -29,6 +29,7 @@ from nsgeo.processing import (
     Step,
     build_step,
     get_step,
+    param_problem,
     param_visible,
 )
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -430,23 +431,26 @@ class ParamForm(QWidget):
     def values(self) -> dict[str, Any]:
         """Every parameter's value, hidden ones included. A hidden field the
         user cannot see (outside the mode) that fails to read, a cleared
-        box say, falls back to the value it was built with, so it cannot
+        box say, or one outside its bounds, falls back to the value it was built with, so it cannot
         block a mode switch; a visible one raises as ever."""
         modes = self._modes()
         out: dict[str, Any] = {}
         for spec in self._specs:
             try:
-                out[spec.name] = self._value_of(spec)
+                value = self._value_of(spec)
+                if param_visible(spec, modes) or param_problem(spec, value) is None:
+                    out[spec.name] = value
+                    continue
             except ValueError:
                 if param_visible(spec, modes):
                     raise
-                shown = self._shown.get(spec.name)
-                if shown is not None:
-                    out[spec.name] = shown[1]
-                elif spec.default is not REQUIRED:
-                    out[spec.name] = spec.default
-                else:
-                    raise
+            shown = self._shown.get(spec.name)
+            if shown is not None:
+                out[spec.name] = shown[1]
+            elif spec.default is not REQUIRED:
+                out[spec.name] = spec.default
+            else:
+                raise ValueError(f"{spec.name} is required")
         return out
 
     def _modes(self) -> dict[str, Any]:

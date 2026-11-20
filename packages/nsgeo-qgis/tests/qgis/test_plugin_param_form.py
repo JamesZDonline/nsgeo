@@ -946,6 +946,24 @@ def test_a_cleared_hidden_field_does_not_block_a_mode_switch(qgis_app):
     assert form.message.text() == ""
 
 
+def test_a_hidden_field_out_of_bounds_does_not_block_a_mode_switch(qgis_app):
+    form = ParamForm()
+    got = []
+    errors = []
+    form.committed.connect(got.append)
+    form.error.connect(errors.append)
+    form.set_step("time_zero", {"mode": "first_break", "sample": 4, "threshold": 0.3})
+    form.editors["threshold"].setText("5")
+    form.commit()
+    assert errors and "threshold" in errors[-1]
+    errors.clear()
+    got.clear()
+    form.set_value("mode", "sample")
+    assert got and got[-1]["mode"] == "sample"
+    assert got[-1]["threshold"] == 0.3
+    assert not errors
+
+
 def test_a_cleared_visible_field_still_errors(qgis_app):
     form = ParamForm()
     errors = []

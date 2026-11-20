@@ -2274,8 +2274,8 @@ class ProfileDock(QgsDockWidget):
             return shown
 
     def _handle_row(self, row: int | None = None) -> int:
-        """`row` (default: the selected one) when it is the cutoff row, else
-        -1. Resolved against the live working stack on every call, never
+        """`row` (default: the selected one) when it is a handle row (a cutoff, or Time zero in
+        sample mode), else -1. Resolved against the live working stack on every call, never
         cached: see the module docstring."""
         row = self._selected_row if row is None else row
         if self._preview_key is not None or self._working_key is None or row < 0:

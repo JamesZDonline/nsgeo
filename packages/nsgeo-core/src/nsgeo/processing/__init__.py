@@ -30,6 +30,7 @@ from nsgeo.processing.base import (
     grouped_steps,
     is_unipolar,
     nyquist_mhz,
+    param_problem,
     param_visible,
     register,  # noqa: F401  (importable, not public)
     required_params,
@@ -65,6 +66,7 @@ __all__ = [
     "grouped_steps",
     "is_unipolar",
     "nyquist_mhz",
+    "param_problem",
     "param_visible",
     "required_params",
     "retime_ns",

@@ -1,6 +1,7 @@
 """The profile viewer: a QWidget that paints a cached radargram image
 through a ViewTransform, with axes, a cursor, a selection band, picks, a
-slice band and the draggable time-cutoff line.
+slice band and the draggable handle line (the time cutoff's end time, or
+the first row Time zero keeps).
 
 Each vertical axis shows its own unit (ns, samples or metres of depth;
 `set_axis_units`), and a press on either axis strip asks for the unit menu
@@ -125,8 +126,9 @@ class ProfileView(QWidget):
     # Declared for the Ctrl/Cmd shortcut, which asks for velocity mode to be switched on.
     velocity_mode_requested = pyqtSignal()
     view_changed = pyqtSignal()
-    # Emitted once, on the release that ends a drag of the cutoff line, with
-    # the snapped end time (ns). Always emitted, even for an unmoved line:
+    # Emitted once, on the release that ends a drag of the handle line, with
+    # the snapped value: the end time (ns) for a cutoff, the row top for a
+    # row handle. Always emitted, even for an unmoved line:
     # the no-op guard lives with the consumer.
     cutoff_dragged = pyqtSignal(float)
     axis_menu_requested = pyqtSignal(str, QPoint)
