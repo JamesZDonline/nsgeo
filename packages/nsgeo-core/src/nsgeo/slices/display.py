@@ -269,9 +269,9 @@ def to_north_up(
 _NORTH_UP_PLANS = 2
 _NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
 _plans: OrderedDict[CubeFrame, _NorthUpPlan] = OrderedDict()
-# Today only the GUI thread draws through here (`SliceLayer.update`); the GeoTIFF
-# exports build their own taps on their worker. The lock keeps the cache sound if a
-# caller off the GUI thread ever appears.
+# The GUI thread draws through here (`SliceLayer.update`) and the Slices fill
+# worker warms a new frame's plan (`warm_north_up_plan`); the GeoTIFF exports build
+# their own taps on their worker. The lock keeps the cache sound across them.
 _plans_lock = threading.Lock()
 
 
@@ -291,6 +291,12 @@ def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
         while len(_plans) > _NORTH_UP_PLANS:
             _plans.popitem(last=False)
     return plan
+
+
+def warm_north_up_plan(frame: CubeFrame) -> None:
+    """Build and keep `frame`'s north-up plan, so the first `to_north_up` on it
+    is one sample. Safe off the GUI thread (the cache is lock-guarded)."""
+    _north_up_plan(frame)
 
 
 def north_up_plans_nbytes() -> int:

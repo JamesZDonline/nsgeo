@@ -1165,6 +1165,9 @@ class SiteScope:
             if sliced is not None and not self._fills_ready(top, span, finish, z, sliced):
                 dock.show_refine()
                 return
+            if sliced is None and not self._footprints_ready(z):
+                dock.show_refine()
+                return
             # Every fill it needs is held now (`_fills_ready`), so the draw builds
             # no weights: the fills were worked out on the fill worker, which
             # also cancelled any refine list made on the plans it dropped.
@@ -1225,13 +1228,31 @@ class SiteScope:
         (cancelled) site starts nothing and draws nothing new."""
         dock = self.dock
         flow = dock.fill_flow
-        if not self.engine.fills_missing(top, span, finish, sliced=sliced):
+        # The footprints a new lattice needs are worked out there too (#193), so
+        # the landing draw gathers nothing on the GUI thread.
+        if not self.engine.fills_missing(
+            top, span, finish, sliced=sliced
+        ) and not self.engine.footprints_missing(self.engine.lattice):
             return True
         if flow.latched:
             return False
         # A running refine list was made on the plans about to be dropped.
         self.refine.before_draw(rebuilds=True)
         return self._request_fills(top, span, finish, z, sliced)
+
+    def _footprints_ready(self, z: ZAxis) -> bool:
+        """A coverage draw needs no fill, only each grid's footprint on the
+        lattice: the flow gathers any missing one on the worker (#193)."""
+        engine, flow = self.engine, self.dock.fill_flow
+        if not engine.footprints_missing(engine.lattice):
+            return True
+        if flow.latched:
+            return False
+        return flow.request(
+            (engine.lattice, "footprints"),
+            engine.footprint_jobs,
+            stretch_key=self.stretch_key(z),
+        )
 
     def _request_fills(
         self, top: float, span: float, finish: SliceFinish, z: ZAxis, sliced: Any = None
@@ -1263,11 +1284,13 @@ class SiteScope:
         stretch every ready grid's missing fill is made, including a grid whose
         axis ends above the shown depth: left out, its stretch stays stale, the
         rest builds its plan on the GUI thread and memory peaks at old plus new.
-        The stretch job is left out when the one held is for this very key (a
-        final one would be replaced by a provisional one)."""
+        The footprint jobs for the grids with no gather on this lattice follow
+        the fills (#193). The stretch job is left out when the one held is for
+        this very key (a final one would be replaced by a provisional one)."""
         shared = self._shared_stretch_wanted()
         fills = self.engine.fill_jobs(top, span, finish, sliced=sliced, every_grid=shared)
         jobs: list[Any] = list(fills)
+        jobs.extend(self.engine.footprint_jobs())
         held = self.refine.stretch
         if shared and not (held is not None and held[0] == self.stretch_key(z)):
             jobs.append(self._stretch_job(z, {job.grid_id: job for job in fills}))

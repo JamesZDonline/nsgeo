@@ -3133,6 +3133,8 @@ class SlicesDock(QgsDockWidget):
         when a shared stretch applies (#193). The fill job first: making it drops
         the held fill, and the stretch job reads the fill job's result."""
         fill = self.engine.fill_job(coverage, finish)
+        # The first north-up plan for this frame is built on the worker too (#193).
+        fill.warm_north_up = True
         jobs: list[Any] = [fill]
         if self._shared_stretch_wanted():
             jobs.append(

@@ -112,11 +112,12 @@ from nsgeo.slices import (
     stretching_grids,
     window_on,
 )
-from qgis.core import QgsProject
+from qgis.core import QgsCoordinateTransformContext, QgsProject
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis import site_geometry
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.site_geometry import extent_in, gather_footprint
+from nsgeo_qgis.site_geometry import extent_in
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
@@ -135,7 +136,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.stretch_jobs import GridStretch, StretchJob, limit_of, shown_window
 
 if TYPE_CHECKING:
-    from nsgeo_qgis.fill_jobs import FillJob
+    from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
 #: engine -- its own or a peer -- is still preparing.
@@ -900,9 +901,52 @@ class SiteEngine(QObject):
         frame = self._engines[grid_id].frame
         if frame is None:
             raise RuntimeError(f"grid {grid_id!r} has no frame")
-        gathered = gather_footprint(frame, lattice, QgsProject.instance().transformContext())
+        gathered = site_geometry.gather_footprint(
+            frame, lattice, QgsProject.instance().transformContext()
+        )
         self._gathers[grid_id] = gathered
         return gathered
+
+    def footprints_missing(self, lattice: SiteLattice | None = None) -> list[str]:
+        """The ready grids with a frame and no gather cached on the current
+        lattice, in `ready_grids` order (#193). `lattice` is the drawn one."""
+        if self._lattice is None or (lattice is not None and lattice != self._lattice):
+            return []
+        return [
+            g
+            for g in self.ready_grids
+            if self._engines[g].frame is not None and g not in self._gathers
+        ]
+
+    def footprint_jobs(self) -> list[FootprintJob]:
+        """One job per `footprints_missing` grid, each capturing the frame, the
+        lattice and a copy of the transform context here, on the GUI thread."""
+        from nsgeo_qgis.fill_jobs import FootprintJob
+
+        lattice = self._lattice
+        if lattice is None:
+            return []
+        context = QgsCoordinateTransformContext(QgsProject.instance().transformContext())
+        jobs = []
+        for g in self.footprints_missing(lattice):
+            frame = self._engines[g].frame
+            assert frame is not None
+            jobs.append(FootprintJob(self, g, frame, lattice, context))
+        return jobs
+
+    def _land_footprint(self, job: FootprintJob) -> bool:
+        """Hold what `job` gathered, if the lattice, the grid and its frame are
+        still what it was made for."""
+        if (
+            self._disposed
+            or job.footprint is None
+            or self._lattice != job.lattice
+            or job.grid_id not in self.ready_grids
+            or self._engines[job.grid_id].frame != job.frame
+        ):
+            return False
+        self._gathers[job.grid_id] = job.footprint
+        return True
 
     def _site_seams(self) -> tuple[Seam, ...]:
         """Seams between the ready grids, once per geometry (spec 4.6.1).

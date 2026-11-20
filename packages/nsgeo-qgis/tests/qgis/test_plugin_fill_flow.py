@@ -1112,7 +1112,9 @@ def test_a_slider_move_mid_fill_never_restarts_the_grid_in_flight(site_slow):
     assert spin_until(lambda: flow.working and flow._landed >= 1, 60_000)
     assert flow._landed < len(flow._fills)
     jobs = [id(job) for job in flow._fills]
-    assert len(jobs) == 3
+    # The three grids' fills, then their footprints on the new lattice (#193).
+    assert sum(isinstance(job, FillJob) for job in flow._fills) == 3
+    assert len(jobs) == 6
     landed = flow._landed
     dock.slice_slider.setValue(min(dock.slice_slider.maximum(), dock.slice_slider.value() + 1))
     dock._site.tick.stop()
@@ -1467,5 +1469,112 @@ def test_a_slider_move_mid_fill_never_makes_the_rest_build_the_grid_still_fillin
         assert ("C", True) in lands, lands
         assert ("C", False) not in lands, lands
         assert engine.engine_for("C").weights_cached(dock.site_finish.value())
+    finally:
+        _close(plugin, answer_modal)
+
+
+# ---- Task 6: the first draw's one-off work, in the background too (#193) -----
+def _spy_footprints(monkeypatch, pause: float = 0.0) -> list[tuple[str, bool]]:
+    """`(thread name, on the main thread)` of each `gather_footprint` call."""
+    from nsgeo_qgis import site_geometry
+
+    real = site_geometry.gather_footprint
+    calls: list[tuple[str, bool]] = []
+
+    def spy(*args, **kwargs):
+        here = threading.current_thread()
+        calls.append((here.name, here is threading.main_thread()))
+        if pause:
+            time.sleep(pause)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site_geometry, "gather_footprint", spy)
+    return calls
+
+
+def test_a_site_landing_builds_no_footprint_on_the_gui_thread(site_quick, monkeypatch):
+    _, dock = site_quick
+    calls = _spy_footprints(monkeypatch)
+    _site_cell(dock, 0.15)
+    assert spin_until(lambda: _picture_cell(dock) == 0.15, 60_000)
+    _wait_idle(dock)
+    assert calls, "no footprint was built for the new lattice"
+    assert not [c for c in calls if c[1]], f"a footprint was built on the GUI thread: {calls}"
+    assert all(name.startswith("nsgeo-fill") for name, _ in calls), calls
+    site = dock.site_engine
+    assert set(site._gathers) == set(site.ready_grids)
+
+
+def test_a_footprint_for_a_stale_lattice_never_lands(site_quick, monkeypatch):
+    from nsgeo_qgis.site_engine import SiteEngine
+
+    _, dock = site_quick
+    on_worker = threading.Event()
+    from nsgeo_qgis import site_geometry
+
+    real = site_geometry.gather_footprint
+
+    def slow_gather(*args, **kwargs):
+        if threading.current_thread() is not threading.main_thread():
+            on_worker.set()
+            time.sleep(0.3)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site_geometry, "gather_footprint", slow_gather)
+    lands: list[tuple[float, bool]] = []
+    real_land = SiteEngine._land_footprint
+
+    def land_spy(self, job):
+        ok = real_land(self, job)
+        lands.append((job.lattice.pixel, ok))
+        return ok
+
+    monkeypatch.setattr(SiteEngine, "_land_footprint", land_spy, raising=False)
+    _site_cell(dock, 0.15)
+    assert spin_until(on_worker.is_set, 30_000), "the footprints never ran on a worker"
+    first_pixel = dock.site_engine.lattice.pixel
+    _site_cell(dock, 0.25)
+    assert spin_until(lambda: _picture_cell(dock) == 0.25, 60_000)
+    _wait_idle(dock)
+    assert (first_pixel, True) not in lands, lands
+    assert _applied_cell(dock) == 0.25
+    site = dock.site_engine
+    assert set(site._gathers) == set(site.ready_grids)
+
+
+def test_this_grids_first_north_up_plan_is_built_on_the_worker(
+    fake_iface, site3, answer_modal, monkeypatch
+):
+    from nsgeo.slices import display
+
+    plugin = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = plugin.slices_dock
+        builds: list[tuple[float, str]] = []
+        real = display._build_north_up_plan
+
+        def spy(frame):
+            builds.append((frame.cell, threading.current_thread().name))
+            return real(frame)
+
+        monkeypatch.setattr(display, "_build_north_up_plan", spy)
+        display.clear_north_up_plans()
+        changed: list[int] = []
+        dock.slice_changed.connect(lambda: changed.append(1))
+        _edit_cell(dock, 0.03)
+        assert spin_until(
+            lambda: (
+                dock.engine.frame is not None
+                and dock.engine.frame.cell == 0.03
+                and dock.current_frame() is not None
+                and dock.current_frame().cell == 0.03
+            ),
+            60_000,
+        )
+        _wait_idle(dock)
+        spin_until(lambda: False, 200)
+        mine = [name for cell, name in builds if cell == 0.03]
+        assert mine, "the plan for the new frame was never built"
+        assert all(name.startswith("nsgeo-fill") for name in mine), builds
     finally:
         _close(plugin, answer_modal)

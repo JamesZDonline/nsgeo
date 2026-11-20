@@ -17,6 +17,9 @@ to show.
   called `request`. So a landing seen inside `request` draws nothing: the
   answer True says the caller draws, and `on_done` runs only from the worker's
   own poll timer, never under a draw.
+* **Footprint jobs join the fill list** after the fills (the site's first draw
+  at a new lattice gathers each grid's footprint there too, so the landing draw
+  builds nothing). The working line does not count them.
 * **The stretch follows the fills as a second list.** It starts once the last
   fill has landed, so a quick fill is never held up by the (longer) stretch,
   and the stretch job reads a fill the engine already holds. It lands through
@@ -36,7 +39,7 @@ from typing import Any
 
 from qgis.PyQt.QtCore import QObject, QTimer
 
-from nsgeo_qgis.fill_jobs import FillJob
+from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.slices_plan import (
@@ -70,7 +73,10 @@ class FillFlow(QObject):
         self._on_error = on_error
         #: The fills of the running request and how many have landed.
         self._key: Hashable | None = None
-        self._fills: list[FillJob] = []
+        self._fills: list[FillJob | FootprintJob] = []
+        #: How many of them are fills: the footprint jobs after them run
+        #: silently, so the working line never counts them (#193).
+        self._fill_count = 0
         self._total = 0
         self._landed = 0
         self._working = False
@@ -114,8 +120,12 @@ class FillFlow(QObject):
         counts the grid being filled rather than a percentage."""
         if self._working:
             if grids:
-                n = min(self._landed + 1, self._total)
-                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=self._total)
+                # Footprint jobs follow the fills and are not counted: the line
+                # stays on the last grid while they run. Footprints alone count
+                # themselves.
+                total = self._fill_count or self._total
+                n = min(self._landed + 1, total)
+                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=total)
             fraction = 0.0
             if self._landed < len(self._fills):
                 fraction = self._fills[self._landed].fraction
@@ -129,7 +139,7 @@ class FillFlow(QObject):
     def request(self, key: Hashable, jobs: Any, *, stretch_key: Hashable) -> bool:
         """Whether the caller draws now.
 
-        `jobs` is the `FillJob`s, then at most one `StretchJob`, or a callable
+        `jobs` is the `FillJob`s, the `FootprintJob`s, then at most one `StretchJob`, or a callable
         that makes them: made only when the work will start, since making a fill
         job drops the engine's held fill. The same `key` as the fill work
         running: dropped, and False; the flow draws once on landing. Another
@@ -141,7 +151,7 @@ class FillFlow(QObject):
         if self._working and self._key == key:
             return False
         built = list(jobs() if callable(jobs) else jobs)
-        fills = [j for j in built if isinstance(j, FillJob)]
+        fills = [j for j in built if isinstance(j, (FillJob, FootprintJob))]
         stretch = next((j for j in built if isinstance(j, StretchJob)), None)
         self._clear()
         self._worker.cancel()
@@ -152,6 +162,7 @@ class FillFlow(QObject):
         self._key = key
         self._fills = fills
         self._total = len(fills)
+        self._fill_count = sum(1 for j in fills if isinstance(j, FillJob))
         self._landed = 0
         self._working = True
         self._pending_stretch = stretch
@@ -221,6 +232,7 @@ class FillFlow(QObject):
         self._working = False
         self._stretching = False
         self._fills = []
+        self._fill_count = 0
         self._total = 0
         self._landed = 0
         self._key = None

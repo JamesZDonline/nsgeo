@@ -206,6 +206,7 @@ several grids' slices into one site view.
 | `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
+| `warm_north_up_plan` | Build and keep a frame's north-up plan, so its first `to_north_up` is one sample (safe off the GUI thread). |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |
