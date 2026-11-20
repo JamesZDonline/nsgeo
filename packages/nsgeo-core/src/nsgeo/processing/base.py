@@ -169,6 +169,22 @@ class ParamSpec:
             and self.default not in self.choices
         ):
             raise ValueError(f"param {self.name!r} default {self.default!r} is not in choices")
+        if self.when is not None:
+            when = self.when
+            if not (
+                isinstance(when, tuple)
+                and len(when) == 2
+                and isinstance(when[0], str)
+                and isinstance(when[1], tuple)
+                and when[1]
+                and all(isinstance(v, str) for v in when[1])
+            ):
+                raise ValueError(
+                    f"param {self.name!r}: when must be (the name of a sibling choice, "
+                    f"a non-empty tuple of its values), got {when!r}"
+                )
+            if when[0] == self.name:
+                raise ValueError(f"param {self.name!r}: when names the parameter itself")
 
     @property
     def required(self) -> bool:

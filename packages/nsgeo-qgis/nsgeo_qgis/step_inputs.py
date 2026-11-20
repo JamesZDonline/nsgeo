@@ -26,6 +26,14 @@ def clock_unknown(stack: StepStack, row: int) -> bool:
     return any(step.name == "time_zero" and on for step, on in stack.entries[:row])
 
 
+def _input_record(stack: StepStack, row: int) -> Radargram:
+    """What the step at `row` receives: the stack's state after the step above
+    it, or the source when it is first. The stack must have its source.
+    Raises ValueError when the steps above refuse."""
+    assert stack.source is not None
+    return stack.intermediate(row - 1) if row > 0 else stack.source
+
+
 def input_axis(session: SiteSession, key: str, row: int) -> tuple[float, float, int] | None:
     """(t0_ns, dt_ns, n_samples) of what the step at `row` receives:
     the stack's state after the step above it, or the source when it is
@@ -40,7 +48,7 @@ def input_axis(session: SiteSession, key: str, row: int) -> tuple[float, float, 
     stack = session.stack_for(key)
     if stack.source is not None:
         try:
-            rg = stack.intermediate(row - 1) if row > 0 else stack.source
+            rg = _input_record(stack, row)
         except ValueError as exc:
             _log(
                 f"input_axis: stack does not evaluate cleanly ({exc}); "
@@ -64,7 +72,7 @@ def time_zero_seed(session: SiteSession, key: str, row: int, threshold: float) -
     if stack.source is None:
         return None
     try:
-        rg = stack.intermediate(row - 1) if row > 0 else stack.source
+        rg = _input_record(stack, row)
     except ValueError as exc:
         _log(f"time_zero_seed: the steps above row {row} do not evaluate ({exc})")
         return None

@@ -933,3 +933,24 @@ def test_the_row_wheel_is_ignored_without_focus(qgis_app):
     assert spin.value() == 6 and len(got) == 1
     host.close()
     host.deleteLater()
+
+
+def test_a_cleared_hidden_field_does_not_block_a_mode_switch(qgis_app):
+    form = ParamForm()
+    got = []
+    form.committed.connect(got.append)
+    form.set_step("time_zero", {"mode": "first_break", "sample": 4, "threshold": 0.3})
+    form.editors["threshold"].setText("")
+    form.set_value("mode", "sample")
+    assert got and got[-1] == {"mode": "sample", "sample": 4, "threshold": 0.3}
+    assert form.message.text() == ""
+
+
+def test_a_cleared_visible_field_still_errors(qgis_app):
+    form = ParamForm()
+    errors = []
+    form.error.connect(errors.append)
+    form.set_step("time_zero", {"mode": "first_break", "sample": 4, "threshold": 0.3})
+    form.editors["threshold"].setText("")
+    form.commit()
+    assert errors and "required" in errors[0].lower()

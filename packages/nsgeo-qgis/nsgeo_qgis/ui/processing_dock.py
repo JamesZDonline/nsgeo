@@ -19,6 +19,7 @@ from nsgeo.processing import (
     get_step,
     grouped_steps,
     is_unipolar,
+    param_visible,
     required_params,
 )
 from qgis.gui import QgsDockWidget
@@ -623,6 +624,12 @@ class ProcessingDock(QgsDockWidget):
             _log(f"_on_line_loaded: {exc}")
 
     def _on_form_committed(self, params: dict[str, Any]) -> None:
+        try:
+            self._commit_form(params)
+        except Exception as exc:
+            _log(f"_on_form_committed: {exc}")
+
+    def _commit_form(self, params: dict[str, Any]) -> None:
         key = self.key()
         row = self.list.currentRow()
         if key is None or row < 0 or self.form.step_name is None:
@@ -642,7 +649,7 @@ class ProcessingDock(QgsDockWidget):
             return
         if current.params == params:
             return
-        seeded = self._seed_sample_row(key, row, current, params)
+        params, seeded = self._seed_entered_row(key, row, current, params)
         new = build_step(self.form.step_name, **params)
         # Set before replace_step: the stack_changed -> rebuild() ->
         # step_selected echo this triggers reports this exact object back
@@ -650,33 +657,41 @@ class ProcessingDock(QgsDockWidget):
         # already on screen and skips rebuilding the editors.
         self._shown_step = new
         self.session.replace_step(key, row, new)
-        if seeded:
-            self.form.show_row("sample", params["sample"])
-        elif seeded is False:
+        if seeded is None:
+            return
+        name, found = seeded
+        if found:
+            self.form.show_row(name, params[name])
+        else:
             # After the replace: a commit that builds clears the message.
             self.form.message.setText(
                 "Couldn't find the first break, so Time zero starts at row "
-                f"{params['sample']}. Drag its line or type the row."
+                f"{params[name]}. Drag its line or type the row."
             )
 
-    def _seed_sample_row(
+    def _seed_entered_row(
         self, key: str, row: int, current: Any, params: dict[str, Any]
-    ) -> bool | None:
-        """On a switch into `sample` mode, start the row at the first break of
-        the step's input, so the step's result does not move. Fills
-        `params["sample"]` in place. True when seeded, False when no first
-        break could be found (the stored row stays), None when this commit is
-        not such a switch. Every switch into `sample` seeds, not only the
-        first: the row the user last typed may be far from where the data is."""
-        if params.get("mode") != "sample" or current.params.get("mode") == "sample":
-            return None
-        if "threshold" not in params:
-            return None
-        found = step_inputs.time_zero_seed(self.session, key, row, float(params["threshold"]))
-        if found is None:
-            return False
-        params["sample"] = found
-        return True
+    ) -> tuple[dict[str, Any], tuple[str, bool] | None]:
+        """On a commit that brings a `row` field into view (its `when` matched
+        the step on screen no longer and matches now), start the row at the
+        first break of the step's input, so the step's result does not move.
+        Returns the params to build (a new dict; `params` is not changed) and
+        `(row field name, whether a first break was found)`, or None when this
+        commit shows no row field. When none is found the stored row stays.
+        Every such switch seeds, not only the first: the row the user last
+        typed may be far from where the data is."""
+        for spec in get_step(current.name).schema():
+            if spec.kind != "row" or spec.when is None:
+                continue
+            if param_visible(spec, current.params) or not param_visible(spec, params):
+                continue
+            if "threshold" not in params:
+                return params, None
+            found = step_inputs.time_zero_seed(self.session, key, row, float(params["threshold"]))
+            if found is None:
+                return params, (spec.name, False)
+            return {**params, spec.name: found}, (spec.name, True)
+        return params, None
 
     # ---- list events ------------------------------------------------------
     def _on_item_changed(self, item: QListWidgetItem) -> None:

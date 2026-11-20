@@ -930,7 +930,7 @@ def test_difference_on_a_row_below_a_refusal_names_that_step(opened):
     assert "(step 1)" in dock.warnings.entries()[0].text
 
 
-def _stepped_line(qgis_app, tmp_path, data, load=True):
+def _stepped_line(tmp_path, data, load=True):
     """A site with one line made of `data` (rows, traces), opened. Returns
     (session, dock, key, line)."""
     from tests.synthetic import write_dzt
@@ -977,7 +977,7 @@ def test_the_row_field_of_a_later_step_is_bounded_by_what_it_receives(opened):
 
 
 def test_switching_to_sample_starts_at_the_first_break(qgis_app, tmp_path):
-    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, _arrival_at(37))
+    session, dock, key, _ = _stepped_line(tmp_path, _arrival_at(37))
     session.append_step(key, build_step("time_zero", mode="first_break"))
     dock.list.setCurrentRow(0)
     stack = session.stack_for(key)
@@ -994,19 +994,25 @@ def test_switching_to_sample_uses_the_steps_threshold(qgis_app, tmp_path):
     import numpy as np
 
     data = np.zeros((512, 40), dtype=np.int32)
-    data[30:, :] = 100_000  # a weak early arrival
+    data[30:, :] = 300_000  # a weak early arrival, between 0.2 and 0.5 of the peak
     data[60:, :] = 1_000_000
-    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, data)
+    session, dock, key, _ = _stepped_line(tmp_path, data)
     session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.5))
     dock.list.setCurrentRow(0)
     dock.form.set_value("mode", "sample")
     assert session.stack_for(key).entries[0][0].params["sample"] == 60
+    # and a lower threshold on the same record picks the weak arrival
+    session.replace_step(key, 0, build_step("time_zero", mode="first_break", threshold=0.2))
+    dock.list.setCurrentRow(-1)
+    dock.list.setCurrentRow(0)
+    dock.form.set_value("mode", "sample")
+    assert session.stack_for(key).entries[0][0].params["sample"] == 30
 
 
 def test_switching_to_sample_with_no_arrival_keeps_the_row_and_says_so(qgis_app, tmp_path):
     import numpy as np
 
-    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, np.zeros((512, 40), dtype=np.int32))
+    session, dock, key, _ = _stepped_line(tmp_path, np.zeros((512, 40), dtype=np.int32))
     session.append_step(key, build_step("time_zero", mode="first_break"))
     dock.list.setCurrentRow(0)
     dock.form.set_value("mode", "sample")
@@ -1017,7 +1023,7 @@ def test_switching_to_sample_with_no_arrival_keeps_the_row_and_says_so(qgis_app,
 
 
 def test_an_edit_that_stays_in_sample_mode_is_not_reseeded(qgis_app, tmp_path):
-    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, _arrival_at(37))
+    session, dock, key, _ = _stepped_line(tmp_path, _arrival_at(37))
     session.append_step(key, build_step("time_zero", mode="sample", sample=100))
     dock.list.setCurrentRow(0)
     spin = dock.form.editors["sample"]
@@ -1026,7 +1032,7 @@ def test_an_edit_that_stays_in_sample_mode_is_not_reseeded(qgis_app, tmp_path):
 
 
 def test_the_row_form_gets_its_bound_when_the_samples_arrive(qgis_app, tmp_path):
-    session, dock, key, line = _stepped_line(qgis_app, tmp_path, _arrival_at(37), load=False)
+    session, dock, key, line = _stepped_line(tmp_path, _arrival_at(37), load=False)
     session.append_step(key, build_step("time_zero", mode="sample", sample=5))
     dock.list.setCurrentRow(0)
     assert dock.form.editors["sample"].maximum() > 1_000_000
@@ -1036,3 +1042,38 @@ def test_the_row_form_gets_its_bound_when_the_samples_arrive(qgis_app, tmp_path)
 
 def test_time_zero_still_adds_without_a_dialog(opened):
     assert not needs_dialog("time_zero")
+
+
+def test_a_switch_to_sample_before_the_samples_load_says_so_and_keeps_the_row(qgis_app, tmp_path):
+    session, dock, key, _ = _stepped_line(tmp_path, _arrival_at(37), load=False)
+    session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.2))
+    dock.list.setCurrentRow(0)
+    dock.form.set_value("mode", "sample")
+    step = session.stack_for(key).entries[0][0]
+    assert step.params["mode"] == "sample" and step.params["sample"] == 0
+    assert dock.form.message.text().startswith("Couldn't find the first break")
+
+
+def test_a_switch_to_sample_behind_a_refusing_step_says_so(qgis_app, tmp_path):
+    session, dock, key, _ = _stepped_line(tmp_path, _arrival_at(37))
+    session.append_step(key, build_step("bandpass", low_mhz=1.0, high_mhz=1e9))
+    session.append_step(key, build_step("time_zero", mode="first_break"))
+    with pytest.raises(ValueError):
+        session.stack_for(key).intermediate(0)
+    dock.list.setCurrentRow(1)
+    dock.form.set_value("mode", "sample")
+    step = session.stack_for(key).entries[1][0]
+    assert step.params["mode"] == "sample" and step.params["sample"] == 0
+    assert dock.form.message.text().startswith("Couldn't find the first break")
+
+
+def test_editing_the_threshold_in_first_break_mode_does_not_seed(qgis_app, tmp_path):
+    session, dock, key, _ = _stepped_line(tmp_path, _arrival_at(37))
+    session.append_step(key, build_step("time_zero", mode="first_break", sample=9))
+    dock.list.setCurrentRow(0)
+    edit = dock.form.editors["threshold"]
+    edit.setText("0.3")
+    edit.editingFinished.emit()
+    params = session.stack_for(key).entries[0][0].params
+    assert params == {"mode": "first_break", "sample": 9, "threshold": 0.3}
+    assert dock.form.message.text() == ""

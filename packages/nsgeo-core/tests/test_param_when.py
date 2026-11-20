@@ -43,6 +43,7 @@ def _step_class(name: str, when):
             return (
                 ParamSpec("mode", "choice", "Mode", "a", choices=("a", "b")),
                 ParamSpec("x", "float", "X", 0.0, when=when),
+                ParamSpec("y", "float", "Y", 0.0),
             )
 
     Throwaway.name = name
@@ -51,7 +52,7 @@ def _step_class(name: str, when):
 
 @pytest.mark.parametrize(
     "when",
-    [("nope", ("a",)), ("mode", ("a", "zzz")), ("x", ("a",))],
+    [("nope", ("a",)), ("mode", ("a", "zzz")), ("y", ("a",))],
     ids=["no such sibling", "unknown value", "sibling not a choice"],
 )
 def test_register_refuses_a_when_that_names_no_choice(when):
@@ -86,3 +87,36 @@ def test_first_break_row_or_none_tells_no_signal_from_row_zero():
     assert first_break_row_or_none(Radargram(data=data, dt_ns=0.2, t0_ns=0.0)) is None
     data[7:, :] = 1.0
     assert first_break_row_or_none(Radargram(data=data, dt_ns=0.2, t0_ns=0.0)) == 7
+
+
+@pytest.mark.parametrize(
+    "when",
+    [
+        ("mode", ()),
+        ("mode",),
+        ("mode", ("a",), "x"),
+        "mode",
+        ("mode", "a"),
+        (1, ("a",)),
+        ("mode", (1,)),
+        ("x", ("a",)),
+    ],
+    ids=[
+        "empty values",
+        "one item",
+        "three items",
+        "a bare string",
+        "values a string",
+        "name not a string",
+        "value not a string",
+        "names itself",
+    ],
+)
+def test_a_malformed_when_is_refused_by_the_spec_itself(when):
+    with pytest.raises(ValueError, match="'x'"):
+        ParamSpec("x", "float", "X", 0.0, when=when)
+
+
+def test_a_well_formed_when_is_accepted_by_the_spec():
+    spec = ParamSpec("x", "float", "X", 0.0, when=("mode", ("a", "b")))
+    assert spec.when == ("mode", ("a", "b"))
