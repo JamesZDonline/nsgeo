@@ -15,15 +15,17 @@ from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import (
     PREVIEW_STEPS_REFUSED_TEXT,
+    SLICE_BAND_KEY,
     STEPS_REFUSED_TEXT,
     ProfileDock,
     velocity_source,
 )
+from nsgeo_qgis.ui import profile_dock
 from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QStyle
+from qgis.PyQt.QtWidgets import QMessageBox, QStyle
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -2342,3 +2344,115 @@ def test_the_velocity_fit_on_a_gps_line_measures_along_the_walked_distance(bare)
     # the middle really is 0.12 m a trace, so trace x wheel spacing would put the points elsewhere
     assert x_m[2] - x_m[0] != pytest.approx((140 - 60) * wheel)
     assert x_m[2] - x_m[0] == pytest.approx(80 * 0.12, abs=0.05)
+
+
+def test_the_slice_band_button_hides_and_shows_the_band_keeping_its_window(opened):
+    session, dock, key, line = opened
+    dock.set_slice_band(18.0, 22.0)
+    shown = dock.view._slice_band
+    assert shown is not None
+    dock.slice_band_button.setChecked(False)
+    assert dock.view._slice_band is None
+    assert dock._slice_band == (18.0, 22.0)  # the window is kept
+    dock.slice_band_button.setChecked(True)
+    assert dock.view._slice_band == pytest.approx(shown)
+
+
+def test_a_window_change_while_hidden_is_drawn_when_shown_again(opened):
+    session, dock, key, line = opened
+    dock.set_slice_band(18.0, 22.0)
+    dock.slice_band_button.setChecked(False)
+    dock.set_slice_band(30.0, 34.0)
+    assert dock.view._slice_band is None
+    dock.slice_band_button.setChecked(True)
+    lo, hi = dock.view._slice_band
+    assert hi - lo == pytest.approx(4.0)  # the new window, on the shown clock
+
+
+def test_the_slice_band_choice_survives_a_new_dock(opened):
+    session, dock, key, line = opened
+    dock.slice_band_button.setChecked(False)
+    other = ProfileDock(session)
+    try:
+        assert not other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+def test_the_slice_band_button_is_greyed_until_there_is_a_window(opened):
+    session, dock, key, line = opened
+    assert not dock.slice_band_button.isEnabled()
+    dock.set_slice_band(18.0, 22.0)
+    assert dock.slice_band_button.isEnabled()
+    dock.slice_band_button.setChecked(False)
+    dock.clear_slice_band()
+    assert not dock.slice_band_button.isEnabled()
+    assert not dock.slice_band_button.isChecked()  # greying keeps the choice
+
+
+def test_a_bad_remembered_band_choice_falls_back_to_shown(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "maybe")
+    other = ProfileDock(session)
+    try:
+        assert other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+@pytest.fixture
+def plugin(fake_iface, answer_modal, tmp_path):
+    import nsgeo_qgis
+    from qgis.core import QgsProject, QgsSettings
+
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    session = plugin.session
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, -1, "FILE__001"))])
+    session.open_line(session.keys()[0])
+    yield plugin
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+
+
+def test_closing_the_slices_panel_leaves_the_band(plugin):
+    plugin.slices_dock.window_changed.emit(18.0, 22.0)
+    plugin.slices_dock.close()
+    plugin.slices_dock.window_changed.emit(19.0, 23.0)
+    band = plugin.profile_dock.view._slice_band
+    assert band is not None
+    assert band[1] - band[0] == pytest.approx(4.0)
+
+
+def _break_velocity(session, monkeypatch, exc):
+    def boom(k):
+        raise exc
+
+    monkeypatch.setattr(session, "resolved_velocity", boom)
+
+
+def test_a_failed_velocity_refresh_clears_the_depth_axis(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.view.depth_tick_labels()  # GRID's velocity is shown
+    _break_velocity(session, monkeypatch, RuntimeError("boom"))
+    dock._refresh_velocity()
+    assert dock.view.depth_tick_labels() == []
+    assert dock.velocity_label.text() == ""
+
+
+def test_a_missing_velocity_on_a_line_clears_the_depth_axis(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.view.depth_tick_labels()
+    _break_velocity(session, monkeypatch, KeyError("no velocity"))
+    dock._refresh_velocity()
+    assert dock.view.depth_tick_labels() == []
+    assert dock.velocity_label.text() == ""

@@ -110,7 +110,7 @@ from nsgeo.velocity_fit import (
     radar_clock_note,
 )
 from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
-from qgis.core import Qgis
+from qgis.core import Qgis, QgsSettings
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -120,6 +120,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -133,6 +134,23 @@ from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
+
+SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
+LEFT_AXIS_KEY = "nsgeo/profile/leftAxis"
+RIGHT_AXIS_KEY = "nsgeo/profile/rightAxis"
+SLICE_BAND_TIP = (
+    "Show or hide the slice's depth window on the profile. "
+    "The window is kept while it's hidden."
+)
+SLICE_BAND_GREYED_TIP = (
+    "No slice depth window yet: the band appears once the Slices panel shows a slice."
+)
+
+
+def profile_settings() -> Any:
+    """The one door to the Profile panel's remembered choices (tests swap it)."""
+    return QgsSettings()
+
 
 STEPS_REFUSED_TEXT = "This line's steps can't run. See the Processing panel."
 PREVIEW_STEPS_REFUSED_TEXT = (
@@ -388,6 +406,13 @@ class ProfileDock(QgsDockWidget):
         self.one_to_one_button = QPushButton("1:1")
         bar.addWidget(self.fit_button)
         bar.addWidget(self.one_to_one_button)
+        self.slice_band_button = QToolButton()
+        self.slice_band_button.setText("Slice band")
+        self.slice_band_button.setCheckable(True)
+        remembered = profile_settings().value(SLICE_BAND_KEY, True)
+        # A value that is not a bool (or "true"/"false") means shown.
+        self.slice_band_button.setChecked(str(remembered).lower() != "false")
+        bar.addWidget(self.slice_band_button)
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)
@@ -441,6 +466,7 @@ class ProfileDock(QgsDockWidget):
         self.colormap_combo.currentTextChanged.connect(self._display_changed)
         self.fit_button.clicked.connect(self.view.fit)
         self.one_to_one_button.clicked.connect(self.view.one_to_one)
+        self.slice_band_button.toggled.connect(self._on_slice_band_toggled)
         self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.view.trace_hovered.connect(self._hovered)
         self.view.range_selected.connect(self._range_selected)
@@ -471,6 +497,7 @@ class ProfileDock(QgsDockWidget):
         session.grids_changed.connect(self._on_geometry_changed)
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
+        self._sync_slice_band_button()
 
     def set_cut_sections(self, sections: CutSections) -> None:
         """Where a cut's section comes from. Its `section_changed` redraws the cut on show."""
@@ -1778,6 +1805,7 @@ class ProfileDock(QgsDockWidget):
         # and reaches `qFatal()` in the CI container.
         try:
             self._slice_band = (lo_ns, hi_ns)
+            self._sync_slice_band_button()
             self._push_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
@@ -1791,7 +1819,7 @@ class ProfileDock(QgsDockWidget):
 
         The band is in the cube's time; the cube's own zero for the line on
         screen (else the shown radargram's) moves it onto the axis drawn."""
-        if self._slice_band is None:
+        if self._slice_band is None or not self.slice_band_button.isChecked():
             return
         if self._key is not None and is_cut_key(self._key):
             # A cut's axis is the cube's own clock: the band is drawn as it is
@@ -1813,8 +1841,25 @@ class ProfileDock(QgsDockWidget):
         try:
             self._slice_band = None
             self.view.clear_slice_band()
+            self._sync_slice_band_button()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
+
+    def _sync_slice_band_button(self) -> None:
+        """Grey the button while there is no window; the checked choice is kept."""
+        has_window = self._slice_band is not None
+        self.slice_band_button.setEnabled(has_window)
+        self.slice_band_button.setToolTip(SLICE_BAND_TIP if has_window else SLICE_BAND_GREYED_TIP)
+
+    def _on_slice_band_toggled(self, checked: bool) -> None:
+        try:
+            profile_settings().setValue(SLICE_BAND_KEY, bool(checked))
+            if checked:
+                self._push_slice_band()
+            else:
+                self.view.clear_slice_band()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not show or hide the slice band: {exc}", Qgis.MessageLevel.Critical)
 
     def current_radargram(self) -> Radargram | None:
         if self._key is None:
@@ -2206,10 +2251,13 @@ class ProfileDock(QgsDockWidget):
                 self.view.set_velocity(model)
                 self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
             except KeyError:
-                if is_cut_key(self._key):  # no velocity on the grid and no line to take one from
-                    self.view.set_velocity(None)
-                    self.velocity_label.setText("")
+                # No velocity on the grid and no line to take one from: the
+                # old depth axis must not stay on screen (#14).
+                self.view.set_velocity(None)
+                self.velocity_label.setText("")
             except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                self.view.set_velocity(None)
+                self.velocity_label.setText("")
                 _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
         # Every path, the early ones included, resets the strip: a line that
         # just went away must not leave the old read-out and buttons behind.

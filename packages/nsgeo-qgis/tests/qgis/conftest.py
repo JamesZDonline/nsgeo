@@ -818,6 +818,16 @@ def _fold_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _profile_settings(tmp_path, monkeypatch):
+    """The Profile panel's remembered choices never reach a real QGIS settings file."""
+    from nsgeo_qgis.ui import profile_dock
+    from qgis.PyQt.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "profile.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(profile_dock, "profile_settings", lambda: store)
+
+
+@pytest.fixture(autouse=True)
 def _add_data_mode_memory(qgis_app):
     """The Add data dialog remembers its mode in QgsSettings and every import a
     test runs writes it: start each test with nothing remembered (a value a
