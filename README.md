@@ -111,6 +111,7 @@ release's notes list everything in it.
 | | Lines in bulk and at import: choose a processing preset when importing lines (remembered per grid; the first import into an empty grid sets its Slices preset too); a selection of lines on the map selects them in the Survey panel and back; apply a preset, the open line's steps or a velocity to a selection at once; removing lines says what processing, velocity and saved fits go with them; a comma in a number box is refused, not read as a decimal point ([#129], [#57], [#58], [#221], [#16], [#17], [#225]) | next release |
 | M16 | Cuts in 3-D, M16's fourth and last plan: picks made on a cut join surfaces, the ParaView export's picks and the 3-D view, on the clock the cut was made on; deleting a cut marks its surfaces stale and a rebuild says which picks it left out. Walls in the ParaView export were built and dropped at the walkthrough ([#229]) | next release |
 | M17b | Add data and GPS grids, M17's second plan: one Add data ▾ ▸ GPR… dialog with a Grid / GPS switch; GPS lines go into an existing grid or a new one fitted around their tracks, holding every trace and previewed on the map; files GPS cannot place are handed on to Grid mode with their direction and first line guessed; GPS lines in Edit lines, Move to grid and Fit to these tracks; a site with only GPS lines hides them when you zoom out ([#222], [#233]) | next release |
+| | A 3D Analysis ▾ drop-down on the toolbar, after Cut, holds Surface from picks…, 3D view and Export for ParaView…; ParaView… leaves the Slices panel ([#227]) | next release |
 
 ### In progress
 
@@ -128,10 +129,6 @@ release's notes list everything in it.
   plans: Plan A, the engine, is built (one moved-grid hang found and fixed;
   the local loop never reproduced #166). Plan B, the fill and then the
   shared colour stretch worked out in the background, is being built.
-- **A 3D Analysis drop-down on the toolbar** ([#227]): Surface from picks…, 3D
-  view and Export for ParaView… move into one drop-down after Cut, and
-  ParaView… leaves the Slices panel. Built and reviewed; the walkthrough is
-  next.
 - **The profile: axes, zoom and time zero by eye** ([#131], [#5], [#11],
   [#14], [#158], and the last part of [#163]). A button that hides the slice
   band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
