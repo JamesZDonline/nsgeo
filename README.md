@@ -129,10 +129,9 @@ release's notes list everything in it.
   dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
   new one fitted around their tracks, previewed on the map; files GPS cannot
   place are handed on to Grid mode with their offsets guessed; GPS lines in
-  Edit lines, Move to grid and Fit to these tracks. Walked through: ten of
-  eleven checks passed; a fitted grid now grows to hold every trace, and GPS
-  mode from the toolbar starts on a new grid. Awaiting a re-check of those
-  fixes.
+  Edit lines, Move to grid and Fit to these tracks. Walked through (a fitted
+  grid now grows to hold every trace, and GPS mode from the toolbar starts on
+  a new grid; both re-checked); [#233] awaits merge.
 
 ### Next, in order
 
@@ -321,6 +320,7 @@ Grouped by area. The order within a group is not a priority.
 [#225]: https://github.com/JamesZDonline/nsgeo/pull/225
 [#230]: https://github.com/JamesZDonline/nsgeo/issues/230
 [#231]: https://github.com/JamesZDonline/nsgeo/issues/231
+[#233]: https://github.com/JamesZDonline/nsgeo/pull/233
 [#232]: https://github.com/JamesZDonline/nsgeo/issues/232
 
 ## Why
