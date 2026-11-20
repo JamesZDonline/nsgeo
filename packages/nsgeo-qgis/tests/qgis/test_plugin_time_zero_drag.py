@@ -95,6 +95,11 @@ def test_a_typed_row_moves_the_line(fake_iface, tmp_path, answer_modal):
         # the picture held, so the line moved down by exactly the ten rows
         row_px = rg.dt_ns / (tr.time_hi - tr.time_lo) * tr.height
         assert tr.y_of_time(dock.view.cutoff_ns) - y_before == pytest.approx(10 * row_px)
+        # A stale line reads 0 ns on its own clock too, so prove it is live: its
+        # next drag must still be accepted (the identity check passes).
+        assert dock._cutoff_step is s.stack_for(key).entries[0][0]
+        dock.view.cutoff_dragged.emit(rg.t0_ns + 33 * rg.dt_ns)
+        assert _row_of(plugin, s, key) == 33
     finally:
         _unload(plugin, answer_modal)
 
