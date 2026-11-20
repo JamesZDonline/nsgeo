@@ -88,10 +88,10 @@ def test_a_drag_reorder_reaims_the_difference_view(plugin):
 
 
 def test_selecting_time_zero_with_difference_on_shows_the_result(plugin):
-    """#48, the issue's exact repro. A guard test: it passes on main (ruling
-    R7). It fails if `ProfileDock.current_radargram`'s `except ValueError`
-    branch returns None after `_decline_difference` instead of falling
-    through to the ordinary view."""
+    """#48, the issue's exact repro, re-pinned for #158 (spec §4.11, §4.13): in
+    `sample` mode the profile shows what Time zero receives, so the fall
+    through after the declined difference draws the source. Fails if the
+    decline returns None instead of falling through."""
     plugin, s, key = plugin
     pd, prd = plugin.processing_dock, plugin.profile_dock
     s.append_step(key, build_step("time_zero", mode="sample", sample=40))
@@ -101,7 +101,41 @@ def test_selecting_time_zero_with_difference_on_shows_the_result(plugin):
     pd.list.setCurrentRow(0)
     assert not pd.diff_button.isChecked()
     assert prd.difference_label.text() == ""
+    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).source.data)
+
+
+def test_selecting_time_zero_in_first_break_mode_with_difference_on_shows_the_result(plugin):
+    """The #48 repro for a Time zero with no handle: the ordinary result."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    s.append_step(key, build_step("time_zero", mode="first_break"))
+    pd.add_step("dewow")
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    pd.list.setCurrentRow(0)
+    assert not pd.diff_button.isChecked()
+    assert prd.difference_label.text() == ""
     np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).result().data)
+
+
+def test_selecting_time_zero_before_a_migration_declines_the_difference_and_draws_the_input(
+    plugin,
+):
+    """§4.13: the difference is declined once (one error), the button is off,
+    and the input is drawn; migration, which the bypass would feed a record
+    that starts far from zero, never runs."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    s.append_step(key, build_step("time_zero", mode="sample", sample=40))
+    s.append_step(key, build_step("migrate_fk", velocity_m_ns=0.1))
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    errors = []
+    prd.error.connect(errors.append)
+    pd.list.setCurrentRow(0)
+    assert len(errors) == 1
+    assert not pd.diff_button.isChecked()
+    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).source.data)
 
 
 def test_closing_the_site_with_difference_on_unchecks_it(plugin):

@@ -26,7 +26,7 @@ against a scale that holds still, instead of the scale chasing the curve
 cutoff is never bypassed in that measurement, so selecting the cutoff row
 shows more record without changing the brightness (call 11).
 
-The time cutoff: a step with a `time`-kind parameter (`time_param_name`)
+The time cutoff: a step with a `time`-kind parameter (`handle_spec`)
 is drawn as a draggable line, and while its row is selected the image
 shows the stack with that step bypassed so there is something below the
 line to drag it over. The *cutoff row* is that selected row, but only when
@@ -91,6 +91,7 @@ from nsgeo.processing import (
     StepStack,
     build_step,
     first_break_ns,
+    param_visible,
     retime_ns,
 )
 from nsgeo.render import (
@@ -188,20 +189,30 @@ def _time_base_of_provenance(provenance_json: str) -> str:
     return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
-def time_param_name(step: Any) -> str | None:
-    """The name of a step's time-kind parameter, if it has one. Decided by
-    the schema's kind, never by the step's name, as `plugin.py`'s
+def handle_spec(step: Any) -> Any:
+    """The spec of a step's draggable parameter: the first of kind `time` or
+    `row` that is visible for the step's own params (spec §4.11). None when it
+    has none, as Time zero has none in `first_break` mode. Decided by the
+    schema's kind, never by the step's name, as `plugin.py`'s
     `_curve_param_name` does for the gain curve."""
+    params = step.params
     for spec in type(step).schema():
-        if spec.kind == "time":
-            return str(spec.name)
+        if spec.kind in ("time", "row") and param_visible(spec, params):
+            return spec
     return None
+
+
+def relabel_onto(rg: Radargram, zero_ns: float) -> Radargram:
+    """`rg` on the clock whose zero is `zero_ns`: the same data and rows, with
+    `t0_ns` and `zero_ns` moved so every sample keeps its radar-clock time
+    (spec §4.11). A no-op when the zero is already that."""
+    return rg.replace(t0_ns=rg.t0_ns + (rg.zero_ns - zero_ns), zero_ns=zero_ns)
 
 
 def curve_param_name(step: Any) -> str | None:
     """The name of a step's curve-kind parameter, if it has one. Decided by
     the schema's kind, never by the step's name; the same shape as
-    `time_param_name`."""
+    `handle_spec`."""
     for spec in type(step).schema():
         if spec.kind == "curve":
             return str(spec.name)
@@ -387,7 +398,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip: tuple[list[list[float]], Any, float | None] | None = None
         # The Processing panel's selected row, and the step object the
         # cutoff line was last read from. Neither says which step is the
-        # cutoff: see `_cutoff_row` and the module docstring.
+        # cutoff: see `_handle_row` and the module docstring.
         self._selected_row = -1
         self._cutoff_step: Any = None
         # A cut's section, from the Slices panel's cube (cut spec §4.3). While
@@ -2106,8 +2117,14 @@ class ProfileDock(QgsDockWidget):
                 # detail, not something a message bar should say.
                 self._decline_difference("the differenced step no longer exists in this stack")
         try:
-            row = self._cutoff_row()
+            row = self._handle_row()
             if row >= 0:
+                spec = handle_spec(stack.entries[row][0])
+                if spec is not None and spec.kind == "row":
+                    # What Time zero receives, on the line's clock (spec
+                    # §4.11): nothing after it runs, so nothing can refuse it.
+                    received = stack.source if row == 0 else stack.intermediate(row - 1)
+                    return relabel_onto(received, stack.zero_ns())
                 return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
@@ -2224,6 +2241,8 @@ class ProfileDock(QgsDockWidget):
         reset `_effective_difference_index`."""
         if self._effective_difference_index >= 0 or self._key is None:
             return shown
+        if self._shows_row_handle():
+            return shown  # the record Time zero receives: no stack runs below it
         try:
             stack = self.session.stack_for(self._key, insert=self._preview_key is None)
             rows = [
@@ -2236,7 +2255,7 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not measure the display scale without the gain curves: {exc}")
             return shown
 
-    def _cutoff_row(self, row: int | None = None) -> int:
+    def _handle_row(self, row: int | None = None) -> int:
         """`row` (default: the selected one) when it is the cutoff row, else
         -1. Resolved against the live working stack on every call, never
         cached: see the module docstring."""
@@ -2252,19 +2271,35 @@ class ProfileDock(QgsDockWidget):
         if not self.session.is_open:
             return -1
         entries = self.session.stack_for(self._working_key, insert=False).entries
-        if row >= len(entries) or time_param_name(entries[row][0]) is None:
+        if row >= len(entries) or handle_spec(entries[row][0]) is None:
             return -1
         return row
 
+    def _shows_row_handle(self) -> bool:
+        """Whether the selected row is a step whose handle is a `row`: the
+        profile then draws that step's input (see `current_radargram`)."""
+        row = self._handle_row()
+        if row < 0 or self._working_key is None:
+            return False
+        spec = handle_spec(self.session.stack_for(self._working_key, insert=False).entries[row][0])
+        return spec is not None and spec.kind == "row"
+
     def _show_cutoff(self) -> None:
-        row = self._cutoff_row()
+        row = self._handle_row()
         if row < 0 or self._working_key is None:
             self._cutoff_step = None
             self.view.set_cutoff(None)
             return
         step = self.session.stack_for(self._working_key, insert=False).entries[row][0]
-        name = time_param_name(step)
-        assert name is not None
+        spec = handle_spec(step)
+        assert spec is not None
+        if spec.kind != "time":
+            # A row handle (Time zero's first kept row) is drawn and dragged
+            # in the next task; until then its line stays down.
+            self._cutoff_step = None
+            self.view.set_cutoff(None)
+            return
+        name = str(spec.name)
         self._cutoff_step = step
         self.view.set_cutoff(
             float(
@@ -2283,16 +2318,16 @@ class ProfileDock(QgsDockWidget):
         try:
             if row == self._selected_row:
                 return
-            was = self._cutoff_row() >= 0
+            was = self._handle_row() >= 0
             self._selected_row = row
-            if was or self._cutoff_row() >= 0:
+            if was or self._handle_row() >= 0:
                 self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not follow the selected step: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_cutoff_dragged(self, end_ns: float) -> None:
         try:
-            row = self._cutoff_row()
+            row = self._handle_row()
             key = self._working_key
             if row < 0 or key is None:
                 return
@@ -2302,9 +2337,10 @@ class ProfileDock(QgsDockWidget):
             # some other step must not write onto it.
             if step is not self._cutoff_step:
                 return
-            name = time_param_name(step)
-            if name is None:
+            spec = handle_spec(step)
+            if spec is None or spec.kind != "time":
                 return
+            name = str(spec.name)
             shown, input_zero = self.shown_zero_ns(), self.step_input_zero_ns(row)
             drawn = float(retime_ns(float(step.params[name]), input_zero, shown))
             if end_ns == drawn:

@@ -1649,7 +1649,7 @@ def test_closing_the_site_with_the_cutoff_selected_is_quiet_in_either_order(
     """`close_site` drops the site, then emits `line_opened("")`. The
     Processing panel answers that with `step_selected(-1)`, and when that
     reaches `set_selected_step` before this dock's own `_open` has dropped
-    the working line, `_cutoff_row` reads that line's stack from a site
+    the working line, `_handle_row` reads that line's stack from a site
     that is gone. Only plugin.py's construction order kept it quiet."""
     session, processing, dock, key, line = processing_first
     _cutoff_setup(session, key, line)
@@ -2824,3 +2824,117 @@ def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened)
     session.open_line(key)
     session.open_line(kb)  # already loaded: no header step
     assert (dock.view.transform.time_lo, dock.view.transform.time_hi) == pytest.approx(first_visit)
+
+
+# ---- Time zero's row draws what the step receives, on the line's clock (#158, spec §4.11) ----
+
+
+def _stack_of(session, key, *entries):
+    session.set_profiles(key, session.line_for_key(key).load())
+    for name, params in entries:
+        session.append_step(key, build_step(name, **params))
+    return session.stack_for(key)
+
+
+def test_selecting_time_zero_in_sample_mode_draws_its_input_on_the_lines_clock(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)), ("dewow", {}))
+    src = stack.source
+    assert dock.image.rg.data.shape[0] == 492
+    dock.set_selected_step(0)
+    drawn = dock.image.rg
+    np.testing.assert_array_equal(drawn.data, src.data)
+    assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
+    assert dock.view.transform.t0_ns == pytest.approx(src.t0_ns + (src.zero_ns - stack.zero_ns()))
+    assert dock.view.transform.n_samples == src.data.shape[0]
+    dock.set_selected_step(-1)
+    assert dock.view.transform.n_samples == 492
+
+
+def test_first_break_mode_selected_draws_the_ordinary_result(opened):
+    """Review Focus 3: the guard for today's behaviour; it may pass first."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="first_break")))
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result().data)
+    assert dock._handle_row() == -1
+
+
+def test_a_time_zero_that_is_not_first_draws_what_it_receives(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+    )
+    dock.set_selected_step(1)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.intermediate(0).data)
+    assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
+
+
+def test_selecting_time_zero_at_the_top_brings_the_cropped_rows_in(opened):
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    t = dock.view.transform
+    dock.view.transform = t.with_window(t.trace_lo, t.trace_hi, t.time_lo, t.time_lo + 10.0)
+    before = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    dock.set_selected_step(0)
+    t = dock.view.transform
+    assert t.time_lo == pytest.approx(t.t0_ns)
+    assert t.time_hi - t.time_lo == pytest.approx(10.0)
+    dock.set_selected_step(-1)
+    t = dock.view.transform
+    assert (t.time_lo, t.time_hi) == pytest.approx(before)
+
+
+def test_selecting_time_zero_mid_record_holds_the_picture_still(opened):
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    dock.set_selected_step(0)
+    assert _radar_window(dock) == pytest.approx(before)
+    dock.set_selected_step(-1)
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_migrated_line_still_draws_time_zeros_input(opened):
+    """§4.11 Q6: the bypass would hand `migrate_fk` a record that starts far
+    from zero, which it refuses; the input view never runs it."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    assert stack.source.t0_ns < -2.5  # the bypass would hand migration this record
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+
+
+@needs_real_data
+def test_the_campus_line_with_time_zero_selected_starts_49_rows_above_the_line(bare):
+    """Spec §4.11's real numbers: FILE__007 seeded at 49 draws a record that
+    starts 49 rows (10.6 ns) above the line, on the line's clock."""
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = next(p for p in CAMPUS_LINES if p.name == "FILE__007.DZT")
+    line = Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__007"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=49))
+    n_kept = dock.view.transform.n_samples
+    dock.set_selected_step(0)
+    t = dock.view.transform
+    assert t.n_samples == n_kept + 49
+    assert t.t0_ns == pytest.approx(-11.086 - (-0.476), abs=0.01)
+    assert dock.shown_zero_ns() == pytest.approx(session.stack_for(key).zero_ns())
