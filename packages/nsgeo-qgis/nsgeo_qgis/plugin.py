@@ -41,7 +41,7 @@ for every dialog, so a stray exec() staying modal by oversight is not a
 failure mode reachable here -- and modeless does mean the site can be
 closed or replaced, or the very grid an open import is targeting can be
 removed (the dock's "Remove grid" has no guard against an import in
-flight), before Import is clicked. the import pages' own import_lines() re-check
+flight), before Import is clicked. The import pages' own import_lines() re-check
 all three before writing anything (see its module docstring) rather than
 lean on exec() to make them unreachable.
 """
@@ -894,7 +894,11 @@ class NsgeoPlugin:
         self.act_add_grid = None
         self.act_add_data = None
         self.act_add_gpr = None
-        self.add_data_menu = None
+        if self.add_data_menu is not None:
+            # Parented to the main window, which outlives this plugin; its
+            # GPR… entry is its child and goes with it.
+            self.add_data_menu.deleteLater()
+            self.add_data_menu = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None

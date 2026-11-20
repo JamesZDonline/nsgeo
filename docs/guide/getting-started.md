@@ -310,7 +310,7 @@ the grid selected in **nsgeo Survey**, or the grid of the selected lines, or the
 grid of the line that is open. The dialog's title and its **Import** button name
 the grid the lines will go into. On a site with no grid yet the page says so;
 add a grid first, or place the lines by GPS. When some of the files have a GPS
-log beside them, a note under the switch says how many.
+log beside them, a note beside the switch says how many.
 
 1. Choose the **Target grid**, and say which way **Lines run along** (the grid's
    Y or X axis).

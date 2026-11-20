@@ -135,6 +135,10 @@ class GridImportPage(QWidget):
         # so no longer follows the spacing (see _follow_spacing).
         self._first_offset_own = False
         self._following = 0
+        #: The grid this page was pointed at when it vanished from the site
+        #: (and nobody has chosen another since): Import refuses rather than
+        #: quietly going into whichever grid the combo fell back to.
+        self._lost: str | None = None
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -227,6 +231,11 @@ class GridImportPage(QWidget):
         layout.addWidget(self.status)
 
         self.grid_combo.currentIndexChanged.connect(self._grid_changed)
+        self.grid_combo.activated.connect(self._picked)
+        # The combo follows the site's grids (a grid added or removed while
+        # this modeless dialog is open). Bound to this widget, so Qt drops the
+        # connection when the page is destroyed.
+        session.grids_changed.connect(self._on_grids_changed)
         self.spacing.valueChanged.connect(self._follow_spacing)
         self.first_offset.valueChanged.connect(self._first_offset_changed)
         self.axis_combo.currentIndexChanged.connect(self._replan)
@@ -333,7 +342,7 @@ class GridImportPage(QWidget):
         Import DZT files..., switches its target to that grid. A half-built
         import is never moved to another grid behind the user's back.
         """
-        if self.rows:
+        if self.rows and self.grid_combo.currentData():
             return
         if self.grid_combo.findData(grid_id) < 0:
             # A grid added since the dialog opened. The refill moves the
@@ -345,7 +354,33 @@ class GridImportPage(QWidget):
                 grid_id = current
         index = self.grid_combo.findData(grid_id)
         if index >= 0:
+            self._lost = None
             self.grid_combo.setCurrentIndex(index)
+
+    def _picked(self, *_: Any) -> None:
+        self._lost = None
+
+    def _on_grids_changed(self) -> None:
+        # A slot (session.grids_changed): guarded, see the module docstring.
+        try:
+            before = self.grid_combo.currentData()
+            self.grid_combo.blockSignals(True)
+            try:
+                self._fill_grid_combo()
+                index = self.grid_combo.findData(before) if before else -1
+                if index >= 0:
+                    self.grid_combo.setCurrentIndex(index)
+            finally:
+                self.grid_combo.blockSignals(False)
+            now = self.grid_combo.currentData()
+            if before and now != before:
+                self._lost = before
+            if now != before:
+                self._grid_changed()
+            else:
+                self.changed.emit()
+        except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+            self.status.setText(f"could not refresh the grids: {exc}")
 
     def _fill_grid_combo(self) -> None:
         self.grid_combo.clear()
@@ -589,6 +624,9 @@ class GridImportPage(QWidget):
             )
             return False
         gid = self.grid_combo.currentData()
+        if self._lost is not None:
+            self.status.setText(f"grid {self._lost!r} no longer exists; nothing was imported")
+            return False
         if gid and self._grid() is None:
             # The grid itself vanished (e.g. "Remove grid" in the dock,
             # which has no guard against an import still in flight) while

@@ -189,8 +189,9 @@ class AddDataDialog(QDialog):
         self._page().add_files(paths)
 
     def retarget(self, grid_id: str) -> None:
-        """Point the dialog at `grid_id`, but only while it has no files."""
-        if self._page().paths():
+        """Point the dialog at `grid_id`, but only while it has no files (or no
+        grid yet: the files then wait for one)."""
+        if self._page().paths() and self.grid_page.grid_combo.currentData():
             return
         self.grid_page.retarget(grid_id)
 

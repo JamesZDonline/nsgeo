@@ -348,6 +348,7 @@ def test_the_survey_panels_add_gpr_data_opens_it_on_that_grid_in_its_mode(plugin
     QgsSettings().setValue(MODE_KEY, GRID)
     plugin.survey_dock.import_requested.emit("A")  # raised, no files: switched to A's mode
     assert plugin._add_data_dialog is d and d.mode() == GRID
+    assert d.grid_page.grid_combo.currentData() == "A"
     d.reject()
 
 
@@ -381,3 +382,67 @@ def test_a_dialog_destroyed_without_finished_is_cleared_too(plugin, tmp_path):
     assert plugin._add_data_dialog is None
     plugin.open_add_data_dialog("A", GRID)
     assert plugin._add_data_dialog is not None and plugin._add_data_dialog is not dialog
+
+
+# ---- the grids move under an open dialog -------------------------------------------
+
+
+def test_a_grid_added_under_a_gridless_dialog_fills_the_combo_and_enables_import(
+    bare_session, tmp_path
+):
+    d = AddDataDialog(bare_session, mode=GRID)
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    assert d.grid_page.grid_combo.count() == 0 and not d.import_button.isEnabled()
+    bare_session.add_grid(GRID_A)
+    assert d.grid_page.grid_combo.currentData() == "A"
+    assert d.import_button.isEnabled() and d.import_button.text() == "Import 1 line(s) into A"
+    assert d.windowTitle() == "Add GPR data into A"
+    assert d.grid_page.status.text() == ""
+    d.reject()
+
+
+def test_retarget_goes_ahead_while_the_dialog_has_files_but_no_grid(bare_session, tmp_path):
+    d = AddDataDialog(bare_session, mode=GRID)
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    d.grid_page.session.add_grid(GRID_A)  # the combo fills with A
+    bare_session.add_grid(_grid("B", 600_000.0))
+    assert d.grid_page.grid_combo.currentData() == "A"
+    d.retarget("B")  # files and a grid now: left alone
+    assert d.grid_page.grid_combo.currentData() == "A"
+    d.reject()
+    d = AddDataDialog(bare_session, grid_id="A", mode=GRID)
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")])
+    d.grid_page.grid_combo.clear()  # no grid selected, as on a gridless site
+    d.retarget("B")
+    assert d.grid_page.grid_combo.currentData() == "B"
+    d.reject()
+
+
+def test_an_added_grid_leaves_a_chosen_target_and_its_edits_alone(session, tmp_path):
+    d = AddDataDialog(session, grid_id="A", mode=GRID)
+    d.add_files([synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)])
+    d.grid_page.set_offset(1, 3.25)
+    session.add_grid(_grid("B", 600_000.0))
+    assert d.grid_page.grid_combo.count() == 2
+    assert d.grid_page.grid_combo.currentData() == "A"
+    assert d.grid_page.rows[1].offset == 3.25
+    d.reject()
+
+
+def test_a_grid_removed_under_the_dialog_leaves_the_combo_and_import_refuses(session, tmp_path):
+    session.add_grid(_grid("B", 600_000.0))
+    d = AddDataDialog(session, grid_id="A", mode=GRID)
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    session.remove_grid("A")
+    assert d.grid_page.grid_combo.findData("A") < 0
+    d.accept()  # the combo fell back to B: it must not import there
+    assert "no longer exists" in d.grid_page.status.text()
+    assert session.keys() == []
+    d.reject()
+    only = AddDataDialog(session, grid_id="B", mode=GRID)
+    only.add_files([synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")])
+    session.remove_grid("B")
+    assert only.grid_page.grid_combo.count() == 0
+    only.accept()
+    assert "no longer exists" in only.grid_page.status.text()
+    only.reject()
