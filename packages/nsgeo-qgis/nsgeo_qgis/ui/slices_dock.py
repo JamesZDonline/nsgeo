@@ -901,6 +901,7 @@ class SlicesDock(QgsDockWidget):
         session.grids_changed.connect(self.rebuild_source)
         session.lines_changed.connect(self.rebuild_source)
         session.presets_changed.connect(self.rebuild_source)
+        session.slice_sources_changed.connect(self._follow_remembered_preset)
 
         # Position is cheap (0.6-4 ms, the module docstring's own figure):
         # every tick redraws directly, with no debounce.
@@ -1298,6 +1299,30 @@ class SlicesDock(QgsDockWidget):
             finally:
                 self._updating -= 1
         self._read_remembered_lines(grid_id)
+
+    def _follow_remembered_preset(self, grid_id: str) -> None:
+        """#129: a preset written for the grid This grid shows (an import's
+        first lines) is a choice made elsewhere; switch the combo to it as a
+        hand choice would (restore-pending values dropped, preparation re-run),
+        so the new lines are prepared with it and `_remember_source` does not
+        write the first preset by name back over it. Does nothing in Whole site
+        scope, for another grid, while the panel refills its own widgets (its
+        own writes), or when the remembered preset is missing or already shown."""
+        try:
+            if self._scope != "grid" or self._updating or not self.session.is_open:
+                return
+            if grid_id != self.grid_combo.currentText():
+                return
+            preset = (self.session.slice_source(grid_id) or {}).get("preset")
+            if (
+                not preset
+                or preset == self.preset_combo.currentText()
+                or self.preset_combo.findText(preset) < 0
+            ):
+                return
+            self.preset_combo.setCurrentText(preset)
+        except Exception as exc:  # noqa: BLE001 -- a slot on slice_sources_changed
+            _log(f"could not follow a remembered preset: {exc}")
 
     def _read_remembered_lines(self, grid_id: str | None) -> None:
         """This grid's reading of the grid's remembered lines, the one

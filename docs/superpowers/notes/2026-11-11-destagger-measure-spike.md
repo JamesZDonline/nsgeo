@@ -15,11 +15,11 @@ committed because they are pictures of the user's site.
 
 ## Data
 
-- **Nashville City Cemetery 2023, Grid 1.** 60 zigzag lines at 0.5 m on a 29.98 m grid, HS350,
+- **The first GPS survey, Grid 1.** 60 zigzag lines at 0.5 m on a 29.98 m grid, HS350,
   60 traces/m. **This is the same survey as `tests/data/local/with-dzg/`** (`FILE__001.DZT` has the
   same md5). The two acceptance cases in #159 (Grid 1 unfitted +0.15, the 60-line survey fitted
   −0.15) are therefore one survey seen two ways.
-- **Nashville City Cemetery 2023, Grid 2.** 60 zigzag lines at 0.5 m on a 29.96 m grid. This is an
+- **The second GPS survey, Grid 2.** 60 zigzag lines at 0.5 m on a 29.96 m grid. This is an
   independent case. Since 2026-11-11 it is in `tests/data/local/grid2/`, as links to the raw files,
   for #159's per-line tests.
 

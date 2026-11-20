@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
 from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
@@ -543,6 +543,21 @@ class SiteSession(QObject):
         grid_id = getattr(line.placement, "grid_id", None)
         return self._require_site().frames.get(grid_id) if grid_id is not None else None
 
+    # ---- the site's CRS ---------------------------------------------------
+    def site_crs(self) -> str | None:
+        """The CRS the site is in: its own, else the first grid's, else None (P9)."""
+        site = self._site
+        return None if site is None else site.effective_crs()
+
+    def set_site_crs(self, crs: str) -> None:
+        """Give a site with no CRS one. It is never changed once set."""
+        site = self._require_site()
+        current = self.site_crs()
+        if current is not None:
+            raise ValueError(f"the site already uses {current}")
+        site.crs = crs
+        self._set_dirty(True)
+
     # ---- grids ------------------------------------------------------------
     def add_grid(self, grid: Grid) -> None:
         site = self._require_site()
@@ -631,6 +646,11 @@ class SiteSession(QObject):
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
+        grids_chosen = site.import_presets.get("grids")
+        if grids_chosen is not None:
+            grids_chosen.pop(grid_id, None)
+            if not grids_chosen:
+                del site.import_presets["grids"]
         # A cut on a removed grid would make validate() refuse every save
         # (cut spec §4.2). Its picks stay: they are authored data.
         gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
@@ -679,6 +699,23 @@ class SiteSession(QObject):
                 raise ValueError(f"line {key!r} is already in the site")
             existing.add(key)
             keyed.append((key, line))
+        gps = [ln for ln in lines if isinstance(ln.placement, TrackPlacement)]
+        if gps:
+            # The first GPS line pins the CRS the site is in right now, so a
+            # later edit of the first grid cannot move it (R9).
+            in_force = self.site_crs()
+            if in_force is None:
+                raise ValueError("GPS lines need the site's CRS, but the site has none")
+            # A line placed in any other CRS fails now, not later at
+            # validate or save (R10).
+            for ln in gps:
+                placed = ln.placement.crs  # type: ignore[union-attr]
+                if placed != in_force:
+                    raise ValueError(
+                        f"line {ln.path.name} is placed in {placed}, but the site is in {in_force}"
+                    )
+            if site.crs is None:
+                site.crs = in_force
         site.lines.extend(lines)
         self._lines_by_key.update(keyed)
         self._set_dirty(True)
@@ -704,6 +741,41 @@ class SiteSession(QObject):
         dropped = self._drop_lines(unique)
         self._set_dirty(True)
         self._announce_dropped(*dropped)
+        self.lines_changed.emit()
+
+    def is_gps_line(self, key: str) -> bool:
+        """Whether the line under `key` is placed along its GPS track (`KeyError` if unknown)."""
+        return isinstance(self.line_for_key(key).placement, TrackPlacement)
+
+    def set_travel_shift(self, keys: Iterable[str], metres: float) -> None:
+        """Set the destagger of every GPS line in `keys` to `metres`, as one change:
+        one dirty mark and one `lines_changed`, and nothing at all when no line
+        would change.
+
+        All or nothing: every key is checked first, so an unknown key raises
+        `KeyError`, a tape line `ValueError("{name} is not a GPS line")`, and a
+        non-finite `metres` `ValueError`, each with the site untouched. A line
+        keeps its key, so its stack, profile and picks stay attached.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        lines = [self.line_for_key(key) for key in unique]
+        for line in lines:
+            if not isinstance(line.placement, TrackPlacement):
+                raise ValueError(f"{line.path.stem} is not a GPS line")
+        if not math.isfinite(metres):
+            raise ValueError(f"travel_shift must be finite, got {metres!r}")
+        changing = [
+            (key, line)
+            for key, line in zip(unique, lines)
+            if line.placement.travel_shift != metres  # type: ignore[union-attr]
+        ]
+        if not changing:
+            return
+        for key, line in changing:
+            placement = dataclasses.replace(line.placement, travel_shift=metres)  # type: ignore[type-var]
+            self._replace_line(key, dataclasses.replace(line, placement=placement))
+        self._set_dirty(True)
         self.lines_changed.emit()
 
     def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
@@ -891,6 +963,33 @@ class SiteSession(QObject):
         self._lines_by_key[key] = new_line  # same key: only the object changed
         self._set_dirty(True)
         self.lines_changed.emit()
+
+    def set_lines_velocity(self, keys: Iterable[str], model: VelocityModel | None) -> list[str]:
+        """Set (or, with None, clear) the velocity override of every line in
+        `keys` and drop each one's velocity source record, as one change: one
+        dirty mark and one `lines_changed`, and nothing at all when no line
+        would change. Saved fits stay on the lines (#58).
+
+        A line already holding exactly `model` with no record is left alone.
+        All or nothing: an unknown key raises `KeyError` with the site untouched.
+        Returns the keys that changed.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        lines = [self.line_for_key(key) for key in unique]
+        changing = [
+            (key, line)
+            for key, line in zip(unique, lines)
+            if line.velocity != model or line.velocity_source is not None
+        ]
+        if not changing:
+            return []
+        for key, line in changing:
+            # A bare number has no source: the record goes (grid velocity spec §7.2).
+            self._replace_line(key, dataclasses.replace(line, velocity=model, velocity_source=None))
+        self._set_dirty(True)
+        self.lines_changed.emit()
+        return [key for key, _ in changing]
 
     def apply_line_velocity(
         self, key: str, model: VelocityModel | None, source: VelocitySource | None
@@ -1185,6 +1284,47 @@ class SiteSession(QObject):
             self.stack_changed.emit(other)
         return changed
 
+    def apply_stack_to(self, source_key: str, keys: Iterable[str]) -> list[str]:
+        """Copy the stack of `source_key` onto every line in `keys` but the source,
+        as one change (`apply_stack_to_grid`'s body for a list of keys). All or
+        nothing: an unknown key raises `KeyError` with the site untouched.
+        Returns the keys changed."""
+        site = self._require_site()
+        self.line_for_key(source_key)
+        targets = [k for k in dict.fromkeys(keys) if k != source_key]
+        for key in targets:
+            self.line_for_key(key)
+        dicts = self.stack_for(source_key).to_dicts()
+        return self._replace_stacks(site, targets, dicts)
+
+    def apply_preset_to(self, name: str, keys: Iterable[str]) -> list[str]:
+        """Replace the stack of every line in `keys` with a fresh one from the
+        preset `name` (`apply_preset`'s body per key), as one change. All or
+        nothing: an unknown key or preset raises `KeyError` with the site
+        untouched. Returns the keys changed (all of them)."""
+        site = self._require_site()
+        dicts = site.presets[name]
+        unique = list(dict.fromkeys(keys))
+        for key in unique:
+            self.line_for_key(key)
+        return self._replace_stacks(site, unique, dicts)
+
+    def _replace_stacks(
+        self, site: Site, keys: list[str], dicts: list[dict[str, Any]]
+    ) -> list[str]:
+        if not keys:
+            return []
+        fresh_stacks = [StepStack.from_dicts(dicts) for _ in keys]  # builds first: may raise
+        for key, fresh in zip(keys, fresh_stacks):
+            self._attach_source(key, fresh)
+            site.stacks[key] = fresh
+        # Dirty before the emits: a synchronous stack_changed slot must never
+        # see a change it is handling as if the site were clean.
+        self._set_dirty(True)
+        for key in keys:
+            self.stack_changed.emit(key)
+        return list(keys)
+
     # ---- presets ----------------------------------------------------------
     def preset_names(self) -> list[str]:
         return sorted(self._require_site().presets)
@@ -1239,6 +1379,54 @@ class SiteSession(QObject):
         sources[grid_id] = new
         self._set_dirty(True)
         self.slice_sources_changed.emit(grid_id)
+
+    def set_slice_preset(self, grid_id: str, name: str | None) -> None:
+        """Set only the grid's remembered Slices preset; None removes it (and
+        an entry left empty), for undoing an import's first-lines write."""
+        if name is not None:
+            self._update_source(grid_id, preset=name)
+            return
+        sources = self._require_site().slice_sources
+        old = sources.get(grid_id)
+        if old is None or "preset" not in old:
+            return
+        new = {k: v for k, v in old.items() if k != "preset"}
+        if new:
+            sources[grid_id] = new
+        else:
+            del sources[grid_id]
+        self._set_dirty(True)
+        self.slice_sources_changed.emit(grid_id)
+
+    def import_preset(self, grid_id: str | None) -> str | None:
+        """The preset an import starts on: the grid's remembered choice (None
+        stays None), else the site's last, else None. A name that is no longer
+        a preset reads as None."""
+        site = self._require_site()
+        grids = site.import_presets.get("grids", {})
+        name = (
+            grids[grid_id]
+            if grid_id is not None and grid_id in grids
+            else (site.import_presets.get("site"))
+        )
+        return name if name in site.presets else None
+
+    def remember_import_preset(self, grid_id: str | None, name: str | None) -> None:
+        """Remember an import's choice for the site and, with a grid, that grid."""
+        site = self._require_site()
+        before = copy.deepcopy(site.import_presets)
+        site.import_presets["site"] = name
+        if grid_id is not None:
+            site.import_presets.setdefault("grids", {})[grid_id] = name
+        if site.import_presets != before:
+            self._set_dirty(True)
+
+    def import_sets_slice_preset(self, grid_id: str) -> bool:
+        """True when an import into this grid would also set its Slices preset:
+        the grid has no lines and its remembered slice source has no preset."""
+        if self.keys_on_grid(grid_id):
+            return False
+        return "preset" not in (self.slice_source(grid_id) or {})
 
     def remember_slice_source(
         self, grid_id: str, *, preset: str, lines: tuple[str, ...] | None

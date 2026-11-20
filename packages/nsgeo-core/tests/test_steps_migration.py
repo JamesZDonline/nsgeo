@@ -521,7 +521,7 @@ def test_the_step_passes_its_aperture_through_to_the_solver():
     assert _arc_reach(narrow.data, apex_trace) < 0.01 * _arc_reach(wide.data, apex_trace)
 
 
-# The user's hand fits on Nashville City Cemetery 2023 Grid 2, saved 2026-11-06 in the
+# The user's hand fits on GPS survey Grid 2, saved 2026-11-06 in the
 # gitignored hand-fit site file. The times are after the default Time zero, which sits at
 # -0.476 ns on the radar clock; the fits were saved on the radar clock (19.947 and 19.363 ns).
 REAL_DIFFRACTIONS = (  # (file in grid2/, apex trace, apex ns after time zero, velocity m/ns)

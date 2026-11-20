@@ -504,7 +504,7 @@ in the test file from the first pass, worked around the same way (bind
   trusting it: the fixture's `GRID` origin `(500.0, 700.0)` is a
   self-consistent internal value, not a real UTM coordinate, so
   transforming it into EPSG:4326 lands near the equator
-  (`-91.48, 0.0063`), not anywhere near the real Nashville-area
+  (`-91.48, 0.0063`), not anywhere near the real survey-area
   coordinates other tests in this file use for a *forward* transform.
   Asserting a physically-plausible longitude range here would have been
   wrong; asserting equality against an independently constructed

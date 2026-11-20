@@ -15,8 +15,8 @@ mean.
 
 - [ ] **Step 1: Add `real_radargram` and write the test**
 
-  Constants, with a provenance comment. They come from the user's hand fits on Nashville City
-  Cemetery 2023 Grid 2, saved 2026-11-06 in the gitignored hand-fit site file. The times are after
+  Constants, with a provenance comment. They come from the user's hand fits on GPS survey
+  Grid 2, saved 2026-11-06 in the gitignored hand-fit site file. The times are after
   the default Time zero, which sits at −0.476 ns on the radar clock; the fits were saved on the
   radar clock (19.947 and 19.363 ns).
 

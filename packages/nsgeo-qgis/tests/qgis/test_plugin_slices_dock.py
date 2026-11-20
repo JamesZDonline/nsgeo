@@ -5727,3 +5727,81 @@ def test_a_z_range_the_resolution_rejects_clears_the_last_refusal(docked):
     dock.flush_debounce()
     assert dock.warnings_panel.entries() == ()
     assert len(errors) == 1 and "must exceed" in errors[0]
+
+
+# ---- #129: the panel follows a preset written for the grid it shows -------------------
+
+
+@pytest.fixture
+def docked_empty_grid(qgis_app, tmp_path):
+    """A site whose one grid is empty and which has two presets, "a" before "p"."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.site.presets["a"] = list(PRESET)
+    session.site.presets["p"] = [{"step": "dewow", "params": {"window_ns": 7.0}, "enabled": True}]
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    yield dock, session, tmp_path
+    dock.refiner.shutdown()
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def _record_set_source(dock, monkeypatch):
+    choices: list[Any] = []
+    real = dock.engine.set_source
+
+    def recording(choice):
+        choices.append(choice)
+        real(choice)
+
+    monkeypatch.setattr(dock.engine, "set_source", recording)
+    return choices
+
+
+def test_the_panel_follows_a_preset_written_for_the_grid_it_shows(docked_empty_grid):
+    dock, session, _ = docked_empty_grid
+    assert dock.preset_combo.currentText() == "a"
+    session.set_slice_preset("A", "p")
+    assert dock.preset_combo.currentText() == "p"
+
+
+def test_the_panel_ignores_its_own_writes_other_grids_and_other_fields(
+    docked_empty_grid, monkeypatch
+):
+    dock, session, _ = docked_empty_grid
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    session.set_slice_preset("A", "p")
+    assert dock.engine.wait_for_preparation(20_000)
+    choices = _record_set_source(dock, monkeypatch)
+    session.remember_slice_resolution("A", cell=0.4)
+    session.set_slice_preset("B", "a")  # another grid
+    session.remember_slice_source("A", preset="p", lines=None)  # the panel's own kind of write
+    assert dock.preset_combo.currentText() == "p"
+    assert choices == []
+
+
+def test_an_import_into_the_shown_empty_grid_prepares_with_the_imports_preset_once(
+    docked_empty_grid, monkeypatch
+):
+    from nsgeo_qgis.ui.import_dialog import ImportDialog
+
+    dock, session, tmp_path = docked_empty_grid
+    assert dock.engine.wait_for_preparation(20_000)
+    choices = _record_set_source(dock, monkeypatch)
+    files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=60) for i in (1, 2)]
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(files)
+    d.preset_box.combo.setCurrentIndex(d.preset_box.combo.findData("p"))
+    d.accept()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.preset_combo.currentText() == "p"
+    with_lines = [c for c in choices if c.line_keys]
+    assert [c.preset for c in with_lines] == ["p"], "the new lines are prepared once, with P"
+    assert choices[-1].preset == "p"
+    assert dock.engine.line_count == 2
+    # a Choose-lines change keeps P in the grid's remembered source
+    dock.set_included(tuple(session.keys())[:1])
+    assert session.slice_source("A")["preset"] == "p"

@@ -16,3 +16,14 @@ def event_pos(event: Any) -> QPointF:
     if hasattr(event, "position"):
         return QPointF(event.position())
     return QPointF(event.pos())
+
+
+def without_layer_flag(layer: Any, flag: Any) -> None:
+    """Clear one `QgsMapLayer.LayerFlag` on a layer, on both QGIS majors.
+
+    QGIS 4's `LayerFlag` is an `IntEnum`, so `layer.flags() & ~flag` is a plain
+    int and `setFlags` refuses it. Going through int and back to the enum is
+    accepted by QGIS 3 (a `LayerFlag` converts to `LayerFlags`) and by QGIS 4.
+    """
+    cls = type(flag)
+    layer.setFlags(cls(int(layer.flags()) & ~int(flag)))

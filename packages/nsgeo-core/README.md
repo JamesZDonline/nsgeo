@@ -19,15 +19,21 @@ between minor releases.
 
 ### `nsgeo.io`
 
-DZT and DZX readers.
+DZT, DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
+| `DzgError` | Raised when a DZG's trace numbers cannot be trusted. |
+| `DzgFix` | One GPS fix: its DZT trace, time, position, quality, satellites, HDOP, altitude and geoid separation. |
+| `DzgLog` | The fixes of a DZG in file order, with counts of dropped and unpaired sentences. |
 | `DztError` | Raised when a DZT file is malformed or unsupported. |
 | `DztHeader` | The parsed DZT header. |
 | `DzxError` | Raised when a DZX sidecar exists but cannot be parsed. |
 | `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
+| `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
+| `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
+| `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
 | `read_header` | Read only the header, cheaply. |
 | `read_samples` | Read all samples as (channels, samples, traces). |
@@ -60,6 +66,12 @@ Coordinate frames and trace placement.
 | `GridPlacement` | A line positioned parametrically within a grid frame. |
 | `Placement` | How traces are positioned; the protocol placements satisfy. |
 | `fit_grid_from_corners` | Least-squares rigid fit of grid-local metres to world coordinates. |
+| `TrackPlacement` | A line placed along the RTK GPS track logged in its DZG. Only RTK-fixed fixes place traces; a dropout is bridged by a straight segment (`bridges`), the ends run on by wheel at the line's heading (`end_runs`), and `travel_shift` moves every trace forward along the walked path. |
+| `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
+| `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
+| `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
+| `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
+| `END_LIMIT_M` | A start or end run longer than this many metres (2.0) is flagged. |
 
 ### `nsgeo.processing`
 
@@ -72,6 +84,7 @@ User-ordered processing steps. Nothing runs automatically.
 | `Radargram` | A radargram as the steps see it. |
 | `STEP_GROUPS` | The groups a step menu is laid out in, in processing order. |
 | `Step` | A pure function of (parameters, radargram). |
+| `StepRefused` | The `ValueError` a stack raises when a step refuses its input; names the step. |
 | `StepStack` | An ordered list of steps applied to a radargram. |
 | `TIME_BASE_RADAR` | `"radar"`: times are on the radar's own clock. |
 | `TIME_BASE_TIME_ZERO` | `"time_zero"`: times are measured from each line's first break. |

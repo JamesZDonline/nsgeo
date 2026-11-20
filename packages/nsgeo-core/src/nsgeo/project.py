@@ -22,6 +22,7 @@ from typing import Any
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.geometry.track import TrackFix, TrackPlacement
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.base import build_step, get_step, param_problem, step_title
@@ -48,7 +49,15 @@ CUTS_SCHEMA_VERSION = SCHEMA_VERSION + 1
 #: older build would drop the record on its next save. A site without one
 #: still saves as 1 or 2 (grid velocity spec §9).
 VELOCITY_SOURCE_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
-READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION, VELOCITY_SOURCE_SCHEMA_VERSION)
+#: A site with any GPS line saves as 4 and only then gains a top-level `"crs"`
+#: (GPS lines spec §15). A site without GPS lines still saves as 1 to 3.
+TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1
+READABLE_SCHEMA_VERSIONS = (
+    SCHEMA_VERSION,
+    CUTS_SCHEMA_VERSION,
+    VELOCITY_SOURCE_SCHEMA_VERSION,
+    TRACK_SCHEMA_VERSION,
+)
 _FIT_ID = re.compile(r"fit-(\d+)")
 
 
@@ -152,11 +161,70 @@ def _placement_to_dict(placement: Any) -> dict[str, Any]:
         if placement.travel_shift != 0.0:
             doc["travel_shift"] = placement.travel_shift
         return doc
+    if isinstance(placement, TrackPlacement):
+        track: dict[str, Any] = {"type": "track", "crs": placement.crs}
+        # As GridPlacement's corrections: written only when set.
+        if placement.grid_id is not None:
+            track["grid_id"] = placement.grid_id
+        track["label"] = placement.label
+        if placement.travel_shift != 0.0:
+            track["travel_shift"] = placement.travel_shift
+        track["fixes"] = [_fix_to_row(f) for f in placement.fixes]
+        return track
     raise ProjectError(f"cannot serialise placement of type {type(placement).__name__}")
 
 
-def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
+def _null_nan(value: float) -> float | None:
+    """NaN is not JSON: a fix with no position writes `null`."""
+    return None if math.isnan(value) else value
+
+
+def _fix_to_row(fix: TrackFix) -> list[Any]:
+    return [
+        fix.trace,
+        _null_nan(fix.x),
+        _null_nan(fix.y),
+        _null_nan(fix.lat),
+        _null_nan(fix.lon),
+        fix.alt_m,
+        fix.geoid_m,
+        fix.quality,
+    ]
+
+
+def _nan_null(value: Any) -> float:
+    return math.nan if value is None else float(value)
+
+
+def _opt_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _fix_from_row(row: Any) -> TrackFix:
+    if not isinstance(row, list) or len(row) != 8:
+        raise TypeError(f"a fix must be a list of 8 values, got {row!r}")
+    return TrackFix(
+        trace=int(row[0]),
+        x=_nan_null(row[1]),
+        y=_nan_null(row[2]),
+        lat=_nan_null(row[3]),
+        lon=_nan_null(row[4]),
+        alt_m=_opt_float(row[5]),
+        geoid_m=_opt_float(row[6]),
+        quality=int(row[7]),
+    )
+
+
+def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement | TrackPlacement:
     kind = doc.get("type")
+    if kind == "track":
+        return TrackPlacement(
+            fixes=tuple(_fix_from_row(r) for r in doc["fixes"]),
+            crs=doc["crs"],
+            grid_id=doc.get("grid_id"),
+            label=doc.get("label"),
+            travel_shift=float(doc.get("travel_shift", 0.0)),
+        )
     if kind != "grid":
         raise ProjectError(f"unknown placement type {kind!r}")
     return GridPlacement(
@@ -267,10 +335,23 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             f"expected one of {sorted(keys_written)}"
         )
 
+    has_gps = site.has_gps_lines()
+    crs = site.effective_crs() if has_gps else None
+    if has_gps and crs is None:
+        raise ProjectError("GPS lines need the site's CRS, but the site has none")
+    if has_gps:
+        for line in site.lines:
+            placed = getattr(line.placement, "crs", None)
+            if isinstance(line.placement, TrackPlacement) and placed != crs:
+                raise ProjectError(
+                    f"line {line.path.name} is placed in {placed}, but the site is in {crs}"
+                )
     has_record = any(g.velocity_source is not None for g in site.grids) or any(
         ln.velocity_source is not None for ln in site.lines
     )
-    if has_record:
+    if has_gps:
+        version = TRACK_SCHEMA_VERSION
+    elif has_record:
         version = VELOCITY_SOURCE_SCHEMA_VERSION
     else:
         version = CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION
@@ -279,6 +360,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
+    if crs is not None:
+        doc["crs"] = crs
     if site.cuts:
         doc["cuts"] = [_cut_to_dict(c) for c in site.cuts]
     if site.presets:
@@ -291,6 +374,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         doc["site_view"] = site.site_view
     if site.slice_colours:
         doc["slice_colours"] = site.slice_colours
+    if site.import_presets:
+        doc["import_presets"] = site.import_presets
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -412,6 +497,29 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     resolution = _clean_resolution(view.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    return out
+
+
+def _clean_import_presets(value: object, known_grid_ids: set[str]) -> dict[str, Any]:
+    """The remembered import presets (#129), each field kept only if usable.
+
+    A non-object reads as empty; a grid the site does not have, or a value
+    that is neither a string nor null, is dropped.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    grids = value.get("grids")
+    if isinstance(grids, dict):
+        kept = {
+            gid: name
+            for gid, name in grids.items()
+            if gid in known_grid_ids and (name is None or isinstance(name, str))
+        }
+        if kept:
+            out["grids"] = kept
+    if "site" in value and (value["site"] is None or isinstance(value["site"], str)):
+        out["site"] = value["site"]
     return out
 
 
@@ -640,7 +748,11 @@ def load_site(path: str | Path) -> Site:
                     f"invalid processing stack for line {entry['path']!r}: {exc}"
                 ) from exc
 
+    file_crs = doc.get("crs")
+    if file_crs is not None and not isinstance(file_crs, str):
+        raise ProjectError(f"{path}: 'crs' must be text, got {type(file_crs).__name__}")
     site = Site(grids=grids, lines=lines)
+    site.crs = file_crs
     site.stacks = stacks
     site.load_notes = load_notes
 
@@ -695,6 +807,7 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(f"{path}: 'site_view' must be an object, got {type(site_view).__name__}")
     site.site_view = _clean_site_view(site_view, known)
     site.slice_colours = _clean_slice_colours(doc.get("slice_colours", {}))
+    site.import_presets = _clean_import_presets(doc.get("import_presets", {}), known)
 
     site.validate()
     return site

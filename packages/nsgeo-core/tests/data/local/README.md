@@ -32,8 +32,8 @@ Fixtures under `packages/nsgeo-core/tests/data/fixtures/` are either:
 local/
 ├── FILE__001.DZT … FILE__010.DZT   the ten campus lines (and their .DZX)
 ├── sunnyside.nsgeo.json            optional saved project for the line-edit tests
-├── with-dzg/                       the sixty GPS-recorded lines for M17 (.DZT + .DZG + .DZX); Nashville Grid 1
-├── grid2/                          Nashville Grid 2, sixty lines for #159 (links to the raw files)
+├── with-dzg/                       the sixty GPS-recorded lines for M17 (.DZT + .DZG + .DZX); GPS survey Grid 1
+├── grid2/                          GPS survey Grid 2, sixty lines for #159 (links to the raw files)
 └── mag-data/                       magnetometer examples for M19 (no tests read them yet)
 ```
 
