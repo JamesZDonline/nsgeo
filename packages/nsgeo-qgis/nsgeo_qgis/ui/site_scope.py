@@ -46,6 +46,7 @@ from nsgeo.slices import (
 from nsgeo.velocity import VelocityModel
 from qgis.PyQt.QtCore import QTimer
 
+from nsgeo_qgis.export_task import running_export
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_engine import PendingSolve
@@ -291,6 +292,20 @@ def grid_time_bases(session: Any, source: SiteSource, site_engine: Any) -> dict[
             continue
         out[choice.grid_id] = time_base_of(steps)
     return out
+
+
+#: The Export button's tooltip while an export runs (`offer_export`).
+EXPORT_RUNNING_TIP = "An export is running: wait for it to finish, or cancel it in the task list."
+
+
+def offer_export(button: Any, ready: bool) -> None:
+    """Enable the Export button when the scope is `ready` and no export runs, so it
+    offers only what a click would open (walkthrough, #193: it stayed enabled while
+    an export ran and a click answered with a message). While one runs it says why;
+    the plugin re-reads this when an export starts and when it ends."""
+    running = running_export() is not None
+    button.setEnabled(ready and not running)
+    button.setToolTip(EXPORT_RUNNING_TIP if running else "")
 
 
 def state_text(site_engine: Any, grid_id: str) -> str:
@@ -850,9 +865,10 @@ class SiteScope:
         return busy(self.engine, self.included())
 
     def update_export_button(self) -> None:
-        """Ruling T4-a: no export while an included grid is queued or preparing."""
+        """Ruling T4-a: no export while an included grid is queued or preparing,
+        nor while an export runs (`offer_export`)."""
         ready = bool(self.engine.ready_grids) and self.engine.lattice is not None
-        self.dock.export_button.setEnabled(ready and not self.export_busy())
+        offer_export(self.dock.export_button, ready and not self.export_busy())
 
     def on_changed(self) -> None:
         """`SiteEngine.on_changed`, kept cheap: the rows, the export button, and

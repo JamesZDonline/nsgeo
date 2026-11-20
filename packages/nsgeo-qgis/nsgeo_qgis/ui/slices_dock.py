@@ -1721,7 +1721,7 @@ class SlicesDock(QgsDockWidget):
             # runs before the conflict check that raises), so this is
             # never stale.
             self.save_button.setEnabled(self.engine.is_prepared)
-            self.export_button.setEnabled(self.engine.is_prepared)
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
             self.error.emit(message)
             # #103: nothing is prepared, so nothing may stay on the map --
             # neither the slice of the source before this one nor, on a
@@ -1810,7 +1810,7 @@ class SlicesDock(QgsDockWidget):
             self._site.update_export_button()
         else:
             self.save_button.setEnabled(self.engine.is_prepared)
-            self.export_button.setEnabled(self.engine.is_prepared)
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
         if self.engine.is_running:
             return
         choice = self.engine.choice
@@ -4147,6 +4147,14 @@ class SlicesDock(QgsDockWidget):
     def site_velocities(self) -> dict[str, VelocityModel | None]:
         """Each ready grid's velocity, resolved as the This-grid readout does."""
         return self._site.velocities()
+
+    def update_export_button(self) -> None:
+        """The Export button by its scope's rule (`site_scope.offer_export`): the
+        plugin calls this when an export starts and when it ends."""
+        if self._scope == "site" and self.session.is_open:
+            self._site.update_export_button()
+        else:
+            site_scope.offer_export(self.export_button, self.engine.is_prepared)
 
     def site_export_busy(self) -> bool:
         """Whether an included grid is queued or preparing: the export button's rule (T4-a)."""

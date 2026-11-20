@@ -2018,18 +2018,21 @@ class NsgeoPlugin:
         own_style = self._export_own_style(dock)
 
         def on_done(result: ExportResult) -> None:
-            self._finish_export(
-                result,
-                job,
-                epoch=epoch,
-                cell=choice.cell,
-                pixel=choice.pixel,
-                palette=palette,
-                unipolar=unipolar,
-                counts_palette=counts_palette,
-                removed=removed,
-                own_style=own_style,
-            )
+            try:
+                self._finish_export(
+                    result,
+                    job,
+                    epoch=epoch,
+                    cell=choice.cell,
+                    pixel=choice.pixel,
+                    palette=palette,
+                    unipolar=unipolar,
+                    counts_palette=counts_palette,
+                    removed=removed,
+                    own_style=own_style,
+                )
+            finally:
+                self._offer_export()
 
         task = ExportTask(
             f"Export {task_name}",
@@ -2049,10 +2052,23 @@ class NsgeoPlugin:
                 Qgis.MessageLevel.Warning,
             )
             return
+        self._offer_export()
         self.message(
             f"exporting {task_name}: you can keep working; "
             "it is in the task list at the bottom right."
         )
+
+    def _offer_export(self) -> None:
+        """Re-read the Export button's rule when an export starts or ends: it is
+        greyed while one runs (walkthrough, #193). Never raises: it runs in an
+        export's `on_done`."""
+        try:
+            if self.slices_dock is not None:
+                self.slices_dock.update_export_button()
+        except Exception as exc:  # noqa: BLE001 -- reached from a task's finished()
+            QgsMessageLog.logMessage(
+                f"could not update the Export button: {exc}", "nsgeo", Qgis.MessageLevel.Warning
+            )
 
     def _on_site_closed_for_export(self) -> None:
         try:

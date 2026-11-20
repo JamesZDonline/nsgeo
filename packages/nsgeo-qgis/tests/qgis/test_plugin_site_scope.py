@@ -1819,6 +1819,32 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     assert dock.export_button.isEnabled()
 
 
+def test_the_site_export_is_greyed_while_an_export_runs(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """Walkthrough (#193): Export stayed enabled while an export ran, and a click
+    answered "an export is already running". It is greyed and says why while one
+    runs, including through the site's own refreshes, and comes back after."""
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "site.tif")
+    assert dock.export_button.isEnabled()
+    dock.export_button.click()
+    gate.wait_entered()
+    try:
+        assert running_export() is not None
+        assert not dock.export_button.isEnabled()
+        assert "task list" in dock.export_button.toolTip()
+        dock._site.on_changed()  # what a grid's state change runs
+        _events()
+        assert not dock.export_button.isEnabled()
+    finally:
+        gate.release.set()
+        wait_for_export()
+    assert dock.export_button.isEnabled()
+    assert dock.export_button.toolTip() == ""
+
+
 def test_site_export_refuses_while_a_grid_prepares(
     plugin, drive_dialog, message_log, fake_iface, monkeypatch
 ):
