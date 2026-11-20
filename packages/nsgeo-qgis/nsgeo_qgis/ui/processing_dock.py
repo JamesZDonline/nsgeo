@@ -99,13 +99,13 @@ def dest_index(start: int, row: int) -> int:
 def needs_dialog(name: str) -> bool:
     """True when adding `name` has to ask the user for values.
 
-    A step whose every required parameter is a curve or a time is seeded
+    A step whose every required parameter is a curve, a time or a row is seeded
     from the record instead (see `ProcessingDock.add_step_with_dialog`), so
     it adds straight away. The Add step menu label and that seeding branch
     both ask this, so they cannot disagree.
     """
     required = [s for s in get_step(name).schema() if s.required]
-    return bool(required) and not all(s.kind in ("curve", "time") for s in required)
+    return bool(required) and not all(s.kind in ("curve", "time", "row") for s in required)
 
 
 def _menu_heading(text: str, menu: QMenu) -> QWidgetAction:
@@ -591,13 +591,20 @@ class ProcessingDock(QgsDockWidget):
         self._shown, self._shown_step = shown, step
         range_kwargs: dict[str, Any] = {}
         self._form_axis_unknown = None
-        if any(spec.kind == "time" for spec in get_step(step.name).schema()):
+        kinds = {spec.kind for spec in get_step(step.name).schema()}
+        if kinds & {"time", "row"}:
             axis = self.input_axis(row)
-            if axis is None:
+            # A row field also waits for the samples: its upper bound is the
+            # record the step receives, which the header alone does not give
+            # once a step above it crops.
+            if axis is None or ("row" in kinds and self.session.stack_for(key).source is None):
                 self._form_axis_unknown = (key, row)
             else:
                 t0, dt, n = axis
-                range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
+                if "time" in kinds:
+                    range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
+                if "row" in kinds:
+                    range_kwargs["row_range"] = (0, n - 1)
         self.form.set_step(step.name, step.params, **range_kwargs)
 
     def _on_line_loaded(self, key: str) -> None:
@@ -635,6 +642,7 @@ class ProcessingDock(QgsDockWidget):
             return
         if current.params == params:
             return
+        seeded = self._seed_sample_row(key, row, current, params)
         new = build_step(self.form.step_name, **params)
         # Set before replace_step: the stack_changed -> rebuild() ->
         # step_selected echo this triggers reports this exact object back
@@ -642,6 +650,33 @@ class ProcessingDock(QgsDockWidget):
         # already on screen and skips rebuilding the editors.
         self._shown_step = new
         self.session.replace_step(key, row, new)
+        if seeded:
+            self.form.show_row("sample", params["sample"])
+        elif seeded is False:
+            # After the replace: a commit that builds clears the message.
+            self.form.message.setText(
+                "Couldn't find the first break, so Time zero starts at row "
+                f"{params['sample']}. Drag its line or type the row."
+            )
+
+    def _seed_sample_row(
+        self, key: str, row: int, current: Any, params: dict[str, Any]
+    ) -> bool | None:
+        """On a switch into `sample` mode, start the row at the first break of
+        the step's input, so the step's result does not move. Fills
+        `params["sample"]` in place. True when seeded, False when no first
+        break could be found (the stored row stays), None when this commit is
+        not such a switch. Every switch into `sample` seeds, not only the
+        first: the row the user last typed may be far from where the data is."""
+        if params.get("mode") != "sample" or current.params.get("mode") == "sample":
+            return None
+        if "threshold" not in params:
+            return None
+        found = step_inputs.time_zero_seed(self.session, key, row, float(params["threshold"]))
+        if found is None:
+            return False
+        params["sample"] = found
+        return True
 
     # ---- list events ------------------------------------------------------
     def _on_item_changed(self, item: QListWidgetItem) -> None:

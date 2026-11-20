@@ -9,6 +9,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import step_inputs
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.param_form import RowSpinBox
 from nsgeo_qgis.ui.processing_dock import (
     PREVIEW_SUFFIX,
     REFUSAL_COLOUR,
@@ -927,3 +928,111 @@ def test_difference_on_a_row_below_a_refusal_names_that_step(opened):
     dock.diff_button.setChecked(True)
     assert dock.refusal().index == 0
     assert "(step 1)" in dock.warnings.entries()[0].text
+
+
+def _stepped_line(qgis_app, tmp_path, data, load=True):
+    """A site with one line made of `data` (rows, traces), opened. Returns
+    (session, dock, key, line)."""
+    from tests.synthetic import write_dzt
+
+    session = SiteSession()
+    dock = ProcessingDock(session)
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = tmp_path / "raw" / "FILE__001.DZT"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_dzt(path, data)
+    line = Line.open(path, GridPlacement("A", "y", 0.0))
+    session.add_lines([line])
+    key = session.keys()[0]
+    if load:
+        session.set_profiles(key, line.load())
+    session.open_line(key)
+    return session, dock, key, line
+
+
+def _arrival_at(k, n=512, traces=40):
+    import numpy as np
+
+    data = np.zeros((n, traces), dtype=np.int32)
+    data[k:, :] = 1_000_000
+    return data
+
+
+def test_the_row_field_is_bounded_by_the_input(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    dock.list.setCurrentRow(0)
+    spin = dock.form.editors["sample"]
+    assert isinstance(spin, RowSpinBox)
+    assert spin.minimum() == 0 and spin.maximum() == 511
+
+
+def test_the_row_field_of_a_later_step_is_bounded_by_what_it_receives(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    session.append_step(key, build_step("time_zero", mode="sample", sample=1))
+    dock.list.setCurrentRow(1)
+    assert dock.form.editors["sample"].maximum() == 511 - 5
+
+
+def test_switching_to_sample_starts_at_the_first_break(qgis_app, tmp_path):
+    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, _arrival_at(37))
+    session.append_step(key, build_step("time_zero", mode="first_break"))
+    dock.list.setCurrentRow(0)
+    stack = session.stack_for(key)
+    before = stack.zero_ns()
+    dock.form.set_value("mode", "sample")
+    step = stack.entries[0][0]
+    assert step.params["mode"] == "sample" and step.params["sample"] == 37
+    assert stack.zero_ns() == before
+    assert dock.form.editors["sample"].value() == 37  # the field shows what was written
+    assert dock.form.values()["sample"] == 37
+
+
+def test_switching_to_sample_uses_the_steps_threshold(qgis_app, tmp_path):
+    import numpy as np
+
+    data = np.zeros((512, 40), dtype=np.int32)
+    data[30:, :] = 100_000  # a weak early arrival
+    data[60:, :] = 1_000_000
+    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, data)
+    session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.5))
+    dock.list.setCurrentRow(0)
+    dock.form.set_value("mode", "sample")
+    assert session.stack_for(key).entries[0][0].params["sample"] == 60
+
+
+def test_switching_to_sample_with_no_arrival_keeps_the_row_and_says_so(qgis_app, tmp_path):
+    import numpy as np
+
+    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, np.zeros((512, 40), dtype=np.int32))
+    session.append_step(key, build_step("time_zero", mode="first_break"))
+    dock.list.setCurrentRow(0)
+    dock.form.set_value("mode", "sample")
+    step = session.stack_for(key).entries[0][0]
+    assert step.params["mode"] == "sample" and step.params["sample"] == 0
+    assert dock.form.message.text().startswith("Couldn't find the first break")
+    assert "row 0" in dock.form.message.text()
+
+
+def test_an_edit_that_stays_in_sample_mode_is_not_reseeded(qgis_app, tmp_path):
+    session, dock, key, _ = _stepped_line(qgis_app, tmp_path, _arrival_at(37))
+    session.append_step(key, build_step("time_zero", mode="sample", sample=100))
+    dock.list.setCurrentRow(0)
+    spin = dock.form.editors["sample"]
+    spin.stepBy(1)
+    assert session.stack_for(key).entries[0][0].params["sample"] == 101
+
+
+def test_the_row_form_gets_its_bound_when_the_samples_arrive(qgis_app, tmp_path):
+    session, dock, key, line = _stepped_line(qgis_app, tmp_path, _arrival_at(37), load=False)
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    dock.list.setCurrentRow(0)
+    assert dock.form.editors["sample"].maximum() > 1_000_000
+    session.set_profiles(key, line.load())
+    assert dock.form.editors["sample"].maximum() == 511
+
+
+def test_time_zero_still_adds_without_a_dialog(opened):
+    assert not needs_dialog("time_zero")

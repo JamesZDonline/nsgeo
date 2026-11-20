@@ -28,6 +28,12 @@ def first_break_row(rg: Radargram, threshold: float = 0.2) -> int:
     return 0 if row is None else row
 
 
+def first_break_row_or_none(rg: Radargram, threshold: float = 0.2) -> int | None:
+    """`first_break_row`, but None when there is no signal, so a front end can
+    tell "row 0" from "nothing found"."""
+    return _first_break_or_none(rg, threshold)
+
+
 def _first_break_or_none(rg: Radargram, threshold: float) -> int | None:
     """`first_break_row`, but None when there is no signal: no row holds a
     finite sample, or every finite sample is zero."""
@@ -105,11 +111,12 @@ class TimeZero:
             ),
             ParamSpec(
                 name="sample",
-                kind="int",
+                kind="row",
                 label="Sample",
                 default=0,
                 min=0,
-                help="Used when mode is 'sample'.",
+                when=("mode", ("sample",)),
+                help="The row that becomes 0 ns. Drag its line on the profile, or type it.",
             ),
             ParamSpec(
                 name="threshold",
@@ -118,6 +125,7 @@ class TimeZero:
                 default=0.2,
                 min=0.0,
                 max=1.0,
+                when=("mode", ("first_break",)),
                 help="Fraction of the peak mean amplitude.",
             ),
         )

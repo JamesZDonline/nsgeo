@@ -8,7 +8,7 @@ from nsgeo.processing import REQUIRED, ParamSpec, build_step
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui import param_form as param_form_module
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
-from nsgeo_qgis.ui.param_form import ParamForm
+from nsgeo_qgis.ui.param_form import ParamForm, RowSpinBox
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt
@@ -32,7 +32,7 @@ def test_form_builds_editors_from_the_schema(qgis_app):
     f.set_step("time_zero")
     assert set(f.editors) == {"mode", "sample", "threshold"}
     assert isinstance(f.editors["mode"], QComboBox)
-    assert isinstance(f.editors["sample"], QLineEdit)
+    assert isinstance(f.editors["sample"], RowSpinBox)
     assert f.values() == {"mode": "first_break", "sample": 0, "threshold": 0.2}
 
 
@@ -98,10 +98,10 @@ def test_int_field_reports_a_clearer_message_for_a_non_integer_number(qgis_app):
     generic "is not a number" message for every failed `int()` call.
     """
     f = ParamForm()
-    f.set_step("time_zero")
+    f.set_step("trace_stack")
     errors = []
     f.error.connect(errors.append)
-    f.set_value("sample", "3.5")
+    f.set_value("window_traces", "3.5")
     f.commit()
     assert errors and "whole number" in errors[0].lower()
 
@@ -153,10 +153,10 @@ def test_non_finite_int_is_rejected_not_silently_accepted(qgis_app):
     check from `_parse_number`'s int branch.
     """
     f = ParamForm()
-    f.set_step("time_zero")
+    f.set_step("trace_stack")
     errors = []
     f.error.connect(errors.append)
-    f.set_value("sample", "inf")
+    f.set_value("window_traces", "inf")
     f.commit()
     assert errors and "finite" in errors[0].lower()
 
@@ -854,5 +854,82 @@ def test_the_wheel_steps_the_spinbox_only_when_it_has_focus(qgis_app):
     QApplication.sendEvent(spin, _wheel(spin))
     assert spin.value() == pytest.approx(end + HS350_DT, abs=1e-9)
     assert len(got) == 1
+    host.close()
+    host.deleteLater()
+
+
+def test_the_form_hides_fields_outside_the_mode(qgis_app):
+    form = ParamForm()
+    form.set_step("time_zero", {"mode": "first_break", "sample": 0, "threshold": 0.2})
+    assert form.editors["threshold"].isVisibleTo(form)
+    assert not form.editors["sample"].isVisibleTo(form)
+    form.set_value("mode", "sample")
+    assert form.editors["sample"].isVisibleTo(form)
+    assert not form.editors["threshold"].isVisibleTo(form)
+    assert set(form.values()) == {"mode", "sample", "threshold"}  # hidden values kept
+    form.set_step("gain_parametric", {"mode": "exponential", "alpha": 0.07, "exponent": 2.0})
+    assert form.editors["alpha"].isVisibleTo(form)
+    assert not form.editors["exponent"].isVisibleTo(form)
+    form.set_value("mode", "power")
+    assert form.editors["exponent"].isVisibleTo(form)
+    assert not form.editors["alpha"].isVisibleTo(form)
+    assert form.values() == {"mode": "power", "alpha": 0.07, "exponent": 2.0}
+
+
+def test_a_hidden_field_hides_its_label_too(qgis_app):
+    form = ParamForm()
+    form.set_step("time_zero", {"mode": "first_break", "sample": 0, "threshold": 0.2})
+    label = form._layout.labelForField(form.editors["sample"])
+    assert not label.isVisibleTo(form)
+    form.set_value("mode", "sample")
+    assert label.isVisibleTo(form)
+
+
+def test_the_row_field_is_a_bounded_whole_number_spinbox(qgis_app):
+    form = ParamForm()
+    got = []
+    form.committed.connect(got.append)
+    form.set_step("time_zero", {"mode": "sample", "sample": 5, "threshold": 0.2}, row_range=(0, 99))
+    spin = form.editors["sample"]
+    assert isinstance(spin, RowSpinBox)
+    assert (spin.minimum(), spin.maximum(), spin.value()) == (0, 99, 5)
+    spin.stepBy(1)  # an arrow step is a finished edit
+    assert got[-1]["sample"] == 6 and isinstance(got[-1]["sample"], int)
+    _type_and_commit(spin, "40")
+    assert got[-1]["sample"] == 40
+    _type_and_commit(spin, "500")  # clamps to the record, not refused
+    assert spin.value() == 99 and got[-1]["sample"] == 99
+
+
+def test_a_row_field_with_no_range_is_bounded_only_by_its_minimum(qgis_app):
+    form = ParamForm()
+    form.set_step("time_zero", {"mode": "sample", "sample": 5, "threshold": 0.2})
+    spin = form.editors["sample"]
+    assert spin.minimum() == 0 and spin.maximum() > 1_000_000
+    assert form.values()["sample"] == 5
+
+
+def test_the_row_wheel_is_ignored_without_focus(qgis_app):
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    form = ParamForm()
+    got = []
+    form.committed.connect(got.append)
+    form.set_step("time_zero", {"mode": "sample", "sample": 5, "threshold": 0.2}, row_range=(0, 99))
+    spin = form.editors["sample"]
+    other = QLineEdit()
+    lay.addWidget(form)
+    lay.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    other.setFocus()
+    got.clear()
+    ev = _wheel(spin)
+    QApplication.sendEvent(spin, ev)
+    assert not ev.isAccepted() and spin.value() == 5 and got == []
+    spin.setFocus()
+    QApplication.sendEvent(spin, _wheel(spin))
+    assert spin.value() == 6 and len(got) == 1
     host.close()
     host.deleteLater()

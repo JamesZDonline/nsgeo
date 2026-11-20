@@ -99,10 +99,12 @@ User-ordered processing steps. Nothing runs automatically.
 | `build_step` | The one way to construct a step; validates its parameters. |
 | `default_params` | Constructor parameters that have a real default. |
 | `first_break_ns` | The radar-clock time of a radargram's first break, by the Time zero step's own rule. |
+| `first_break_row_or_none` | The row of a radargram's first break by the Time zero step's own rule, or None when it has no signal. |
 | `get_step` | Look a step class up by name. |
 | `grouped_steps` | The registered steps by group, in menu order. |
 | `is_unipolar` | Whether a step's output has no negative side. |
 | `nyquist_mhz` | Nyquist frequency in MHz for a sample interval in ns. |
+| `param_visible` | Whether a parameter applies under the step's current mode (its `when`). |
 | `required_params` | Parameters that must be collected before a step can be built. |
 | `retime_ns` | A time on one clock, read on another: `t + (from_zero_ns - to_zero_ns)`. The one conversion rule between clocks. |
 | `sets_time_zero` | Whether a list of step dicts has an enabled Time zero step. |
