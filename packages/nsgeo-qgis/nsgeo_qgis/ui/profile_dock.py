@@ -139,8 +139,7 @@ SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
 LEFT_AXIS_KEY = "nsgeo/profile/leftAxis"
 RIGHT_AXIS_KEY = "nsgeo/profile/rightAxis"
 SLICE_BAND_TIP = (
-    "Show or hide the slice's depth window on the profile. "
-    "The window is kept while it's hidden."
+    "Show or hide the slice's depth window on the profile. The window is kept while it's hidden."
 )
 SLICE_BAND_GREYED_TIP = (
     "No slice depth window yet: the band appears once the Slices panel shows a slice."

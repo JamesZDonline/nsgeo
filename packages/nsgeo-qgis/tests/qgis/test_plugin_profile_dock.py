@@ -12,6 +12,7 @@ from nsgeo.render import PercentileClip, colormap_names, to_index8
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.ui import profile_dock
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import (
     PREVIEW_STEPS_REFUSED_TEXT,
@@ -20,7 +21,6 @@ from nsgeo_qgis.ui.profile_dock import (
     ProfileDock,
     velocity_source,
 )
-from nsgeo_qgis.ui import profile_dock
 from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
@@ -603,6 +603,10 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     that: with the toolbar back to its pre-M7 widget set, nothing in it
     moves when a preview starts, at the 900px width the author actually
     uses.
+
+    Re-pinned for spec section 4.1: the velocity label may now elide at
+    900px (the Slice band button takes room), so it is the label's full
+    text that is asserted, not its width.
     """
     session = SiteSession()
     dock = ProfileDock(session)
@@ -639,11 +643,8 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     assert dock.width() == 900, f"the width constraint did not take: {dock.width()}"
     before_fit = dock.fit_button.x()
     before_one_to_one = dock.one_to_one_button.x()
-    velocity_text_width = dock.velocity_label.fontMetrics().horizontalAdvance(
-        dock.velocity_label.text()
-    )
-    assert velocity_text_width > 0  # sanity: really populated, like production
-    assert dock.velocity_label.width() >= velocity_text_width  # not squeezed, even before
+    velocity_text = dock.velocity_label.text()
+    assert velocity_text  # sanity: really populated, like production
     assert "PREVIEW" not in dock.windowTitle()
 
     session.set_preview(keys[1], 5)
@@ -651,7 +652,7 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
 
     assert dock.fit_button.x() == before_fit
     assert dock.one_to_one_button.x() == before_one_to_one
-    assert dock.velocity_label.width() >= velocity_text_width  # still not squeezed
+    assert dock.velocity_label.text() == velocity_text  # the full text is kept
     # The cue spec §3.3 requires is visible -- not merely "a method was
     # called" -- and it is the actual, un-elided line name: the whole
     # point of moving it out of the toolbar row.
@@ -671,10 +672,13 @@ def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
     `setFixedWidth` version reached. The toolbar's widget set is now
     IDENTICAL to what it was before any of this episode:
     `difference_label` is back to a plain, unreserved `QLabel`, and there
-    is no preview label in the row at all any more."""
+    is no preview label in the row at all any more.
+
+    Re-pinned for spec section 4.1, which adds the Slice band button
+    (measured 766px here); the bound is now 800 and Task 2 tightens it."""
     session = SiteSession()
     dock = ProfileDock(session)
-    assert dock.minimumSizeHint().width() <= 700
+    assert dock.minimumSizeHint().width() <= 800
     dock.hide()
     dock.deleteLater()
 
@@ -2361,12 +2365,14 @@ def test_the_slice_band_button_hides_and_shows_the_band_keeping_its_window(opene
 def test_a_window_change_while_hidden_is_drawn_when_shown_again(opened):
     session, dock, key, line = opened
     dock.set_slice_band(18.0, 22.0)
+    shown = dock.view._slice_band
     dock.slice_band_button.setChecked(False)
     dock.set_slice_band(30.0, 34.0)
     assert dock.view._slice_band is None
     dock.slice_band_button.setChecked(True)
     lo, hi = dock.view._slice_band
-    assert hi - lo == pytest.approx(4.0)  # the new window, on the shown clock
+    assert hi - lo == pytest.approx(4.0)
+    assert lo - shown[0] == pytest.approx(12.0)  # the new window, on the shown clock
 
 
 def test_the_slice_band_choice_survives_a_new_dock(opened):
@@ -2388,6 +2394,27 @@ def test_the_slice_band_button_is_greyed_until_there_is_a_window(opened):
     dock.clear_slice_band()
     assert not dock.slice_band_button.isEnabled()
     assert not dock.slice_band_button.isChecked()  # greying keeps the choice
+
+
+def test_a_remembered_false_comes_back_unchecked(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "false")  # an INI file after a restart
+    other = ProfileDock(session)
+    try:
+        assert not other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+def test_a_bad_remembered_band_choice_is_overwritten_by_the_next_choice(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "maybe")
+    other = ProfileDock(session)
+    try:
+        other.slice_band_button.setChecked(False)
+        assert profile_dock.profile_settings().value(SLICE_BAND_KEY) in (False, "false")
+    finally:
+        other.deleteLater()
 
 
 def test_a_bad_remembered_band_choice_falls_back_to_shown(opened):
@@ -2426,11 +2453,14 @@ def plugin(fake_iface, answer_modal, tmp_path):
 
 def test_closing_the_slices_panel_leaves_the_band(plugin):
     plugin.slices_dock.window_changed.emit(18.0, 22.0)
+    first = plugin.profile_dock.view._slice_band
     plugin.slices_dock.close()
+    assert plugin.profile_dock.view._slice_band == pytest.approx(first)
     plugin.slices_dock.window_changed.emit(19.0, 23.0)
     band = plugin.profile_dock.view._slice_band
     assert band is not None
     assert band[1] - band[0] == pytest.approx(4.0)
+    assert band[0] - first[0] == pytest.approx(1.0)
 
 
 def _break_velocity(session, monkeypatch, exc):
