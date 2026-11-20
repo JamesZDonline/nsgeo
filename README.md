@@ -134,8 +134,8 @@ release's notes list everything in it.
   dialog with a Grid / GPS switch; GPS lines go into an existing grid or a
   new one fitted around their tracks, previewed on the map; files GPS cannot
   place are handed on to Grid mode with their offsets guessed; GPS lines in
-  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed, planned
-  in six tasks; the plan awaits review.
+  Edit lines, Move to grid and Fit to these tracks. Mock-up agreed; built
+  and reviewed, awaiting its walkthrough.
 
 ### Next, in order
 
