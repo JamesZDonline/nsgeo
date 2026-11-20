@@ -224,6 +224,10 @@ Grouped by area. The order within a group is not a priority.
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
+- **In the field:** a cut-down Android app for checking results on the GSSI
+  collection tablet while you can still collect more. It's an idea, not yet a
+  milestone; first find out whether anything can be installed on the tablet
+  and whether its DZT files can be reached ([#232]).
 
 [#8]: https://github.com/JamesZDonline/nsgeo/issues/8
 [#9]: https://github.com/JamesZDonline/nsgeo/issues/9
@@ -317,6 +321,7 @@ Grouped by area. The order within a group is not a priority.
 [#225]: https://github.com/JamesZDonline/nsgeo/pull/225
 [#230]: https://github.com/JamesZDonline/nsgeo/issues/230
 [#231]: https://github.com/JamesZDonline/nsgeo/issues/231
+[#232]: https://github.com/JamesZDonline/nsgeo/issues/232
 
 ## Why
 
