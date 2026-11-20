@@ -28,12 +28,15 @@ anything -- see its own docstring below.
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry import Grid
 from nsgeo.project import ProjectError
 from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -53,6 +56,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis.decimal_input import parse_decimal
+from nsgeo_qgis.gps_import import TapeGuess
 from nsgeo_qgis.lookup import (
     ImportOptions,
     ImportRow,
@@ -61,6 +65,7 @@ from nsgeo_qgis.lookup import (
     rows_to_lines,
 )
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.gps_import_dialog import FLAG_BG, FLAG_FG
 from nsgeo_qgis.ui.preset_box import PRESET_GONE, PresetBox
 
 (
@@ -110,6 +115,13 @@ HEADERS = [
 EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR}
 
 
+GUESS_BG, GUESS_FG = FLAG_BG, FLAG_FG  # Add data's GPS amber
+HAND_ON = (
+    "{n} GPS line(s) are in {gid}. GPS could not place {k} file(s): place them "
+    "by the tapes, or Cancel to leave them out."
+)
+HAND_ON_GUESSED = " Offsets and directions are guessed from the GPS lines either side of each one."
+
 NO_GRID = "This site has no grid yet. Add one with Add grid…, or place the lines by GPS."
 
 
@@ -140,8 +152,15 @@ class GridImportPage(QWidget):
         #: quietly going into whichever grid the combo fell back to.
         self._lost: str | None = None
         layout = QVBoxLayout(self)
+        #: The hand-on banner (amber), hidden until `hand_on`.
+        self.banner = QLabel("")
+        self.banner.setWordWrap(True)
+        self.banner.setStyleSheet(f"background: {GUESS_BG}; color: {GUESS_FG}; padding: 4px;")
+        self.banner.setVisible(False)
+        layout.addWidget(self.banner)
 
         form = QFormLayout()
+        self._form = form
         self.grid_combo = QComboBox()
         self._fill_grid_combo()
         if grid_id:
@@ -181,6 +200,7 @@ class GridImportPage(QWidget):
             self._direction_group.addButton(b)
             direction_row.addWidget(b)
         direction_row.addStretch(1)
+        self._direction_row = direction_row
         form.addRow("Direction", direction_row)
         label_row = QHBoxLayout()
         self.label_stem = QRadioButton("file name")
@@ -317,6 +337,61 @@ class GridImportPage(QWidget):
             return
         self.rows = [r for r in self.rows if r.path.resolve() in want]
         self.add_files([p for p in paths if Path(p).resolve() not in have])
+        self._replan()
+
+    def _show_placement_rows(self, shown: bool) -> None:
+        """Direction and First line at read nothing while the rows hold guesses."""
+        for field in (self.first_offset, self._direction_row):
+            label = self._form.labelForField(field)
+            if label is not None:
+                label.setVisible(shown)
+            if isinstance(field, QWidget):
+                field.setVisible(shown)
+            else:
+                for i in range(field.count()):
+                    item = field.itemAt(i)
+                    widget = None if item is None else item.widget()
+                    if widget is not None:
+                        widget.setVisible(shown)
+
+    def hand_on(
+        self,
+        paths: Sequence[Path],
+        grid_id: str,
+        guesses: Mapping[Path, TapeGuess],
+        *,
+        n_placed: int,
+    ) -> None:
+        """Show exactly `paths`, planned on `grid_id`, with each guess applied as
+        a hand edit (and its note) in amber; GPS could not place these files."""
+        self.rows = []
+        self.retarget(grid_id)
+        self._lost = None
+        axes = Counter(g.axis for g in guesses.values())
+        axis = axes.most_common(1)[0][0] if axes else None
+        if axis is not None:
+            index = self.axis_combo.findData(axis)
+            if index >= 0:
+                self.axis_combo.setCurrentIndex(index)
+        self.add_files([Path(p) for p in paths])
+        guessed = 0
+        for row in self.rows:
+            g = guesses.get(row.path)
+            if g is None or g.axis != axis:
+                continue
+            row.offset = g.offset
+            row.offset_edited = True
+            row.direction = 1 if g.direction >= 0 else -1
+            row.direction_edited = True
+            row.guess = g.note
+            guessed += 1
+        text = HAND_ON.format(n=n_placed, gid=grid_id, k=len(self.rows))
+        if guessed:
+            text += HAND_ON_GUESSED
+        self.banner.setText(text)
+        self.banner.setVisible(True)
+        self._show_placement_rows(False)
+        self.status.setText("")
         self._replan()
 
     def _follow_spacing(self, *_: Any) -> None:
@@ -485,6 +560,7 @@ class GridImportPage(QWidget):
     def set_offset(self, row: int, value: float) -> None:
         self.rows[row].offset = float(value)
         self.rows[row].offset_edited = True
+        self.rows[row].guess = ""
         self._replan()
 
     def set_direction(self, row: int, value: int) -> None:
@@ -496,6 +572,7 @@ class GridImportPage(QWidget):
         # triggers (fix round 1, Finding 2).
         self.rows[row].direction = 1 if value >= 0 else -1
         self.rows[row].direction_edited = True
+        self.rows[row].guess = ""
         self._replan()
 
     # ---- table ------------------------------------------------------------
@@ -531,12 +608,15 @@ class GridImportPage(QWidget):
                     COL_TRACES: "" if row.n_traces is None else str(row.n_traces),
                     COL_LENGTH: "" if row.length_m is None else f"{row.length_m:.2f}",
                     COL_SIDECAR: sidecar,
-                    COL_NOTE: row.note,
+                    COL_NOTE: "; ".join(t for t in (row.guess, row.note) if t),
                 }
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
                     if col not in EDITABLE:
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if row.guess and col in (COL_OFFSET, COL_DIR):
+                        item.setBackground(QBrush(QColor(GUESS_BG)))
+                        item.setForeground(QBrush(QColor(GUESS_FG)))
                     self.table.setItem(r, col, item)
             self.table.resizeColumnsToContents()
         finally:
@@ -677,6 +757,7 @@ class GridImportPage(QWidget):
             self.status.setText(str(exc))
             return False
         self.imported_keys = new_keys  # the lines are in the site whatever follows
+        self._show_placement_rows(True)
         self.messages = [(f"imported {len(new_keys)} line(s)", False)]
         try:
             if chosen is not None:

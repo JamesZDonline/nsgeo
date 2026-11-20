@@ -59,7 +59,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
-from nsgeo.geometry import Grid
+from nsgeo.geometry import Grid, fit_frame, measure_spacing
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
@@ -155,7 +155,7 @@ from nsgeo_qgis.ui.add_data_dialog import AddDataDialog, opening_mode
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
-from nsgeo_qgis.ui.grid_dialog import GridDialog
+from nsgeo_qgis.ui.grid_dialog import DEFAULT_SPACING, GridDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
@@ -2724,7 +2724,13 @@ class NsgeoPlugin:
             return False
 
     # ---- dialogs (provided by later tasks) --------------------------------
-    def open_grid_dialog(self, grid_id: str | None) -> None:
+    def open_grid_dialog(
+        self,
+        grid_id: str | None,
+        *,
+        proposed: Grid | None = None,
+        move_keys: Sequence[str] = (),
+    ) -> None:
         # Fix round 4, Finding 1 (critical): GridDialog must be
         # modeless. QDialog.exec()'s application-modal event loop
         # terminates the instant the dialog is hidden -- verified
@@ -2774,6 +2780,7 @@ class NsgeoPlugin:
             grid=grid,
             parent=self.iface.mainWindow(),
             canvas=self.iface.mapCanvas(),
+            proposed=proposed,
         )
         # Fix round 5, Finding 2: modeless means the toolbar stays
         # clickable while the dialog is open, so the site it was opened
@@ -2822,6 +2829,8 @@ class NsgeoPlugin:
                         try:
                             if grid is None:
                                 self.session.add_grid(new_grid)
+                                if move_keys:
+                                    self._moved_into(move_keys, new_grid.id)
                             else:
                                 new_grid = self._edited_grid_velocity(dialog, new_grid)
                                 report = self.session.replace_grid(new_grid)
@@ -3271,11 +3280,36 @@ class NsgeoPlugin:
         dialog.activateWindow()
 
     def fit_tracks(self, keys: list[str]) -> None:
-        """Fit a grid to GPS tracks, from the Survey panel. A slot; Task 6 builds it."""
+        """Fit a grid to GPS tracks, from the Survey panel: Add grid… filled in
+        with the fitted rectangle, and OK adds the grid and moves the lines
+        into it. A slot: it never raises."""
         try:
-            _log(f"Fit to these tracks asked for {len(keys)} line(s)", Qgis.MessageLevel.Info)
+            assert self.session is not None
+            crs = self.session.site_crs()
+            tracks = [self.session.line_for_key(k).trace_coords({}) for k in keys]
+            if crs is None or not tracks:
+                self.message("Fit a grid: the site has no CRS yet", Qgis.MessageLevel.Critical)
+                return
+            spacing = measure_spacing(tracks) or DEFAULT_SPACING
+            proposed = fit_frame(tracks, spacing).as_grid("_", crs, spacing)
+            self.open_grid_dialog(None, proposed=proposed, move_keys=keys)
         except Exception as exc:  # noqa: BLE001 -- a slot must never raise into Qt
-            _log(f"could not fit a grid to the tracks: {exc}", Qgis.MessageLevel.Critical)
+            self.message(f"could not fit a grid to the tracks: {exc}", Qgis.MessageLevel.Critical)
+
+    def _moved_into(self, keys: Sequence[str], grid_id: str) -> None:
+        """Move GPS lines into a grid just added and say so (Fit to these tracks)."""
+        try:
+            outcome = self.session.move_lines(keys, grid_id)
+        except Exception as exc:  # noqa: BLE001 -- finished() is a slot: never raise
+            self.message(
+                f"grid {grid_id} was added, but the lines could not be moved into it: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
+            return
+        text = f"moved {len(outcome.changed)} GPS line(s) into {grid_id}"
+        for s in outcome.skipped:
+            text += f"; {s.label} {s.reason}, so it was left as it is"
+        self.message(text, Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info)
 
     def move_lines(self, keys: list[str], grid_id: str) -> None:
         """Move lines to another grid, from the Survey panel's Move to grid.

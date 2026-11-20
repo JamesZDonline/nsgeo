@@ -306,3 +306,98 @@ def test_with_grid_reuses_measurements_it_is_given(tmp_path):
     grid = _grid_around(rows)
     _, outside = with_grid(rows, grid, measured=({ok: 7.5}, {ok: True}))
     assert outside == {ok: 7.5}
+
+
+# ---- the hand-on guess (M17b Task 6) -------------------------------------------
+import numpy as np  # noqa: E402
+from nsgeo_qgis.gps_import import TapeGuess, guess_tape_rows  # noqa: E402
+
+G0 = Grid("G", (0.0, 0.0), 0.0, 10.0, 20.0, CRS, 0.5)
+NAMES = [Path(f"FILE__{n}.DZT") for n in range(302, 312)]
+
+
+def _along_y(x, up=True):
+    ys = np.linspace(0, 20, 5)
+    return np.column_stack([np.full(5, x), ys if up else ys[::-1]])
+
+
+def _along_x(y, right=True):
+    xs = np.linspace(0, 10, 5)
+    return np.column_stack([xs if right else xs[::-1], np.full(5, y)])
+
+
+def _line_set(skip, make_line=_along_y):
+    """Ten files, offsets 0.25, 0.75, ..., zigzag; `skip` are the indices not placed."""
+    placed = {
+        p: make_line(0.25 + 0.5 * i, i % 2 == 0) for i, p in enumerate(NAMES) if i not in skip
+    }
+    return NAMES, placed
+
+
+def test_a_gap_between_two_placed_lines_gets_the_midpoint_and_a_zigzag_direction():
+    order, placed = _line_set({2})
+    guess = guess_tape_rows(order, placed, G0)
+    assert set(guess) == {NAMES[2]}
+    g = guess[NAMES[2]]
+    assert g == TapeGuess("y", pytest.approx(1.25), 1, "between FILE__303 and FILE__305")
+
+
+def test_two_leftovers_in_a_row_interpolate_by_file_position():
+    order, placed = _line_set({2, 3})
+    guess = guess_tape_rows(order, placed, G0)
+    assert guess[NAMES[2]].offset == pytest.approx(0.25 + 0.5 * 2)
+    assert guess[NAMES[3]].offset == pytest.approx(0.25 + 0.5 * 3)
+    assert [guess[NAMES[2]].direction, guess[NAMES[3]].direction] == [1, -1]
+
+
+def test_a_leftover_after_the_last_placed_line_gets_one_spacing_on():
+    order, placed = _line_set({9})
+    g = guess_tape_rows(order, placed, G0)[NAMES[9]]
+    assert g.offset == pytest.approx(0.25 + 0.5 * 8 + 0.5)
+    assert g.note == "1 spacing after FILE__310"
+    assert g.direction == -(1 if 8 % 2 == 0 else -1)
+
+
+def test_further_files_on_get_a_spacing_each_and_the_plural_note():
+    order, placed = _line_set({8, 9})
+    guess = guess_tape_rows(order, placed, G0)
+    assert guess[NAMES[9]].note == "2 spacings after FILE__309"
+    assert guess[NAMES[9]].offset == pytest.approx(0.25 + 0.5 * 7 + 1.0)
+
+
+def test_the_first_file_goes_one_spacing_before_and_opposite_its_follower():
+    order, placed = _line_set({0})
+    g = guess_tape_rows(order, placed, G0)[NAMES[0]]
+    assert g.note == "1 spacing before FILE__303"
+    assert g.offset == pytest.approx(0.25)  # the placed line at 0.75 minus one spacing
+    assert g.direction == 1  # file 303 runs down (-1)
+
+
+def test_one_placed_line_makes_the_end_guess_plus():
+    order = NAMES[:2]
+    placed = {NAMES[0]: _along_y(0.25)}
+    g = guess_tape_rows(order, placed, G0)[NAMES[1]]
+    assert g.offset == pytest.approx(0.75) and g.direction == -1
+
+
+def test_neighbours_at_45_degrees_give_no_guess():
+    diag = np.column_stack([np.linspace(0, 10, 5), np.linspace(0, 10, 5)])
+    order = NAMES[:3]
+    placed = {NAMES[0]: diag, NAMES[2]: diag + 1.0}
+    assert guess_tape_rows(order, placed, G0) == {}
+
+
+def test_lines_along_x_guess_axis_x_with_offsets_in_local_y():
+    order, placed = _line_set({4}, _along_x)
+    g = guess_tape_rows(order, placed, G0)[NAMES[4]]
+    assert g.axis == "x"
+    assert g.offset == pytest.approx(0.25 + 0.5 * 4)
+    assert g.direction == 1
+
+
+def test_a_leftover_after_an_unguessed_one_is_left_out_too():
+    diag = np.column_stack([np.linspace(0, 10, 5), np.linspace(0, 10, 5)])
+    order = NAMES[:4]
+    placed = {NAMES[0]: _along_y(0.25), NAMES[1]: diag}
+    # file 2 leans on a diagonal neighbour: no guess; file 3 follows file 2
+    assert guess_tape_rows(order, placed, G0) == {}

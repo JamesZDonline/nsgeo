@@ -72,6 +72,9 @@ class ImportRow:
     direction_edited: bool = False
     note: str = ""
     scale: float = 1.0
+    #: Non-empty: offset and direction are a guess (the hand-on from GPS) the
+    #: user has not changed since; the text says how it was made.
+    guess: str = ""
 
     @property
     def placeable(self) -> bool:

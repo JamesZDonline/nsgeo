@@ -467,3 +467,118 @@ def test_the_gps_page_opens_on_the_grid_the_dialog_was_opened_for(session):
     d.retarget("A")
     assert d.gps_page.target() == "A"
     d.reject()
+
+
+# ---- files GPS cannot place: the hand-on (M17b Task 6) ---------------------------
+from nsgeo_qgis.ui.import_dialog import COL_DIR, COL_NOTE, COL_OFFSET  # noqa: E402
+from qgis.PyQt.QtGui import QColor  # noqa: E402
+
+COS_LAT = 0.7036  # cos(45.2 deg)
+DLON = 0.5 / (M_PER_DEG * COS_LAT)  # half a metre east, in degrees of longitude
+AMBER = QColor("#fbf3df")
+
+
+def survey(folder, missing=(3, 6), n=10):
+    """`n` files one half-metre apart, due north; the files at `missing` have no DZG."""
+    paths = []
+    for i in range(n):
+        name = f"FILE__{i:03d}.DZT"
+        if i in missing:
+            paths.append(synthetic_dzt(folder, name, traces_per_metre=10.0))
+        else:
+            track = [
+                (t, LAT0 + t * 0.1 / M_PER_DEG, LON0 + i * DLON, 4) for t in (25, 75, 125, 175)
+            ]
+            paths.append(synthetic_gps_dzt(folder, name, track, traces_per_metre=10.0))
+    return paths
+
+
+def cell(page, r, col):
+    return page.table.item(r, col)
+
+
+def handed_on_dialog(session, tmp_path):
+    batches: list[list] = []
+    d = AddDataDialog(session, mode=GPS)
+    d.imported.connect(batches.append)
+    d.add_files(survey(tmp_path / "raw"))
+    d.gps_page.target_combo.setCurrentIndex(0)  # New grid
+    d.gps_page.name_edit.setText("G4")
+    return d, batches
+
+
+def test_files_gps_cannot_place_are_handed_on_to_grid_mode_with_a_guess(session, tmp_path):
+    d, batches = handed_on_dialog(session, tmp_path)
+    d.accept()
+    assert len(session.site.lines) == 8
+    assert d.result() == 0  # not accepted: the dialog stays open
+    assert d.mode() == GRID
+    page = d.grid_page
+    assert page.grid_combo.currentData() == "G4"
+    assert [r.path.name for r in page.rows] == ["FILE__003.DZT", "FILE__006.DZT"]
+    assert [round(r.offset, 1) for r in page.rows] == [1.8, 3.3]
+    assert [r.direction for r in page.rows] == [-1, -1]
+    for r in range(2):
+        for col in (COL_OFFSET, COL_DIR):
+            assert cell(page, r, col).background().color() == AMBER
+    assert cell(page, 0, COL_NOTE).text() == "between FILE__002 and FILE__004"
+    assert cell(page, 1, COL_NOTE).text() == "between FILE__005 and FILE__007"
+    assert page.banner.isVisibleTo(d)
+    assert page.banner.text() == (
+        "8 GPS line(s) are in G4. GPS could not place 2 file(s): place them by the tapes, "
+        "or Cancel to leave them out. Offsets and directions are guessed from the GPS lines "
+        "either side of each one."
+    )
+    assert not page.first_offset.isVisibleTo(d)
+    assert not page.direction_alternate.isVisibleTo(d)
+    texts = [t for t, _ in batches[0]]
+    assert texts[0].startswith("imported 8 GPS line(s) into new grid G4")
+    assert not any("not imported" in t for t in texts)
+    assert d.import_button.text() == "Import 2 line(s) into G4"
+
+
+def test_importing_the_handed_on_files_adds_tape_lines_and_closes(session, tmp_path):
+    d, batches = handed_on_dialog(session, tmp_path)
+    d.accept()
+    d.accept()
+    lines = session.site.lines
+    assert len(lines) == 10
+    tape = [ln for ln in lines if isinstance(ln.placement, GridPlacement)]
+    assert len(tape) == 2 and {ln.placement.grid_id for ln in tape} == {"G4"}
+    assert d.result() == 1  # accepted
+    assert len(batches) == 2
+
+
+def test_cancel_after_the_hand_on_leaves_the_gps_lines_and_adds_nothing(session, tmp_path):
+    d, _ = handed_on_dialog(session, tmp_path)
+    d.accept()
+    d.reject()
+    assert len(session.site.lines) == 8
+    assert not any(isinstance(ln.placement, GridPlacement) for ln in session.site.lines)
+
+
+def test_editing_a_guessed_offset_clears_its_amber_and_note(session, tmp_path):
+    d, _ = handed_on_dialog(session, tmp_path)
+    d.accept()
+    page = d.grid_page
+    page.set_offset(0, 2.0)
+    assert cell(page, 0, COL_OFFSET).background().color() != AMBER
+    assert cell(page, 0, COL_NOTE).text() == ""
+    assert cell(page, 1, COL_NOTE).text() != ""
+
+
+def test_an_already_in_the_site_refusal_is_not_handed_on(session, tmp_path):
+    raw = tmp_path / "raw"
+    paths = survey(raw, missing=())
+    d = AddDataDialog(session, mode=GPS)
+    d.add_files(paths)
+    d.gps_page.name_edit.setText("G4")
+    d.accept()
+    assert d.result() == 1
+    (extra,) = survey(tmp_path / "more", missing=(), n=1)
+    d2 = AddDataDialog(session, mode=GPS)
+    d2.add_files([paths[0], extra])
+    d2.gps_page.target_combo.setCurrentIndex(d2.gps_page.target_combo.findData("G4"))
+    d2.accept()
+    assert len(session.site.lines) == 11
+    assert d2.result() == 1 and d2.mode() == GPS  # closed as before: nothing to hand on

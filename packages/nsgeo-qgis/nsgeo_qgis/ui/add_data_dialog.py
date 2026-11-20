@@ -41,7 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.gps_import import count_with_gps
+from nsgeo_qgis.gps_import import count_with_gps, guess_tape_rows
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import GpsImportPage
 from nsgeo_qgis.ui.grid_overlay import GridOverlay
@@ -161,14 +161,16 @@ class AddDataDialog(QDialog):
         except Exception as exc:  # noqa: BLE001 -- a slot (clicked)
             self._page().status.setText(f"could not switch: {exc}")
 
-    def set_mode(self, mode: str) -> None:
-        """Show the page for `mode`, carrying the file list across."""
+    def set_mode(self, mode: str, *, carry: bool = True) -> None:
+        """Show the page for `mode`, carrying the file list across (unless
+        `carry` is False: the hand-on gives the Grid page its own files)."""
         if mode not in (GRID, GPS):
             raise ValueError(f"unknown mode {mode!r}")
         if mode != self._mode:
             src = self._page()
             self._mode = mode
-            self._page().set_files(src.paths())
+            if carry:
+                self._page().set_files(src.paths())
         self._show_mode()
 
     def _show_mode(self) -> None:
@@ -271,7 +273,27 @@ class AddDataDialog(QDialog):
                 return
             QgsSettings().setValue(MODE_KEY, self._mode)
             self.imported.emit(list(page.messages))
+            if self._mode == GPS and self._hand_on():
+                return
         except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
             page.status.setText(f"could not import: {exc}")
             return
         super().accept()
+
+    def _hand_on(self) -> bool:
+        """After a GPS import that left files GPS cannot place: stay open, on
+        the Grid page, with only those files and a guess for each. False when
+        nothing was left over (the dialog closes as usual)."""
+        result = self.gps_page.last_import
+        if result is None or not result.leftovers:
+            return False
+        grid = self.session.grid(result.grid_id)
+        guesses = guess_tape_rows(result.order, result.placed, grid)
+        self.gps_page.set_files([])
+        self.set_mode(GRID, carry=False)
+        self.grid_page.hand_on(
+            result.leftovers, result.grid_id, guesses, n_placed=len(result.placed)
+        )
+        self._gps_key = None
+        self._page_changed()
+        return True

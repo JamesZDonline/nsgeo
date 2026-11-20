@@ -373,7 +373,7 @@ def test_import_adds_gps_lines_sets_the_site_crs_and_applies_the_shift(plugin, t
     assert plugin._add_data_dialog is None  # finished() ran
 
 
-def test_import_reports_refused_files_last(plugin, tmp_path):
+def test_import_leaves_files_it_hands_on_out_of_the_summary(plugin, tmp_path):
     shown: list[str] = []
     plugin.message = lambda text, level=None, title="nsgeo": shown.append(text)  # type: ignore[method-assign]
     raw = tmp_path / "raw"
@@ -384,7 +384,9 @@ def test_import_reports_refused_files_last(plugin, tmp_path):
     dialog.accept()
     assert len(plugin.session.site.lines) == 1
     assert shown[0] == "imported 1 GPS line(s) into new grid G1 (0.5 × 19.9 m, spacing 0.50 m)"
-    assert shown[-1] == "not imported: FILE__002.DZT (no DZG beside it)"
+    assert not any(t.startswith("not imported") for t in shown)  # FILE__002 is handed on
+    assert dialog.mode() == "grid"
+    assert [r.path.name for r in dialog.grid_page.rows] == ["FILE__002.DZT"]
 
 
 def test_an_import_into_a_site_with_grids_uses_their_crs(plugin, tmp_path, project_degrees):

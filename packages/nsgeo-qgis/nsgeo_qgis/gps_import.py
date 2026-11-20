@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from nsgeo.geometry import END_LIMIT_M, Bridge, Grid, ToXY, metres_outside, track_from_log
+from nsgeo.geometry import (
+    ALONG_DEG,
+    END_LIMIT_M,
+    Bridge,
+    Grid,
+    ToXY,
+    metres_outside,
+    track_from_log,
+)
 from nsgeo.io import (
     RTK_FIXED,
     DzgError,
@@ -257,3 +265,113 @@ def count_with_gps(paths: Sequence[Path]) -> int:
     """How many of the DZT files in `paths` have a DZG beside them that holds
     at least one RTK fix with a position (the Add data dialog's GPS note)."""
     return sum(1 for p in paths if first_fixed_lonlat(p) is not None)
+
+
+@dataclass(frozen=True)
+class TapeGuess:
+    """A leftover file's offset and direction on one grid axis, guessed from the
+    GPS lines either side of it in file order, and the note that says how."""
+
+    axis: str
+    offset: float
+    direction: int
+    note: str
+
+
+@dataclass(frozen=True)
+class _Placed:
+    axis: str | None  # the grid axis the line runs within ALONG_DEG of, if any
+    offset: float  # mean local cross coordinate
+    direction: int  # sign of the local along change
+
+
+def _placed_line(coords: np.ndarray, grid: Grid) -> _Placed:
+    local = grid.to_local(np.asarray(coords, dtype=float))
+    step = local[-1] - local[0]
+    dev_y = math.degrees(math.atan2(abs(step[0]), abs(step[1])))
+    if dev_y <= ALONG_DEG:
+        axis: str | None = "y"
+    elif 90.0 - dev_y <= ALONG_DEG:
+        axis = "x"
+    else:
+        axis = None
+    if axis == "x":
+        return _Placed(axis, float(local[:, 1].mean()), 1 if step[0] >= 0 else -1)
+    return _Placed(axis, float(local[:, 0].mean()), 1 if step[1] >= 0 else -1)
+
+
+def _spacings(k: int) -> str:
+    return f"{k} spacing" if k == 1 else f"{k} spacings"
+
+
+def guess_tape_rows(
+    order: Sequence[Path], placed: Mapping[Path, np.ndarray], grid: Grid
+) -> dict[Path, TapeGuess]:
+    """A tape guess for each path in `order` that is not in `placed`.
+
+    The offset is interpolated by file position between the nearest placed
+    lines before and after; at an end, one `grid.default_spacing` per file
+    further on, away from the placed line before it (or `+` with only one
+    placed line; mirrored at the start). The direction is opposite the line
+    before it in file order, placed or guessed, or opposite the line after it
+    for the first file. A file is left out unless every neighbour used runs
+    within ALONG_DEG of the same grid axis."""
+    paths = list(order)
+    info = {i: _placed_line(placed[p], grid) for i, p in enumerate(paths) if p in placed}
+    idx = sorted(info)
+    if not idx:
+        return {}
+    spacing = grid.default_spacing
+    # offsets and the neighbours each leftover leans on
+    guesses: dict[int, tuple[str, float, str]] = {}
+    for i in range(len(paths)):
+        if i in info:
+            continue
+        before = [j for j in idx if j < i]
+        after = [j for j in idx if j > i]
+        if before and after:
+            a, b = before[-1], after[0]
+            used = [info[a], info[b]]
+            t = (i - a) / (b - a)
+            offset = info[a].offset + (info[b].offset - info[a].offset) * t
+            note = f"between {paths[a].stem} and {paths[b].stem}"
+        elif before:
+            a = before[-1]
+            used = [info[a]]
+            sign = 1.0
+            if len(before) > 1:
+                used.append(info[before[-2]])
+                d = info[a].offset - info[before[-2]].offset
+                sign = -1.0 if d < 0 else 1.0
+            offset = info[a].offset + sign * spacing * (i - a)
+            note = f"{_spacings(i - a)} after {paths[a].stem}"
+        else:
+            b = after[0]
+            used = [info[b]]
+            sign = -1.0
+            if len(after) > 1:
+                used.append(info[after[1]])
+                d = info[after[1]].offset - info[b].offset
+                sign = 1.0 if d < 0 else -1.0
+            offset = info[b].offset + sign * spacing * (b - i)
+            note = f"{_spacings(b - i)} before {paths[b].stem}"
+        axes = {u.axis for u in used}
+        if len(axes) != 1 or None in axes:
+            continue
+        guesses[i] = (axes.pop() or "y", offset, note)
+    # directions: zigzag from the placed lines, forwards then backwards
+    direction: dict[int, int] = {i: v.direction for i, v in info.items()}
+    for i in range(len(paths)):
+        if i in direction:
+            continue
+        if i - 1 in direction and i > idx[0]:
+            direction[i] = -direction[i - 1]
+    for i in range(idx[0] - 1, -1, -1):
+        direction[i] = -direction[i + 1]
+    out: dict[Path, TapeGuess] = {}
+    for i, (axis, offset, note) in guesses.items():
+        # a neighbour before it that is a leftover without a guess breaks the chain
+        if i > idx[0] and i - 1 not in info and i - 1 not in guesses:
+            continue
+        out[paths[i]] = TapeGuess(axis, offset, direction[i], note)
+    return out

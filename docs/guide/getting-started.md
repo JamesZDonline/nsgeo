@@ -441,6 +441,17 @@ again.
    line(s) into new grid North**. A new grid is made and the lines are added in
    one step; if adding the lines fails, the new grid is taken away again.
 
+Files GPS cannot place (no DZG beside them, or no RTK-fixed position) are not
+dropped. After the GPS lines go in, the dialog stays open, switched to **Grid**
+on the same grid, holding only those files. Each one's **Offset** and **Dir**
+are guessed from the GPS lines either side of it in file order and shown in
+amber, with a note in the **Note** column (for example *between FILE__003 and
+FILE__005*); **Direction** and **First line at** are hidden while they stand.
+Check them against your tapes and change any that are wrong (a changed cell
+stops being amber), then click **Import** to place them by the tapes, or
+**Cancel** to leave them out; the GPS lines stay either way. No guess is made
+when the lines either side do not run along one of the grid's axes.
+
 The lines are drawn along the walk, in their grid's colour, so the turns at
 the line ends show. Only RTK-fixed positions place a line. Past the first and
 last of them, the line carries on in a straight line by the wheel. If the log
@@ -460,6 +471,14 @@ RTK and away from lifts of the cart until true-distance profiles arrive.
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
 cannot yet measure the destagger from GPS lines; that comes with GPS areas.
+
+To put lines that have no grid (or the wrong one) into a grid fitted around
+them, select only GPS lines in **nsgeo Survey**, right-click, and choose **Fit
+a grid to these tracks…** (or **Fit a grid to this track…** for one line). **Add
+grid** opens with the fitted rectangle and spacing filled in and the **Id**
+blank. Type an Id and click OK: the grid is added and the lines move into it,
+their tracks unchanged. With one line there is no spacing to measure, so the
+dialog starts from its usual spacing.
 
 A line is placed either by tapes or by GPS, not both. To switch a tape-placed
 line to its GPS track, remove it and import it again with **Place lines by:

@@ -697,11 +697,23 @@ class GpsImportPage(QWidget):
                 f"new grid {target_id} ({new_grid.size_x:.1f} × {new_grid.size_y:.1f} m, "
                 f"spacing {new_grid.default_spacing:.2f} m)"
             )
+        leftovers = [
+            r.path
+            for r in self.rows
+            if r.refusal is not None
+            and r.refusal != ALREADY_IN_SITE
+            and r.refusal != OUTSIDE.format(gid=target_id)
+        ]
         self.messages = [
             (t, i > 0)
             for i, t in enumerate(
                 import_messages(
-                    self.rows, len(lines), into=into, gid=target_id, outside=self._outside
+                    self.rows,
+                    len(lines),
+                    into=into,
+                    gid=target_id,
+                    outside=self._outside,
+                    handed_on=leftovers,
                 )
             )
         ]
@@ -709,13 +721,7 @@ class GpsImportPage(QWidget):
             grid_id=target_id,
             order=list(self._paths),
             placed={ln.path: ln.trace_coords({}) for ln in lines},
-            leftovers=[
-                r.path
-                for r in self.rows
-                if r.refusal is not None
-                and r.refusal != ALREADY_IN_SITE
-                and r.refusal != OUTSIDE.format(gid=target_id)
-            ],
+            leftovers=leftovers,
         )
         try:
             if chosen is not None:

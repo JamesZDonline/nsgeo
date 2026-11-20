@@ -80,6 +80,11 @@ VELOCITY_UNSET = "from line headers"
 MIN_MEASURED_SIZE = 0.1
 
 
+#: The Spacing box's starting value (also what Fit to these tracks proposes
+#: when the tracks give nothing to measure one from).
+DEFAULT_SPACING = 0.5
+
+
 def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) -> QDoubleSpinBox:
     s = QDoubleSpinBox()
     s.setRange(lo, hi)
@@ -152,6 +157,8 @@ class GridDialog(QDialog):
         grid: Grid | None = None,
         parent: QWidget | None = None,
         canvas: QgsMapCanvas | None = None,
+        *,
+        proposed: Grid | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
@@ -214,7 +221,7 @@ class GridDialog(QDialog):
         self.azimuth.setWrapping(True)
         self.size_x = _spin(0.0, 1e5, 2, 0.5, 10.0)
         self.size_y = _spin(0.0, 1e5, 2, 0.5, 10.0)
-        self.spacing = _spin(0.01, 100.0, 3, 0.05, 0.5)
+        self.spacing = _spin(0.01, 100.0, 3, 0.05, DEFAULT_SPACING)
         # Optional (#4): 0 is "unset", and each line then falls back on its
         # own header dielectric -- resolve_velocity's last tier.
         self.velocity = _spin(0.0, 0.3, 4, 0.001)
@@ -308,6 +315,9 @@ class GridDialog(QDialog):
             self._write_crs(project_crs)
         if grid is not None:
             self._prefill(grid)
+            self._typed = [True, True]
+        elif proposed is not None:
+            self._prefill(proposed, keep_id=False)
             self._typed = [True, True]
         else:
             self._settle_crs_at_open()
@@ -1040,9 +1050,14 @@ class GridDialog(QDialog):
         self.use_measured_button.setVisible(show)
 
     # ---- result -----------------------------------------------------------
-    def _prefill(self, grid: Grid) -> None:
-        self.id_edit.setText(grid.id)
-        self.id_edit.setEnabled(False)  # lines reference the id; renaming is a different feature
+    def _prefill(self, grid: Grid, *, keep_id: bool = True) -> None:
+        """Fill the form from `grid`. An existing grid keeps its Id (disabled);
+        a proposed one (Fit to these tracks) leaves the Id empty and editable."""
+        if keep_id:
+            self.id_edit.setText(grid.id)
+            self.id_edit.setEnabled(
+                False
+            )  # lines reference the id; renaming is a different feature
         self._write_crs(QgsCoordinateReferenceSystem(grid.crs))
         self._write_numbers(self.crs_widget.crs(), grid.origin[0], grid.origin[1], grid.azimuth)
         self.size_x.setValue(grid.size_x)
