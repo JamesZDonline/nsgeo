@@ -26,7 +26,7 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
-from nsgeo_qgis.line_edit import LineEdit
+from nsgeo_qgis.line_edit import LineEdit, TrackEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -43,7 +43,18 @@ from nsgeo_qgis.slices_plan import (
     limit_windows,
     transform_names,
 )
-from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
+from plugin_testing import (
+    CRS,
+    LAT0,
+    LON0,
+    M_PER_DEG,
+    REAL_DZT,
+    needs_real_data,
+    open_gps,
+    spin_until,
+    synthetic_dzt,
+    synthetic_gps_dzt,
+)
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
@@ -1705,6 +1716,50 @@ def test_a_label_only_edit_does_not_re_prepare(sourced):
     assert engine.wait_for_preparation(2_000)
     assert len(prepared) == count
     assert errors == []
+
+
+def test_a_label_only_edit_to_a_gps_line_does_not_re_prepare(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    session.add_grid(Grid("G", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.5))
+    paths = [
+        synthetic_gps_dzt(
+            tmp_path / "raw",
+            f"FILE__00{i + 1}.DZT",
+            [(t, LAT0 + t * 0.1 / M_PER_DEG, LON0 + i * 0.5 / M_PER_DEG, 4) for t in (25, 175)],
+            n_traces=200,
+            traces_per_metre=10.0,
+        )
+        for i in range(2)
+    ]
+    session.add_lines([open_gps(p, grid_id="G") for p in paths])
+    session.site.presets["p"] = list(PRESET)
+    errors: list[str] = []
+    prepared: list[int] = []
+    engine = SliceEngine(
+        session, on_prepared=lambda: prepared.append(1), on_error=lambda m: errors.append(m)
+    )
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="G",
+                preset="p",
+                transform="amp_envelope",
+                line_keys=tuple(session.keys()),
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        count = len(prepared)
+        key = session.keys()[0]
+        session.edit_lines([TrackEdit(key, session.line_for_key(key).placement, label="the wall")])
+        assert session.line_for_key(key).placement.label == "the wall"
+        assert not engine.is_running
+        assert engine.wait_for_preparation(2_000)
+        assert len(prepared) == count
+        assert errors == []
+    finally:
+        engine.dispose()
 
 
 def test_a_line_moved_to_another_grid_leaves_the_source(sourced):

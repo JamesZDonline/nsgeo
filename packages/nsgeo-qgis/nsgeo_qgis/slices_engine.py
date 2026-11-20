@@ -132,7 +132,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
-from nsgeo.geometry import GridPlacement
+from nsgeo.geometry import GridPlacement, TrackPlacement
 from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
@@ -1197,7 +1197,7 @@ class SliceEngine(QObject):
     def _without_label(placement: Any) -> Any:
         """A placement as geometry only: the label names a line and never
         moves it, so a label-only edit must not re-prepare (line editing spec §4.5)."""
-        if isinstance(placement, GridPlacement):
+        if isinstance(placement, (GridPlacement, TrackPlacement)):
             return dataclasses.replace(placement, label=None)
         return placement
 

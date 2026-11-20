@@ -778,7 +778,7 @@ def test_the_context_menu_offers_the_right_actions_for_each_kind_of_item(
     assert _texts(_right_click(dock, grid_item)) == [
         "Edit grid…",
         "Edit lines…",
-        "Import DZT files…",
+        "Add GPR data…",
         "Set velocity…",
         "Remove grid",
     ]
@@ -828,7 +828,7 @@ def test_every_context_menu_action_is_wired_to_the_slot_it_names(dock, answer_mo
 
     _action(_right_click(dock, root), "Add grid…").trigger()
     menu = _right_click(dock, grid_item)
-    for text in ("Edit grid…", "Import DZT files…", "Set velocity…", "Remove grid"):
+    for text in ("Edit grid…", "Add GPR data…", "Set velocity…", "Remove grid"):
         _action(menu, text).trigger()
     menu = _right_click(dock, line_item)
     for text in ("Open", "Set velocity override…", "Remove line from site"):
@@ -1701,7 +1701,7 @@ def test_a_gps_line_sits_under_the_site_when_it_names_no_grid(gps_dock):
     assert [dock.key_of(root.child(i)) for i in range(root.childCount())] == KEYS
 
 
-def test_a_gps_line_menu_offers_destagger_not_edit_or_move(gps_dock, answer_modal, message_log):
+def test_a_gps_line_menu_offers_destagger_move_and_fit(gps_dock, answer_modal, message_log):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     menu = _right_click(dock, dock.item_for_key(KEYS[0]))
@@ -1709,18 +1709,67 @@ def test_a_gps_line_menu_offers_destagger_not_edit_or_move(gps_dock, answer_moda
         "Open",
         "Set velocity override…",
         "Set destagger…",
+        "Move to grid",
+        "Fit a grid to this track…",
         "Remove line from site",
     ]
     assert menu.actions()[-2].isSeparator()
-    assert menu.findChildren(QMenu) == []  # no Move to grid submenu either
     fired = []
     dock.destagger_requested.connect(fired.append)
     _action(menu, "Set destagger…").trigger()
     assert fired == [[KEYS[0]]]
+    fits = []
+    dock.fit_tracks_requested.connect(fits.append)
+    _action(menu, "Fit a grid to this track…").trigger()
+    assert fits == [[KEYS[0]]]
     assert message_log == []
 
 
-def test_a_gps_only_selection_offers_destagger_for_all(gps_dock, answer_modal, message_log):
+def test_move_to_grid_is_greyed_on_a_site_with_no_grid_and_wakes_with_one(
+    gps_dock, answer_modal, tmp_path
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert not _action(menu, "Move to grid").isEnabled()
+    _add_tape_line(session, tmp_path)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(menu, "Move to grid").isEnabled()
+
+
+def test_a_gps_line_in_a_grid_sits_under_that_grids_item(gps_dock, tmp_path):
+    from plugin_testing import CRS
+
+    session, dock = gps_dock
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    session.move_lines([KEYS[0]], "A")
+    assert session.line_for_key(KEYS[0]).placement.grid_id == "A"
+    grid_item = _grid_item(dock, "A")
+    under = [dock.key_of(grid_item.child(i)) for i in range(grid_item.childCount())]
+    assert KEYS[0] in under
+    root = dock.tree.topLevelItem(0)
+    loose = [dock.key_of(root.child(i)) for i in range(root.childCount())]
+    assert KEYS[0] not in loose
+
+
+def test_moving_a_gps_line_from_its_menu_goes_through_move_lines(
+    gps_dock, answer_modal, tmp_path, message_log
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    _add_tape_line(session, tmp_path)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    sub = _action(menu, "Move to grid").menu()
+    # A line in no grid is "on" none: every grid is offered.
+    assert [(a.text(), a.isEnabled()) for a in sub.actions()] == [("A", True)]
+    moves = []
+    dock.move_lines_requested.connect(lambda k, g: moves.append((k, g)))
+    sub.actions()[0].trigger()
+    assert moves == [([KEYS[0]], "A")]
+    assert message_log == []
+
+
+def test_a_gps_only_selection_offers_destagger_move_and_fit(gps_dock, answer_modal, message_log):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
@@ -1728,17 +1777,24 @@ def test_a_gps_only_selection_offers_destagger_for_all(gps_dock, answer_modal, m
     menu = _right_click(dock, first)
     assert _texts_before_bulk(menu) == [
         "Set destagger for 2 GPS lines…",
+        "Move 2 lines to grid",
+        "Fit a grid to these 2 tracks…",
         "Remove 2 lines from site",
     ]
-    assert menu.actions()[1].isSeparator()
-    fired = []
+    assert menu.actions()[3].isSeparator()
+    fired, fits = [], []
     dock.destagger_requested.connect(fired.append)
+    dock.fit_tracks_requested.connect(fits.append)
     _action(menu, "Set destagger for 2 GPS lines…").trigger()
+    _action(menu, "Fit a grid to these 2 tracks…").trigger()
     assert fired == [[KEYS[0], KEYS[1]]]
+    assert fits == [[KEYS[0], KEYS[1]]]
     assert message_log == []
 
 
-def test_a_mixed_selection_offers_only_removal(gps_dock, tmp_path, answer_modal, message_log):
+def test_a_mixed_selection_in_no_one_grid_offers_move_and_removal(
+    gps_dock, tmp_path, answer_modal, message_log
+):
     session, dock = gps_dock
     answer_modal(QMenu, "exec", None)
     tape = _add_tape_line(session, tmp_path)
@@ -1746,7 +1802,32 @@ def test_a_mixed_selection_offers_only_removal(gps_dock, tmp_path, answer_modal,
     _unfold(second)
     _select(dock, first, second)
     menu = _right_click(dock, first)
-    assert _texts_before_bulk(menu) == ["Remove 2 lines from site"]
+    assert _texts_before_bulk(menu) == ["Move 2 lines to grid", "Remove 2 lines from site"]
+    assert message_log == []
+
+
+def test_a_mixed_selection_on_one_grid_offers_edit_and_move(
+    gps_dock, tmp_path, answer_modal, message_log
+):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    from plugin_testing import CRS
+
+    # one grid in the site's CRS (a GPS line only joins a grid in its own CRS)
+    session.add_grid(Grid("S", (0.0, 0.0), 0.0, 10.0, 10.0, CRS, 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+    session.add_lines([Line.open(p, GridPlacement("S", "y", 0.0, 0.0, 1, p.stem))])
+    tape = "raw/FILE__009.DZT"
+    session.move_lines([KEYS[0]], "S")
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(tape)
+    _unfold(first)
+    _select(dock, first, second)
+    menu = _right_click(dock, first)
+    assert _texts_before_bulk(menu) == [
+        "Edit 2 lines…",
+        "Move 2 lines to grid",
+        "Remove 2 lines from site",
+    ]
     assert message_log == []
 
 
@@ -1909,6 +1990,8 @@ def test_the_bulk_items_follow_gps_and_mixed_selections(gps_dock, answer_modal, 
     menu = _selected_menu(dock, KEYS[:2])
     assert _texts(menu) == [
         "Set destagger for 2 GPS lines…",
+        "Move 2 lines to grid",
+        "Fit a grid to these 2 tracks…",
         "Apply preset to 2 lines",
         "Apply steps from the open line…",
         "Set velocity for 2 lines…",
@@ -1918,6 +2001,7 @@ def test_the_bulk_items_follow_gps_and_mixed_selections(gps_dock, answer_modal, 
     _add_tape_line(session, tmp_path)
     menu = _selected_menu(dock, [KEYS[0], "raw/FILE__009.DZT"])
     assert _texts(menu) == [
+        "Move 2 lines to grid",
         "Apply preset to 2 lines",
         "Apply steps from the open line…",
         "Set velocity for 2 lines…",

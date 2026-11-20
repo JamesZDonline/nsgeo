@@ -70,6 +70,13 @@ Coordinate frames and trace placement.
 | `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
 | `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
 | `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
+| `ALONG_DEG` | 20 degrees: a line within this of the main direction runs along it. |
+| `MIN_VOTE_M` | 1 m: a line whose first-to-last chord is shorter does not vote for the main direction. |
+| `TrackFrame` | A fitted grid rectangle (origin, azimuth, `size_x`, `size_y`, `lined_up`); `as_grid(id, crs, spacing)` makes the `Grid`. |
+| `fit_frame` | The rectangle around tracks: lined up with their main direction, half a spacing outside the outer lines or further to hold every trace, else the smallest rectangle around every trace. Raises `ValueError` for no tracks, a track with no finite point or a non-positive spacing. |
+| `main_direction` | The axial azimuth in [0, 180) the tracks share (length-weighted, lines within `ALONG_DEG`), or `None` when they share none. |
+| `measure_spacing` | The median gap between neighbouring along lines, or `None` with fewer than two or no main direction. |
+| `metres_outside` | Metres of trace-to-trace steps whose midpoint lies outside a `Grid`, and whether any trace lies inside. |
 | `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
 | `END_LIMIT_M` | A start or end run longer than this many metres (2.0) is flagged. |
 

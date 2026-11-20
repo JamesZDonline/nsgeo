@@ -44,6 +44,7 @@ from nsgeo_qgis.line_edit import (
     GridEditReport,
     LineEdit,
     Skipped,
+    TrackEdit,
     followed_length,
     is_fitted,
     length_along,
@@ -836,7 +837,7 @@ class SiteSession(QObject):
 
     def edit_lines(
         self,
-        edits: Sequence[LineEdit],
+        edits: Sequence[LineEdit | TrackEdit],
         *,
         grid_id: str | None = None,
         order: Sequence[str] | None = None,
@@ -846,8 +847,10 @@ class SiteSession(QObject):
         §3 call 14). The table that built the edits may be stale, so each
         edit is re-checked here and a line is skipped, and named in the
         outcome, when it was removed (`REMOVED`), when its placement is no
-        longer the one the table saw (`CHANGED_ELSEWHERE`), or when its new
-        grid no longer exists. The rest still apply.
+        longer the one the table saw (`CHANGED_ELSEWHERE`), when its new
+        grid no longer exists, or (a GPS line's `TrackEdit`) when its new
+        grid is in another CRS than the line's track. The rest still apply.
+        A `TrackEdit` changes only a GPS line's grid, label and destagger.
 
         A key is the file path, so editing never changes one: the current
         and preview lines, stacks, profiles, velocity, fits and channels all
@@ -869,7 +872,9 @@ class SiteSession(QObject):
             self.grid(grid_id)
         frames = site.frames
         skipped: list[Skipped] = []
-        applied: list[tuple[str, GridPlacement, GridPlacement]] = []  # key, old, new
+        applied: list[
+            tuple[str, GridPlacement | TrackPlacement, GridPlacement | TrackPlacement]
+        ] = []  # key, old, new
         for edit in edits:
             label = edit.seen.label or Path(edit.key).stem
             line = self._lines_by_key.get(edit.key)
@@ -877,7 +882,8 @@ class SiteSession(QObject):
                 skipped.append(Skipped(edit.key, label, REMOVED))
                 continue
             current = line.placement
-            if not isinstance(current, GridPlacement) or current != edit.seen:
+            kind = TrackPlacement if isinstance(edit, TrackEdit) else GridPlacement
+            if not isinstance(current, kind) or current != edit.seen:
                 skipped.append(Skipped(edit.key, label, CHANGED_ELSEWHERE))
                 continue
             try:
@@ -886,7 +892,19 @@ class SiteSession(QObject):
                 gone = edit.grid_id or current.grid_id
                 skipped.append(Skipped(edit.key, label, f"its new grid {gone!r} no longer exists"))
                 continue
-            if same_placement(new, current):
+            if isinstance(edit, TrackEdit) and edit.grid_id is not None:
+                grid_crs = frames[edit.grid_id].crs
+                if grid_crs != current.crs:
+                    skipped.append(
+                        Skipped(
+                            edit.key,
+                            label,
+                            f"its new grid {edit.grid_id!r} is in {grid_crs}, "
+                            f"the line in {current.crs}",
+                        )
+                    )
+                    continue
+            if not edit.changes(frames):  # current == edit.seen was checked above
                 continue
             applied.append((edit.key, current, new))
         for key, _, new in applied:
@@ -898,6 +916,8 @@ class SiteSession(QObject):
         moved = [key for key, old, new in applied if new.grid_id != old.grid_id]
         for key, old, new in applied:
             if new.grid_id == old.grid_id:
+                continue
+            if old.grid_id is None:
                 continue
             remembered = site.slice_sources.get(old.grid_id, {}).get("lines")
             if isinstance(remembered, list):
@@ -940,17 +960,22 @@ class SiteSession(QObject):
     def move_lines(self, keys: Iterable[str], grid_id: str) -> EditOutcome:
         """Move lines to another grid, keeping each one's inset from the edge
         it starts at (line editing spec §3 calls 7 and 1). Lines already on
-        `grid_id` are left out; a key that is gone is skipped and named."""
+        `grid_id` are left out; a key that is gone is skipped and named. A GPS
+        line moves by a `TrackEdit`: only its grid changes, never its track,
+        and a grid in another CRS than its track is skipped and named."""
         self._require_site()
         self.grid(grid_id)
-        edits: list[LineEdit] = []
+        edits: list[LineEdit | TrackEdit] = []
         skipped: list[Skipped] = []
         for key in dict.fromkeys(keys):
             line = self._lines_by_key.get(key)
             if line is None:
                 skipped.append(Skipped(key, Path(key).stem, REMOVED))
-            elif isinstance(line.placement, GridPlacement) and line.placement.grid_id != grid_id:
-                edits.append(LineEdit(key, seen=line.placement, grid_id=grid_id))
+            elif line.placement.grid_id != grid_id:
+                if isinstance(line.placement, TrackPlacement):
+                    edits.append(TrackEdit(key, seen=line.placement, grid_id=grid_id))
+                else:
+                    edits.append(LineEdit(key, seen=line.placement, grid_id=grid_id))
         outcome = self.edit_lines(edits)
         return dataclasses.replace(outcome, skipped=tuple(skipped) + outcome.skipped)
 

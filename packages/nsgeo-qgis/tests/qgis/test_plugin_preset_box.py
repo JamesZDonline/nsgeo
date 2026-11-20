@@ -100,6 +100,23 @@ def test_the_note_shows_the_slices_line_only_when_the_rule_holds(session):
     assert "Slices" not in box.note.text()
 
 
+def test_a_new_grid_starts_on_the_sites_last_choice_and_always_shows_the_slices_line(session):
+    _save(session, "Plain", ("dewow", {}))
+    session.remember_import_preset(None, "Plain")
+    box = PresetBox(session)
+    box.set_grid("G4", new=True)  # G4 is not in the site: no KeyError from the rule
+    assert box.chosen() == "Plain"
+    assert box.note.text() == "G4's first lines: this becomes its Slices preset too."
+    box.set_grid(None, new=True)
+    assert box.note.text() == "The new grid's first lines: this becomes its Slices preset too."
+    box.combo.setCurrentIndex(0)
+    assert "Slices" not in box.note.text()  # no preset chosen
+    box.combo.setCurrentIndex(box.combo.findData("Plain"))
+    box.rename_new_grid("G5")  # typing a name keeps the choice
+    assert box.chosen() == "Plain"
+    assert box.note.text().startswith("G5's first lines")
+
+
 def test_a_deleted_choice_drops_to_none_and_says_so(session):
     _save(session, "Plain", ("dewow", {}))
     _save(session, "Other", ("dewow", {}))
@@ -156,3 +173,13 @@ def test_opening_a_site_refills_the_box_and_moves_to_the_starting_value(session,
     assert box.is_choice()
     assert box.chosen() == "Plain"
     assert "deleted" not in box.note.text()
+
+
+def test_a_site_opening_keeps_a_new_grid_box_new(session):
+    _save(session, "Plain", ("dewow", {}))
+    session.remember_import_preset(None, "Plain")
+    box = PresetBox(session)
+    box.set_grid("G4", new=True)
+    box._on_site_opened()
+    assert box.chosen() == "Plain"
+    assert box.note.text() == "G4's first lines: this becomes its Slices preset too."

@@ -818,6 +818,25 @@ def _fold_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _add_data_mode_memory(qgis_app):
+    """The Add data dialog remembers its mode in QgsSettings and every import a
+    test runs writes it: start each test with nothing remembered (a value a
+    killed run left behind must not steer the next one), and put the value
+    back after."""
+    from nsgeo_qgis.ui.add_data_dialog import MODE_KEY
+    from qgis.core import QgsSettings
+
+    settings = QgsSettings()
+    before = settings.value(MODE_KEY, None)
+    settings.remove(MODE_KEY)
+    yield
+    if before is None:
+        settings.remove(MODE_KEY)
+    else:
+        settings.setValue(MODE_KEY, before)
+
+
+@pytest.fixture(autouse=True)
 def _slice_previews_in_tmp(tmp_path, monkeypatch):
     """The Slices preview folders never reach the real cache folder (R19)."""
     from nsgeo_qgis import slice_layer
