@@ -299,8 +299,9 @@ class _FitButton(QToolButton):
         self._actions: tuple[Any, ...] = ()
         self._busy = False
 
-    def set_actions(self, actions: tuple[Any, ...]) -> None:
+    def set_actions(self, actions: tuple[Any, ...], default: Any) -> None:
         self._actions = actions
+        self.setDefaultAction(default)
         self._hold_widest()
 
     def _hold_widest(self) -> None:
@@ -308,8 +309,7 @@ class _FitButton(QToolButton):
             return
         self._busy = True
         try:
-            # A new button starts on the last action given (plain Fit).
-            current = self.defaultAction() or self._actions[-1]
+            current = self.defaultAction()
             self.setMinimumWidth(0)
             widest = 0
             for action in self._actions:
@@ -321,12 +321,13 @@ class _FitButton(QToolButton):
             self._busy = False
 
     def event(self, e: Any) -> bool:
+        handled = super().event(e)
         try:
             if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
                 self._hold_widest()
         except Exception as exc:  # an override that raises is a hard crash
             _log(f"fit button width: {exc!r}")
-        return super().event(e)
+        return handled
 
 
 class ProfileDock(QgsDockWidget):
@@ -371,7 +372,6 @@ class ProfileDock(QgsDockWidget):
         # True when those axes are header-only (`_take_down_picture`): on the radar
         # clock, not one the user zoomed on, so the clock rule skips them.
         self._axes_from_header = False
-        self._clock_carried = False  # set by `_set_axes_holding` when the clock rule fires
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
@@ -474,7 +474,8 @@ class ProfileDock(QgsDockWidget):
         # move the buttons after it. It holds the width of its widest state,
         # recomputed on a font or style change (see `_FitButton`).
         self.fit_button.set_actions(
-            (self.fit_height_action, self.fit_width_action, self.fit_all_action)
+            (self.fit_height_action, self.fit_width_action, self.fit_all_action),
+            self.fit_all_action,
         )
         self.one_to_one_button = QToolButton()
         self.one_to_one_button.setText("1:1")
@@ -727,7 +728,6 @@ class ProfileDock(QgsDockWidget):
         old_ruler = view.ruler
         old_key = self._axes_key
         was_header = self._axes_from_header
-        self._clock_carried = False
         self._file_window()
         # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
         # against its own distance along the path (cut spec call 5).
@@ -757,7 +757,6 @@ class ProfileDock(QgsDockWidget):
             == (old.n_traces, old.dt_ns, old.bounds, old.mirrored)
         ):
             view.transform = carry_time_window(old, new, self._axes_zero, zero_ns)
-            self._clock_carried = True
             view.view_changed.emit()
             view.update()
         elif ruler is not None and ruler.key in self._held:
@@ -1000,8 +999,8 @@ class ProfileDock(QgsDockWidget):
         self._shown_radargram = None
         self.view.set_cutoff(None)
         # Header axes are the radar clock, unless this same line's processed
-        # picture was up (rule 1 carries its window onto them, rule 2 holds it
-        # or the view stays as it was): then the window is still the one the
+        # picture was up (rule 1 puts the same transform back, or the clock
+        # rule carries its window onto them): then the window is still the one the
         # user zoomed on, and the render that follows must carry it again.
         # Checked before the call, which resets the flag.
         from_processed = self._axes_key == key and not self._axes_from_header

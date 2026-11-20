@@ -712,12 +712,18 @@ def test_the_toolbar_minimum_width_holds_in_any_font(qgis_app):
     stays within 900px, the docked width the M7 walkthrough used."""
     session = SiteSession()
     dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    QTest.qWait(50)
     base = dock.minimumSizeHint().width()
     label_before = dock.difference_label.sizeHint().width()
     dock.difference_label.setText("Difference: " + "w" * 60)
     dock.velocity_label.setText("Velocity " + "w" * 200)
+    QTest.qWait(50)
     grown = dock.difference_label.sizeHint().width() - label_before
-    assert dock.minimumSizeHint().width() <= base + grown
+    after = dock.minimumSizeHint().width()
+    assert after >= base + grown  # live: a stale cached reading fails here
+    assert after <= base + grown
     assert base <= 900
     dock.hide()
     dock.deleteLater()
