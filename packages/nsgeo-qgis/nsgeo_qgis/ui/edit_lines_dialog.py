@@ -202,7 +202,7 @@ class EditLinesDialog(QDialog):
         self._updating = False
         self._order: list[str] = []
         self._edits: dict[str, LineEdit | TrackEdit] = {}
-        self._walked: dict[str, float] = {}  # a GPS row's walked length, m
+        self._walked: dict[str, float] = {}  # a GPS row's walked length, m, without its destagger
         self._traces: dict[str, int] = {}
         self._per_metre: dict[str, float] = {}
         self._picks: dict[str, int] = {}
@@ -221,7 +221,7 @@ class EditLinesDialog(QDialog):
                 if isinstance(line.placement, TrackPlacement):
                     self._edits[key] = TrackEdit(key, seen=line.placement)
                     walked = line.distance_along()
-                    self._walked[key] = float(walked[-1]) if len(walked) else 0.0
+                    self._walked[key] = float(walked[-1] - walked[0]) if len(walked) else 0.0
                 else:
                     self._edits[key] = LineEdit(key, seen=line.placement)  # type: ignore[arg-type]
                 self._traces[key] = line.n_traces
@@ -620,12 +620,15 @@ class EditLinesDialog(QDialog):
             return
         gps = sum(isinstance(self._edits[k], TrackEdit) for k in targets)
         gps_note = GPS_SKIP.format(n=gps, what="Measure") if gps else ""
-        targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
+        tapes = [k for k in targets if not isinstance(self._edits[k], TrackEdit)]
+        targets = [k for k in tapes if k in snapshot]  # P6: not rows sent to another grid
         if not targets:
-            if gps_note:
-                self._say(gps_note)
-                return  # every selected row now sits on another grid: nothing to fill
-            self._say(MEASURE_NO_TARGETS)
+            # Nothing to fill: GPS rows are left alone, and any tape row now sits on
+            # another grid (or none was selected).
+            parts = [gps_note] if gps_note else []
+            if tapes or not gps_note:
+                parts.append(MEASURE_NO_TARGETS)
+            self._say(" ".join(parts))
             return
         labels = {k: self._label_of(k) for k in self._order}
         # Cached by the file, not the row key: keys repeat from site to site.
@@ -640,8 +643,6 @@ class EditLinesDialog(QDialog):
         )
         self._update_panel()
         self._show_progress()
-        if gps_note:
-            self._say(gps_note)
         self._progress.start(MEASURE_PROGRESS_MS)
 
     def _label_of(self, key: str) -> str:
@@ -939,7 +940,8 @@ class EditLinesDialog(QDialog):
             frames = self._frames()
             note = None
             if isinstance(edit, TrackEdit) and c in GPS_BLANK:
-                return  # read-only; nothing reaches a TrackEdit but Label, Destagger and Grid
+                self._refresh()  # back to "—": a TrackEdit takes only Label, Destagger, Grid
+                return
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
             elif c == COL_SCALE:

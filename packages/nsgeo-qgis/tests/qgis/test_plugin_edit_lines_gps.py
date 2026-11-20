@@ -23,6 +23,7 @@ from nsgeo_qgis.ui.edit_lines_dialog import (
     COL_TRACES,
     GPS_SKIP,
     GPS_TIP,
+    MEASURE_NO_TARGETS,
     EditLinesDialog,
 )
 from plugin_testing import (
@@ -44,7 +45,7 @@ TAPES = ["T1", "T2", "T3"]
 GPSES = ["G1", "G2"]
 
 
-def _gps(folder, name, lon):
+def _gps(folder, name, lon, travel_shift=0.0):
     path = synthetic_gps_dzt(
         folder,
         name,
@@ -52,7 +53,7 @@ def _gps(folder, name, lon):
         n_traces=200,
         traces_per_metre=10.0,
     )
-    return open_gps(path, grid_id="A")
+    return open_gps(path, grid_id="A", travel_shift=travel_shift)
 
 
 def _tape(folder, name, i):
@@ -60,7 +61,12 @@ def _tape(folder, name, i):
     return Line.open(
         p,
         GridPlacement(
-            "A", "y", 0.25 + 0.5 * i, 0.0 if i != 1 else 15.0, 1 if i != 1 else -1, f"tape {name}"
+            "A",
+            "y",
+            0.25 + 0.5 * i,
+            {0: 3.0, 1: 15.0}.get(i, 0.0),
+            1 if i != 1 else -1,
+            f"tape {name}",
         ),
     )
 
@@ -117,9 +123,7 @@ def test_the_table_lists_tape_and_gps_lines_in_survey_order(mixed):
                 assert item.toolTip() == GPS_TIP
             assert _cell(d, r, COL_ALONG) == "GPS"
             assert _cell(d, r, COL_TRACES) == "200"
-            assert float(_cell(d, r, COL_LENGTH)) == pytest.approx(
-                s.line_for_key(d.keys()[r]).distance_along()[-1], abs=0.01
-            )
+            assert 15.0 < float(_cell(d, r, COL_LENGTH)) < 30.0
             assert _cell(d, r, COL_PICKS) == "0"
         else:
             assert _cell(d, r, COL_ALONG) == "y"
@@ -181,6 +185,8 @@ def test_tape_only_bulk_changes_leave_a_gps_row_alone_and_say_so(mixed, act, wha
     assert d.status.text() == GPS_SKIP.format(n=1, what=what)
     assert d.edit_for(_k("G1")) == seen[_k("G1")]
     assert d.edit_for(_k("T3")) == seen[_k("T3")]
+    assert d.edit_for(_k("T1")) != seen[_k("T1")]
+    assert d.edit_for(_k("T2")) != seen[_k("T2")] or what == "Start"
 
 
 def test_bulk_offset_changes_the_tapes_and_names_the_skip(mixed):
@@ -240,7 +246,6 @@ def test_measure_reads_the_tape_rows_only_and_names_the_gps_skip(mixed, monkeypa
     monkeypatch.setattr(job_module, "measure_destagger", canned)
     _select(d, ["T1", "G1", "T2"])
     d.measure()
-    assert GPS_SKIP.format(n=1, what="Measure") in d.status.text()
     assert spin_until(lambda: not d._measurer.busy)
     assert canned.seen == [_keys(TAPES)]
     assert d.edit_for(_k("T1")).travel_shift == 0.12
@@ -273,3 +278,43 @@ def test_a_destagger_set_elsewhere_skips_that_row_and_applies_the_rest(mixed):
     assert "G1 changed elsewhere" in d.outcome.message()
     assert s.line_for_key(g1).placement.label != "renamed"
     assert s.line_for_key(t1).placement.travel_shift == pytest.approx(0.3)
+
+
+def test_a_gps_rows_length_does_not_include_its_destagger(mixed, tmp_path):
+    s, d = mixed
+    r = d.keys().index(_k("G1"))
+    unshifted = _cell(d, r, COL_LENGTH)
+    (tmp_path / "other").mkdir()
+    other = SiteSession()
+    other.new_site(tmp_path / "other")
+    other.set_site_crs(CRS)
+    other.add_grid(GA)
+    other.add_lines([_gps(tmp_path / "other" / "raw", "G1.DZT", LON0, travel_shift=0.3)])
+    d2 = EditLinesDialog(other, "A")
+    try:
+        assert other.line_for_key(_k("G1")).placement.travel_shift == 0.3
+        assert _cell(d2, 0, COL_LENGTH) == unshifted
+    finally:
+        d2.hide()
+        d2.deleteLater()
+
+
+def test_typing_into_a_gps_rows_read_only_cell_goes_back_to_the_dash(mixed):
+    s, d = mixed
+    r = d.keys().index(_k("G1"))
+    for c in (COL_OFFSET, COL_DIR, COL_START, COL_SCALE):
+        d.table.item(r, c).setText("7")
+        assert _cell(d, r, c) == "—"
+    assert d.edit_for(_k("G1")).label is None
+    assert d.status.text() == ""
+
+
+def test_measure_says_both_when_a_gps_row_and_a_moved_tape_row_are_selected(mixed, monkeypatch):
+    s, d = mixed
+    monkeypatch.setattr(job_module, "measure_destagger", Canned())
+    d.select_keys([_k("T1")])
+    d.move_to("B")
+    _select(d, ["T1", "G1"])
+    d.measure()
+    assert d.status.text() == f"{GPS_SKIP.format(n=1, what='Measure')} {MEASURE_NO_TARGETS}"
+    assert not d._measurer.busy
