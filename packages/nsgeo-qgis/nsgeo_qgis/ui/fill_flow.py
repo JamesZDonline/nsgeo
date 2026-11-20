@@ -194,13 +194,13 @@ class FillFlow(QObject):
         except Exception as exc:  # noqa: BLE001 -- the link's slot must not raise
             _log(f"could not handle a cancelled fill: {exc}")
 
-    def stop(self, *, keep_latch: bool = False) -> None:
+    def stop(self) -> None:
         """A scope switch, a closed survey, or work for what is no longer drawn:
-        cancel without the callback, and unlatch unless `keep_latch`."""
+        cancel without the callback. The latch is not touched: `FillPicture` is
+        its one owner (`latch`/`unlatch` with its note), so a stop that must
+        also unlatch says so there."""
         self._clear()
         self._worker.cancel()
-        if not keep_latch:
-            self._latched = False
 
     def drop_stretch(self) -> None:
         """The held stretch was dropped (the cube's geometry or source moved): a

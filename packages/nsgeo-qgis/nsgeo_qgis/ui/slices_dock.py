@@ -2014,7 +2014,9 @@ class SlicesDock(QgsDockWidget):
             if self._scope == "site":
                 # M12: the Resolution and Display widgets are the site's
                 # now; This grid's clamp and redraw run on the way back.
-                self._drop_stretch()
+                # Only This grid's held stretch: the site's own may be measuring
+                # on the shared flow, and this preparation is not its business.
+                self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
             # Settled only on This grid: a switch to Whole site within the
@@ -3147,7 +3149,7 @@ class SlicesDock(QgsDockWidget):
 
     def _stop_fill_work(self) -> None:
         """Cancel the fill work for what is no longer drawn, keeping a latch."""
-        self.fill_flow.stop(keep_latch=True)
+        self.fill_flow.stop()
 
     def _drop_stretch(self) -> None:
         """The held shared stretch is no longer for this cube: drop it, and

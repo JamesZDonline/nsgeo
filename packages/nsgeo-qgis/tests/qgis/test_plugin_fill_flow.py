@@ -717,6 +717,37 @@ def test_progress_reads_the_running_job_or_the_grids_landed(flow_probe):
     assert flow.progress_text(0.05, grids=False) == ""
 
 
+def test_stop_never_touches_the_latch(flow_probe):
+    """FillPicture is the latch's one owner: a stop only cancels the work."""
+    flow, _, _ = flow_probe
+    flow.latch()
+    flow.stop()
+    assert flow.latched
+    flow.unlatch()
+    assert not flow.latched
+
+
+def test_a_this_grid_preparation_under_the_site_never_cancels_the_sites_stretch(
+    fake_iface, site3, answer_modal
+):
+    from test_plugin_site_scope import whole_site
+
+    plugin = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = plugin.slices_dock
+        whole_site(plugin)
+        assert dock.scope() == "site"
+        job = FakeStretch(1.0, pause=0.8)
+        dock.fill_flow.request_stretch("site-key", job)
+        assert dock.fill_flow.stretching
+        dock._on_prepared()  # a This-grid preparation lands under Whole site
+        assert dock.fill_flow.stretching, "the site's stretch was cancelled"
+        assert spin_until(lambda: not dock.fill_flow.stretching, 20_000)
+        assert not dock.fill_worker.busy
+    finally:
+        _close(plugin, answer_modal)
+
+
 def test_a_failed_stretch_is_named_as_the_stretch(flow_probe):
     flow, _, log = flow_probe
 

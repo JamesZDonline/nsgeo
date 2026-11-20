@@ -74,6 +74,7 @@ def _open(fake_iface, site, answer_modal):
     # This grid's automatic first preparation (A), as on any survey open.
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     return plugin
 
 
@@ -107,6 +108,14 @@ def open_plugin(fake_iface, answer_modal):
     yield make
     for p in made:
         _close(p, answer_modal)
+
+
+def drawn(dock) -> None:
+    """Wait for This grid's background draw (#193): a fill over the budget is
+    drawn from the fill worker, not in the tick that asked for it. These tests
+    check what a switch or a preparation leaves on the map, not how long it takes."""
+    assert spin_until(lambda: not dock.fill_flow.working, 60_000), "the fill never landed"
+    QCoreApplication.processEvents()
 
 
 def _events(n: int = 5) -> None:
@@ -310,6 +319,7 @@ def test_whole_site_draws_one_layer_covering_every_grid(plugin):
 
     # Both scopes drawn: switching renames the one layer in place.
     dock.grid_scope_button.click()
+    drawn(dock)
     assert plugin.slice_layer.layer.id() == layer.id()
     assert layer.name() == LAYER_NAME
     assert dock.current_site_slice() is None
@@ -354,6 +364,7 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
+    drawn(dock)
     text = dock.status_label.text()
     assert text == f"{dock.engine.status_text()} · +{format_bytes(held)} held by the site view"
 
@@ -527,6 +538,7 @@ def test_both_scopes_legends_name_the_transform_by_title(plugin):
     dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.legend_label.text().endswith("(Envelope)"), dock.legend_label.text()
     whole_site(plugin)
     dock.site_panel.transform_combo.set_value("amp_abs")
@@ -1500,6 +1512,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.3)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
@@ -1532,6 +1545,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
+    drawn(dock)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.05)
     assert dock.current_values() is not None
