@@ -1,0 +1,10 @@
+# Task 1 open findings (review of 16c1532..61d455b)
+
+1. (Important) A stop can wait 1-3 s at realistic fine-cell sizes in the neighbour search. `_neighbourhoods` (interpolate.py:244) checks `should_stop` every 32 offsets; per-offset cost grows with active targets, so at 1000x800 the gap is ~0.75 s and at 1500x1200 1.6-2.9 s (loaded box). Fix: check `should_stop` on EVERY offset in `_neighbourhoods` and `_reach` (an Event.is_set is ~100 ns vs ~20 ms per pass); progress can stay every 32.
+
+2. (Important, controller ruling on a plan-mandated item) Level-0 `_coarsen` (multigrid.py ~158, called from build_hierarchy ~349) runs 25 probes with no check: 1.0 s at 1000x800, 2.3-3.2 s at 1500x1200. RULING: the spec's binding requirement is that a cancel lands "within a fraction of a second"; the plan's "once per hierarchy level" is widened to a check per probe inside `_coarsen` (pass `should_stop` down). Also report progress per hierarchy level (and per probe if cheap) so min_curvature's bar does not sit at 0.4 for most of its run (reviewer Minor 4, folded into this ruling). Arithmetic must stay bit-identical. `eigh` stays unstoppable.
+
+3. (Important) The tests only prove a stop at a stage's FIRST check: a mutant that checks only at `i == 0` in `_reach` and `_neighbourhoods` passed all 10 new tests; deleting the checks in `_stencil` (curvature.py:323) or `build_hierarchy` would fail no test. Fix:
+   - `test_a_plan_stops_inside_the_neighbour_search`: flip `should_stop` only after progress has passed `0.1 + 0.5*(64/total_offsets)` (i.e. two progress reports into the search), so the raise must come from a later check; assert the last progress reported is above the first search report and below 0.6.
+   - Add, in `CT/test_slices_curvature.py` (the brief lists it; nothing went there): a min_curvature case that flips `should_stop` once progress passes the stencil stage, so the hierarchy/`_coarsen` checks must fire; and one that flips mid-stencil if `_stencil` has more than one term-check.
+   - Each new/changed test must fail against the corresponding first-check-only mutant (show it in a scratch copy, not in the shared tree) and pass at the fix.

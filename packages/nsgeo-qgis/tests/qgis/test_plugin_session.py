@@ -1487,6 +1487,51 @@ def test_site_resolution_is_remembered_apart_from_each_grid(session):
     assert session.site_resolution()["cell"] == 0.2
 
 
+def test_restoring_a_slice_resolution_puts_the_record_back_exactly(session):
+    # #193: taking an edit back restores the record, key presence included.
+    session.add_grid(GRID)
+    session.remember_slice_source("A", preset="p", lines=None)
+    session.remember_slice_resolution("A", cell=0.1)
+    before = session.slice_resolution("A")
+    session.remember_slice_resolution("A", cell=0.02, max_distance_spacings=1.0)
+    session.save()
+    seen: list[str] = []
+    session.slice_sources_changed.connect(seen.append)
+    session.restore_slice_resolution("A", before)
+    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert "max_distance_spacings" not in session.slice_resolution("A")
+    assert session.dirty and seen == ["A"]
+    assert session.slice_source("A")["preset"] == "p"
+    # None removes the record, so "chosen or seeded" returns too.
+    session.restore_slice_resolution("A", None)
+    assert session.slice_resolution("A") == {}
+    assert "resolution" not in session.slice_source("A")
+
+
+def test_restoring_to_no_record_leaves_no_entry_behind(session):
+    session.add_grid(GRID)
+    assert session.slice_source("A") is None
+    session.remember_slice_resolution("A", cell=0.1)
+    session.restore_slice_resolution("A", None)
+    assert session.slice_source("A") is None
+
+
+def test_restoring_the_site_resolution_puts_the_record_back_exactly(session):
+    session.add_grid(GRID)
+    session.set_site_view(grids=("A",), transform="none")
+    session.remember_site_resolution(cell=0.2)
+    before = session.site_resolution()
+    session.remember_site_resolution(cell=0.02, max_distance_spacings=1.0)
+    session.save()
+    session.restore_site_resolution(before)
+    assert session.site_resolution() == {"cell": 0.2}
+    assert session.dirty
+    assert session.site_view()["grids"] == ["A"]
+    session.restore_site_resolution(None)
+    assert session.site_resolution() == {}
+    assert session.site_view()["transform"] == "none"
+
+
 def test_removing_a_grid_drops_its_remembered_resolution(session):
     session.add_grid(GRID)
     session.remember_slice_resolution("A", cell=0.1, max_distance_spacings=1.0)

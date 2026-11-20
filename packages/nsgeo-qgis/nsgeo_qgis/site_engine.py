@@ -45,14 +45,18 @@ ignored, because whoever cancelled already set the state.
 per-grid engine exists, so `_on_grids_changed` runs BEFORE each engine's
 own handler. Inside that call the engines have not reacted yet: a moved
 grid's engine still holds lines binned at the old registration. So it
-reads no engine state. It drops the caches the edit made stale and
-handles grids that no longer exist (those engines are disposed, not
+never reads a moved grid's engine. It drops the caches the edit made stale
+and handles grids that no longer exist (those engines are disposed, not
 consulted). A moved grid is driven by `_on_grid_moved`, which runs after
-its engine has cleared, and the geometry is rebuilt there -- never in the
-synchronous slot. A preparation whose grid moved under it is not marked
-ready or failed: its callback arrives from inside the engine's `clear()`,
-before `_on_grid_moved`, and `_on_engine_prepared` recognises it by the
-grid's registration no longer matching the one it was dispatched against.
+its engine has cleared, and the geometry is rebuilt there. The one rebuild
+inside the synchronous slot is after a removal, and it is safe because
+every `grids_changed` emitter (`add_grid`, `replace_grid`, `remove_grid`)
+changes exactly one grid: a removal never arrives together with a move,
+so the engines it reads all still hold their grids' places. A
+preparation whose grid moved under it is not marked ready or failed: its
+callback arrives from inside the engine's `clear()`, before
+`_on_grid_moved`, and `_on_engine_prepared` recognises it by the grid's
+registration no longer matching the one it was dispatched against.
 
 **Caches**: the gathers (each grid's `Footprint` on the lattice, once per
 grid per lattice, spec 4.7) and the seams (once per geometry, from each
@@ -85,11 +89,10 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from nsgeo.slices import (
@@ -99,30 +102,22 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
-    bilinear_taps,
     compose_footprints,
     covered_pixels,
     find_seams,
     finest_fitting_cell,
     fitting_lattice,
-    footprint,
     grid_axis,
-    limit_over_slices,
-    normalise,
     site_axis,
-    slice_extent,
     stretching_grids,
     window_on,
 )
-from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
-    QgsPointXY,
-    QgsProject,
-)
+from qgis.core import QgsCoordinateTransformContext, QgsProject
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis import site_geometry
 from nsgeo_qgis.log import log as _log
+from nsgeo_qgis.site_geometry import extent_in
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
@@ -136,19 +131,16 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
     preview_note,
+    window_levels,
 )
+from nsgeo_qgis.stretch_jobs import GridStretch, StretchJob, limit_of, shown_window
+
+if TYPE_CHECKING:
+    from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
 #: engine -- its own or a peer -- is still preparing.
 _RETRY_MS = 50
-
-#: Points per edge when a frame's outline is transformed into another CRS.
-#: A transverse Mercator edge is not quite straight in a neighbouring zone.
-_EDGE_POINTS = 8
-
-
-def _ignore() -> None:
-    """A retiring engine's `on_grid_moved`: its moves no longer matter."""
 
 
 #: How `_shown` draws one present grid: `(grid id, its window, binned
@@ -438,14 +430,24 @@ class SiteEngine(QObject):
         if engine.has_live_task:
             self._retire(engine)
         else:
-            engine.dispose()
+            self._release(engine)
+
+    @staticmethod
+    def _release(engine: SliceEngine) -> None:
+        """Dispose an engine and have Qt delete it, so it is not a child for ever.
+
+        Nothing may touch the engine after this call: `deleteLater` frees it
+        at the next pass of the event loop.
+        """
+        engine.dispose()
+        with contextlib.suppress(RuntimeError):
+            engine.deleteLater()
 
     def _retire(self, engine: SliceEngine) -> None:
-        # Nothing it does now is a result. The move hook becomes a no-op,
-        # not None: None would bring back M11's self-dispatch on a move.
-        engine.on_prepared = None
-        engine.on_progress = None
-        engine.on_grid_moved = _ignore
+        # Nothing it does now is a result.
+        # Detached too, so it neither waits again on the session's signals nor
+        # reports about a grid this site has already let go of.
+        engine.detach()
         self._retiring.append(engine)
         self._reaper.start()
 
@@ -457,7 +459,7 @@ class SiteEngine(QObject):
                 if engine.has_live_task:
                     alive.append(engine)
                 else:
-                    engine.dispose()
+                    self._release(engine)
             self._retiring = alive
             if alive and not self._disposed:
                 self._reaper.start()
@@ -563,6 +565,22 @@ class SiteEngine(QObject):
         if self._preparing != grid_id or not self._active or self._disposed:
             self._dispatch_again = True  # the callback changed the plan
             return
+        # The notify is a callback into the dock, which can start a peer's task
+        # or move this very grid. Neither is seen by what was read before it:
+        # the registration is captured again, and the gate is run again. The
+        # engine has not been given the source yet, so undoing is only this
+        # site's own bookkeeping: back to the head of the queue, not preparing.
+        self._preparing_fp = self._registration(grid_id)
+        if self._anything_live():
+            self._preparing = None
+            self._preparing_fp = None
+            self._progress.pop(grid_id, None)
+            self._states[grid_id] = "queued"
+            if grid_id not in self._queue:
+                self._queue.insert(0, grid_id)
+            self._notify_changed()
+            self._retry.start()
+            return
         try:
             engine.set_source(choice)
         except Exception as exc:  # noqa: BLE001 -- a refused preset fails this grid only
@@ -611,7 +629,11 @@ class SiteEngine(QObject):
         try:
             if self._disposed or grid_id != self._preparing:
                 return
-            self._progress[grid_id] = (int(done), int(total))
+            # The dispatch recorded the choice's key count as the total; an
+            # engine that skips a key (it left the grid) counts fewer jobs.
+            # A skipped key counts as done, so the total never shifts.
+            n_keys = max(self._progress.get(grid_id, (0, int(total)))[1], int(total))
+            self._progress[grid_id] = (int(done) + n_keys - int(total), n_keys)
             self._notify_changed()
         except Exception as exc:  # noqa: BLE001 -- reached from a task's signal
             self._report(f"could not report grid {grid_id!r}'s progress: {exc}")
@@ -648,7 +670,19 @@ class SiteEngine(QObject):
             self._report(f"could not re-queue grid {grid_id!r} after it moved: {exc}")
 
     def _on_grids_changed(self) -> None:
-        """`grids_changed`, delivered before the engines' own (see the module docstring)."""
+        """`grids_changed`, delivered before the engines' own (see the module docstring).
+
+        When a grid has left, the geometry is rebuilt right here, inside the
+        emission (#75). That is deliberate and safe: the rebuild reads the
+        session's grids and the frames and axes of the engines still ready
+        (and pushes the site resolution to them), and one emission changes
+        one grid, so none of them has moved; a grid that only moved reaches
+        `_on_grid_moved` afterwards, which rebuilds again once its engine has
+        cleared. A rebuild that fails is
+        kept in `geometry_problem` for the next tick, never raised. It is not
+        deferred with a timer: the dock reads the geometry straight after
+        `remove_grid` returns, and a deferral would leave it stale for a tick.
+        """
         try:
             if self._disposed or self._source is None or not self.session.is_open:
                 return
@@ -801,56 +835,12 @@ class SiteEngine(QObject):
     ) -> dict[str, tuple[float, float, float, float]]:
         """Each ready grid's extent in the site CRS, as its frame at `cell` spans."""
         site_crs = self._site_crs()
+        context = QgsProject.instance().transformContext()
         extents = {}
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
-            extents[grid_id] = self._extent_in(frame, site_crs)
+            extents[grid_id] = extent_in(frame, site_crs, context)
         return extents
-
-    @staticmethod
-    def _transform(points: np.ndarray, source: str, target: str) -> np.ndarray:
-        """(n, 2) points from `source` to `target`; a missing transform raises.
-
-        An invalid `QgsCoordinateTransform` returns its input unchanged
-        while reporting success (`layers._require_transform`), which would
-        draw a grid in the wrong place without a word.
-        """
-        transform = QgsCoordinateTransform(
-            QgsCoordinateReferenceSystem(source),
-            QgsCoordinateReferenceSystem(target),
-            QgsProject.instance(),
-        )
-        if not transform.isValid():
-            raise RuntimeError(f"no coordinate transform from {source} to {target}")
-        out = np.empty((len(points), 2), dtype=float)
-        for i, (x, y) in enumerate(np.asarray(points, dtype=float)):
-            moved = transform.transform(QgsPointXY(float(x), float(y)))
-            out[i] = (moved.x(), moved.y())
-        return out
-
-    @classmethod
-    def _extent_in(cls, frame: CubeFrame, crs: str) -> tuple[float, float, float, float]:
-        if frame.crs == crs:
-            return slice_extent(frame)
-        x_hat, y_hat = frame.axes()
-        w, h = frame.nx * frame.cell, frame.ny * frame.cell
-        t = np.linspace(0.0, 1.0, _EDGE_POINTS + 1)
-        local = np.concatenate(
-            [
-                np.column_stack([t * w, np.zeros_like(t)]),
-                np.column_stack([np.full_like(t, w), t * h]),
-                np.column_stack([t * w, np.full_like(t, h)]),
-                np.column_stack([np.zeros_like(t), t * h]),
-            ]
-        )
-        outline = np.asarray(frame.origin) + local[:, :1] * x_hat + local[:, 1:] * y_hat
-        moved = cls._transform(outline, frame.crs, crs)
-        return (
-            float(moved[:, 0].min()),
-            float(moved[:, 1].min()),
-            float(moved[:, 0].max()),
-            float(moved[:, 1].max()),
-        )
 
     def _drop_caches(self) -> None:
         self._gathers = {}
@@ -911,28 +901,52 @@ class SiteEngine(QObject):
         frame = self._engines[grid_id].frame
         if frame is None:
             raise RuntimeError(f"grid {grid_id!r} has no frame")
-        xmin, ymin, xmax, ymax = self._extent_in(frame, lattice.crs)
-        p = lattice.pixel
-        col0 = max(0, math.floor((xmin - lattice.x0) / p) - 1)
-        col1 = min(lattice.width, math.ceil((xmax - lattice.x0) / p) + 1)
-        row0 = max(0, math.floor((lattice.y1 - ymax) / p) - 1)
-        row1 = min(lattice.height, math.ceil((lattice.y1 - ymin) / p) + 1)
-        if col1 > col0 and row1 > row0:
-            cols = np.arange(col0, col1)
-            rows = np.arange(row0, row1)
-            # The same centres as `SiteLattice.pixel_centres`, restricted.
-            xs = lattice.x0 + (cols.astype(float) + 0.5) * p
-            ys = lattice.y1 - (rows.astype(float) + 0.5) * p
-            grid_x, grid_y = np.meshgrid(xs, ys)
-            centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-            if frame.crs != lattice.crs:
-                centres = self._transform(centres, lattice.crs, frame.crs)
-            taps = bilinear_taps(frame, centres)
-            gathered = footprint(taps, row1 - row0, col1 - col0, row0, col0)
-        else:
-            gathered = footprint(bilinear_taps(frame, np.empty((0, 2))), 0, 0)
+        gathered = site_geometry.gather_footprint(
+            frame, lattice, QgsProject.instance().transformContext()
+        )
         self._gathers[grid_id] = gathered
         return gathered
+
+    def footprints_missing(self, lattice: SiteLattice | None = None) -> list[str]:
+        """The ready grids with a frame and no gather cached on the current
+        lattice, in `ready_grids` order (#193). `lattice` is the drawn one."""
+        if self._lattice is None or (lattice is not None and lattice != self._lattice):
+            return []
+        return [
+            g
+            for g in self.ready_grids
+            if self._engines[g].frame is not None and g not in self._gathers
+        ]
+
+    def footprint_jobs(self) -> list[FootprintJob]:
+        """One job per `footprints_missing` grid, each capturing the frame, the
+        lattice and a copy of the transform context here, on the GUI thread."""
+        from nsgeo_qgis.fill_jobs import FootprintJob
+
+        lattice = self._lattice
+        if lattice is None:
+            return []
+        context = QgsCoordinateTransformContext(QgsProject.instance().transformContext())
+        jobs = []
+        for g in self.footprints_missing(lattice):
+            frame = self._engines[g].frame
+            assert frame is not None
+            jobs.append(FootprintJob(self, g, frame, lattice, context))
+        return jobs
+
+    def _land_footprint(self, job: FootprintJob) -> bool:
+        """Hold what `job` gathered, if the lattice, the grid and its frame are
+        still what it was made for."""
+        if (
+            self._disposed
+            or job.footprint is None
+            or self._lattice != job.lattice
+            or job.grid_id not in self.ready_grids
+            or self._engines[job.grid_id].frame != job.frame
+        ):
+            return False
+        self._gathers[job.grid_id] = job.footprint
+        return True
 
     def _site_seams(self) -> tuple[Seam, ...]:
         """Seams between the ready grids, once per geometry (spec 4.6.1).
@@ -1026,13 +1040,13 @@ class SiteEngine(QObject):
             }
             return windows, counts, dict.fromkeys(binned, (1.0, 0.0))
         seams = self._site_seams() if method == "edge" else ()
-        factors = normalise(method, binned, seams, manual)
-        shown: dict[str, np.ndarray] = {}
-        for grid_id, (values, cov) in binned.items():
+
+        def drawn(grid_id: str, values: np.ndarray, cov: np.ndarray) -> np.ndarray:
             window = windows[grid_id]
             assert window is not None  # binned only where present
-            a, b = factors[grid_id]
-            shown[grid_id] = a * draw(grid_id, window, values, cov) + b
+            return draw(grid_id, window, values, cov)
+
+        shown, factors = shown_window(binned, method, seams, manual, drawn)
         return windows, shown, factors
 
     def _draw_full(self, finish: SliceFinish) -> _Draw:
@@ -1117,8 +1131,12 @@ class SiteEngine(QObject):
         manual: Mapping[str, float],
         coverage: bool = False,
         preview: bool = False,
+        sliced: _Sliced | None = None,
     ) -> SiteSlice:
         """One tick: every ready grid's window, normalised, filled and composed.
+
+        `sliced` is this tick's `sliced(top_ns, thickness_ns)` when the caller took
+        it already (to ask `fills_missing`): the tick then slices each grid once.
 
         Spec 4.3: the same time window in every grid (`window_on`); a grid
         whose range misses it is absent (`windows[g] is None`) and nodata.
@@ -1139,7 +1157,7 @@ class SiteEngine(QObject):
             self._site_seams()
         previewed: dict[str, PreviewedGrid] = {}
         started = time.perf_counter()
-        sliced = self._sliced(top_ns, thickness_ns)
+        sliced = sliced if sliced is not None else self._sliced(top_ns, thickness_ns)
         # A coverage tick finishes nothing, so it hashes nothing either.
         live = preview and not coverage
         draw = self._draw_live(finish, sliced[1], previewed) if live else self._draw_full(finish)
@@ -1219,7 +1237,7 @@ class SiteEngine(QObject):
         z = self._site_z
         if z is None:
             raise RuntimeError("no site time axis: no ready grid covers the z range")
-        thickness_levels = max(1, int(round(thickness_ns / z.dz_ns)))
+        thickness_levels = window_levels(thickness_ns, thickness_ns, z.dz_ns)[0]
         return [
             (z.t0_ns + w.k0 * z.dz_ns, w.n_levels * z.dz_ns)
             for w in limit_windows(z, thickness_levels)
@@ -1229,14 +1247,157 @@ class SiteEngine(QObject):
         self, thickness_ns: float, clip: Any, method: str, manual: Mapping[str, float], draw: _Draw
     ) -> float:
         """`clip`'s limit over every present grid's slice, as `draw` draws it,
-        at each window the stretch is measured over (`_limit_windows_ns`)."""
-        slices: list[np.ndarray] = []
+        at each window the stretch is measured over (`_limit_windows_ns`).
+        Streamed: one window's slices alive at a time, as `StretchJob` measures."""
+
+        def slices() -> Iterator[np.ndarray]:
+            for top, thickness in self._limit_windows_ns(thickness_ns):
+                _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
+                yield from shown.values()
+
+        return limit_of(slices(), clip)
+
+    def sliced(self, top_ns: float, thickness_ns: float) -> _Sliced:
+        """Each ready grid's window at this site time and each present grid's
+        binned slice: what a tick draws from, taken once and passed to
+        `fills_missing`, `fill_jobs` and `slice_at`."""
+        self._require_lattice()
+        return self._sliced(top_ns, thickness_ns)
+
+    def _coverage_for(
+        self, grid_id: str, thickness_ns: float, sliced: _Sliced
+    ) -> np.ndarray | None:
+        """`grid_id`'s covered cells for its fill: its slice at the shown window
+        when it has one, else at the first window the shared stretch measures it
+        in. Within a grid the covered cells are the same in every window (the
+        binner rejects lines that do not span the axis), so any will do; None when
+        no window reaches the grid."""
+        binned = sliced[1]
+        if grid_id in binned:
+            return binned[grid_id][1]
         for top, thickness in self._limit_windows_ns(thickness_ns):
-            _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
-            slices.extend(shown.values())
-        if not slices:
-            return float(clip.limit(np.array([], dtype=float)))
-        return limit_over_slices(slices, clip)
+            window = self._grid_window(grid_id, top, thickness)
+            if window is not None:
+                return self._engines[grid_id].slice_at(window)[1]
+        return None
+
+    def _fill_targets(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        sliced: _Sliced | None,
+        every_grid: bool,
+    ) -> list[tuple[str, np.ndarray]]:
+        """`(grid id, covered cells)` for each grid whose fill is not held, in
+        `ready_grids` order: the grids with a window at this time, or with
+        `every_grid` every ready grid with an axis (what the shared stretch and
+        its rest need: a fill for each, or the job builds one itself while the
+        engine still holds the old, and the rest builds it on the GUI thread)."""
+        self._require_lattice()
+        taken = sliced if sliced is not None else self._sliced(top_ns, thickness_ns)
+        grids = (
+            self.fills_wanted() if every_grid else [g for g in self.ready_grids if g in taken[1]]
+        )
+        targets = []
+        for g in grids:
+            cover = self._coverage_for(g, thickness_ns, taken)
+            if cover is not None and not self._engines[g].fill_held(cover, finish):
+                targets.append((g, cover))
+        return targets
+
+    def fills_missing(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        *,
+        sliced: _Sliced | None = None,
+        every_grid: bool = False,
+    ) -> list[str]:
+        """The ready grids, in `ready_grids` order, whose fill is not held (#193):
+        those with a window at this time, or every one with `every_grid`. A grid
+        whose axis misses the window builds nothing there, so it is only ever
+        missing with `every_grid`."""
+        return [g for g, _ in self._fill_targets(top_ns, thickness_ns, finish, sliced, every_grid)]
+
+    def fills_wanted(self) -> list[str]:
+        """The ready grids that have a time axis, in `ready_grids` order: the
+        grids the site's fills are worked out for, whatever window is shown.
+        Nothing here depends on the slider or the thickness (a grid whose axis
+        ends above the window is in range again after a move), so a key built
+        from it never restarts work in flight."""
+        self._require_lattice()
+        return [g for g in self.ready_grids if self._engines[g].z is not None]
+
+    def fill_jobs(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        *,
+        sliced: _Sliced | None = None,
+        every_grid: bool = False,
+    ) -> list[FillJob]:
+        """One `FillJob` per missing grid, in `fills_missing` order. Making a job
+        drops that engine's held fill, as `_fill_for` does, so call this only
+        when the work will start."""
+        return [
+            self._engines[g].fill_job(cover, finish)
+            for g, cover in self._fill_targets(top_ns, thickness_ns, finish, sliced, every_grid)
+        ]
+
+    def fill_keys(self, grids: Sequence[str], finish: SliceFinish) -> tuple[Any, ...]:
+        """Each of `grids`' fill key for `finish`, in order."""
+        return tuple(self._engines[g].fill_key(finish) for g in grids)
+
+    def stretch_job(
+        self,
+        thickness_ns: float,
+        clip: Any,
+        *,
+        finish: SliceFinish,
+        method: str,
+        manual: Mapping[str, float],
+        fills: Mapping[str, FillJob] | None = None,
+    ) -> StretchJob:
+        """`stretch_limit` as a job for a worker (#193). Everything it reads is
+        captured here, on the GUI thread: each grid's snapshot, its windows at
+        every measured time, its finish settings, its held fill or the fill job
+        in `fills` (by grid id), a copy of its solved cache and, for edge
+        normalisation, the seams. `job.limit` and `job.final` equal what
+        `stretch_limit` returns.
+
+        Obligation: the caller passes a fill job in `fills` for every grid whose fill is
+        not held for these settings. Otherwise the job builds that fill itself
+        on the worker while the engine still holds the old one, so the memory
+        peak is old plus new.
+        """
+        self._require_lattice()
+        times = self._limit_windows_ns(thickness_ns)
+        seams = self._site_seams() if method == "edge" else ()
+        steps: list[dict[str, SliceWindow | None]] = []
+        grids: dict[str, GridStretch] = {}
+        for top, thickness in times:
+            step: dict[str, SliceWindow | None] = {}
+            for grid_id in self.ready_grids:
+                window = self._grid_window(grid_id, top, thickness)
+                step[grid_id] = window
+                if window is not None and grid_id not in grids:
+                    grids[grid_id] = self._engines[grid_id].stretch_parts(
+                        finish, (fills or {}).get(grid_id)
+                    )
+            steps.append(step)
+        return StretchJob(
+            grids,
+            steps,
+            clip,
+            curvature=finish.method == "min_curvature",
+            site=True,
+            method=method,
+            manual=manual,
+            seams=seams,
+        )
 
     def shared_limit(
         self,
@@ -1443,8 +1604,52 @@ class SiteEngine(QObject):
         self.clear()
         retiring, self._retiring = self._retiring, []
         for engine in retiring:
-            engine.dispose()
+            self._release(engine)
         self.on_error = None
+
+    def busy_report(self) -> str:
+        """Plain text on what keeps the site engine running, for a hang's message.
+
+        Never raises: a report that fails while a test is already failing
+        would hide the cause it exists to show.
+        """
+        try:
+            moved = ""
+            if self._preparing is not None and (
+                self._registration(self._preparing) != self._preparing_fp
+            ):
+                moved = " (moved since dispatch)"
+            lines = [
+                f"active: {self._active} · preparing: {self._preparing!r}{moved}"
+                f" · queue: {self._queue!r}",
+                f"retry timer: {'on' if self._retry.isActive() else 'off'}"
+                f" · reaper timer: {'on' if self._reaper.isActive() else 'off'}"
+                f" · in dispatch: {self._in_dispatch}",
+            ]
+
+            def engine_line(label: str, e: SliceEngine) -> str:
+                return (
+                    f"{label}: running {e.is_running} · live task {e.has_live_task}"
+                    f" · pending tasks {e.pending_tasks}"
+                )
+
+            for grid_id, engine in self._engines.items():
+                lines.append(engine_line(f"engine {grid_id}", engine))
+            for n, engine in enumerate(self._retiring, 1):
+                lines.append(engine_line(f"retiring engine {n}", engine))
+            for n, peer in enumerate(self._exclusive_with, 1):
+                lines.append(f"exclusive peer {n}: live task {peer.has_live_task}")
+            order = [c.grid_id for c in self._source.grids] if self._source else []
+            order += [g for g in self._states if g not in order]
+            for grid_id in order:
+                text = self._states.get(grid_id, "unknown")
+                if grid_id in self._progress:
+                    done, total = self._progress[grid_id]
+                    text += f" ({done} of {total})"
+                lines.append(f"grid {grid_id}: {text}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 -- the report must not raise
+            return f"could not describe the site: {exc}"
 
     def wait_until_idle(self, timeout_ms: int = 60_000) -> bool:
         """Spin the event loop until nothing is preparing or queued. For tests."""

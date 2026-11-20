@@ -169,6 +169,12 @@ from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
 ADD_DATA_TIP = "Add survey data to the site: GPR lines placed by a grid's tapes or by GPS."
+ANALYSIS_3D_TIP = "3-D tools: a surface from picks, the 3D view, and the export for ParaView."
+SURFACE_TIP = "Make a surface from the picks selected on the map (the picks layer current)."
+PARAVIEW_TIP = (
+    "Write one grid's volume for ParaView: a block to slice, an isosurface, and its picks, "
+    "lines and surfaces."
+)
 VELOCITY_TIP = (
     "Velocity mode: click a diffraction hyperbola on the profile, apex first, "
     "or drag a box around it to trace it. Right-click a point to remove it. "
@@ -315,8 +321,14 @@ class NsgeoPlugin:
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
+        #: The toolbar's 3D Analysis button (its own action for it), the
+        #: menu it drops down, and that menu's three entries (#227). See
+        #: `_build_analysis3d_button`.
+        self.act_analysis3d: QAction | None = None
+        self.analysis3d_menu: QMenu | None = None
         self.act_surface: QAction | None = None
         self.act_view3d: QAction | None = None
+        self.act_paraview: QAction | None = None
         #: QGIS's 3-D view of the Slices panel's grid (M16 C).
         self.scene3d: Scene3D | None = None
         #: The Cut map tool while the toggle is on (cut spec §4.1).
@@ -407,12 +419,8 @@ class NsgeoPlugin:
         self.act_cut = self._toolbar_action("Cut", self._toggle_cut_tool)
         self.act_cut.setCheckable(True)
         self.act_cut.setToolTip(CUT_TIP)
-        self.act_surface = self._toolbar_action("Surface from picks…", self.new_surface)
-        self.act_surface.setToolTip(
-            "Make a surface from the picks selected on the map (the picks layer current)."
-        )
-        self.act_view3d = self._toolbar_action("3D view", self.open_view3d)
-        self.act_view3d.setToolTip(BUTTON_TIP)
+        self.toolbar.addSeparator()
+        self._build_analysis3d_button()
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -453,7 +461,6 @@ class NsgeoPlugin:
         self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
         self.slices_dock.save_cube_requested.connect(self.save_cube)
         self.slices_dock.export_requested.connect(self.export_geotiff)
-        self.slices_dock.paraview_requested.connect(self.export_paraview)
         self.scene3d = Scene3D(
             self.session,
             self.layers,
@@ -632,14 +639,44 @@ class NsgeoPlugin:
         menu = QMenu(self.iface.mainWindow())
         self.act_add_gpr = menu.addAction("GPR…")
         self.act_add_gpr.triggered.connect(self._add_data_from_toolbar)
+        self.act_add_data = self._toolbar_menu_button("Add data", ADD_DATA_TIP, menu)
+        self.add_data_menu = menu
+
+    def _build_analysis3d_button(self) -> None:
+        """#227: the toolbar's 3D Analysis button, after Cut: an instant-popup
+        menu holding Surface from picks…, 3D view and Export for ParaView…,
+        with room for later 3-D tools. Each entry keeps its tooltip, and the
+        menu shows them, so the 3D view still says which grid it shows."""
+        menu = QMenu(self.iface.mainWindow())
+        menu.setToolTipsVisible(True)
+        self.act_surface = menu.addAction("Surface from picks…")
+        self.act_surface.setToolTip(SURFACE_TIP)
+        self.act_surface.triggered.connect(self.new_surface)
+        self.act_view3d = menu.addAction("3D view")
+        self.act_view3d.setToolTip(BUTTON_TIP)
+        self.act_view3d.triggered.connect(self.open_view3d)
+        self.act_paraview = menu.addAction("Export for ParaView…")
+        self.act_paraview.setToolTip(PARAVIEW_TIP)
+        self.act_paraview.triggered.connect(self.export_paraview)
+        self.act_analysis3d = self._toolbar_menu_button("3D Analysis", ANALYSIS_3D_TIP, menu)
+        self.analysis3d_menu = menu
+
+    def _toolbar_menu_button(self, text: str, tip: str, menu: QMenu) -> QAction:
+        """A toolbar button of our own that drops `menu` down on one click.
+
+        A button of our own, not an action given a menu: the popup mode
+        belongs to the button, and QToolBar would make that button itself,
+        with a split arrow whose main half does nothing here. Returns the
+        toolbar's action for the button; callers add their own separator.
+        """
         button = QToolButton(self.toolbar)
-        button.setText("Add data")
-        button.setToolTip(ADD_DATA_TIP)
+        button.setText(text)
+        button.setToolTip(tip)
         button.setMenu(menu)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.act_add_data = self.toolbar.addWidget(button)
-        self.toolbar_actions.append(self.act_add_data)
-        self.add_data_menu = menu
+        action = self.toolbar.addWidget(button)
+        self.toolbar_actions.append(action)
+        return action
 
     def _build_panels_menu(self) -> None:
         """#84: the toolbar's Panels button -- each panel by name, then
@@ -684,17 +721,10 @@ class NsgeoPlugin:
         )
         menu.addAction("Show all").triggered.connect(self._show_all_panels)
 
-        # A button of our own, not an action given a menu: the popup mode
-        # belongs to the button, and QToolBar would make that button
-        # itself, with a split arrow whose main half does nothing here.
-        button = QToolButton(self.toolbar)
-        button.setText("Panels")
-        button.setToolTip("Show or hide the nsgeo panels, or switch to a layout")
-        button.setMenu(menu)
-        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.toolbar.addSeparator()
-        self.act_panels = self.toolbar.addWidget(button)
-        self.toolbar_actions.append(self.act_panels)
+        self.act_panels = self._toolbar_menu_button(
+            "Panels", "Show or hide the nsgeo panels, or switch to a layout", menu
+        )
         self.panels_menu = menu
 
     def _set_panel_open(self, dock: Any, entry: QAction, checked: bool) -> None:
@@ -861,6 +891,8 @@ class NsgeoPlugin:
                 self.cut_sections.dispose()
                 self.cut_sections = None
             self.slices_dock.refiner.shutdown()
+            self.slices_dock.fill_flow.stop()
+            self.slices_dock.fill_worker.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
             # -- so nothing it owns can start or outlive the teardown.
@@ -902,8 +934,15 @@ class NsgeoPlugin:
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
+        self.act_analysis3d = None
         self.act_surface = None
         self.act_view3d = None
+        self.act_paraview = None
+        if self.analysis3d_menu is not None:
+            # Parented to the main window, which outlives this plugin; its
+            # entries are its children and go with it.
+            self.analysis3d_menu.deleteLater()
+            self.analysis3d_menu = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -981,8 +1020,10 @@ class NsgeoPlugin:
                 self.act_save,
                 self.act_add_grid,
                 self.act_add_data,
+                self.act_analysis3d,
                 self.act_surface,
                 self.act_view3d,
+                self.act_paraview,
             ):
                 if act is not None:
                     act.setEnabled(is_open)
@@ -1558,8 +1599,8 @@ class NsgeoPlugin:
         return callback, dialog
 
     def export_paraview(self) -> None:
-        """The Slices panel's "ParaView..." button: the dialog, then the export behind the
-        progress dialog, then (when asked) ParaView on the folder (M16 A)."""
+        """The 3D Analysis menu's Export for ParaView… (#227): the dialog, then the export
+        behind the progress dialog, then (when asked) ParaView on the folder (M16 A)."""
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
                 return
@@ -1809,11 +1850,19 @@ class NsgeoPlugin:
         assert self.session is not None and self.slices_dock is not None
         dock = self.slices_dock
         site = dock.site_engine
+        # The button's own rule (T4-a), which this is reachable without: an included
+        # grid still queued or preparing. Not `is_running`, which a grid left out whose
+        # cancelled read runs on also holds, while the button is enabled.
+        if dock.site_export_busy():
+            self.message(
+                "wait until the site's grids finish preparing, then export.",
+                Qgis.MessageLevel.Warning,
+            )
+            return
         if not site.ready_grids or site.lattice is None or site.site_z is None:
             self.message("prepare the site's grids before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        transform = dock.site_panel.transform()
         method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
         gains = dock.site_gains()
@@ -1839,7 +1888,6 @@ class NsgeoPlugin:
                 step_levels,
                 cell,
                 pixel,
-                transform=transform,
                 method=method,
                 finish=finish,
                 gains=gains,
@@ -1970,18 +2018,21 @@ class NsgeoPlugin:
         own_style = self._export_own_style(dock)
 
         def on_done(result: ExportResult) -> None:
-            self._finish_export(
-                result,
-                job,
-                epoch=epoch,
-                cell=choice.cell,
-                pixel=choice.pixel,
-                palette=palette,
-                unipolar=unipolar,
-                counts_palette=counts_palette,
-                removed=removed,
-                own_style=own_style,
-            )
+            try:
+                self._finish_export(
+                    result,
+                    job,
+                    epoch=epoch,
+                    cell=choice.cell,
+                    pixel=choice.pixel,
+                    palette=palette,
+                    unipolar=unipolar,
+                    counts_palette=counts_palette,
+                    removed=removed,
+                    own_style=own_style,
+                )
+            finally:
+                self._offer_export()
 
         task = ExportTask(
             f"Export {task_name}",
@@ -2001,10 +2052,23 @@ class NsgeoPlugin:
                 Qgis.MessageLevel.Warning,
             )
             return
+        self._offer_export()
         self.message(
             f"exporting {task_name}: you can keep working; "
             "it is in the task list at the bottom right."
         )
+
+    def _offer_export(self) -> None:
+        """Re-read the Export button's rule when an export starts or ends: it is
+        greyed while one runs (walkthrough, #193). Never raises: it runs in an
+        export's `on_done`."""
+        try:
+            if self.slices_dock is not None:
+                self.slices_dock.update_export_button()
+        except Exception as exc:  # noqa: BLE001 -- reached from a task's finished()
+            QgsMessageLog.logMessage(
+                f"could not update the Export button: {exc}", "nsgeo", Qgis.MessageLevel.Warning
+            )
 
     def _on_site_closed_for_export(self) -> None:
         try:

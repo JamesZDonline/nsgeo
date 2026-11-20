@@ -1494,6 +1494,29 @@ class SiteSession(QObject):
         if merged is not None:
             self._update_source(grid_id, resolution=merged)
 
+    def restore_slice_resolution(self, grid_id: str, record: dict[str, float | str] | None) -> None:
+        """Put the grid's remembered resolution back exactly as `record` (a copy
+        taken from `slice_resolution` earlier); None removes it, so a field that
+        was only ever seeded is seeded again. For taking an edit back (#193), not
+        for choosing. Marks the survey dirty and emits what `remember_slice_resolution`
+        does."""
+        sources = self._require_site().slice_sources
+        entry = dict(sources.get(grid_id) or {})
+        if record is None:
+            if "resolution" not in entry:
+                return
+            del entry["resolution"]
+        else:
+            if entry.get("resolution") == record:
+                return
+            entry["resolution"] = dict(record)
+        if entry:
+            sources[grid_id] = entry
+        else:
+            sources.pop(grid_id, None)
+        self._set_dirty(True)
+        self.slice_sources_changed.emit(grid_id)
+
     def volume_record(self, grid_id: str) -> dict[str, float | str]:
         """A copy of the grid's remembered 3-D settings (M16), or {}."""
         entry = self._require_site().slice_sources.get(grid_id) or {}
@@ -1618,6 +1641,22 @@ class SiteSession(QObject):
             return
         site = self._require_site()
         site.site_view = {**site.site_view, "resolution": merged}
+        self._set_dirty(True)
+
+    def restore_site_resolution(self, record: dict[str, float | str] | None) -> None:
+        """Put Whole site's remembered resolution back exactly as `record`; None
+        removes it. As `restore_slice_resolution`, for the site (#193)."""
+        site = self._require_site()
+        view = dict(site.site_view)
+        if record is None:
+            if "resolution" not in view:
+                return
+            del view["resolution"]
+        else:
+            if view.get("resolution") == record:
+                return
+            view["resolution"] = dict(record)
+        site.site_view = view
         self._set_dirty(True)
 
     # ---- current line, samples, cursor ------------------------------------

@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 import numpy as np
+
+from nsgeo.slices.stopping import SolveStopped
 
 if TYPE_CHECKING:
     from nsgeo.slices.curvature import CurvaturePlan
@@ -64,6 +66,9 @@ _PRUNE_EVERY = 32  # offsets between dropping targets whose quadrants are all fu
 # system is solved on its own (checked bit for bit against one pass).
 _PLAN_CHUNK = 8192
 _SOLVE_CHUNK = 2048
+# Where `plan_fill`'s progress puts the end of the reach and of the neighbour search.
+_REACH_DONE = 0.1
+_SEARCH_DONE = 0.6
 _EMPTY = np.iinfo(np.int32).min  # offset sentinel for an empty slot in pattern keys
 
 
@@ -171,13 +176,29 @@ def _disc_offsets(radius_m: float, cell: float) -> tuple[np.ndarray, np.ndarray,
     return dy[order], dx[order], dist[order]
 
 
-def _reach(pop2: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
-    """Cells with a data cell within the offsets (data cells included)."""
+def _reach(
+    pop2: np.ndarray,
+    dy: np.ndarray,
+    dx: np.ndarray,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> np.ndarray:
+    """Cells with a data cell within the offsets (data cells included).
+
+    `should_stop` is asked before every offset (a pass over the frame costs far
+    more than the question); True raises `SolveStopped`. `progress` gets the
+    share of offsets done, every `_PRUNE_EVERY` offsets and never 1.0: at a
+    fine cell the reach alone takes seconds. It changes no result."""
     ny, nx = pop2.shape
     reach = pop2.copy()
+    total = max(1, len(dy))
     # zip without strict=: that is Python 3.10+, and the core supports 3.9.
     # The offsets come in equal-length arrays by construction.
-    for oy, ox in zip(dy.tolist(), dx.tolist()):
+    for i, (oy, ox) in enumerate(zip(dy.tolist(), dx.tolist())):
+        if should_stop is not None and should_stop():
+            raise SolveStopped
+        if progress is not None and i % _PRUNE_EVERY == 0:
+            progress(i / total)
         # reach[y, x] |= pop[y + oy, x + ox], reading False outside the frame
         ys, ye = max(0, -oy), min(ny, ny - oy)
         xs, xe = max(0, -ox), min(nx, nx - ox)
@@ -186,21 +207,38 @@ def _reach(pop2: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
     return reach
 
 
-def reach_mask(populated: np.ndarray, cell: float, max_distance_m: float) -> np.ndarray:
+def reach_mask(
+    populated: np.ndarray,
+    cell: float,
+    max_distance_m: float,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> np.ndarray:
     """(ny, nx) bool: data cells, and every cell within `max_distance_m` of one.
 
     The one reach rule: the cells IDW and kriging fill and the cells minimum
     curvature shows are the same, so every method blanks in the same place
-    (interpolation spec §5.2).
+    (interpolation spec §5.2). `should_stop` True raises `SolveStopped`; `progress` as `_reach`'s.
     """
     ry, rx, _ = _disc_offsets(max_distance_m, cell)
-    return _reach(np.asarray(populated, dtype=bool), ry, rx)
+    return _reach(np.asarray(populated, dtype=bool), ry, rx, should_stop, progress)
 
 
 def _neighbourhoods(
-    pop2: np.ndarray, targets: np.ndarray, dy: np.ndarray, dx: np.ndarray
+    pop2: np.ndarray,
+    targets: np.ndarray,
+    dy: np.ndarray,
+    dx: np.ndarray,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> np.ndarray:
-    """Per target, the K nearest data cells in each quadrant as flat ids (-1 = empty)."""
+    """Per target, the K nearest data cells in each quadrant as flat ids (-1 = empty).
+
+    `should_stop` is asked before every offset (True raises `SolveStopped`): at
+    fine cells one offset's pass over the targets takes tens of milliseconds.
+    Every `_PRUNE_EVERY` offsets `progress` gets the share of offsets done,
+    which the early exit when every quadrant is full does not top up."""
     ny, nx = pop2.shape
     k = NEIGHBOURS_PER_QUADRANT
     # int32 throughout, as `sources` already is: half the working set of intp.
@@ -210,7 +248,12 @@ def _neighbourhoods(
     sources = np.full((targets.size, _SLOTS), -1, dtype=np.int32)
     count = np.zeros((targets.size, 4), dtype=np.int8)
     active = np.arange(targets.size, dtype=np.int32)
+    total = max(1, dy.size)
     for i, (oy, ox, q) in enumerate(zip(dy.tolist(), dx.tolist(), quad.tolist())):  # 3.9: no strict
+        if should_stop is not None and should_stop():
+            raise SolveStopped
+        if i % _PRUNE_EVERY == 0 and progress is not None:
+            progress(i / total)
         if i % _PRUNE_EVERY == 0 and i:
             active = active[(count[active] < k).any(axis=1)]
             if not active.size:
@@ -243,7 +286,12 @@ def _idw_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndarray:
     return w / w.sum(axis=1, keepdims=True)
 
 
-def _kriging_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndarray:
+def _kriging_weights(
+    rel: np.ndarray,
+    valid: np.ndarray,
+    cell: float,
+    should_stop: Callable[[], bool] | None = None,
+) -> np.ndarray:
     """Ordinary kriging, linear variogram, no nugget, isotropic (interpolation spec §5.1).
 
     Weights depend only on the sources' offsets from the target, and regular
@@ -258,6 +306,8 @@ def _kriging_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndar
     rel_u, valid_u = rel[first], valid[first]
     out = np.zeros((first.size, _SLOTS))
     for lo in range(0, first.size, _SOLVE_CHUNK):
+        if should_stop is not None and should_stop():
+            raise SolveStopped
         p = rel_u[lo : lo + _SOLVE_CHUNK] * cell  # (c, 12, 2) metres from the target
         ok = valid_u[lo : lo + _SOLVE_CHUNK]
         c = p.shape[0]
@@ -276,7 +326,14 @@ def _kriging_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndar
 
 
 def plan_fill(
-    populated: np.ndarray, cell: float, method: str, max_distance_m: float, search_radius_m: float
+    populated: np.ndarray,
+    cell: float,
+    method: str,
+    max_distance_m: float,
+    search_radius_m: float,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> FillWeights | CurvaturePlan:
     """Plan which empty cells get filled and from which neighbours with which weights.
 
@@ -284,6 +341,14 @@ def plan_fill(
     target when a data cell lies within `max_distance_m`; its sources are drawn
     from within `search_radius_m`. Minimum curvature has no sources: it plans
     a solve instead, over the same targets (interpolation spec §5.4).
+
+    `should_stop` is asked between the stages' units of work (offsets of the
+    reach and the neighbour search, plan chunks, kriging solve chunks); True
+    raises `SolveStopped`. `progress` gets fractions that never fall and end at
+    exactly 1.0 on success: the reach is the first tenth, the neighbour search
+    up to 0.6 and the weights the rest. `method="min_curvature"` passes both on
+    to `plan_curvature`, which has its own split. `eigh` in the hierarchy
+    cannot be stopped. Neither argument changes a result.
     """
     pop2 = np.asarray(populated)
     if pop2.ndim != 2:
@@ -301,9 +366,16 @@ def plan_fill(
         # Here, not at the top: curvature imports this module.
         from nsgeo.slices.curvature import plan_curvature
 
-        return plan_curvature(pop2, cell, max_distance_m)
+        return plan_curvature(
+            pop2, cell, max_distance_m, should_stop=should_stop, progress=progress
+        )
     shape = (int(pop2.shape[0]), int(pop2.shape[1]))
     nx = shape[1]
+
+    def report(fraction: float) -> None:
+        if progress is not None:
+            progress(fraction)
+
     flat_pop = pop2.ravel().copy()
     empty = FillWeights(
         shape,
@@ -312,17 +384,49 @@ def plan_fill(
         np.empty((0, _SLOTS), dtype=np.int32),
         np.empty((0, _SLOTS), dtype=np.float32),
     )
+    report(0.0)
     if method == "none":
+        report(1.0)
         return empty
-    targets = np.flatnonzero((reach_mask(pop2, cell, max_distance_m) & ~pop2).ravel())
+    targets = np.flatnonzero(
+        (
+            reach_mask(
+                pop2,
+                cell,
+                max_distance_m,
+                should_stop=should_stop,
+                progress=lambda f: report(f * _REACH_DONE),
+            )
+            & ~pop2
+        ).ravel()
+    )
+    report(_REACH_DONE)
     if not targets.size:
+        report(1.0)
         return empty
     sy, sx, _ = _disc_offsets(search_radius_m, cell)
-    sources = _neighbourhoods(pop2, targets, sy, sx)
-    build = _idw_weights if method == "idw" else _kriging_weights
+    sources = _neighbourhoods(
+        pop2,
+        targets,
+        sy,
+        sx,
+        should_stop,
+        lambda f: report(_REACH_DONE + f * (_SEARCH_DONE - _REACH_DONE)),
+    )
+    report(_SEARCH_DONE)
     weights = np.empty(sources.shape, dtype=np.float32)
     for lo in range(0, targets.size, _PLAN_CHUNK):
+        if should_stop is not None and should_stop():
+            raise SolveStopped
         rows = slice(lo, lo + _PLAN_CHUNK)
         rel, valid = _offsets(sources[rows], targets[rows], nx)
-        weights[rows] = build(rel, valid, cell)
+        if method == "idw":
+            weights[rows] = _idw_weights(rel, valid, cell)
+        else:
+            weights[rows] = _kriging_weights(rel, valid, cell, should_stop)
+        report(
+            _SEARCH_DONE
+            + (min(lo + _PLAN_CHUNK, targets.size) / targets.size) * (1.0 - _SEARCH_DONE)
+        )
+    report(1.0)
     return FillWeights(shape, flat_pop, targets, sources, weights)

@@ -43,7 +43,7 @@ reviewer of this task does:
   cell size with a nearest-cell gather and recorded a 15-18% loss at rotated
   azimuths; half the cell replaced it until the bilinear rule.
 * **The taps are not shared with the live view.** The export runs on a worker
-  thread, so it never calls `to_north_up` (its `lru_cache` of plans is what
+  thread, so it never calls `to_north_up` (its two cached plans are what
   `SliceLayer.update` draws through on the GUI thread) and never touches a live
   engine. A grid's taps are built once per export and every band after the first
   is one gather. The file still equals what the live view draws at the live cell

@@ -90,6 +90,7 @@ import numpy as np
 
 from nsgeo.slices.interpolate import reach_mask
 from nsgeo.slices.multigrid import Hierarchy, build_hierarchy
+from nsgeo.slices.stopping import SolveStopped
 
 CURVATURE_TOL: float = 1e-6  # ‖r‖ ≤ tol · ‖b‖ ends the solve (plan call 3)
 CURVATURE_EPS: float = 1e-6  # the slope term's weight, in cell units (plan call 1)
@@ -112,10 +113,6 @@ _TERMS: tuple[tuple[tuple[tuple[int, int], ...], tuple[float, ...], float], ...]
     (((0, 0), (0, 1)), (-1.0, 1.0), CURVATURE_EPS),  # slope along X
     (((0, 0), (1, 0)), (-1.0, 1.0), CURVATURE_EPS),  # slope along Y
 )
-
-
-class SolveStopped(Exception):
-    """`CurvaturePlan.solve` gave up because `should_stop` asked it to."""
 
 
 def _dot(a: np.ndarray, b: np.ndarray) -> float:
@@ -282,10 +279,14 @@ class CurvaturePlan:
         )
 
 
-def _grow(mask: np.ndarray, times: int) -> np.ndarray:
+def _grow(
+    mask: np.ndarray, times: int, should_stop: Callable[[], bool] | None = None
+) -> np.ndarray:
     """`mask` dilated `times` times by its 4-neighbours."""
     out = mask.copy()
     for _ in range(times):
+        if should_stop is not None and should_stop():
+            raise SolveStopped
         wider = out.copy()
         wider[1:] |= out[:-1]
         wider[:-1] |= out[1:]
@@ -295,7 +296,9 @@ def _grow(mask: np.ndarray, times: int) -> np.ndarray:
     return out
 
 
-def _stencil(domain: np.ndarray, unknown: np.ndarray) -> np.ndarray:
+def _stencil(
+    domain: np.ndarray, unknown: np.ndarray, should_stop: Callable[[], bool] | None = None
+) -> np.ndarray:
     """A's row at each unknown, by stencil offset: A = Σ w·c·cᵀ over the
     energy's terms, half its Hessian.
 
@@ -316,6 +319,8 @@ def _stencil(domain: np.ndarray, unknown: np.ndarray) -> np.ndarray:
     ny, nx = domain.shape
     out = np.zeros((len(_OFFSETS), ny, nx), dtype=np.float32)
     for cells, coefficients, weight in _TERMS:
+        if should_stop is not None and should_stop():
+            raise SolveStopped
         hy = max(dy for dy, _ in cells)
         hx = max(dx for _, dx in cells)
         if hy >= ny or hx >= nx:
@@ -422,11 +427,25 @@ def _start(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
     return start
 
 
-def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) -> CurvaturePlan:
+def plan_curvature(
+    populated: np.ndarray,
+    cell: float,
+    max_distance_m: float,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[float], None] | None = None,
+) -> CurvaturePlan:
     """Plan minimum curvature for one grid: the solve area and its operator.
 
     `populated` is the (ny, nx) mask of cells holding data. The output is
     finite within `max_distance_m` of a data cell, as IDW's and kriging's are.
+
+    `should_stop` is asked between the stages, between the offsets of the
+    reach, the terms of the stencil and the probes of the hierarchy; True
+    raises `SolveStopped`. `progress` gets fractions that never fall and end
+    at exactly 1.0: the reach is the first tenth, growing it to 0.15, the
+    stencil to 0.4, and the hierarchy the rest. The dense solve on the coarsest
+    level cannot be stopped.
     """
     pop2 = np.asarray(populated)
     if pop2.ndim != 2:
@@ -435,18 +454,38 @@ def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) ->
         raise ValueError(f"cell must be > 0, got {cell}")
     if not max_distance_m >= 0:
         raise ValueError(f"max_distance_m must be >= 0, got {max_distance_m}")
+
+    def report(fraction: float) -> None:
+        if progress is not None:
+            progress(fraction)
+
     pop2 = pop2.astype(bool)
-    reach = reach_mask(pop2, cell, max_distance_m)
-    domain = _grow(reach, SOLVE_MARGIN_CELLS)
+    report(0.0)
+    reach = reach_mask(
+        pop2, cell, max_distance_m, should_stop=should_stop, progress=lambda f: report(f * 0.1)
+    )
+    report(0.1)
+    domain = _grow(reach, SOLVE_MARGIN_CELLS, should_stop)
+    report(0.15)
     unknown = domain & ~pop2
-    coefficients = _stencil(domain, unknown)
-    return CurvaturePlan(
+    coefficients = _stencil(domain, unknown, should_stop)
+    report(0.4)
+    hierarchy = build_hierarchy(
+        _OFFSETS,
+        coefficients,
+        unknown,
+        should_stop=should_stop,
+        progress=lambda fraction: report(0.4 + 0.6 * fraction),
+    )
+    plan = CurvaturePlan(
         shape=(int(pop2.shape[0]), int(pop2.shape[1])),
         populated=pop2.ravel(),
         reach=reach.ravel(),
         domain=domain,
         coefficients=coefficients,
-        hierarchy=build_hierarchy(_OFFSETS, coefficients, unknown),
+        hierarchy=hierarchy,
         cell=float(cell),
         max_distance_m=float(max_distance_m),
     )
+    report(1.0)
+    return plan

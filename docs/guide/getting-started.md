@@ -110,13 +110,11 @@ stay exactly where they are.
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
-| **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
-| **3D view** | Opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). |
+| **3D Analysis ▾** | The 3-D tools. **Surface from picks…** makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). **3D view** opens QGIS's 3-D view of the grid the Slices panel shows: its picks at their depths and its surfaces, with depth stretched (see [The 3D view](#the-3d-view)). **Export for ParaView…** writes one grid's volume for ParaView (see [Step 9](#step-9-export-for-paraview)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Add data**, **Cut**, **Surface from
-picks…** and **3D view** stay greyed out until a site is open, and **Pick** and **Velocity** until a
-line is open.
+**Save site**, **Add grid…**, **Add data**, **Cut** and **3D Analysis** stay greyed
+out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -843,14 +841,15 @@ table, and they come back when you turn the setting back.
 
 ### Step 9: Export for ParaView
 
-ParaView is a free program for looking at 3-D data. **ParaView…** on the
-**nsgeo Slices** panel (beside **Save cube…** and **Export GeoTIFF…**) writes one
-grid's volume for it: a block you can slice, and an isosurface that draws each
-strong reflection as a surface. The button is on whenever a site is open, in
-either scope, and it needs no prepared slice source. Exporting never changes
-what the Slices panel shows.
+ParaView is a free program for looking at 3-D data. **Export for ParaView…**, in
+the **3D Analysis ▾** drop-down on the nsgeo toolbar, writes one grid's volume for
+it: a block you can slice, and an isosurface that draws each strong reflection as
+a surface. It is on whenever a site is open, in either scope of the Slices panel,
+and it needs no prepared slice source. Exporting never changes what the Slices
+panel shows.
 
-1. Click **ParaView…**. The dialog opens on the panel's grid.
+1. Click **3D Analysis ▾**, then **Export for ParaView…**. The dialog opens on
+   the Slices panel's grid.
    - **3-D resolution** is this grid's own **Cell** and **Depth step**, kept
      apart from the Slices panel's, which the hint beside each box shows. Cells
      finer than the panel's make a bigger, sharper block. A cell so fine the
@@ -930,10 +929,11 @@ on the clock the grid's preset uses now.
    Select tool: a box, a polygon, or by expression. At least three, not all in a
    straight line, and saved (an unsaved pick is refused until you save the picks
    layer's edits).
-2. Click **Surface from picks…**. Name the surface. **Settings** are folded away
-   and show their values; open them only to change how the surface is drawn
-   between your picks, how far it may follow the reflection from a pick (the
-   window), or the strength test that decides which cells are holes.
+2. Click **3D Analysis ▾**, then **Surface from picks…**. Name the surface.
+   **Settings** are folded away and show their values; open them only to change
+   how the surface is drawn between your picks, how far it may follow the
+   reflection from a pick (the window), or the strength test that decides which
+   cells are holes.
    A pick can belong to several surfaces, so picks already in another surface join
    this one and stay in the other; the dialog says which.
 3. Click **Create and build**. It builds at the grid's 3-D resolution, the one its
@@ -963,9 +963,9 @@ deleting a surface never deletes a pick.
 
 ### The 3D view
 
-Click **3D view** to open QGIS's own 3-D view of one grid: its saved picks as
-spheres at their depths, and its surfaces. Nothing in it is saved, and opening or
-closing it never marks the site changed.
+Click **3D Analysis ▾**, then **3D view**, to open QGIS's own 3-D view of one
+grid: its saved picks as spheres at their depths, and its surfaces. Nothing in it
+is saved, and opening or closing it never marks the site changed.
 
 - **Which grid.** The grid the Slices panel shows. In **This grid** the view follows
   the panel's grid combo. In **Whole site** it keeps the last grid it showed.
@@ -1007,7 +1007,7 @@ Everything for a site lives in its site folder:
 | `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**, and the list of your surfaces. |
 | `surfaces` | One folder per grid with each surface's last build: a mesh, its depths and a fit report. Regenerable: **Rebuild** writes them again. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
-| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
+| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **Export for ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,

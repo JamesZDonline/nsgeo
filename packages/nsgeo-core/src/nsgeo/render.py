@@ -28,6 +28,7 @@ __all__ = [
     "display_range",
     "gradient_stops",
     "row_envelope",
+    "sample_stride",
     "section_rgba8",
     "to_index8",
     "to_index8_unipolar",
@@ -43,6 +44,13 @@ class Normalizer(Protocol):
     colour table. Bipolar data is always mapped symmetrically about zero."""
 
     def limit(self, data: np.ndarray) -> float: ...
+
+
+def sample_stride(size: int, max_samples: int) -> int:
+    """The step of the strided subsample a clip measures `size` values by: every
+    value up to `max_samples`, else every `ceil(size / max_samples)`-th. One
+    rule, so `limit_over_slices` can take the same values without joining them."""
+    return 1 if size <= max_samples else int(math.ceil(size / max_samples))
 
 
 @dataclass(frozen=True)
@@ -71,8 +79,7 @@ class PercentileClip:
 
     def limit(self, data: np.ndarray) -> float:
         flat = np.asarray(data, dtype=float).ravel()
-        if flat.size > self.max_samples:
-            flat = flat[:: int(math.ceil(flat.size / self.max_samples))]
+        flat = flat[:: sample_stride(flat.size, self.max_samples)]
         finite = flat[np.isfinite(flat)]
         if finite.size == 0:
             return 1.0
@@ -131,8 +138,7 @@ class UnipolarClip:
 
     def limit(self, data: np.ndarray) -> float:
         flat = np.asarray(data, dtype=float).ravel()
-        if flat.size > self.max_samples:
-            flat = flat[:: int(math.ceil(flat.size / self.max_samples))]
+        flat = flat[:: sample_stride(flat.size, self.max_samples)]
         finite = flat[np.isfinite(flat)]
         if finite.size == 0:
             return 1.0
