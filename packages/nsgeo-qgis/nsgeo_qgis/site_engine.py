@@ -1222,13 +1222,14 @@ class SiteEngine(QObject):
     ) -> bool:
         return self._engines[grid_id].fill_held(binned[grid_id][1], finish)
 
-    def fills_wanted(self, top_ns: float, thickness_ns: float) -> list[str]:
-        """The ready grids with a window at this time, in `ready_grids` order:
-        the grids a draw here finishes, whether or not their fills are held."""
+    def fills_wanted(self) -> list[str]:
+        """The ready grids that have a time axis, in `ready_grids` order: the
+        grids the site's fills are worked out for, whatever window is shown.
+        Nothing here depends on the slider or the thickness (a grid whose axis
+        ends above the window is in range again after a move), so a key built
+        from it never restarts work in flight."""
         self._require_lattice()
-        return [
-            g for g in self.ready_grids if self._grid_window(g, top_ns, thickness_ns) is not None
-        ]
+        return [g for g in self.ready_grids if self._engines[g].z is not None]
 
     def fill_jobs(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[FillJob]:
         """One `FillJob` per missing grid, in `fills_missing` order. Making a job

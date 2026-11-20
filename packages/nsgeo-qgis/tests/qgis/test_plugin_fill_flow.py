@@ -2,13 +2,13 @@
 
 The dock on a synthetic grid at a cell fine enough that the interpolation fill
 takes seconds. `SLOW_CELL` is calibrated once (`_assert_slow`) so the hazard
-cannot silently shrink. CI's runners (QGIS 3.44 and 4.2 alike) build the same
-fill in about 0.65 of this machine's time: at 0.017 m, 1.25 s there against
-1.9 to 2.2 s here. At 0.016 m CI measures about 1.6 s and this loaded machine
-about 2.5 s. The floor only has to make a GUI-thread fill impossible to miss
-against the 0.25 s gap limit, so it is `MIN_SLOW_S` = 1.0 s (four times the gap
-limit). `MID_CELL` (0.022 m) takes about 0.75 s here and about 0.5 s on CI, over
-twice the 0.2 s budget on both.
+cannot silently shrink. CI's runners build the same fill in 0.65 to 0.47 of this
+machine's time (QGIS 4.2 ran at 0.47 once), so the cells are chosen for 0.47.
+Measured here for one grid's fill: 0.022 m 0.85 s, 0.018 m 1.64 s, 0.016 m
+2.5 s, 0.015 m 3.2 s. `SLOW_CELL` 0.015 m: 3.2 s here, about 1.5 s on CI, over
+the 1.0 s floor (`MIN_SLOW_S`, four times the 0.25 s gap limit). `MID_CELL`
+0.018 m: 1.6 s here, about 0.77 s on CI, over twice the 0.2 s budget (0.4 s)
+with margin.
 """
 
 from __future__ import annotations
@@ -51,15 +51,15 @@ from test_plugin_slices_dock import (  # noqa: F401 -- fixture
     docked,
 )
 
-SLOW_CELL = 0.016
+SLOW_CELL = 0.015
 QUICK_CELL = 0.1
-MID_CELL = 0.022
+MID_CELL = 0.018
 MIN_SLOW_S = 1.0
 #: Whole site: the cell at which the three grids' fills together take about
-#: 3.3 s here (CI about 0.65 of that, 2.1 s, about 0.7 s a grid against the
-#: 0.25 s gap limit). Measured per cell: 0.08 m 1.0 s, 0.06 m 2.5 s, 0.05 m
-#: 4.4 s, in the three grids' sum.
-SITE_SLOW_CELL = 0.055
+#: 4.4 s here (CI at 0.47 of that, 2.1 s, about 0.7 s a grid against the 0.25 s
+#: gap limit). Measured per cell: 0.08 m 1.0 s, 0.06 m 2.5 s, 0.05 m 4.4 s, in
+#: the three grids' sum.
+SITE_SLOW_CELL = 0.05
 #: The floor: four times the gap limit, as MIN_SLOW_S.
 MIN_SLOW_SITE_S = 1.0
 GAP_LIMIT_S = 0.25
@@ -1117,6 +1117,95 @@ def test_a_slider_move_mid_fill_never_restarts_the_grid_in_flight(site_slow):
     assert last in texts, texts
     assert not any(t.endswith("of 2") for t in texts), texts
     _wait_idle(dock)
+
+
+def _open_short_c(fake_iface, site3_factory, answer_modal):
+    """The site with grid C recording half the time: C's axis ends mid-slider."""
+    return _open(fake_iface, site3_factory(samples={"C": 256}), answer_modal)
+
+
+def _slider_with_and_without_c(dock) -> tuple[int, int]:
+    """A slider value whose window reaches C, and one past C's axis end."""
+    from nsgeo_qgis.ui.site_scope import levels
+
+    engine, z = dock.site_engine, dock.site_engine.site_z
+    thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
+    span = thickness * z.dz_ns
+    present = [
+        v for v in range(z.nz) if engine._grid_window("C", z.t0_ns + v * z.dz_ns, span) is not None
+    ]
+    assert present and present[-1] < z.nz - 1, "C must end inside the site's axis"
+    return present[0], present[-1] + 5
+
+
+def test_crossing_a_grids_axis_end_mid_fill_never_restarts_the_work(
+    fake_iface, site3_factory, answer_modal
+):
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        _assert_slow_site(dock)
+        flow = dock.fill_flow
+        inside, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(inside)
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, SITE_SLOW_CELL)
+        assert spin_until(lambda: flow.working and flow._landed >= 1, 60_000)
+        assert flow._landed < len(flow._fills)
+        jobs = [id(job) for job in flow._fills]
+        landed = flow._landed
+        for value in (outside, inside, outside):  # across the axis end, both ways
+            dock.slice_slider.setValue(value)
+            dock._site.tick.stop()
+            dock._site.refresh_slice()
+            assert [id(job) for job in flow._fills] == jobs, f"restarted at slider {value}"
+            assert flow._landed >= landed
+        assert flow.working
+        texts: list[str] = []
+        assert spin_until(
+            lambda: texts.append(dock.refine_label.text()) or not flow.working, 120_000
+        )
+        assert not any("of 1" in t or "of 2" in t for t in texts), texts
+        _wait_idle(dock)
+    finally:
+        _close(plugin, answer_modal)
+
+
+def test_a_grid_that_comes_into_range_gets_its_fill_on_the_next_request(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        _assert_slow_site(dock)
+        flow, engine = dock.fill_flow, dock.site_engine
+        inside, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, SITE_SLOW_CELL)
+        assert spin_until(lambda: flow.working, 60_000)
+        _wait_idle(dock)  # A and B filled for a window without C; the picture is drawn
+        top = engine.site_z.t0_ns + inside * engine.site_z.dz_ns
+        from nsgeo_qgis.ui.site_scope import levels
+
+        z = engine.site_z
+        thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
+        assert engine.fills_missing(top, thickness * z.dz_ns, dock.site_finish.value()) == ["C"]
+        requested: list[list[str]] = []
+        real = engine.fill_jobs
+        monkeypatch.setattr(
+            engine, "fill_jobs", lambda *a, **k: (requested.append(r := real(*a, **k)), r)[1]
+        )
+        dock.slice_slider.setValue(inside)
+        dock._site.tick.stop()
+        dock._site.refresh_slice()
+        assert requested and [job.grid_id for job in requested[0]] == ["C"]
+        _wait_idle(dock)
+        assert engine.fills_missing(top, thickness * z.dz_ns, dock.site_finish.value()) == []
+    finally:
+        _close(plugin, answer_modal)
 
 
 def test_closing_the_generator_runs_the_docked_teardown(tmp_path, qgis_app):

@@ -1227,11 +1227,13 @@ class SiteScope:
         engine = self.engine
         # A running refine list was made on the plans about to be dropped.
         self.refine.before_draw(rebuilds=True)
-        # What the tick WANTS, not what is still missing: the missing set shrinks
-        # as each grid lands, and a slider move after that must not restart the
-        # grid in flight. The key moves only with the lattice, the ready grids
-        # at this time, and cell, method or max distance.
-        wanted = engine.fills_wanted(top, span)
+        # Not what is still missing (it shrinks as each grid lands) and not what
+        # the window needs (it moves with the slider and the thickness, as a
+        # grid's axis ends): neither may restart the grid in flight. The key
+        # moves only with the lattice, the ready grids with an axis, and cell,
+        # method or max distance. On landing the tick asks again for whatever
+        # its current window still lacks, as a new request on the idle flow.
+        wanted = engine.fills_wanted()
         key = (engine.lattice, tuple(wanted), engine.fill_keys(wanted, finish))
         return flow.request(
             key,
