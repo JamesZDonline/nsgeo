@@ -170,7 +170,9 @@ def test_a_cube_written_outside_the_project_tree_is_refused(exportable_with_sess
 def test_the_record_survives_a_save_and_reload_of_the_survey(exportable_with_session, tmp_path):
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
-    session.site.cubes["A__default"] = cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
+    session.site.cubes["A__default"] = cube_record(
+        session, engine.choice, engine.frame, engine.z, _VIEW, npz
+    )
     session.save()
     reloaded = load_site(session.json_path)
     assert reloaded.cubes["A__default"]["array"] == "slices/A__default.npz"

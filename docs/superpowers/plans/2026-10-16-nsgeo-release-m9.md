@@ -73,9 +73,11 @@ def test_metadata_admits_qgis_3_40_through_4():
     assert g["qgisMinimumVersion"] == "3.40"
     assert g["qgisMaximumVersion"] == "4.99"
 
+
 def test_qt6_builds_of_qgis_3_still_accept_the_plugin():
     # QGIS 3.44 installer_data.py:832 rejects a Qt6 build without it.
     assert _general()["supportsQt6"] == "True"
+
 
 def test_release_is_marked_experimental():
     assert _general()["experimental"] == "True"
@@ -174,10 +176,21 @@ Expected: every job is green, including both `plugin-qgis (qgis/qgis:3.44)` and 
 - [ ] **Step 1: Write the failing core tests** in `test_public_api.py`
 
 ```python
-EXPECTED_PUBLIC = {"io", "model", "geometry", "processing", "slices", "project", "render", "velocity"}
+EXPECTED_PUBLIC = {
+    "io",
+    "model",
+    "geometry",
+    "processing",
+    "slices",
+    "project",
+    "render",
+    "velocity",
+}
+
 
 def test_the_public_modules_are_exactly_the_named_ones():
-    assert public_modules() == EXPECTED_PUBLIC   # helper: one level below nsgeo, declares __all__
+    assert public_modules() == EXPECTED_PUBLIC  # helper: one level below nsgeo, declares __all__
+
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_PUBLIC))
 def test_every_public_name_resolves_and_none_is_private(name):
@@ -186,16 +199,23 @@ def test_every_public_name_resolves_and_none_is_private(name):
     for n in mod.__all__:
         assert not n.startswith("_") and hasattr(mod, n), n
 
+
 def test_top_level_exports_only_the_version():
     assert nsgeo.__all__ == ["__version__"]
+
 
 def test_register_is_not_public():
     assert "register" not in nsgeo.processing.__all__
 
+
 def test_the_readme_names_every_public_name():
     text = (CORE / "README.md").read_text(encoding="utf-8")
-    missing = [f"{m}.{n}" for m in EXPECTED_PUBLIC
-               for n in importlib.import_module(f"nsgeo.{m}").__all__ if f"`{n}`" not in text]
+    missing = [
+        f"{m}.{n}"
+        for m in EXPECTED_PUBLIC
+        for n in importlib.import_module(f"nsgeo.{m}").__all__
+        if f"`{n}`" not in text
+    ]
     assert not missing, missing
 ```
 

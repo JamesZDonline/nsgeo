@@ -13,16 +13,19 @@ Builds the package, the preparation step, the grid value per axis (the spike's m
 # nsgeo/destagger/prepare.py
 @dataclass(frozen=True, eq=False)
 class EnvelopeBins:
-    data: np.ndarray     # (n_bins, n_traces) float32
-    t0_ns: float         # centre time of bin 0, header clock
-    dt_ns: float         # time between bin centres (BIN_SAMPLES x sample interval)
+    data: np.ndarray  # (n_bins, n_traces) float32
+    t0_ns: float  # centre time of bin 0, header clock
+    dt_ns: float  # time between bin centres (BIN_SAMPLES x sample interval)
+
     @property
     def t_ns(self) -> np.ndarray: ...
+
 
 def envelope_bins(samples: np.ndarray, dt_ns: float, t0_ns: float) -> EnvelopeBins:
     """One channel's raw samples (n_samples, n_traces): dewow DEWOW_NS, background_mean,
     analytic envelope (nsgeo.processing), then the mean of each BIN_SAMPLES rows (a partial
     last bin is dropped)."""
+
 
 # nsgeo/destagger/measure.py
 class LineStatus(Enum):
@@ -32,39 +35,46 @@ class LineStatus(Enum):
     NO_MATCH = "no clear match"
     NOT_MEASURED = "not measured"
 
+
 @dataclass(frozen=True)
 class MeasureLine:
     key: str
     bins: EnvelopeBins
-    placement: GridPlacement   # as the table shows it now; travel_shift is ignored (C1)
-    header: DztHeader          # positions: replace(placement, travel_shift=0.0).distance_along(bins.data.shape[1], header)
+    placement: GridPlacement  # as the table shows it now; travel_shift is ignored (C1)
+    header: DztHeader  # positions: replace(placement, travel_shift=0.0).distance_along(bins.data.shape[1], header)
+
 
 # nsgeo/destagger/profiles.py (internal, but Task 2 imports it)
 def search_range_m(longest_m: float) -> float:
     """Neighbour-lag search half-width: max(MIN_SEARCH_M, SEARCH_FRACTION * longest_m) (C12)."""
+
 
 @dataclass(frozen=True)
 class LineResult:
     key: str
     axis: str
     status: LineStatus
-    destagger: float | None    # the value for its Destagger cell; None exactly when NOT_MEASURED
-    reason: str = ""           # set for NOT_MEASURED (one of the reason constants)
+    destagger: float | None  # the value for its Destagger cell; None exactly when NOT_MEASURED
+    reason: str = ""  # set for NOT_MEASURED (one of the reason constants)
+
 
 @dataclass(frozen=True)
 class AxisResult:
     axis: str
-    destagger: float | None    # None when the grid value could not be measured (C10)
-    spread_m: float            # half the width of the 95% bootstrap interval; nan when destagger is None
-    lines_used: int            # lines with an opposite-direction neighbour that were measured
-    reason: str = ""           # ONE_WAY, TOO_FEW or UNCLEAR when destagger is None
+    destagger: float | None  # None when the grid value could not be measured (C10)
+    spread_m: float  # half the width of the 95% bootstrap interval; nan when destagger is None
+    lines_used: int  # lines with an opposite-direction neighbour that were measured
+    reason: str = ""  # ONE_WAY, TOO_FEW or UNCLEAR when destagger is None
+
 
 @dataclass(frozen=True)
 class DestaggerResult:
-    axes: dict[str, AxisResult]    # one per axis present among the lines
-    lines: dict[str, LineResult]   # one per input line
+    axes: dict[str, AxisResult]  # one per axis present among the lines
+    lines: dict[str, LineResult]  # one per input line
+
 
 class MeasureStopped(Exception): ...
+
 
 def measure_destagger(
     lines: Sequence[MeasureLine], should_stop: Callable[[], bool] = lambda: False

@@ -67,7 +67,11 @@ def test_add_remove_toggle_and_reorder(opened):
     assert session.stack_for(key).entries[1][1] is False
     dock.list.setCurrentRow(2)
     dock.move_selected(-1)
-    assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow", "gain_agc", "background_mean"]
+    assert [s.name for s, _ in session.stack_for(key).entries] == [
+        "dewow",
+        "gain_agc",
+        "background_mean",
+    ]
     assert dock.list.currentRow() == 1
     dock.remove_selected()
     assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow", "background_mean"]
@@ -179,7 +183,9 @@ class ProcessingDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Processing", parent)
         self.setObjectName("nsgeoProcessingDock")
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self.session = session
         self._updating = False
 
@@ -256,7 +262,9 @@ class ProcessingDock(QgsDockWidget):
                         | Qt.ItemFlag.ItemIsUserCheckable
                         | Qt.ItemFlag.ItemIsDragEnabled
                     )
-                    item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+                    item.setCheckState(
+                        Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked
+                    )
                     self.list.addItem(item)
             if 0 <= keep < self.list.count():
                 self.list.setCurrentRow(keep)

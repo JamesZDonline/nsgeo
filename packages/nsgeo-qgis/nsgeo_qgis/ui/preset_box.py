@@ -52,6 +52,7 @@ class PresetBox(QWidget):
         super().__init__(parent)
         self.session = session
         self._grid_id: str | None = None
+        self._new = False
         self._refilling = 0
         self._deleted: str | None = None
         self.combo = QComboBox()
@@ -69,15 +70,26 @@ class PresetBox(QWidget):
         self.set_grid(None)
 
     # ---- public ----------------------------------------------------------
-    def set_grid(self, grid_id: str | None) -> None:
-        """Move to the grid's starting value (the site's last, else None)."""
+    def set_grid(self, grid_id: str | None, *, new: bool = False) -> None:
+        """Move to the grid's starting value (the site's last, else None).
+
+        `new`: the grid does not exist yet (a New grid being named). It starts
+        on the site's last choice, and the Slices note shows for any chosen
+        preset, since a grid's first lines always set its Slices preset."""
         self._grid_id = grid_id
+        self._new = new
         self._deleted = None
         try:
-            start = self.session.import_preset(grid_id)
+            start = self.session.import_preset(None if new else grid_id)
         except Exception:  # noqa: BLE001 -- a closed site: start on None
             start = None
         self._fill(start)
+        self._refresh_note()
+
+    def rename_new_grid(self, grid_id: str | None) -> None:
+        """The name of the grid being made moved: only the note follows, the
+        choice stays."""
+        self._grid_id = grid_id
         self._refresh_note()
 
     def chosen(self) -> str | None:
@@ -163,7 +175,9 @@ class PresetBox(QWidget):
             migration = migration_note(dicts, saved=True)
             if migration:
                 lines.append(migration)
-            if self._grid_id is not None and self._sets_slices(self._grid_id):
+            if self._new:
+                lines.append(SLICES_NOTE.format(grid=self._grid_id or "The new grid"))
+            elif self._grid_id is not None and self._sets_slices(self._grid_id):
                 lines.append(SLICES_NOTE.format(grid=self._grid_id))
         self.note.setText("\n".join(lines))
 

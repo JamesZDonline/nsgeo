@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from nsgeo.geometry import END_LIMIT_M, Bridge, ToXY, track_from_log
+import numpy as np
+from nsgeo.geometry import END_LIMIT_M, Bridge, Grid, ToXY, metres_outside, track_from_log
 from nsgeo.io import (
     RTK_FIXED,
     DzgError,
@@ -31,6 +32,22 @@ from nsgeo.model import Line
 
 NO_DZG = "no DZG beside it"
 ALREADY_IN_SITE = "already in the site"
+OUTSIDE = "outside {gid}"
+#: A stretch outside the grid shorter than this is not worth a line (metres).
+OUTSIDE_NOTE_M = 0.05
+
+
+@dataclass(frozen=True)
+class GpsImportResult:
+    """What the GPS page did at Import, for the hand-on to the Grid page: the
+    grid, every path the page held (its order), each imported line's
+    `trace_coords`, and the refused paths that are neither already in the site
+    nor outside the grid (in file order)."""
+
+    grid_id: str
+    order: list[Path]
+    placed: dict[Path, np.ndarray]
+    leftovers: list[Path]
 
 
 @dataclass(frozen=True)
@@ -154,22 +171,58 @@ def plan_gps_rows(
     return [_plan_one(Path(p), to_xy, crs, taken, usable) for p in paths]
 
 
-def shifted_lines(rows: Sequence[GpsRow], metres: float) -> list[Line]:
-    """The ready rows' lines with `travel_shift` set to `metres`."""
+def shifted_lines(rows: Sequence[GpsRow], metres: float, grid_id: str | None = None) -> list[Line]:
+    """The ready rows' lines with `travel_shift` set to `metres`, and, when
+    `grid_id` is given, `grid_id` set on each placement."""
     out: list[Line] = []
     for row in rows:
         if row.line is None:
             continue
-        placement = dataclasses.replace(row.line.placement, travel_shift=float(metres))  # type: ignore[type-var]
+        changes: dict[str, object] = {"travel_shift": float(metres)}
+        if grid_id is not None:
+            changes["grid_id"] = grid_id
+        placement = dataclasses.replace(row.line.placement, **changes)  # type: ignore[type-var]
         out.append(dataclasses.replace(row.line, placement=placement))
     return out
 
 
-def import_messages(rows: Sequence[GpsRow], imported: int) -> list[str]:
-    """What the plugin says after an import: the count, then every bridge,
-    then every end run over END_LIMIT_M, then every refused file."""
+def with_grid(rows: Sequence[GpsRow], grid: Grid) -> tuple[list[GpsRow], dict[Path, float]]:
+    """Rows against an existing grid: a ready line with no trace inside it
+    becomes refused `OUTSIDE`; the dict holds the metres outside for every
+    ready row that stays."""
+    out: list[GpsRow] = []
+    outside: dict[Path, float] = {}
+    for row in rows:
+        if row.line is None or row.refusal is not None:
+            out.append(row)
+            continue
+        metres, any_inside = metres_outside(grid, row.line.trace_coords({}))
+        if not any_inside:
+            out.append(dataclasses.replace(row, line=None, refusal=OUTSIDE.format(gid=grid.id)))
+        else:
+            out.append(row)
+            outside[row.path] = metres
+    return out, outside
+
+
+def _gid_of(into: str) -> str:
+    return into.split(" ")[2] if into.startswith("new grid ") else into
+
+
+def import_messages(
+    rows: Sequence[GpsRow],
+    imported: int,
+    *,
+    into: str,
+    outside: Mapping[Path, float] = {},  # noqa: B006 -- read only
+    handed_on: Collection[Path] = (),
+) -> list[str]:
+    """What the plugin says after an import: the count and where it went, then
+    every bridge, then every end run over END_LIMIT_M, then each line's metres
+    outside its grid, then every refused file that is not handed on.
+    `into` is "new grid G (w × l m, spacing s m)" or just the grid's id."""
     ready = [r for r in rows if r.refusal is None]
-    out = [f"imported {imported} GPS line(s)"]
+    out = [f"imported {imported} GPS line(s) into {into}"]
     for r in ready:
         for b in r.bridges:
             out.append(
@@ -182,8 +235,15 @@ def import_messages(rows: Sequence[GpsRow], imported: int) -> list[str]:
             out.append(f"{r.path.name}: its start runs {start:.1f} m before the first RTK fix")
         if end > END_LIMIT_M:
             out.append(f"{r.path.name}: its end runs {end:.1f} m past the last RTK fix")
+    gid = _gid_of(into)
+    for r in ready:
+        metres = outside.get(r.path, 0.0)
+        if metres >= OUTSIDE_NOTE_M:
+            out.append(
+                f"{r.path.name}: {metres:.1f} m lies outside {gid} and is left out of its slices"
+            )
     for r in rows:
-        if r.refusal is not None:
+        if r.refusal is not None and r.path not in handed_on:
             out.append(f"not imported: {r.path.name} ({r.refusal})")
     return out
 

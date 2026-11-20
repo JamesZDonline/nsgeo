@@ -38,7 +38,9 @@ def _lines(folder, n=3):
     out = []
     for i in range(n):
         p = synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60 + i)
-        out.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem)))
+        out.append(
+            Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem))
+        )
     return out
 
 

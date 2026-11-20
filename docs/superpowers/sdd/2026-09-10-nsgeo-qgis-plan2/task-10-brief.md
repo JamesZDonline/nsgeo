@@ -98,13 +98,26 @@ def test_polygon_tab_reads_a_selected_feature(session):
 
 def test_digitised_points_set_origin_and_azimuth(session):
     d = GridDialog(session)
-    d.set_digitised((500.0, 700.0), (500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30))))
+    d.set_digitised(
+        (500.0, 700.0), (500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30)))
+    )
     assert (d.origin_x.value(), d.origin_y.value()) == (500.0, 700.0)
     assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
 
 
 def test_editing_an_existing_grid_prefills_and_keeps_its_id(session):
-    session.add_grid(Grid("A", (1.0, 2.0), 45.0, 3.0, 4.0, "EPSG:32616", 0.25, velocity=VelocityModel.constant(0.1)))
+    session.add_grid(
+        Grid(
+            "A",
+            (1.0, 2.0),
+            45.0,
+            3.0,
+            4.0,
+            "EPSG:32616",
+            0.25,
+            velocity=VelocityModel.constant(0.1),
+        )
+    )
     d = GridDialog(session, grid=session.grid("A"))
     assert d.id_edit.text() == "A" and not d.id_edit.isEnabled()
     assert d.velocity.value() == pytest.approx(0.1)
@@ -283,7 +296,9 @@ class GridDialog(QDialog):
         form.addRow("Velocity (m/ns)", vel_row)
         layout.addLayout(form)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -309,7 +324,9 @@ class GridDialog(QDialog):
         w = QWidget()
         v = QVBoxLayout(w)
         self.corner_table = QTableWidget(4, 5)
-        self.corner_table.setHorizontalHeaderLabels(["corner", "local x", "local y", "world E", "world N"])
+        self.corner_table.setHorizontalHeaderLabels(
+            ["corner", "local x", "local y", "world E", "world N"]
+        )
         for row, name in enumerate(CORNER_NAMES):
             item = QTableWidgetItem(name)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -330,7 +347,11 @@ class GridDialog(QDialog):
     def _build_digitise_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
-        v.addWidget(QLabel("Click the grid origin on the map, then a point along the +Y edge. Then enter the sizes."))
+        v.addWidget(
+            QLabel(
+                "Click the grid origin on the map, then a point along the +Y edge. Then enter the sizes."
+            )
+        )
         self.digitise_button = QPushButton("Pick on map")
         self.digitise_button.clicked.connect(self.digitise_requested.emit)
         v.addWidget(self.digitise_button)
@@ -390,7 +411,9 @@ class GridDialog(QDialog):
         self.azimuth.setValue(fit.azimuth)
         self.size_x.setValue(float(local[:, 0].max()))
         self.size_y.setValue(float(local[:, 1].max()))
-        self.residual_label.setText(f"rigid fit RMS {fit.residual_rms:.3f} m (nonzero = grid not square)")
+        self.residual_label.setText(
+            f"rigid fit RMS {fit.residual_rms:.3f} m (nonzero = grid not square)"
+        )
 
     def set_digitised(self, origin_xy: tuple[float, float], along_xy: tuple[float, float]) -> None:
         dx = along_xy[0] - origin_xy[0]
@@ -410,7 +433,9 @@ class GridDialog(QDialog):
         polygon = geom.asPolygon() if not geom.isMultipart() else geom.asMultiPolygon()[0]
         ring = [(p.x(), p.y()) for p in polygon[0]]
         try:
-            corners = corners_from_polygon(ring, self.origin_combo.currentIndex(), self.plus_y_combo.currentIndex())
+            corners = corners_from_polygon(
+                ring, self.origin_combo.currentIndex(), self.plus_y_combo.currentIndex()
+            )
             fit = fit_grid_from_corners(corners.local, corners.world)
         except ValueError as exc:
             self.polygon_status.setText(str(exc))
@@ -438,7 +463,12 @@ class GridDialog(QDialog):
             self.velocity.setValue(grid.velocity.surface_velocity)
 
     def _validate(self, *_: Any) -> None:
-        ok = bool(self.id_edit.text().strip()) and self.velocity.value() > 0 and self.size_x.value() > 0 and self.size_y.value() > 0
+        ok = (
+            bool(self.id_edit.text().strip())
+            and self.velocity.value() > 0
+            and self.size_x.value() > 0
+            and self.size_y.value() > 0
+        )
         self.ok_button.setEnabled(ok)
 
     def result_grid(self) -> Grid:
@@ -461,43 +491,46 @@ Import `Qt` alongside `pyqtSignal`: `from qgis.PyQt.QtCore import Qt, pyqtSignal
 In `plugin.py`, replace the `open_grid_dialog` stub:
 
 ```python
-    def open_grid_dialog(self, grid_id: str | None) -> None:
-        assert self.session is not None
-        if not self.session.is_open:
-            return
-        grid = self.session.grid(grid_id) if grid_id else None
-        suggestion = None
+def open_grid_dialog(self, grid_id: str | None) -> None:
+    assert self.session is not None
+    if not self.session.is_open:
+        return
+    grid = self.session.grid(grid_id) if grid_id else None
+    suggestion = None
+    if grid is None:
+        lines = self.session.site.lines if self.session.site else []
+        if lines:
+            suggestion = VelocityModel.from_dielectric(lines[0].header.epsr).surface_velocity
+    dialog = GridDialog(
+        self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
+    )
+    dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return
+    result = dialog.result_grid()
+    try:
         if grid is None:
-            lines = self.session.site.lines if self.session.site else []
-            if lines:
-                suggestion = VelocityModel.from_dielectric(lines[0].header.epsr).surface_velocity
-        dialog = GridDialog(self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow())
-        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dialog.result_grid()
-        try:
-            if grid is None:
-                self.session.add_grid(result)
-            else:
-                self.session.replace_grid(result)
-        except (ValueError, KeyError) as exc:
-            self.message(str(exc), Qgis.MessageLevel.Critical)
+            self.session.add_grid(result)
+        else:
+            self.session.replace_grid(result)
+    except (ValueError, KeyError) as exc:
+        self.message(str(exc), Qgis.MessageLevel.Critical)
 
-    def _start_digitise(self, dialog: GridDialog) -> None:
-        canvas = self.iface.mapCanvas()
-        tool = DigitiseGridTool(canvas)
 
-        def done(origin: Any, along: Any) -> None:
-            dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
-            dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
-            canvas.unsetMapTool(tool)
-            dialog.show()
-            dialog.raise_()
+def _start_digitise(self, dialog: GridDialog) -> None:
+    canvas = self.iface.mapCanvas()
+    tool = DigitiseGridTool(canvas)
 
-        tool.points_picked.connect(done)
-        dialog.hide()
-        canvas.setMapTool(tool)
+    def done(origin: Any, along: Any) -> None:
+        dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
+        dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
+        canvas.unsetMapTool(tool)
+        dialog.show()
+        dialog.raise_()
+
+    tool.points_picked.connect(done)
+    dialog.hide()
+    canvas.setMapTool(tool)
 ```
 
 Add the imports `from qgis.PyQt.QtWidgets import QDialog`, `from nsgeo.velocity import VelocityModel`, `from nsgeo_qgis.ui.grid_dialog import GridDialog`, `from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool`.

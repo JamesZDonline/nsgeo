@@ -127,7 +127,7 @@ the 18 tests:
 ```python
 v.set_axes(200, 128, -4.0, 0.5, distance_along=np.arange(100) / 60.0)
 v.set_image(RadargramImage(rg).image)
-v.grab_image()   # repaint 0: warning.  v.grab_image() again: SIGSEGV
+v.grab_image()  # repaint 0: warning.  v.grab_image() again: SIGSEGV
 ```
 ```
 File ".../ui/profile_view.py", line 281, in _paint_axes

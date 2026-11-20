@@ -540,7 +540,7 @@ capture mechanism and its "must still see all 37 [levels, via a tail
 window]" intent:
 ```python
 expected_n_windows = -(-odd.z.nz // 10)  # ceil(37 / 10) == 4
-assert seen and seen[0].size == expected_n_windows * odd.frame.n_cells, (...)
+assert seen and seen[0].size == expected_n_windows * odd.frame.n_cells, ...
 ```
 Verified this corrected assertion **FAILS** against the pre-fix code
 (`1200` seen, `1600` expected — 3 windows, tail dropped) and **PASSES**

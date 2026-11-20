@@ -3184,6 +3184,7 @@ class NsgeoPlugin:
             # A slot on dialog.finished: see the module docstring. The page
             # already did the session write (and its own identity re-checks).
             try:
+                dialog.dispose_overlay()  # the preview leaves the map, however it closed
                 dialog.deleteLater()
             finally:
                 self._add_data_dialog = None
@@ -3195,7 +3196,13 @@ class NsgeoPlugin:
             # still points at *this* dialog.
             if self._add_data_dialog is dialog:
                 self._add_data_dialog = None
+            # The preview's canvas item belongs to the canvas: a dialog
+            # destroyed without finished() still gives it back (idempotent,
+            # held by a local reference since `dialog` is gone).
+            if overlay is not None:
+                overlay.dispose()
 
+        overlay = dialog.overlay
         dialog.imported.connect(imported)
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)

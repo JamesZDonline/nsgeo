@@ -218,24 +218,32 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   CURVATURE_MAX_ITERATIONS: int = 10_000
   SOLVE_MARGIN_CELLS: int = 2
 
-  class SolveStopped(Exception): ...   # raised by solve() when should_stop() returns True
+
+  class SolveStopped(Exception): ...  # raised by solve() when should_stop() returns True
+
 
   @dataclass(frozen=True, eq=False)
   class CurvaturePlan:
       shape: tuple[int, int]
-      populated: np.ndarray     # (ny*nx,) bool
-      reach: np.ndarray         # (ny*nx,) bool: finite in the output
-      domain: np.ndarray        # (ny, nx) bool: the solve area D (plan call 2)
-      coefficients: np.ndarray  # (13, ny, nx) float32: A's row at each unknown, by stencil offset; 0 elsewhere
-      cell: float               # amended during Task 1: kept so plan call 10 can re-plan around a
-      max_distance_m: float     # non-finite data cell
+      populated: np.ndarray  # (ny*nx,) bool
+      reach: np.ndarray  # (ny*nx,) bool: finite in the output
+      domain: np.ndarray  # (ny, nx) bool: the solve area D (plan call 2)
+      coefficients: (
+          np.ndarray
+      )  # (13, ny, nx) float32: A's row at each unknown, by stencil offset; 0 elsewhere
+      cell: float  # amended during Task 1: kept so plan call 10 can re-plan around a
+      max_distance_m: float  # non-finite data cell
+
       def solve(
           self, values: np.ndarray, should_stop: Callable[[], bool] | None = None
-      ) -> tuple[np.ndarray, int]: ...                                  # (the slice, CG iterations run)
-      def apply(self, values: np.ndarray) -> np.ndarray: ...            # solve(values)[0]: (ny, nx) float32
-      def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray: ...  # apply(values).ravel()[cells]
+      ) -> tuple[np.ndarray, int]: ...  # (the slice, CG iterations run)
+      def apply(self, values: np.ndarray) -> np.ndarray: ...  # solve(values)[0]: (ny, nx) float32
+      def apply_at(
+          self, values: np.ndarray, cells: np.ndarray
+      ) -> np.ndarray: ...  # apply(values).ravel()[cells]
       @property
       def nbytes(self) -> int: ...  # sum of the array fields' nbytes
+
 
   def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) -> CurvaturePlan: ...
   ```
@@ -359,21 +367,30 @@ These are the inputs most likely to hurt a user that the spec does not spell out
 - Produces, in `refine.py`:
   ```python
   class RefineJob(Protocol):
-      def run(self, should_stop: Callable[[], bool]) -> None: ...   # worker thread; keeps its own result
+      def run(
+          self, should_stop: Callable[[], bool]
+      ) -> None: ...  # worker thread; keeps its own result
+
 
   class Refiner:
-      def __init__(self, parent: QObject) -> None: ...   # the poll QTimer is parented to `parent`
+      def __init__(self, parent: QObject) -> None: ...  # the poll QTimer is parented to `parent`
       def start(
           self,
           jobs: Sequence[RefineJob],
           on_landed: Callable[[RefineJob], None],
           on_error: Callable[[str], None],
-      ) -> None: ...
+      ) -> None:
+          ...
           # cancels whatever is running, then runs `jobs` in order on the worker thread;
           # on_landed(job) runs on the GUI thread after each job finishes, in order
-      def cancel(self) -> None: ...    # the running job stops at its next iteration; nothing more of that list lands
+
+      def cancel(
+          self,
+      ) -> None: ...  # the running job stops at its next iteration; nothing more of that list lands
       @property
-      def busy(self) -> bool: ...      # a started list has jobs that have not landed; False before the LAST job's on_landed runs
+      def busy(
+          self,
+      ) -> bool: ...  # a started list has jobs that have not landed; False before the LAST job's on_landed runs
       def shutdown(self) -> None: ...  # cancel, then join the worker; safe to call twice
   ```
 
@@ -471,26 +488,42 @@ These are the inputs most likely to hurt a user that the spec does not spell out
 - Consumes: Task 1's `plan_fill(..., "min_curvature", ...)` → `CurvaturePlan`, `SolveStopped` and `METHODS`; Task 2's `Refiner`.
 - Produces, in `slices_engine.py`:
   ```python
-  class PendingSolve:                 # a RefineJob
-      key: bytes                      # the solved-slice cache key of its values
-      solved: np.ndarray | None       # set by run(): the unsmoothed slice
-      ms: float | None                # set by run(): the solve's own time
-      def run(self, should_stop: Callable[[], bool]) -> None: ...   # worker thread
-      def land(self) -> bool: ...     # GUI thread: into the engine's cache (and last_solve_ms) only if that
-                                      # engine still holds the plan this job was made from; whether it did
+  class PendingSolve:  # a RefineJob
+      key: bytes  # the solved-slice cache key of its values
+      solved: np.ndarray | None  # set by run(): the unsmoothed slice
+      ms: float | None  # set by run(): the solve's own time
+
+      def run(self, should_stop: Callable[[], bool]) -> None: ...  # worker thread
+      def land(self) -> bool:
+          ...  # GUI thread: into the engine's cache (and last_solve_ms) only if that
+          # engine still holds the plan this job was made from; whether it did
   ```
 - Produces, on `SliceEngine`:
   ```python
   @property
-  def last_solve_ms(self) -> float | None: ...   # the last solve that ran on this plan; None after the plan is dropped
-  def finish_is_slow(self, values, coverage, finish: SliceFinish) -> bool: ...   # plan call 5's "slow"; False for other methods
-  def preview(self, values, coverage, finish: SliceFinish) -> np.ndarray: ...
+  def last_solve_ms(
+      self,
+  ) -> float | None: ...  # the last solve that ran on this plan; None after the plan is dropped
+  def finish_is_slow(
+      self, values, coverage, finish: SliceFinish
+  ) -> bool: ...  # plan call 5's "slow"; False for other methods
+  def preview(self, values, coverage, finish: SliceFinish) -> np.ndarray:
+      ...
       # min_curvature: kriging at the same distances and smoothing; any other method: finish(...)
-  def pending_solve(self, values, coverage, finish: SliceFinish) -> PendingSolve | None: ...
+
+
+  def pending_solve(self, values, coverage, finish: SliceFinish) -> PendingSolve | None:
+      ...
       # None unless min_curvature and these values are uncached
-  def stretch_solves(self, thickness_levels: int, finish: SliceFinish) -> list[PendingSolve]: ...
+
+
+  def stretch_solves(self, thickness_levels: int, finish: SliceFinish) -> list[PendingSolve]:
+      ...
       # the uncached limit_windows; [] for other methods
-  def shared_limit(self, thickness_levels, clip, finish, *, preview: bool = False) -> float: ...
+
+
+  def shared_limit(self, thickness_levels, clip, finish, *, preview: bool = False) -> float:
+      ...
       # min_curvature: over limit_windows, through finish() or, with preview=True, preview()
   ```
   - `finish()` keeps its signature and always returns the full result.
@@ -642,14 +675,28 @@ These are the inputs most likely to hurt a user that the spec does not spell out
 - Consumes: Task 3's `SliceEngine.finish_is_slow`, `preview`, `pending_solve`, `stretch_solves`, `shared_limit(..., preview=)` and `PendingSolve`; Task 2's `Refiner` through `dock.refiner`.
 - Produces, on `SiteEngine`:
   ```python
-  def slice_at(self, top_ns, thickness_ns, *, finish, method, manual, coverage=False,
-               preview: bool = False) -> SiteSlice: ...
+  def slice_at(
+      self, top_ns, thickness_ns, *, finish, method, manual, coverage=False, preview: bool = False
+  ) -> SiteSlice:
+      ...
       # preview=True: each grid whose finish_is_slow shows engine.preview(...); provisional = any grid did
-  def pending_solves(self, top_ns: float, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]: ...
+
+
+  def pending_solves(
+      self, top_ns: float, thickness_ns: float, finish: SliceFinish
+  ) -> list[PendingSolve]:
+      ...
       # every ready grid's uncached slice at this window, in ready_grids order
-  def stretch_solves(self, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]: ...
+
+
+  def stretch_solves(self, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]:
+      ...
       # every ready grid's uncached limit_windows
-  def shared_limit(self, thickness_ns, clip, *, finish, method, manual, preview: bool = False) -> float: ...
+
+
+  def shared_limit(
+      self, thickness_ns, clip, *, finish, method, manual, preview: bool = False
+  ) -> float: ...
   ```
   `SiteScope` gains `provisional: bool`.
 

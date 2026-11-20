@@ -66,8 +66,13 @@ def test_to_local_inverts_the_rotation():
 
 def test_for_grid_covers_the_whole_grid():
     g = Grid(
-        id="A", origin=(10.0, 20.0), azimuth=45.0, size_x=30.0, size_y=20.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(10.0, 20.0),
+        azimuth=45.0,
+        size_x=30.0,
+        size_y=20.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     f = CubeFrame.for_grid(g, cell=0.25)
     assert (f.nx, f.ny) == (120, 80)
@@ -78,8 +83,13 @@ def test_for_grid_covers_the_whole_grid():
 
 def test_for_grid_rounds_a_ragged_extent_up_rather_than_dropping_it():
     g = Grid(
-        id="A", origin=(0.0, 0.0), azimuth=0.0, size_x=10.1, size_y=10.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=10.1,
+        size_y=10.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     assert CubeFrame.for_grid(g, cell=1.0).nx == 11
 
@@ -142,8 +152,13 @@ def test_z_axis_rejects_a_non_positive_dz():
 def test_azimuth_convention_matches_grid():
     """CubeFrame must turn the same way as Grid or cubes land rotated."""
     g = Grid(
-        id="A", origin=(0.0, 0.0), azimuth=37.0, size_x=10.0, size_y=10.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(0.0, 0.0),
+        azimuth=37.0,
+        size_x=10.0,
+        size_y=10.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     f = CubeFrame.for_grid(g, cell=1.0)
     gx, gy = g.axes()

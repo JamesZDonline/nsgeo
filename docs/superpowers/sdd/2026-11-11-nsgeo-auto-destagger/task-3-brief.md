@@ -19,20 +19,30 @@ class JobLine:
     label: str
     path: Path
     header: DztHeader
-    placement: GridPlacement     # LineEdit.placed(frames) at press time
+    placement: GridPlacement  # LineEdit.placed(frames) at press time
 
-class MeasureJob:                # a RefineJob
+
+class MeasureJob:  # a RefineJob
     def __init__(self, lines: Sequence[JobLine], cached: Mapping[str, EnvelopeBins]) -> None: ...
-    prepared: dict[str, EnvelopeBins]    # cached plus newly read
-    unreadable: dict[str, str]           # key -> str(error)
+
+    prepared: dict[str, EnvelopeBins]  # cached plus newly read
+    unreadable: dict[str, str]  # key -> str(error)
     result: DestaggerResult | None
     stopped: bool
-    progress: tuple[int, int]            # (lines read, lines to read); written by the worker
+    progress: tuple[int, int]  # (lines read, lines to read); written by the worker
+
     def run(self, should_stop: Callable[[], bool]) -> None: ...
 
-def box_value(result: DestaggerResult) -> float | None: ...   # the axis with more lines_used (C11); None if it failed
-def measure_summary(result: DestaggerResult, filled: Sequence[str],
-                    unreadable: Mapping[str, str], labels: Mapping[str, str]) -> str: ...
+
+def box_value(
+    result: DestaggerResult,
+) -> float | None: ...  # the axis with more lines_used (C11); None if it failed
+def measure_summary(
+    result: DestaggerResult,
+    filled: Sequence[str],
+    unreadable: Mapping[str, str],
+    labels: Mapping[str, str],
+) -> str: ...
 ```
 
 `run`:

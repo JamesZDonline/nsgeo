@@ -117,8 +117,13 @@ def test_to_local_inverts_the_rotation():
 
 def test_for_grid_covers_the_whole_grid():
     g = Grid(
-        id="A", origin=(10.0, 20.0), azimuth=45.0, size_x=30.0, size_y=20.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(10.0, 20.0),
+        azimuth=45.0,
+        size_x=30.0,
+        size_y=20.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     f = CubeFrame.for_grid(g, cell=0.25)
     assert (f.nx, f.ny) == (120, 80)
@@ -129,8 +134,13 @@ def test_for_grid_covers_the_whole_grid():
 
 def test_for_grid_rounds_a_ragged_extent_up_rather_than_dropping_it():
     g = Grid(
-        id="A", origin=(0.0, 0.0), azimuth=0.0, size_x=10.1, size_y=10.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=10.1,
+        size_y=10.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     assert CubeFrame.for_grid(g, cell=1.0).nx == 11
 
@@ -193,8 +203,13 @@ def test_z_axis_rejects_a_non_positive_dz():
 def test_azimuth_convention_matches_grid():
     """CubeFrame must turn the same way as Grid or cubes land rotated."""
     g = Grid(
-        id="A", origin=(0.0, 0.0), azimuth=37.0, size_x=10.0, size_y=10.0,
-        crs="EPSG:32633", default_spacing=0.5,
+        id="A",
+        origin=(0.0, 0.0),
+        azimuth=37.0,
+        size_x=10.0,
+        size_y=10.0,
+        crs="EPSG:32633",
+        default_spacing=0.5,
     )
     f = CubeFrame.for_grid(g, cell=1.0)
     gx, gy = g.axes()
@@ -412,7 +427,9 @@ class ZAxis:
             raise ValueError(f"t1_ns must exceed t0_ns, got {t0_ns} .. {t1_ns}")
         return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=int(math.floor((t1_ns - t0_ns) / dz_ns)) + 1)
 
-    def level_range(self, top_ns: float, thickness_ns: float) -> tuple[int, int]:  # amended during execution (ruff UP)
+    def level_range(
+        self, top_ns: float, thickness_ns: float
+    ) -> tuple[int, int]:  # amended during execution (ruff UP)
         """Half-open [k0, k1) for a window, clamped to the axis.
 
         Never returns an empty range: a window entirely off the end still
@@ -1088,8 +1105,13 @@ def axis(nz=5, dz=1.0, t0=0.0):
 
 def prov():
     return Provenance(
-        line_keys=("a.dzt",), preset_name="p", steps=(), transform="amp_abs",
-        velocity=None, built_utc="2026-09-18T00:00:00Z", core_version="0.1.0.dev0",
+        line_keys=("a.dzt",),
+        preset_name="p",
+        steps=(),
+        transform="amp_abs",
+        velocity=None,
+        built_utc="2026-09-18T00:00:00Z",
+        core_version="0.1.0.dev0",
     )
 
 
@@ -1190,7 +1212,8 @@ def test_slice_levels_shape_is_ny_by_nx():
 def test_cube_rejects_a_mean_of_the_wrong_shape():
     with pytest.raises(ValueError, match="mean must be"):
         SliceCube(
-            frame=frame(), z=axis(),
+            frame=frame(),
+            z=axis(),
             mean=np.zeros((2, 2), dtype=np.float32),
             count=np.zeros(12, dtype=np.int32),
             provenance=prov(),
@@ -1295,9 +1318,7 @@ class SliceCube:
         if self.mean.shape != expected:
             raise ValueError(f"mean must be {expected}, got {self.mean.shape}")
         if self.count.shape != (self.frame.n_cells,):
-            raise ValueError(
-                f"count must be ({self.frame.n_cells},), got {self.count.shape}"
-            )
+            raise ValueError(f"count must be ({self.frame.n_cells},), got {self.count.shape}")
 
     def slice_levels(self, k0: int, k1: int) -> np.ndarray:
         """Mean over the half-open level window, shaped (ny, nx).
@@ -1474,12 +1495,8 @@ def build_cube(
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
         accumulate(total, count, line, plan)  # amended during execution: no k0/k1
-    mean = np.divide(
-        total, count, out=np.full_like(total, np.nan), where=count > 0
-    )
+    mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
-
-
 ```
 
 (amended during execution: `slice_extent` was dropped rather than shipped. M10 wrote no caller for it -- a helper with no caller in this milestone is exactly what this plan's own review flagged elsewhere as a mistake to avoid repeating -- and M11's north-up GeoTIFF export is its actual caller. It should return in M11 written together with that caller and a real test, not ahead of either.)
@@ -1565,8 +1582,13 @@ from nsgeo.slices.frame import CubeFrame, ZAxis
 
 def prov():
     return Provenance(
-        line_keys=(), preset_name="p", steps=(), transform="amp_abs",
-        velocity=None, built_utc="2026-09-18T00:00:00Z", core_version="0.1.0.dev0",
+        line_keys=(),
+        preset_name="p",
+        steps=(),
+        transform="amp_abs",
+        velocity=None,
+        built_utc="2026-09-18T00:00:00Z",
+        core_version="0.1.0.dev0",
     )
 
 
@@ -1946,9 +1968,7 @@ def test_round_trip_preserves_the_arrays_exactly(tmp_path):
     save_cube(cube, path)
     back = load_cube(path)
     np.testing.assert_array_equal(np.isnan(back.mean), np.isnan(cube.mean))
-    np.testing.assert_array_equal(
-        back.mean[~np.isnan(back.mean)], cube.mean[~np.isnan(cube.mean)]
-    )
+    np.testing.assert_array_equal(back.mean[~np.isnan(back.mean)], cube.mean[~np.isnan(cube.mean)])
     np.testing.assert_array_equal(back.count, cube.count)
 
 
@@ -2121,11 +2141,11 @@ def load_cube(path: str | Path) -> SliceCube:  # amended during execution (ruff 
             cell=float(frame_doc["cell"]),
             nx=int(frame_doc["nx"]),
             ny=int(frame_doc["ny"]),
-            crs=frame_doc["crs"],  # amended during execution: implemented with validation that crs is a string, rejecting None with CubeStoreError to prevent silent failure in GeoTIFF export
+            crs=frame_doc[
+                "crs"
+            ],  # amended during execution: implemented with validation that crs is a string, rejecting None with CubeStoreError to prevent silent failure in GeoTIFF export
         ),
-        z=ZAxis(
-            t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])
-        ),
+        z=ZAxis(t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])),
         mean=mean,
         count=count,
         provenance=Provenance.from_dict(meta["provenance"]),
@@ -2211,8 +2231,12 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     z = ZAxis.from_range(1.0, 40.0, 0.2165)
     plans = [plan_line(p, frame, z) for p in prepared]
     prov = Provenance(
-        line_keys=tuple(p.key for p in prepared), preset_name="test", steps=(),
-        transform="amp_envelope", velocity=None, built_utc="2026-09-18T00:00:00Z",
+        line_keys=tuple(p.key for p in prepared),
+        preset_name="test",
+        steps=(),
+        transform="amp_envelope",
+        velocity=None,
+        built_utc="2026-09-18T00:00:00Z",
         core_version="0.1.0.dev0",
     )
     cube = build_cube(prepared, plans, frame, z, prov)
@@ -2223,9 +2247,7 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     assert (covered >= 0.0).all()  # the envelope is unipolar
 
     streamed, _ = stream_slice(prepared, plans, frame, z, 10, 28)
-    np.testing.assert_allclose(
-        streamed[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
-    )
+    np.testing.assert_allclose(streamed[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5)
 
     out = tmp_path / "real.npz"
     save_cube(cube, out)

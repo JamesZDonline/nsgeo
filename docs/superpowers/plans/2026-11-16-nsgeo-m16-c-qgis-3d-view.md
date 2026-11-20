@@ -178,16 +178,19 @@ def test_view_title_states_grid_stretch_and_stale_count():
     )
     assert view_title("Grid 1", 3.0, 2).endswith("  ·  2 surfaces stale")
 
+
 def test_scene_grid_follows_this_grid_and_keeps_the_last_in_whole_site():
     assert scene_grid("grid", "Grid 2", "Grid 1") == "Grid 2"
     assert scene_grid("site", "Grid 2", "Grid 1") == "Grid 1"
     assert scene_grid("site", "Grid 2", None) == "Grid 2"
     assert scene_grid("grid", None, None) is None
 
+
 def test_scene_stretch_is_the_grids_own_or_the_default():
     assert scene_stretch({"stretch": 2.0}) == 2.0
     for bad in ({}, {"stretch": 0.0}, {"stretch": float("nan")}, {"stretch": "x"}):
         assert scene_stretch(bad) == DEFAULT_STRETCH
+
 
 def test_camera_frames_the_grid_at_mid_depth():
     pose = camera_pose([(0, 0), (20, 0), (20, 16), (0, 16)], [1.0, 3.0], 3.0)
@@ -221,11 +224,15 @@ def test_pick_depths_match_place_picks_without_preparing(site, steps, monkeypatc
     monkeypatch.setattr(fresh, "_prepared", lambda *a, **k: pytest.fail("prepared a line"))
     assert fresh.pick_depths(GRID, rows) == pytest.approx(want)
 
+
 def test_pick_depths_are_none_where_they_cannot_be_found(synth_site):
     session, _, export = synth_site
     key = session.keys()[0]
-    rows = [("raw/none.DZT", _pick(key, 5, 10.0)), ("cut:abc", _pick(key, 5, 10.0)),
-            (key, _pick(key, 5, float("nan")))]
+    rows = [
+        ("raw/none.DZT", _pick(key, 5, 10.0)),
+        ("cut:abc", _pick(key, 5, 10.0)),
+        (key, _pick(key, 5, float("nan"))),
+    ]
     assert export.pick_depths(GRID, rows) == [None, None, None]
 ```
 
@@ -313,40 +320,59 @@ def test_open_shows_the_scene_grids_picks_and_surfaces(scene):
     pts = list(s3d.picks_layer.getFeatures())
     depths = _depths_of(scene, GRID)  # pick_depths for the grid's line picks, Nones dropped
     assert sorted(f.geometry().constGet().z() for f in pts) == pytest.approx(
-        sorted(-d * 3.0 for d in depths))
+        sorted(-d * 3.0 for d in depths)
+    )
     settings = iface.canvases3d[VIEW_NAME].mapSettings()
     assert settings.terrainRenderingEnabled() is False
     assert iface.dialogs3d[VIEW_NAME].windowTitle() == view_title(GRID, 3.0, 0)
     assert len(iface.canvases3d[VIEW_NAME].cameraController().poses) == 1
 
-def test_opening_again_reuses_the_view_and_brings_it_forward(scene): ...
+
+def test_opening_again_reuses_the_view_and_brings_it_forward(scene):
+    ...
     # one canvas created in all; the dialog is raised (isActiveWindow or a recorded raise_)
 
-def test_a_view_closed_by_hand_cleans_up_and_opens_again(scene): ...
+
+def test_a_view_closed_by_hand_cleans_up_and_opens_again(scene):
+    ...
     # iface.closeMapCanvas3D(VIEW_NAME) -> picks layer gone from the project, no surface
     # layer has a renderer3D, is_open() False; open() makes a second canvas
 
-def test_a_new_pick_and_a_rebuild_show_without_reopening(scene): ...
+
+def test_a_new_pick_and_a_rebuild_show_without_reopening(scene):
+    ...
     # write a pick on the grid -> picks_changed -> spin_until a point more; rebuild a surface
     # -> its new layer has the renderer (via add_listener)
 
-def test_the_stretch_restretches_picks_and_surfaces(scene): ...
+
+def test_the_stretch_restretches_picks_and_surfaces(scene):
+    ...
     # session.remember_volume(GRID, stretch=2.0) -> Z values * 2/3, vertical-scale 2, title ×2
 
-def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene): ...
+
+def test_the_scene_follows_this_grid_and_keeps_its_grid_in_whole_site(scene):
+    ...
     # combo to grid B in "grid" scope -> renderers move to B's surfaces, camera framed again;
     # scope "site" then combo to A -> scene stays on B
 
-def test_a_stale_surface_is_counted_in_the_title(scene): ...
+
+def test_a_stale_surface_is_counted_in_the_title(scene):
+    ...
     # change a surface's settings -> title ends "1 surface stale"
 
-def test_an_empty_grid_opens_an_empty_scene_with_its_title(scene): ...
+
+def test_an_empty_grid_opens_an_empty_scene_with_its_title(scene):
+    ...
     # a grid with no picks and no surfaces: picks layer empty, title set, no error
 
-def test_a_picks_layer_removed_by_hand_comes_back(scene): ...
+
+def test_a_picks_layer_removed_by_hand_comes_back(scene):
+    ...
     # project.removeMapLayer(picks layer id) then refresh -> a new picks layer, no raise
 
-def test_a_cleared_project_forgets_the_scene_layers(scene): ...
+
+def test_a_cleared_project_forgets_the_scene_layers(scene):
+    ...
     # QgsProject.instance().clear() -> no raise; picks_layer None; open() again works
 ```
 
@@ -415,19 +441,27 @@ git push origin nsgeo-m16-c
 - [ ] **Step 1: Write the failing tests**, using the `surface_plugin` fixture with a `FakeIface` that has the fake canvas.
 
 ```python
-def test_the_3d_view_button_greys_until_a_site_opens(fake_iface): ...
+def test_the_3d_view_button_greys_until_a_site_opens(fake_iface):
+    ...
     # plugin.initGui() -> act_view3d disabled; after new_site -> enabled; after close -> disabled
 
-def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin): ...
+
+def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin):
+    ...
     # plugin.open_view3d() -> plugin.scene3d.is_open() and grid_id == the dock's grid
 
-def test_a_scope_change_reaches_the_scene(surface_plugin): ...
+
+def test_a_scope_change_reaches_the_scene(surface_plugin):
+    ...
     # slices_dock.set_scope("site") emits scope_changed("site") once; a second set_scope("site")
     # emits nothing
 
-def test_closing_the_site_closes_the_view(surface_plugin): ...
+
+def test_closing_the_site_closes_the_view(surface_plugin):
+    ...
     # open, then plugin.session.close_site() -> view closed, picks layer gone, no surface
     # layer keeps a renderer3D
+
 
 def test_unload_closes_the_view(surface_plugin): ...
 ```

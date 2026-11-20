@@ -138,16 +138,12 @@ Reformatted-only spots (ruff format, no logic change):
 
 ```python
 # layers.py, write_pick
-raise RuntimeError(
-    f"could not write the pick: {layer.dataProvider().error().message()}"
-)
+raise RuntimeError(f"could not write the pick: {layer.dataProvider().error().message()}")
 ```
 
 ```python
 # test_plugin_layers.py, the migration test
-old_spec = [
-    (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
-]
+old_spec = [(name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")]
 ...
 kinds = {
     "str": QMetaType.Type.QString,

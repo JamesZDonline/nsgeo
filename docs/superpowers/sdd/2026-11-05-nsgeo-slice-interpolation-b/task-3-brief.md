@@ -22,26 +22,42 @@
 - Consumes: Task 1's `plan_fill(..., "min_curvature", ...)` → `CurvaturePlan`, `SolveStopped` and `METHODS`; Task 2's `Refiner`.
 - Produces, in `slices_engine.py`:
   ```python
-  class PendingSolve:                 # a RefineJob
-      key: bytes                      # the solved-slice cache key of its values
-      solved: np.ndarray | None       # set by run(): the unsmoothed slice
-      ms: float | None                # set by run(): the solve's own time
-      def run(self, should_stop: Callable[[], bool]) -> None: ...   # worker thread
-      def land(self) -> bool: ...     # GUI thread: into the engine's cache (and last_solve_ms) only if that
-                                      # engine still holds the plan this job was made from; whether it did
+  class PendingSolve:  # a RefineJob
+      key: bytes  # the solved-slice cache key of its values
+      solved: np.ndarray | None  # set by run(): the unsmoothed slice
+      ms: float | None  # set by run(): the solve's own time
+
+      def run(self, should_stop: Callable[[], bool]) -> None: ...  # worker thread
+      def land(self) -> bool:
+          ...  # GUI thread: into the engine's cache (and last_solve_ms) only if that
+          # engine still holds the plan this job was made from; whether it did
   ```
 - Produces, on `SliceEngine`:
   ```python
   @property
-  def last_solve_ms(self) -> float | None: ...   # the last solve that ran on this plan; None after the plan is dropped
-  def finish_is_slow(self, values, coverage, finish: SliceFinish) -> bool: ...   # plan call 5's "slow"; False for other methods
-  def preview(self, values, coverage, finish: SliceFinish) -> np.ndarray: ...
+  def last_solve_ms(
+      self,
+  ) -> float | None: ...  # the last solve that ran on this plan; None after the plan is dropped
+  def finish_is_slow(
+      self, values, coverage, finish: SliceFinish
+  ) -> bool: ...  # plan call 5's "slow"; False for other methods
+  def preview(self, values, coverage, finish: SliceFinish) -> np.ndarray:
+      ...
       # min_curvature: kriging at the same distances and smoothing; any other method: finish(...)
-  def pending_solve(self, values, coverage, finish: SliceFinish) -> PendingSolve | None: ...
+
+
+  def pending_solve(self, values, coverage, finish: SliceFinish) -> PendingSolve | None:
+      ...
       # None unless min_curvature and these values are uncached
-  def stretch_solves(self, thickness_levels: int, finish: SliceFinish) -> list[PendingSolve]: ...
+
+
+  def stretch_solves(self, thickness_levels: int, finish: SliceFinish) -> list[PendingSolve]:
+      ...
       # the uncached limit_windows; [] for other methods
-  def shared_limit(self, thickness_levels, clip, finish, *, preview: bool = False) -> float: ...
+
+
+  def shared_limit(self, thickness_levels, clip, finish, *, preview: bool = False) -> float:
+      ...
       # min_curvature: over limit_windows, through finish() or, with preview=True, preview()
   ```
   - `finish()` keeps its signature and always returns the full result.

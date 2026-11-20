@@ -436,21 +436,23 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam(): ...
 # edge_match_solve: weighted least squares in log space, then per-group anchoring
 ids = sorted(levels)
 x = dict.fromkeys(ids, 0.0)
-for group in connected_components(ids, seam_levels):        # singletons included
+for group in connected_components(ids, seam_levels):  # singletons included
     terms = [s for s in seam_levels if s[0] in group]
     if terms:
         A, rhs, w = [], [], []
-        for a, b, s_ab, s_ba, weight in terms:              # x_a + ln s_ab = x_b + ln s_ba
+        for a, b, s_ab, s_ba, weight in terms:  # x_a + ln s_ab = x_b + ln s_ba
             row = {a: 1.0, b: -1.0}
-            A.append([row.get(g, 0.0) for g in group]); rhs.append(log(s_ba) - log(s_ab))
+            A.append([row.get(g, 0.0) for g in group])
+            rhs.append(log(s_ba) - log(s_ab))
             w.append(sqrt(weight))
-        sol = lstsq(A * w[:, None], rhs * w)                # minimum-norm, gauge-free
+        sol = lstsq(A * w[:, None], rhs * w)  # minimum-norm, gauge-free
         x.update(zip(group, sol))
     # anchor: the group's corrected backgrounds match the site's in the geometric mean
     known = [g for g in group if levels[g]]
     if known:
         shift = ln_b_site - mean(x[g] + log(levels[g]) for g in known)
-        for g in group: x[g] += shift
+        for g in group:
+            x[g] += shift
 # finally: renormalise so mean(x) over ids is 0 -> geometric mean gain 1
 ```
 
@@ -688,20 +690,37 @@ def test_two_engines_never_prepare_at_once(site3, monkeypatch):
     # A peer SliceEngine passed as exclusive_with is set_source'd at the same moment as
     # SiteEngine.set_source(3 grids); later, cancel() then set_source again.
     assert max_concurrent == 1 and all(states == "ready")
-def test_grids_prepare_in_order_and_each_is_drawn_as_soon_as_ready(site3): ...
+
+
+def test_grids_prepare_in_order_and_each_is_drawn_as_soon_as_ready(site3):
+    ...
     # after the first on_changed, slice_at returns finite pixels over A only
-def test_changing_one_grids_preset_re_prepares_only_that_grid(site3, monkeypatch): ...
+
+
+def test_changing_one_grids_preset_re_prepares_only_that_grid(site3, monkeypatch):
+    ...
     # count Line.load calls: 4, not 12
+
+
 def test_a_grid_with_no_lines_is_listed_and_skipped(site3): ...
-def test_a_grid_outside_the_window_is_nodata_and_named(site3): ...
+def test_a_grid_outside_the_window_is_nodata_and_named(site3):
+    ...
     # C's lines cropped to a shorter time range: windows["C"] is None, its pixels NaN
-def test_background_normalisation_evens_out_a_grid_recorded_at_double_gain(site3): ...
+
+
+def test_background_normalisation_evens_out_a_grid_recorded_at_double_gain(site3):
+    ...
     # B's synthetic data written x2: with "none" mean(B pixels) ~ 2 x mean(A); with "background" ~ equal (rtol 0.05)
+
+
 def test_the_manual_gain_multiplies_only_that_grids_pixels(site3): ...
-def test_normalising_a_signed_site_gives_finite_factors(site3): ...      # transform NO_TRANSFORM
+def test_normalising_a_signed_site_gives_finite_factors(site3): ...  # transform NO_TRANSFORM
 def test_the_shared_limit_follows_normalisation(site3): ...
-def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3): ...
+def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3):
+    ...
     # B re-declared in EPSG:26916; the B cell centre transformed to 32616 holds B's value
+
+
 def test_grids_too_far_apart_for_the_lattice_are_refused_by_pixel_count(site3): ...
 def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3): ...
 def test_removing_a_grid_drops_it_from_the_site(site3): ...
@@ -794,15 +813,15 @@ record of what was done. Built and tested against `SiteEngine` directly. Task 5 
   `tests/qgis/conftest.py` if needed):
 
 ```python
-def test_the_file_lands_on_the_site_lattice(site3, tmp_path): ...        # geotransform, size, CRS
+def test_the_file_lands_on_the_site_lattice(site3, tmp_path): ...  # geotransform, size, CRS
 def test_there_is_a_band_per_planned_window(site3, tmp_path): ...
-def test_each_band_is_exactly_what_slice_at_shows(site3, tmp_path): ...    # normalised, filled
+def test_each_band_is_exactly_what_slice_at_shows(site3, tmp_path): ...  # normalised, filled
 def test_the_dataset_records_transform_method_and_every_grid(site3, tmp_path): ...
 def test_each_band_records_every_grids_factors_and_depths(site3, tmp_path): ...
 def test_an_absent_grid_is_null_in_the_band_metadata(site3, tmp_path): ...
 def test_band_descriptions_name_each_grids_depths(site3, tmp_path): ...
 def test_temporal_ranges_follow_the_ns_windows(site3, tmp_path): ...
-def test_export_never_builds_a_resident_cube(site3, tmp_path): ...          # stub writer
+def test_export_never_builds_a_resident_cube(site3, tmp_path): ...  # stub writer
 def test_the_coverage_companion_is_written_beside_it(site3, tmp_path): ...
 ```
 

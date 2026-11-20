@@ -181,6 +181,7 @@ sys.path.insert(0, "packages/nsgeo-qgis/tests")
 sys.path.insert(0, "packages/nsgeo-core")
 
 from qgis.core import QgsApplication, QgsProject
+
 QgsApplication.setPrefixPath("/usr", True)
 app = QgsApplication([], False)
 app.initQgis()

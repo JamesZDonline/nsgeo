@@ -5,13 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from nsgeo.geometry import END_LIMIT_M, TrackPlacement
+from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement
 from nsgeo_qgis.gps_import import (
+    OUTSIDE,
     count_with_gps,
     first_fixed_lonlat,
     import_messages,
     plan_gps_rows,
     shifted_lines,
+    with_grid,
 )
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
 from tests.dzg_data import local_xy, write_dzg
@@ -166,8 +168,8 @@ def test_import_messages_follow_the_copy_in_order(tmp_path):
     bare = synthetic_dzt(tmp_path, "FILE__002.DZT")
     rows = plan([bridged, bare])
     assert END_LIMIT_M == 2.0
-    assert import_messages(rows, 1) == [
-        "imported 1 GPS line(s)",
+    assert import_messages(rows, 1, into="G1") == [
+        "imported 1 GPS line(s) into G1",
         "FILE__001.DZT: 10.0 m without an RTK fix, traces 25–125",
         "FILE__001.DZT: its start runs 2.5 m before the first RTK fix",
         "FILE__001.DZT: its end runs 2.4 m past the last RTK fix",
@@ -183,7 +185,7 @@ def test_an_end_run_within_the_limit_is_not_reported(tmp_path):
         traces_per_metre=10.0,
     )
     rows = plan([path])
-    assert import_messages(rows, 1) == ["imported 1 GPS line(s)"]
+    assert import_messages(rows, 1, into="G1") == ["imported 1 GPS line(s) into G1"]
 
 
 def test_a_dzg_naming_a_trace_beyond_its_dzt_is_refused(tmp_path):
@@ -221,3 +223,64 @@ def test_count_with_gps_counts_the_files_whose_dzg_holds_an_rtk_fix(tmp_path):
     assert count_with_gps([with_fix, float_only, bare]) == 1
     assert count_with_gps([with_fix, make(tmp_path, "FILE__004.DZT")]) == 2
     assert count_with_gps([]) == 0
+
+
+def _grid_around(rows, gid="G1", pad=0.0, north=None):
+    """A grid whose frame covers the rows' tracks (south-west corner at their
+    minimum), `north` metres long when given."""
+    import numpy as np
+
+    pts = np.vstack([r.line.trace_coords({}) for r in rows if r.line is not None])
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    length = (hi[1] - lo[1]) if north is None else north
+    return Grid(gid, (lo[0] - pad, lo[1]), 0.0, hi[0] - lo[0] + 2 * pad + 1.0, length, CRS, 0.5)
+
+
+def test_with_grid_refuses_a_line_wholly_outside_and_reports_metres_past_the_end(tmp_path):
+    inside = make(tmp_path, "FILE__001.DZT")
+    rows = plan([inside])
+    ys = rows[0].line.trace_coords({})[:, 1]
+    full = float(ys.max() - ys.min())
+    grid = _grid_around(rows, north=full - 3.0)  # the line runs 3 m past the grid's end
+    kept, outside = with_grid(rows, grid)
+    assert kept[0].refusal is None
+    assert outside[inside] == pytest.approx(3.0, abs=0.2)
+
+    far = Grid("G2", (grid.origin[0] + 500.0, grid.origin[1]), 0.0, 5.0, 40.0, CRS, 0.5)
+    kept, outside = with_grid(rows, far)
+    assert kept[0].refusal == OUTSIDE.format(gid="G2") == "outside G2"
+    assert kept[0].line is None and outside == {}
+
+
+def test_with_grid_leaves_refused_rows_alone(tmp_path):
+    ok = make(tmp_path, "FILE__001.DZT")
+    bare = synthetic_dzt(tmp_path, "FILE__002.DZT")
+    rows = plan([ok, bare])
+    kept, outside = with_grid(rows, _grid_around(rows[:1]))
+    assert kept[1] is rows[1] and set(outside) == {ok}
+
+
+def test_shifted_lines_can_set_the_grid(tmp_path):
+    rows = plan([make(tmp_path, "FILE__001.DZT")])
+    (line,) = shifted_lines(rows, 0.1, grid_id="G1")
+    assert line.placement.grid_id == "G1" and line.placement.travel_shift == 0.1
+    assert rows[0].line.placement.grid_id is None
+
+
+def test_import_messages_name_a_new_grid_list_outside_metres_and_skip_handed_on(tmp_path):
+    ok = make(tmp_path, "FILE__001.DZT")
+    bare = synthetic_dzt(tmp_path, "FILE__002.DZT")
+    other = synthetic_dzt(tmp_path, "FILE__003.DZT")
+    rows = plan([ok, bare, other])
+    into = "new grid G4 (4.0 × 20.0 m, spacing 0.50 m)"
+    assert import_messages(rows, 1, into=into, outside={ok: 3.04}, handed_on=[bare]) == [
+        "imported 1 GPS line(s) into new grid G4 (4.0 × 20.0 m, spacing 0.50 m)",
+        "FILE__001.DZT: its start runs 2.5 m before the first RTK fix",
+        "FILE__001.DZT: its end runs 2.4 m past the last RTK fix",
+        "FILE__001.DZT: 3.0 m lies outside G4 and is left out of its slices",
+        "not imported: FILE__003.DZT (no DZG beside it)",
+    ]
+    # an existing grid, and a stretch under 0.05 m is not worth a line
+    assert import_messages(rows[:1], 1, into="G1", outside={ok: 0.04})[-1].startswith("FILE__001")
+    assert "outside" not in " ".join(import_messages(rows[:1], 1, into="G1", outside={ok: 0.04}))
+    assert "outside G1" in import_messages(rows[:1], 1, into="G1", outside={ok: 1.0})[-1]

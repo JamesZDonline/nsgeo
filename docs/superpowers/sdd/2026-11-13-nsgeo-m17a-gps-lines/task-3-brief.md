@@ -18,15 +18,18 @@
 
 ```python
 # nsgeo/model/survey.py — Site gains
-crs: str | None = None        # P9; GPS lines are placed in it
+crs: str | None = None  # P9; GPS lines are placed in it
 
 # nsgeo/project.py
-TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1        # 4 (P8, P15)
+TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1  # 4 (P8, P15)
 READABLE_SCHEMA_VERSIONS = (..., TRACK_SCHEMA_VERSION)
 
+
 # nsgeo_qgis/session.py — SiteSession gains
-def site_crs(self) -> str | None: ...          # site.crs, else the first grid's crs, else None
-def set_site_crs(self, crs: str) -> None: ...  # ValueError(f"the site already uses {old}") when site_crs() is set; marks dirty
+def site_crs(self) -> str | None: ...  # site.crs, else the first grid's crs, else None
+def set_site_crs(
+    self, crs: str
+) -> None: ...  # ValueError(f"the site already uses {old}") when site_crs() is set; marks dirty
 ```
 
 - [ ] **Step 1: Write the failing core tests.**

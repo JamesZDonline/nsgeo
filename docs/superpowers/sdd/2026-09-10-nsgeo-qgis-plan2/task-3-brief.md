@@ -67,7 +67,9 @@ def test_from_dielectric_matches_c_over_sqrt_epsr():
 def test_two_layers_integrate_piecewise():
     m = VelocityModel(layers=((0.0, 0.1), (20.0, 0.05)))
     np.testing.assert_allclose(m.depth_at(np.array([0.0, 10.0, 20.0, 40.0])), [0.0, 0.5, 1.0, 1.5])
-    np.testing.assert_allclose(m.velocity_at(np.array([-5.0, 5.0, 20.0, 99.0])), [0.1, 0.1, 0.05, 0.05])
+    np.testing.assert_allclose(
+        m.velocity_at(np.array([-5.0, 5.0, 20.0, 99.0])), [0.1, 0.1, 0.05, 0.05]
+    )
     assert not m.is_constant
 
 
@@ -275,21 +277,19 @@ def resolve_velocity(line: Any, grid: Any) -> VelocityModel:
 `model/survey.py`: add `from nsgeo.velocity import VelocityModel`; add `velocity: VelocityModel | None = None` as the last field of `Line`; change `Line.open` to
 
 ```python
-    @classmethod
-    def open(
-        cls, path: Path, placement: Placement, velocity: VelocityModel | None = None
-    ) -> Line:
-        """Read the header and derive the trace count. Reads 1024 bytes plus
-        a stat, regardless of file size."""
-        path = Path(path)
-        header = read_header(path)
-        return cls(
-            path=path,
-            header=header,
-            placement=placement,
-            n_traces=trace_count(path, header),
-            velocity=velocity,
-        )
+@classmethod
+def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:
+    """Read the header and derive the trace count. Reads 1024 bytes plus
+    a stat, regardless of file size."""
+    path = Path(path)
+    header = read_header(path)
+    return cls(
+        path=path,
+        header=header,
+        placement=placement,
+        n_traces=trace_count(path, header),
+        velocity=velocity,
+    )
 ```
 
 `project.py`: import `VelocityModel`; in `_grid_to_dict` add `if grid.velocity is not None: doc["velocity"] = grid.velocity.to_dict()` (restructure the literal into a local `doc` first); in `_grid_from_dict` pass `velocity=VelocityModel.from_dict(doc["velocity"]) if "velocity" in doc else None`; in `save_site`'s line loop add `if line.velocity is not None: entry["velocity"] = line.velocity.to_dict()`; in `load_site` pass `velocity=VelocityModel.from_dict(entry["velocity"]) if "velocity" in entry else None` to `Line.open`.

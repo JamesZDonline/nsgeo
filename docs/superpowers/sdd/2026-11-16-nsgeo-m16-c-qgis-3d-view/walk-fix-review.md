@@ -113,7 +113,8 @@ Reviewer: opus, read-only. All experiments ran on copies in
   2. In `surface_layers.py:356`, drop the layer before forgetting it:
 
      ```python
-     self._drop_layer(self._shown[fid].layer_id); del self._shown[fid]
+     self._drop_layer(self._shown[fid].layer_id)
+     del self._shown[fid]
      ```
 
   Add a test: open the view, attach the renderer recorder to Grid A's surface layer, run `surfaces.delete(fid)` then `surface_layers.sync()`, and assert `(True, True) in log`.

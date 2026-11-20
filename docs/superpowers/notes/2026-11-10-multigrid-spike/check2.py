@@ -59,8 +59,7 @@ def hier(plan, coarsest=None):
     return mg2.build_hierarchy(_OFFSETS, plan.coefficients, unknown, coarsest)
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     for md in (0.25, 0.375):
         mean, pop, cell, shape = load("grid1_005")
         plan = plan_curvature(pop, cell, md)
@@ -82,21 +81,31 @@ if __name__ == '__main__':
     # the existing tests' cases
     STEP = 0.05
 
-
     def lines(rows=(5, 15, 25, 35), ny=40, nx=60):
         p = np.zeros((ny, nx), bool)
         p[list(rows), :] = True
         return p
 
-
     p = lines()
     plan = plan_curvature(p, STEP, 0.25)
     v = np.random.default_rng(0).normal(size=p.shape)
     H = hier(plan)
-    print("lines() 40x60: levels", [int(L.active.sum()) for L in H.levels], "its", solve(plan, H, v)[1], "today", plan.solve(v)[1])
+    print(
+        "lines() 40x60: levels",
+        [int(L.active.sum()) for L in H.levels],
+        "its",
+        solve(plan, H, v)[1],
+        "today",
+        plan.solve(v)[1],
+    )
     for c in (16, 4, 1):
         H = hier(plan, c)
-        print(f"   coarsest {c}: levels", [int(L.active.sum()) for L in H.levels], "its", solve(plan, H, v)[1])
+        print(
+            f"   coarsest {c}: levels",
+            [int(L.active.sum()) for L in H.levels],
+            "its",
+            solve(plan, H, v)[1],
+        )
 
     # partial coverage case (test_partial_coverage_solves_in_few_iterations)
     cell, n = 0.2, 250
@@ -130,14 +139,21 @@ if __name__ == '__main__':
         t = time.perf_counter()
         _, it0 = plan.solve(v)
         t0 = time.perf_counter() - t
-        print(f"10 m wandering @ {cell}: mg its {it} ({t1:.3f} s, setup {ts:.3f}) today {it0} ({t0:.3f} s)")
+        print(
+            f"10 m wandering @ {cell}: mg its {it} ({t1:.3f} s, setup {ts:.3f}) today {it0} ({t0:.3f} s)"
+        )
 
     # degenerate: one row, no unknowns
     one = np.zeros((1, 3000), bool)
     one[0, ::7] = True
     plan = plan_curvature(one, 0.05, 0.2)
     H = hier(plan)
-    print("one row:", [L.active.shape for L in H.levels], "its", solve(plan, H, np.random.default_rng(1).normal(size=one.shape))[1])
+    print(
+        "one row:",
+        [L.active.shape for L in H.levels],
+        "its",
+        solve(plan, H, np.random.default_rng(1).normal(size=one.shape))[1],
+    )
     full = np.ones((30, 30), bool)
     plan = plan_curvature(full, 0.05, 0.2)
     H = hier(plan)

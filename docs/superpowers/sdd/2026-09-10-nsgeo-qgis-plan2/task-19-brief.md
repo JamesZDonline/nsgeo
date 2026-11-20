@@ -168,7 +168,10 @@ def test_presets_save_apply_and_persist(plugin, tmp_path):
     s.open_line(other)
     assert pd.list.count() == 0
     pd.apply_preset_named("campus")
-    assert [i.text() for i in (pd.list.item(r) for r in range(pd.list.count()))] == ["dewow", "gain_agc"]
+    assert [i.text() for i in (pd.list.item(r) for r in range(pd.list.count()))] == [
+        "dewow",
+        "gain_agc",
+    ]
     assert [a.text() for a in pd.presets_menu.actions() if a.text() == "campus"]
     s.save()
     assert '"presets"' in (tmp_path / "survey.nsgeo.json").read_text()
@@ -181,29 +184,32 @@ def test_presets_save_apply_and_persist(plugin, tmp_path):
 `session.py`: add `presets_changed = pyqtSignal()` and
 
 ```python
-    # ---- presets ----------------------------------------------------------
-    def preset_names(self) -> list[str]:
-        return sorted(self._require_site().presets)
+# ---- presets ----------------------------------------------------------
+def preset_names(self) -> list[str]:
+    return sorted(self._require_site().presets)
 
-    def save_preset(self, name: str, key: str) -> None:
-        name = name.strip()
-        if not name:
-            raise ValueError("a preset needs a name")
-        self._require_site().presets[name] = self.stack_for(key).to_dicts()
-        self._set_dirty(True)
-        self.presets_changed.emit()
 
-    def apply_preset(self, name: str, key: str) -> None:
-        site = self._require_site()
-        fresh = StepStack.from_dicts(site.presets[name])
-        self._attach_source(key, fresh)
-        site.stacks[key] = fresh
-        self._touch_stack(key)
+def save_preset(self, name: str, key: str) -> None:
+    name = name.strip()
+    if not name:
+        raise ValueError("a preset needs a name")
+    self._require_site().presets[name] = self.stack_for(key).to_dicts()
+    self._set_dirty(True)
+    self.presets_changed.emit()
 
-    def delete_preset(self, name: str) -> None:
-        self._require_site().presets.pop(name, None)
-        self._set_dirty(True)
-        self.presets_changed.emit()
+
+def apply_preset(self, name: str, key: str) -> None:
+    site = self._require_site()
+    fresh = StepStack.from_dicts(site.presets[name])
+    self._attach_source(key, fresh)
+    site.stacks[key] = fresh
+    self._touch_stack(key)
+
+
+def delete_preset(self, name: str) -> None:
+    self._require_site().presets.pop(name, None)
+    self._set_dirty(True)
+    self.presets_changed.emit()
 ```
 
 `processing_dock.py`: add `difference_toggled = pyqtSignal(int)`; in the top button row add
@@ -234,35 +240,39 @@ and in the bottom row
 with methods:
 
 ```python
-    def _emit_difference(self, checked: bool) -> None:
-        self.difference_toggled.emit(self.list.currentRow() if checked else -1)
+def _emit_difference(self, checked: bool) -> None:
+    self.difference_toggled.emit(self.list.currentRow() if checked else -1)
 
-    def _rebuild_presets_menu(self) -> None:
-        self.presets_menu.clear()
-        self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
-        names = self.session.preset_names() if self.session.is_open else []
-        if names:
-            self.presets_menu.addSeparator()
-            for name in names:
-                self.presets_menu.addAction(name, lambda n=name: self.apply_preset_named(n))
-            delete = self.presets_menu.addMenu("Delete")
-            for name in names:
-                delete.addAction(name, lambda n=name: self.session.delete_preset(n))
 
-    def _save_preset_prompt(self) -> None:
-        name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
-        if ok and name.strip():
-            self.save_preset_named(name)
+def _rebuild_presets_menu(self) -> None:
+    self.presets_menu.clear()
+    self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
+    names = self.session.preset_names() if self.session.is_open else []
+    if names:
+        self.presets_menu.addSeparator()
+        for name in names:
+            self.presets_menu.addAction(name, lambda n=name: self.apply_preset_named(n))
+        delete = self.presets_menu.addMenu("Delete")
+        for name in names:
+            delete.addAction(name, lambda n=name: self.session.delete_preset(n))
 
-    def save_preset_named(self, name: str) -> None:
-        key = self.key()
-        if key is not None:
-            self.session.save_preset(name, key)
 
-    def apply_preset_named(self, name: str) -> None:
-        key = self.key()
-        if key is not None:
-            self.session.apply_preset(name, key)
+def _save_preset_prompt(self) -> None:
+    name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
+    if ok and name.strip():
+        self.save_preset_named(name)
+
+
+def save_preset_named(self, name: str) -> None:
+    key = self.key()
+    if key is not None:
+        self.session.save_preset(name, key)
+
+
+def apply_preset_named(self, name: str) -> None:
+    key = self.key()
+    if key is not None:
+        self.session.apply_preset(name, key)
 ```
 
 (`QInputDialog` joins the widgets import.) In `_on_current_row`, after emitting `step_selected`, add `if self.diff_button.isChecked(): self._emit_difference(True)` so moving the selection moves the difference view.
@@ -272,8 +282,10 @@ with methods:
 `plugin.py` `initGui`:
 
 ```python
-        self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
-        self.profile_dock.difference_cleared.connect(lambda: self.processing_dock.diff_button.setChecked(False))
+self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
+self.profile_dock.difference_cleared.connect(
+    lambda: self.processing_dock.diff_button.setChecked(False)
+)
 ```
 
 `README.md`: replace the status blockquote with

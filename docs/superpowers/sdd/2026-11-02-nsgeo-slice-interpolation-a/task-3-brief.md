@@ -30,9 +30,10 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
   DEFAULT_METHOD = "kriging"
   DEFAULT_MAX_DISTANCE_SPACINGS = 0.5
   SEARCH_RADIUS_SPACINGS = 2.0
-  METHOD_LABELS: dict[str, str]          # ordered as METHODS, labels from Global Constraints
-  WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8   # int32 source + float32 weight
+  METHOD_LABELS: dict[str, str]  # ordered as METHODS, labels from Global Constraints
+  WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8  # int32 source + float32 weight
   FINISH_FIELDS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
+
 
   @dataclass(frozen=True)
   class SliceFinish:
@@ -40,11 +41,15 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
       max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
       smooth_x_m: float = 0.0
       smooth_y_m: float = 0.0
-      def in_metres(self, spacing_m: float) -> FinishSettings: ...
+
+      def in_metres(self, spacing_m: float) -> FinishSettings:
+          ...
           # max_distance_m = max_distance_spacings * spacing_m
           # search_radius_m = max(SEARCH_RADIUS_SPACINGS * spacing_m, 2 * max_distance_m)
           # ValueError if spacing_m <= 0
-      def updated(self, fields: Mapping[str, object]) -> SliceFinish: ...
+
+      def updated(self, fields: Mapping[str, object]) -> SliceFinish:
+          ...
           # lays FINISH_FIELDS from `fields` over self; a bad method or a negative or
           # non-finite number is ignored, as is every other key
   ```
@@ -57,19 +62,25 @@ Everything in this task is **additive**. The dock still uses Fill radius until T
 - Produces, in `ui/finish_panel.py`:
   ```python
   @contextmanager
-  def busy_cursor() -> Iterator[None]: ...     # wait cursor; always restored, even on an exception
+  def busy_cursor() -> Iterator[None]: ...  # wait cursor; always restored, even on an exception
 
-  class FinishPanel(QGroupBox):                 # title "Interpolation"
-      edited = pyqtSignal(str, object)          # (field, value): only a user's edit
+
+  class FinishPanel(QGroupBox):  # title "Interpolation"
+      edited = pyqtSignal(str, object)  # (field, value): only a user's edit
+
       def __init__(self, parent: QWidget | None = None, *, metres_label: bool) -> None: ...
-      method_combo: QComboBox                   # labels from METHOD_LABELS, itemData = key
-      max_distance_spin: QDoubleSpinBox         # 0–10, 2 dp, step 0.25, suffix " × line spacing"
-      max_distance_metres: QLabel               # "= 0.25 m"; exists only when metres_label
-      smooth_x_spin: QDoubleSpinBox             # 0–5, 2 dp, step 0.05, suffix " m"
-      smooth_y_spin: QDoubleSpinBox             # same
+
+      method_combo: QComboBox  # labels from METHOD_LABELS, itemData = key
+      max_distance_spin: QDoubleSpinBox  # 0–10, 2 dp, step 0.25, suffix " × line spacing"
+      max_distance_metres: QLabel  # "= 0.25 m"; exists only when metres_label
+      smooth_x_spin: QDoubleSpinBox  # 0–5, 2 dp, step 0.05, suffix " m"
+      smooth_y_spin: QDoubleSpinBox  # same
+
       def value(self) -> SliceFinish: ...
-      def set_value(self, finish: SliceFinish) -> None: ...   # quiet: emits nothing
-      def set_spacing(self, spacing_m: float | None) -> None: ...  # refreshes the metres label; "" for None
+      def set_value(self, finish: SliceFinish) -> None: ...  # quiet: emits nothing
+      def set_spacing(
+          self, spacing_m: float | None
+      ) -> None: ...  # refreshes the metres label; "" for None
   ```
 - **Panel rows:** `Method`, `Max distance to data` (with the metres label beside it, when present), `Smoothing X`, `Smoothing Y`.
 - **Panel behaviour:** `max_distance_spin` is disabled while the method is `"none"`.

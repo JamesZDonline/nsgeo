@@ -216,7 +216,11 @@ class ParamSpec:
             raise ValueError(f"param {self.name!r} is a choice but declares no choices")
         if self.kind != "choice" and self.choices:
             raise ValueError(f"param {self.name!r} is {self.kind!r} but declares choices")
-        if self.kind == "choice" and self.default is not REQUIRED and self.default not in self.choices:
+        if (
+            self.kind == "choice"
+            and self.default is not REQUIRED
+            and self.default not in self.choices
+        ):
             raise ValueError(f"param {self.name!r} default {self.default!r} is not in choices")
 
     @property
@@ -259,80 +263,129 @@ def required_params(name: str) -> tuple[str, ...]:
 `timezero.py`, inside `TimeZero` (add the import `from nsgeo.processing.base import ParamSpec, Radargram, register`):
 
 ```python
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(
-                name="mode",
-                kind="choice",
-                label="Mode",
-                default="first_break",
-                choices=("first_break", "sample"),
-                help="Pick the first arrival automatically, or crop at a fixed sample.",
-            ),
-            ParamSpec(name="sample", kind="int", label="Sample", default=0, min=0,
-                      help="Used when mode is 'sample'."),
-            ParamSpec(name="threshold", kind="float", label="Threshold", default=0.2,
-                      min=0.0, max=1.0, help="Fraction of the peak mean amplitude."),
-        )
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(
+            name="mode",
+            kind="choice",
+            label="Mode",
+            default="first_break",
+            choices=("first_break", "sample"),
+            help="Pick the first arrival automatically, or crop at a fixed sample.",
+        ),
+        ParamSpec(
+            name="sample",
+            kind="int",
+            label="Sample",
+            default=0,
+            min=0,
+            help="Used when mode is 'sample'.",
+        ),
+        ParamSpec(
+            name="threshold",
+            kind="float",
+            label="Threshold",
+            default=0.2,
+            min=0.0,
+            max=1.0,
+            help="Fraction of the peak mean amplitude.",
+        ),
+    )
 ```
 
 `dewow.py`, inside `Dewow`:
 
 ```python
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(name="window_ns", kind="float", label="Window", default=4.0, unit="ns",
-                      min=0.0, help="Running-mean window; must exceed one sample interval."),
-        )
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(
+            name="window_ns",
+            kind="float",
+            label="Window",
+            default=4.0,
+            unit="ns",
+            min=0.0,
+            help="Running-mean window; must exceed one sample interval.",
+        ),
+    )
 ```
 
 `gain.py`, inside `GainAgc`:
 
 ```python
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0),
-            ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
-            ParamSpec(name="eps", kind="float", label="Epsilon", default=1e-12, min=0.0,
-                      help="Guards all-zero traces at the start of a line."),
-        )
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0),
+        ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
+        ParamSpec(
+            name="eps",
+            kind="float",
+            label="Epsilon",
+            default=1e-12,
+            min=0.0,
+            help="Guards all-zero traces at the start of a line.",
+        ),
+    )
 ```
 
 inside `GainParametric`:
 
 ```python
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(name="mode", kind="choice", label="Mode", default="exponential",
-                      choices=("exponential", "power")),
-            ParamSpec(name="alpha", kind="float", label="Alpha", default=0.05, unit="1/ns",
-                      help="Exponential rate; used when mode is 'exponential'."),
-            ParamSpec(name="exponent", kind="float", label="Exponent", default=1.0,
-                      help="Used when mode is 'power'."),
-        )
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(
+            name="mode",
+            kind="choice",
+            label="Mode",
+            default="exponential",
+            choices=("exponential", "power"),
+        ),
+        ParamSpec(
+            name="alpha",
+            kind="float",
+            label="Alpha",
+            default=0.05,
+            unit="1/ns",
+            help="Exponential rate; used when mode is 'exponential'.",
+        ),
+        ParamSpec(
+            name="exponent",
+            kind="float",
+            label="Exponent",
+            default=1.0,
+            help="Used when mode is 'power'.",
+        ),
+    )
 ```
 
 inside `GainCurve`, replace `__init__` and add `schema`:
 
 ```python
-    def __init__(self, points: Sequence[Sequence[float]]) -> None:
-        pts = [[float(t), float(db)] for t, db in points]
-        if len(pts) < 2:
-            raise ValueError("gain_curve needs at least two control points")
-        if not all(math.isfinite(v) for p in pts for v in p):
-            raise ValueError("gain_curve control points must be finite")
-        self.points: list[list[float]] = pts
+def __init__(self, points: Sequence[Sequence[float]]) -> None:
+    pts = [[float(t), float(db)] for t, db in points]
+    if len(pts) < 2:
+        raise ValueError("gain_curve needs at least two control points")
+    if not all(math.isfinite(v) for p in pts for v in p):
+        raise ValueError("gain_curve control points must be finite")
+    self.points: list[list[float]] = pts
 
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(name="points", kind="curve", label="Gain curve", default=REQUIRED, unit="dB",
-                      help="(two-way time ns, gain dB) control points on the viewer's time axis."),
-        )
+
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(
+            name="points",
+            kind="curve",
+            label="Gain curve",
+            default=REQUIRED,
+            unit="dB",
+            help="(two-way time ns, gain dB) control points on the viewer's time axis.",
+        ),
+    )
 ```
 
 and remove the now-redundant `if len(self.points) < 2` check from `GainCurve.apply`. Add `import math` and import `REQUIRED, ParamSpec` from base.
@@ -340,16 +393,36 @@ and remove the now-redundant `if len(self.points) < 2` check from `GainCurve.app
 `bandpass.py`, inside `Bandpass`:
 
 ```python
-    @classmethod
-    def schema(cls) -> tuple[ParamSpec, ...]:
-        return (
-            ParamSpec(name="low_mhz", kind="float", label="Low", default=REQUIRED, unit="MHz", min=0.0,
-                      help="No default: a wrong passband silently filters real data."),
-            ParamSpec(name="high_mhz", kind="float", label="High", default=REQUIRED, unit="MHz", min=0.0,
-                      help="Must be below the Nyquist frequency of the radargram."),
-            ParamSpec(name="taper_frac", kind="float", label="Taper", default=0.25, min=0.0,
-                      help="Cosine taper width as a fraction of the passband."),
-        )
+@classmethod
+def schema(cls) -> tuple[ParamSpec, ...]:
+    return (
+        ParamSpec(
+            name="low_mhz",
+            kind="float",
+            label="Low",
+            default=REQUIRED,
+            unit="MHz",
+            min=0.0,
+            help="No default: a wrong passband silently filters real data.",
+        ),
+        ParamSpec(
+            name="high_mhz",
+            kind="float",
+            label="High",
+            default=REQUIRED,
+            unit="MHz",
+            min=0.0,
+            help="Must be below the Nyquist frequency of the radargram.",
+        ),
+        ParamSpec(
+            name="taper_frac",
+            kind="float",
+            label="Taper",
+            default=0.25,
+            min=0.0,
+            help="Cosine taper width as a fraction of the passband.",
+        ),
+    )
 ```
 
 `background.py`: `BackgroundMean.schema` returns `()`; `BackgroundSliding.schema` returns `(ParamSpec(name="window_traces", kind="int", label="Window", default=200, unit="traces", min=1),)`; `BackgroundSvd.schema` returns `(ParamSpec(name="n_components", kind="int", label="Components removed", default=1, min=0),)`.
@@ -368,13 +441,11 @@ In `packages/nsgeo-core/src/nsgeo/project.py`, replace
 with
 
 ```python
-        if "stack" in entry:
-            try:
-                stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ProjectError(
-                    f"invalid processing stack for line {entry['path']!r}: {exc}"
-                ) from exc
+if "stack" in entry:
+    try:
+        stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectError(f"invalid processing stack for line {entry['path']!r}: {exc}") from exc
 ```
 
 - [ ] **Step 6: Run the full core suite**

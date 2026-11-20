@@ -17,19 +17,27 @@
 - [ ] **Step 1: Write the failing tests**, using the `surface_plugin` fixture with a `FakeIface` that has the fake canvas.
 
 ```python
-def test_the_3d_view_button_greys_until_a_site_opens(fake_iface): ...
+def test_the_3d_view_button_greys_until_a_site_opens(fake_iface):
+    ...
     # plugin.initGui() -> act_view3d disabled; after new_site -> enabled; after close -> disabled
 
-def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin): ...
+
+def test_the_3d_view_button_opens_the_scene_of_the_slices_panels_grid(surface_plugin):
+    ...
     # plugin.open_view3d() -> plugin.scene3d.is_open() and grid_id == the dock's grid
 
-def test_a_scope_change_reaches_the_scene(surface_plugin): ...
+
+def test_a_scope_change_reaches_the_scene(surface_plugin):
+    ...
     # slices_dock.set_scope("site") emits scope_changed("site") once; a second set_scope("site")
     # emits nothing
 
-def test_closing_the_site_closes_the_view(surface_plugin): ...
+
+def test_closing_the_site_closes_the_view(surface_plugin):
+    ...
     # open, then plugin.session.close_site() -> view closed, picks layer gone, no surface
     # layer keeps a renderer3D
+
 
 def test_unload_closes_the_view(surface_plugin): ...
 ```

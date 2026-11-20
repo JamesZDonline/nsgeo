@@ -57,9 +57,7 @@ def test_round_trip_preserves_the_arrays_exactly(tmp_path):
     save_cube(cube, path)
     back = load_cube(path)
     np.testing.assert_array_equal(np.isnan(back.mean), np.isnan(cube.mean))
-    np.testing.assert_array_equal(
-        back.mean[~np.isnan(back.mean)], cube.mean[~np.isnan(cube.mean)]
-    )
+    np.testing.assert_array_equal(back.mean[~np.isnan(back.mean)], cube.mean[~np.isnan(cube.mean)])
     np.testing.assert_array_equal(back.count, cube.count)
 
 
@@ -234,9 +232,7 @@ def load_cube(path: Union[str, Path]) -> SliceCube:
             ny=int(frame_doc["ny"]),
             crs=frame_doc["crs"],
         ),
-        z=ZAxis(
-            t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])
-        ),
+        z=ZAxis(t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])),
         mean=mean,
         count=count,
         provenance=Provenance.from_dict(meta["provenance"]),
@@ -322,8 +318,12 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     z = ZAxis.from_range(1.0, 40.0, 0.2165)
     plans = [plan_line(p, frame, z) for p in prepared]
     prov = Provenance(
-        line_keys=tuple(p.key for p in prepared), preset_name="test", steps=(),
-        transform="amp_envelope", velocity=None, built_utc="2026-09-18T00:00:00Z",
+        line_keys=tuple(p.key for p in prepared),
+        preset_name="test",
+        steps=(),
+        transform="amp_envelope",
+        velocity=None,
+        built_utc="2026-09-18T00:00:00Z",
         core_version="0.1.0.dev0",
     )
     cube = build_cube(prepared, plans, frame, z, prov)
@@ -334,9 +334,7 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     assert (covered >= 0.0).all()  # the envelope is unipolar
 
     streamed, _ = stream_slice(prepared, plans, frame, z, 10, 28)
-    np.testing.assert_allclose(
-        streamed[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
-    )
+    np.testing.assert_allclose(streamed[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5)
 
     out = tmp_path / "real.npz"
     save_cube(cube, out)

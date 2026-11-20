@@ -261,70 +261,72 @@ In `__init__`, after the geometry cache is declared:
 And the slots:
 
 ```python
-    # ---- ambient hover ----------------------------------------------------
-    def _on_xy(self, point: QgsPointXY) -> None:
-        """Fired on every mouse move over the canvas, whatever tool is
-        active -- that is the whole reason this feature needs no tool slot.
-        Cheap on purpose: it records a position and restarts the dwell."""
-        try:
-            self._last_point = QgsPointXY(point)
-            self._dwell.start(self.HOVER_DWELL_MS)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
+# ---- ambient hover ----------------------------------------------------
+def _on_xy(self, point: QgsPointXY) -> None:
+    """Fired on every mouse move over the canvas, whatever tool is
+    active -- that is the whole reason this feature needs no tool slot.
+    Cheap on purpose: it records a position and restarts the dwell."""
+    try:
+        self._last_point = QgsPointXY(point)
+        self._dwell.start(self.HOVER_DWELL_MS)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
 
-    def _on_dwell(self) -> None:
-        try:
-            point = self._last_point
-            if point is None or not self.session.is_open:
-                return
-            hit = self._hit_test(point)
-            if hit is None:
-                # Clearing goes through the same dwell as previewing, so
-                # crossing a gap between two lines does not flicker the
-                # profile back to the working line and out again.
-                self.session.clear_preview()
-                return
-            key, trace = hit
-            if key == self.session.current_key:
-                # The pointer is over the line already being worked on,
-                # which is NOT a preview. The working line's cursor is
-                # `current_trace`; routing it through `set_preview` would
-                # give one line two sources of truth for one cursor, and
-                # the map marker would then stop following a drag in the
-                # profile. Any preview in progress ends here.
-                self.session.clear_preview()
-                self.session.set_trace(key, trace)
-            else:
-                self.session.set_preview(key, trace)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
-    def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
-        """The (line_key, trace) under `point`, or None if nothing is close
-        enough. `point` is in canvas CRS, and so is the geometry cache.
+def _on_dwell(self) -> None:
+    try:
+        point = self._last_point
+        if point is None or not self.session.is_open:
+            return
+        hit = self._hit_test(point)
+        if hit is None:
+            # Clearing goes through the same dwell as previewing, so
+            # crossing a gap between two lines does not flicker the
+            # profile back to the working line and out again.
+            self.session.clear_preview()
+            return
+        key, trace = hit
+        if key == self.session.current_key:
+            # The pointer is over the line already being worked on,
+            # which is NOT a preview. The working line's cursor is
+            # `current_trace`; routing it through `set_preview` would
+            # give one line two sources of truth for one cursor, and
+            # the map marker would then stop following a drag in the
+            # profile. Any preview in progress ends here.
+            self.session.clear_preview()
+            self.session.set_trace(key, trace)
+        else:
+            self.session.set_preview(key, trace)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
-        `closestVertexWithContext` returns a SQUARED distance, so the
-        tolerance is squared to match rather than the distance rooted --
-        getting this backwards silently widens the hit radius by 12x and
-        is invisible to any test that hovers exactly on a line.
 
-        Nearest *vertex* rather than nearest point on the segment: the
-        vertex index is the trace index, which is the answer being asked
-        for, and traces are centimetres apart, so the two differ by less
-        than the pointer's own precision.
-        """
-        tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
-        limit = tolerance * tolerance
-        best: tuple[float, str, int] | None = None
-        for key, geom in self._geometries().items():
-            if geom.isEmpty():
-                continue
-            sq_dist, index = geom.closestVertexWithContext(point)
-            if index < 0 or sq_dist > limit:
-                continue
-            if best is None or sq_dist < best[0]:
-                best = (sq_dist, key, index)
-        return None if best is None else (best[1], best[2])
+def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
+    """The (line_key, trace) under `point`, or None if nothing is close
+    enough. `point` is in canvas CRS, and so is the geometry cache.
+
+    `closestVertexWithContext` returns a SQUARED distance, so the
+    tolerance is squared to match rather than the distance rooted --
+    getting this backwards silently widens the hit radius by 12x and
+    is invisible to any test that hovers exactly on a line.
+
+    Nearest *vertex* rather than nearest point on the segment: the
+    vertex index is the trace index, which is the answer being asked
+    for, and traces are centimetres apart, so the two differ by less
+    than the pointer's own precision.
+    """
+    tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
+    limit = tolerance * tolerance
+    best: tuple[float, str, int] | None = None
+    for key, geom in self._geometries().items():
+        if geom.isEmpty():
+            continue
+        sq_dist, index = geom.closestVertexWithContext(point)
+        if index < 0 or sq_dist > limit:
+            continue
+        if best is None or sq_dist < best[0]:
+            best = (sq_dist, key, index)
+    return None if best is None else (best[1], best[2])
 ```
 
 Add `self._dwell.stop()` as the first line of `dispose()` (Task 5 gives that method its final form).

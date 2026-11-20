@@ -18,8 +18,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from nsgeo.project import ProjectError
-from qgis.core import QgsSettings
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsCsException,
+    QgsPointXY,
+    QgsProject,
+    QgsSettings,
+)
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
@@ -36,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.gps_import import count_with_gps
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import GpsImportPage
+from nsgeo_qgis.ui.grid_overlay import GridOverlay
 from nsgeo_qgis.ui.import_dialog import GridImportPage
 
 if TYPE_CHECKING:
@@ -83,7 +92,10 @@ class AddDataDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.session = session
-        self.canvas = canvas  # Task 5 draws the GPS page's preview on it
+        self.canvas = canvas
+        #: The new grid the GPS page would make, dashed on the map while this
+        #: dialog is open (disposed whenever it finishes).
+        self.overlay: GridOverlay | None = None if canvas is None else GridOverlay(canvas)
         self._gps_key: tuple[Path, ...] | None = None
         self._gps_count = 0
         self.resize(900, 560)
@@ -124,8 +136,13 @@ class AddDataDialog(QDialog):
 
         self.grid_button.clicked.connect(lambda: self._switch(GRID))
         self.gps_button.clicked.connect(lambda: self._switch(GPS))
+        if grid_id:
+            self.gps_page.retarget(grid_id)
         self.grid_page.changed.connect(self._page_changed)
         self.gps_page.changed.connect(self._page_changed)
+        if canvas is not None:
+            canvas.destinationCrsChanged.connect(self._update_preview)
+        self.finished.connect(self.dispose_overlay)
         self._mode = mode if mode in (GRID, GPS) else remembered_mode()
         self._show_mode()
 
@@ -168,8 +185,54 @@ class AddDataDialog(QDialog):
             self.import_button.setText(page.import_text())
             self.import_button.setEnabled(page.can_import())
             self._update_note()
+            self._update_preview()
         except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
             self._page().status.setText(f"could not update the dialog: {exc}")
+
+    # ---- the preview -----------------------------------------------------------
+    def _update_preview(self, *_: Any) -> None:
+        """Draw the grid the GPS page would make, or nothing. A slot
+        (`destinationCrsChanged`, the pages' `changed`): never raises."""
+        overlay = self.overlay
+        if overlay is None or overlay.disposed:
+            return
+        try:
+            outline = None
+            if self._mode == GPS and self.gps_page.target() is None:
+                outline = self._outline(self.gps_page.proposal())
+            overlay.set_grid(outline)
+        except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
+            overlay.set_grid(None)
+            self.gps_page.status.setText(f"could not draw the preview: {exc}")
+
+    def _outline(self, grid: Any) -> list[QgsPointXY] | None:
+        """`grid`'s four corners in the canvas CRS, None when it cannot be placed there."""
+        if grid is None or self.canvas is None:
+            return None
+        world = grid.to_world(
+            np.array(
+                [[0, 0], [grid.size_x, 0], [grid.size_x, grid.size_y], [0, grid.size_y]],
+                dtype=float,
+            )
+        )
+        points = [QgsPointXY(float(x), float(y)) for x, y in world]
+        target = self.canvas.mapSettings().destinationCrs()
+        source = QgsCoordinateReferenceSystem(grid.crs)
+        if source != target:
+            try:
+                xform = QgsCoordinateTransform(source, target, QgsProject.instance())
+                points = [xform.transform(p) for p in points]
+            except QgsCsException:
+                return None
+        return points
+
+    def dispose_overlay(self, *_: Any) -> None:
+        """Take the preview off the map (idempotent). Also a slot on `finished`."""
+        try:
+            if self.overlay is not None:
+                self.overlay.dispose()
+        except Exception:  # noqa: BLE001 -- a slot (finished): nothing to report to
+            pass
 
     def _update_note(self) -> None:
         """The GPS-available note: Grid mode only, from the Grid page's paths."""
@@ -194,6 +257,8 @@ class AddDataDialog(QDialog):
         if self._page().paths() and self.grid_page.grid_combo.currentData():
             return
         self.grid_page.retarget(grid_id)
+        if not self.gps_page.paths():
+            self.gps_page.retarget(grid_id)
 
     # ---- import ------------------------------------------------------------------
     def accept(self) -> None:

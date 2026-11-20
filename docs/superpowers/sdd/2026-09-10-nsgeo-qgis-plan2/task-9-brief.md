@@ -30,7 +30,9 @@ from qgis.PyQt.QtCore import Qt
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 
-GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08))
+GRID = Grid(
+    "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
+)
 
 
 @pytest.fixture
@@ -42,7 +44,9 @@ def dock(qgis_app, tmp_path):
     lines = []
     for i in range(3):
         p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT")
-        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem)))
+        lines.append(
+            Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem))
+        )
     session.add_lines(lines)
     return session, dock
 
@@ -58,7 +62,11 @@ def test_tree_mirrors_site_grids_and_lines(dock):
     line_item = grid_item.child(1)
     assert line_item.data(0, ROLE_KIND) == "line"
     assert line_item.data(0, ROLE_ID) == "raw/FILE__002.DZT"
-    assert "FILE__002" in line_item.text(0) and "0.50" in line_item.text(0) and "↓" in line_item.text(0)
+    assert (
+        "FILE__002" in line_item.text(0)
+        and "0.50" in line_item.text(0)
+        and "↓" in line_item.text(0)
+    )
 
 
 def test_tree_follows_session_changes(dock):
@@ -185,7 +193,9 @@ class SurveyDock(QgsDockWidget):
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
         self.setObjectName("nsgeoSurveyDock")
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self.session = session
 
         body = QWidget(self)
@@ -228,7 +238,9 @@ class SurveyDock(QgsDockWidget):
         for grid in site.grids:
             v = f" · v {grid.velocity.surface_velocity:.3f}" if grid.velocity else ""
             lines = by_grid[grid.id]
-            text = f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · {grid.default_spacing:g} m{v}"
+            text = (
+                f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · {grid.default_spacing:g} m{v}"
+            )
             if not lines:
                 text += " · empty"
             g_item = QTreeWidgetItem([text])
@@ -455,7 +467,9 @@ class NsgeoPlugin:
         assert self.session is not None
         if self.session.dirty and not self.save_with_prompt(ask_first=True):
             return
-        folder = QFileDialog.getExistingDirectory(self.iface.mainWindow(), "Choose an empty folder for the site")
+        folder = QFileDialog.getExistingDirectory(
+            self.iface.mainWindow(), "Choose an empty folder for the site"
+        )
         if not folder:
             return
         try:
@@ -468,7 +482,10 @@ class NsgeoPlugin:
         if self.session.dirty and not self.save_with_prompt(ask_first=True):
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.iface.mainWindow(), "Open a survey file", "", f"nsgeo survey ({SURVEY_FILE});;All files (*)"
+            self.iface.mainWindow(),
+            "Open a survey file",
+            "",
+            f"nsgeo survey ({SURVEY_FILE});;All files (*)",
         )
         if not path:
             return
@@ -488,7 +505,9 @@ class NsgeoPlugin:
                 self.iface.mainWindow(),
                 "Unsaved changes",
                 "Save the site before continuing?",
-                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
             )
             if answer == QMessageBox.StandardButton.Cancel:
                 return False

@@ -329,9 +329,7 @@ Reproduces exactly the three cases (`list`, `int`, `str`) the reviewer probed.
 ```python
 cubes = doc.get("cubes", {})
 if not isinstance(cubes, dict):
-    raise ProjectError(
-        f"{path}: 'cubes' must be an object keyed by id, got {type(cubes).__name__}"
-    )
+    raise ProjectError(f"{path}: 'cubes' must be an object keyed by id, got {type(cubes).__name__}")
 site.cubes = dict(cubes)
 ```
 

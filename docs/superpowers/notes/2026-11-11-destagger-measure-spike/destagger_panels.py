@@ -14,7 +14,12 @@ import numpy as np  # noqa: E402
 
 sys.argv = [sys.argv[0], *sys.argv[1:]]
 spike = {}
-exec(open(sys.argv[0].replace("destagger_panels.py", "destagger_spike.py")).read().split("def main():")[0], spike)
+exec(
+    open(sys.argv[0].replace("destagger_panels.py", "destagger_spike.py"))
+    .read()
+    .split("def main():")[0],
+    spike,
+)
 
 cache, survey, gid, t_lo, t_hi, out = sys.argv[1:7]
 specs = [s.split(":") for s in sys.argv[7:]]
@@ -41,13 +46,23 @@ for ax, (label, fit, shift) in zip(axes.ravel(), specs):
         img[row] = prof
     lim = np.nanpercentile(img, 99.5)
     # along axis horizontal, lines stacked vertically, 0.5 m per strip
-    ax.imshow(img, aspect=PX / 0.5 * 0.5 / PX * (0.5 / PX) / 10, cmap="gray_r", vmin=0, vmax=lim,
-              extent=(0, length, len(lines) * 0.5, 0), interpolation="nearest")
-    ax.set_title(f"{label}\nfit={'yes' if fit == '1' else 'no'}, destagger {float(shift):+.3f} m", fontsize=9)
+    ax.imshow(
+        img,
+        aspect=PX / 0.5 * 0.5 / PX * (0.5 / PX) / 10,
+        cmap="gray_r",
+        vmin=0,
+        vmax=lim,
+        extent=(0, length, len(lines) * 0.5, 0),
+        interpolation="nearest",
+    )
+    ax.set_title(
+        f"{label}\nfit={'yes' if fit == '1' else 'no'}, destagger {float(shift):+.3f} m", fontsize=9
+    )
     ax.set_xlabel("along line (m)")
     ax.set_ylabel("across (m)")
     ax.set_aspect("equal")
     import os
+
     if os.environ.get("CROP"):
         a0, a1, c0, c1 = map(float, os.environ["CROP"].split(","))
         ax.set_xlim(a0, a1)

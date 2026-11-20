@@ -12,14 +12,17 @@
 
 ```python
 # nsgeo/geometry/track.py
-ToXY = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]   # (lon, lat) degrees -> (x, y) metres
+ToXY = Callable[
+    [np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]
+]  # (lon, lat) degrees -> (x, y) metres
 END_LIMIT_M: float = 2.0
 HEADING_BASE_M: float = 1.0
+
 
 @dataclass(frozen=True)
 class TrackFix:
     trace: int
-    x: float                  # metres in the placement's crs; NaN for a fix with no position
+    x: float  # metres in the placement's crs; NaN for a fix with no position
     y: float
     lat: float
     lon: float
@@ -27,11 +30,13 @@ class TrackFix:
     geoid_m: float | None = None
     quality: int = 4
 
+
 @dataclass(frozen=True)
 class Bridge:
-    first_trace: int          # the anchor before the dropout
-    last_trace: int           # the anchor after it
-    metres: float             # straight distance between the two anchors
+    first_trace: int  # the anchor before the dropout
+    last_trace: int  # the anchor after it
+    metres: float  # straight distance between the two anchors
+
 
 @dataclass(frozen=True)
 class TrackPlacement:
@@ -40,15 +45,27 @@ class TrackPlacement:
     grid_id: str | None = None
     label: str | None = None
     travel_shift: float = 0.0
+
     # __post_init__: P3 + the Copy's ValueErrors (traces strictly rising, >= 2 anchors, not all at one point, finite shift)
     def anchors(self) -> tuple[TrackFix, ...]: ...
-    def bridges(self) -> tuple[Bridge, ...]: ...                                 # P4, in trace order
-    def positions(self, n_traces: int, header: DztHeader) -> np.ndarray: ...     # (n, 2) unshifted, P4/P5
-    def end_runs(self, n_traces: int, header: DztHeader) -> tuple[float, float]: ...  # metres placed before the first / after the last anchor
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray: ...     # P6: c + s
-    def trace_coords(self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]) -> np.ndarray: ...  # P6; frames ignored
+    def bridges(self) -> tuple[Bridge, ...]: ...  # P4, in trace order
+    def positions(
+        self, n_traces: int, header: DztHeader
+    ) -> np.ndarray: ...  # (n, 2) unshifted, P4/P5
+    def end_runs(
+        self, n_traces: int, header: DztHeader
+    ) -> tuple[float, float]: ...  # metres placed before the first / after the last anchor
+    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray: ...  # P6: c + s
+    def trace_coords(
+        self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
+    ) -> np.ndarray: ...  # P6; frames ignored
 
-def track_from_log(log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None) -> TrackPlacement: ...
+
+def track_from_log(
+    log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None
+) -> TrackPlacement: ...
+
+
 # Projects every fix with a position. Raises ValueError("no RTK-fixed position") or ValueError("only one RTK-fixed position")
 # before building, so the import can show those words as they are.
 ```

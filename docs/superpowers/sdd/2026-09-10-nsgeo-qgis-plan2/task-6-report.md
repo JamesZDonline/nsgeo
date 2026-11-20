@@ -70,6 +70,7 @@ def move_step(self, key: str, src: int, dst: int) -> None:
     stack.move(src, dst)
     self._touch_stack(key)
 
+
 def set_step_enabled(self, key: str, index: int, flag: bool) -> None:
     stack = self.stack_for(key)
     if stack.entries[index][1] == flag:

@@ -357,9 +357,11 @@ class Radargram:
     dt_ns: float
     t0_ns: float
 
+
 class Step(Protocol):
     name: str
-    params: dict              # declared schema; the UI builds widgets from it
+    params: dict  # declared schema; the UI builds widgets from it
+
     def apply(self, rg: Radargram) -> Radargram: ...
 ```
 

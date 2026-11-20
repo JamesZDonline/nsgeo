@@ -11,30 +11,42 @@
 ```python
 # nsgeo/io/dzg.py
 RTK_FIXED: int = 4
+
+
 class DzgError(ValueError): ...
+
 
 @dataclass(frozen=True)
 class DzgFix:
-    trace: int                # 0-based DZT trace index, from the $GSSIS before the GGA
-    utc_s: float | None       # GGA time, seconds of the UTC day
-    lat: float                # degrees, S negative; NaN when the GGA has no position
-    lon: float                # degrees, W negative; NaN likewise
-    quality: int              # GGA fix quality: 4 RTK fixed, 5 float, 1 GPS, 2 DGPS, 0 none
+    trace: int  # 0-based DZT trace index, from the $GSSIS before the GGA
+    utc_s: float | None  # GGA time, seconds of the UTC day
+    lat: float  # degrees, S negative; NaN when the GGA has no position
+    lon: float  # degrees, W negative; NaN likewise
+    quality: int  # GGA fix quality: 4 RTK fixed, 5 float, 1 GPS, 2 DGPS, 0 none
     n_sats: int | None
     hdop: float | None
-    alt_m: float | None       # antenna altitude above mean sea level (GGA field 9)
-    geoid_m: float | None     # geoid separation (GGA field 11)
+    alt_m: float | None  # antenna altitude above mean sea level (GGA field 9)
+    geoid_m: float | None  # geoid separation (GGA field 11)
+
 
 @dataclass(frozen=True)
 class DzgLog:
-    fixes: tuple[DzgFix, ...]    # in file order; traces strictly rising
+    fixes: tuple[DzgFix, ...]  # in file order; traces strictly rising
     bad_checksum: int
     unpaired: int
-    @property
-    def n_fixed(self) -> int: ...   # fixes with quality == RTK_FIXED
 
-def dzg_for(path: str | Path) -> Path | None: ...   # the .DZG beside a .DZT, either case; dzx.sidecar_for's directory-listing rule
-def read_dzg(path: str | Path, n_traces: int | None = None) -> DzgLog: ...   # P2; checks the trace range only when n_traces is given
+    @property
+    def n_fixed(self) -> int: ...  # fixes with quality == RTK_FIXED
+
+
+def dzg_for(
+    path: str | Path,
+) -> (
+    Path | None
+): ...  # the .DZG beside a .DZT, either case; dzx.sidecar_for's directory-listing rule
+def read_dzg(
+    path: str | Path, n_traces: int | None = None
+) -> DzgLog: ...  # P2; checks the trace range only when n_traces is given
 ```
 
 - [ ] **Step 1: Write the failing tests.**

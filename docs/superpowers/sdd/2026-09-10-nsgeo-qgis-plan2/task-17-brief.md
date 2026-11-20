@@ -350,7 +350,9 @@ class AddStepDialog(QDialog):
         self.facts = QLabel(header_facts(header) if header is not None else "")
         self.facts.setWordWrap(True)
         layout.addWidget(self.facts)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         self.ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -396,66 +398,73 @@ In `processing_dock.py`, add imports `from nsgeo.processing import Radargram, ge
 and add these methods:
 
 ```python
-    def _show_form(self, row: int) -> None:
-        key = self.key()
-        if key is None or row < 0:
-            self.form.clear()
-            return
-        step, _ = self.session.stack_for(key).entries[row]
-        self.form.set_step(step.name, step.params)
+def _show_form(self, row: int) -> None:
+    key = self.key()
+    if key is None or row < 0:
+        self.form.clear()
+        return
+    step, _ = self.session.stack_for(key).entries[row]
+    self.form.set_step(step.name, step.params)
 
-    def _on_form_committed(self, params: dict[str, Any]) -> None:
-        key = self.key()
-        row = self.list.currentRow()
-        if key is None or row < 0 or self.form.step_name is None:
-            return
-        current = self.session.stack_for(key).entries[row][0]
-        if current.params == params:
-            return
-        self.session.replace_step(key, row, build_step(self.form.step_name, **params))
 
-    def time_axis(self) -> tuple[float, float, int]:
-        """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
-        when loaded, else the header."""
-        key = self.key()
-        assert key is not None
-        source = self.session.stack_for(key).source
-        if source is not None:
-            return source.t0_ns, source.dt_ns, source.n_samples
-        h = self.session.line_for_key(key).header
-        return h.position_ns, h.dt_ns, h.n_samples
+def _on_form_committed(self, params: dict[str, Any]) -> None:
+    key = self.key()
+    row = self.list.currentRow()
+    if key is None or row < 0 or self.form.step_name is None:
+        return
+    current = self.session.stack_for(key).entries[row][0]
+    if current.params == params:
+        return
+    self.session.replace_step(key, row, build_step(self.form.step_name, **params))
 
-    def build_add_dialog(self, name: str) -> AddStepDialog:
-        key = self.key()
-        assert key is not None
-        line = self.session.line_for_key(key)
-        return AddStepDialog(name, header=line.header, radargram=self.session.stack_for(key).source, parent=self)
 
-    def append_from_dialog(self, dialog: AddStepDialog) -> None:
-        key = self.key()
-        step = dialog.result_step()
-        if key is None or step is None:
-            return
-        self.session.append_step(key, step)
+def time_axis(self) -> tuple[float, float, int]:
+    """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
+    when loaded, else the header."""
+    key = self.key()
+    assert key is not None
+    source = self.session.stack_for(key).source
+    if source is not None:
+        return source.t0_ns, source.dt_ns, source.n_samples
+    h = self.session.line_for_key(key).header
+    return h.position_ns, h.dt_ns, h.n_samples
+
+
+def build_add_dialog(self, name: str) -> AddStepDialog:
+    key = self.key()
+    assert key is not None
+    line = self.session.line_for_key(key)
+    return AddStepDialog(
+        name, header=line.header, radargram=self.session.stack_for(key).source, parent=self
+    )
+
+
+def append_from_dialog(self, dialog: AddStepDialog) -> None:
+    key = self.key()
+    step = dialog.result_step()
+    if key is None or step is None:
+        return
+    self.session.append_step(key, step)
+    self.list.setCurrentRow(self.list.count() - 1)
+
+
+def add_step_with_dialog(self, name: str) -> None:
+    key = self.key()
+    if key is None:
+        return
+    specs = get_step(name).schema()
+    required = [s for s in specs if s.required]
+    if required and all(s.kind == "curve" for s in required):
+        # The identity curve is not a guess: seed it and let the strip edit it.
+        t0, dt, n = self.time_axis()
+        params = {s.name: identity_curve(t0, dt, n) for s in required}
+        params.update(default_params(name))
+        self.session.append_step(key, build_step(name, **params))
         self.list.setCurrentRow(self.list.count() - 1)
-
-    def add_step_with_dialog(self, name: str) -> None:
-        key = self.key()
-        if key is None:
-            return
-        specs = get_step(name).schema()
-        required = [s for s in specs if s.required]
-        if required and all(s.kind == "curve" for s in required):
-            # The identity curve is not a guess: seed it and let the strip edit it.
-            t0, dt, n = self.time_axis()
-            params = {s.name: identity_curve(t0, dt, n) for s in required}
-            params.update(default_params(name))
-            self.session.append_step(key, build_step(name, **params))
-            self.list.setCurrentRow(self.list.count() - 1)
-            return
-        dialog = self.build_add_dialog(name)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.append_from_dialog(dialog)
+        return
+    dialog = self.build_add_dialog(name)
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        self.append_from_dialog(dialog)
 ```
 
 (`QDialog` joins the `qgis.PyQt.QtWidgets` import; `Radargram` is only needed for the type of `source`, drop it if ruff flags it unused.)

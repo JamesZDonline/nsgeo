@@ -161,7 +161,7 @@ def test_a_wrong_apex_guess_is_recovered_by_the_search():
     x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
     t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
     fit = fit_hyperbola(x, t, apex_guess_m=5.4, search_m=0.5)
-    assert fit.apex_x_m == pytest.approx(5.0, abs=0.011)   # grid step is 0.01 m
+    assert fit.apex_x_m == pytest.approx(5.0, abs=0.011)  # grid step is 0.01 m
     assert fit.v_m_ns == pytest.approx(v, rel=1e-3)
 ```
 
@@ -182,15 +182,17 @@ def test_the_reported_sigma_brackets_the_error_under_noise():
 ```python
 def test_points_clustered_near_the_apex_report_a_large_sigma_while_the_residual_stays_quiet():
     v, t0, x0 = 0.1, 20.0, 5.0
+
     def noisy(x):
         t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
         return t + np.random.default_rng(1).normal(0.0, 0.2, size=t.size)
+
     spread_x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
     tight_x = np.array([4.7, 4.85, 5.0, 5.15, 5.3])
     spread = fit_hyperbola(spread_x, noisy(spread_x), apex_guess_m=x0, search_m=0.0)
     tight = fit_hyperbola(tight_x, noisy(tight_x), apex_guess_m=x0, search_m=0.0)
-    assert tight.v_stderr_m_ns > 5.0 * spread.v_stderr_m_ns   # sigma warns
-    assert tight.rms_ns < 2.0 * spread.rms_ns                 # the residual does not
+    assert tight.v_stderr_m_ns > 5.0 * spread.v_stderr_m_ns  # sigma warns
+    assert tight.rms_ns < 2.0 * spread.rms_ns  # the residual does not
 ```
 
 - [ ] **Step 8: Write one test per refusal**
@@ -234,8 +236,9 @@ git commit -m "feat(velocity): fit a diffraction hyperbola, with its standard er
       v_stderr_m_ns: float
       rms_ns: float
       apex_trace: int
-      points: tuple[tuple[int, float], ...]   # (trace index, two-way time ns)
-      fitted_at: str                           # ISO-8601 UTC
+      points: tuple[tuple[int, float], ...]  # (trace index, two-way time ns)
+      fitted_at: str  # ISO-8601 UTC
+
       def to_dict(self) -> dict[str, Any]: ...
       @classmethod
       def from_dict(cls, doc: dict[str, Any]) -> StoredFit: ...
@@ -252,12 +255,18 @@ git commit -m "feat(velocity): fit a diffraction hyperbola, with its standard er
 
 ```python
 def test_velocity_fits_survive_a_save_and_load(tmp_path):
-    fit = StoredFit(t0_ns=18.4, v_m_ns=0.0984, v_stderr_m_ns=0.0041, rms_ns=0.31,
-                    apex_trace=412, points=((389, 21.2), (412, 18.6), (437, 21.9)),
-                    fitted_at="2026-10-22T14:02:11Z")
+    fit = StoredFit(
+        t0_ns=18.4,
+        v_m_ns=0.0984,
+        v_stderr_m_ns=0.0041,
+        rms_ns=0.31,
+        apex_trace=412,
+        points=((389, 21.2), (412, 18.6), (437, 21.9)),
+        fitted_at="2026-10-22T14:02:11Z",
+    )
     # save a site whose single line has velocity_fits={"f1": fit}, velocity_from_fit="f1"
     loaded = load_site(path).lines[0]
-    assert loaded.velocity_fits == {"f1": fit}      # whole-record equality, not field by field
+    assert loaded.velocity_fits == {"f1": fit}  # whole-record equality, not field by field
     assert loaded.velocity_from_fit == "f1"
     assert loaded.velocity_fits["f1"].points == ((389, 21.2), (412, 18.6), (437, 21.9))
 ```

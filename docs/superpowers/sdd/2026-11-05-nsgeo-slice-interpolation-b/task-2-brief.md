@@ -10,21 +10,30 @@
 - Produces, in `refine.py`:
   ```python
   class RefineJob(Protocol):
-      def run(self, should_stop: Callable[[], bool]) -> None: ...   # worker thread; keeps its own result
+      def run(
+          self, should_stop: Callable[[], bool]
+      ) -> None: ...  # worker thread; keeps its own result
+
 
   class Refiner:
-      def __init__(self, parent: QObject) -> None: ...   # the poll QTimer is parented to `parent`
+      def __init__(self, parent: QObject) -> None: ...  # the poll QTimer is parented to `parent`
       def start(
           self,
           jobs: Sequence[RefineJob],
           on_landed: Callable[[RefineJob], None],
           on_error: Callable[[str], None],
-      ) -> None: ...
+      ) -> None:
+          ...
           # cancels whatever is running, then runs `jobs` in order on the worker thread;
           # on_landed(job) runs on the GUI thread after each job finishes, in order
-      def cancel(self) -> None: ...    # the running job stops at its next iteration; nothing more of that list lands
+
+      def cancel(
+          self,
+      ) -> None: ...  # the running job stops at its next iteration; nothing more of that list lands
       @property
-      def busy(self) -> bool: ...      # a started list has jobs that have not landed; False before the LAST job's on_landed runs
+      def busy(
+          self,
+      ) -> bool: ...  # a started list has jobs that have not landed; False before the LAST job's on_landed runs
       def shutdown(self) -> None: ...  # cancel, then join the worker; safe to call twice
   ```
 

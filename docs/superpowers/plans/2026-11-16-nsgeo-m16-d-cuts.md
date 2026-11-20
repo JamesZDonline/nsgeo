@@ -129,25 +129,41 @@ def test_a_cut_pick_lands_where_the_line_pick_under_it_lands(built_site):
     # A cut drawn along line 0 (x = 0.5): a cut pick at the same place and moment as a line pick
     # is placed at the same depth and, within half a cell, the same spot.
     ...
-    a, b = place_picks([(line_key, line_pick), (cut_key, cut_pick)], got.lines, got.prov,
-                       got.frame, got.velocity, cuts={cut_key: cut}, grid=session.grid(GRID))
+    a, b = place_picks(
+        [(line_key, line_pick), (cut_key, cut_pick)],
+        got.lines,
+        got.prov,
+        got.frame,
+        got.velocity,
+        cuts={cut_key: cut},
+        grid=session.grid(GRID),
+    )
     assert b.depth_m == pytest.approx(a.depth_m)
     assert math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) <= got.frame.cell / 2
 
-def test_a_surface_builds_from_line_and_cut_picks_together(built_site): ...
+
+def test_a_surface_builds_from_line_and_cut_picks_together(built_site):
+    ...
     # three line picks + two cut picks -> check() accepts; build -> fit counts five picks
 
-def test_a_cut_pick_on_another_clock_is_reported_not_placed(built_site): ...
+
+def test_a_cut_pick_on_another_clock_is_reported_not_placed(built_site):
+    ...
     # preset STEPS_ZERO, cut pick with time_base "radar" -> place_picks gives None; the build's
     # skipped list names WHY_OTHER_CLOCK for it; the other picks build
 
-def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site): ...
+
+def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
+    ...
     # build with a cut pick; session.delete_cut(cut_key) (the M15 delete) -> state(...).stale
     # contains "source"; rebuild -> skipped reason WHY_NO_CUT; no raise
 
+
 def test_a_cut_pick_outside_the_frame_is_reported_on_a_hole(built_site): ...
 
-def test_a_cut_picks_distance_not_its_column_is_its_identity(built_site): ...
+
+def test_a_cut_picks_distance_not_its_column_is_its_identity(built_site):
+    ...
     # changing only the stored column (trace) of a cut pick leaves the surface fresh; moving its
     # distance_m marks it stale ("picks")
 ```
@@ -287,21 +303,28 @@ git push origin nsgeo-m16-d
 ```python
 def test_a_line_wall_follows_the_line_at_the_cubes_levels():
     line = prepared_lines([0], to_world)[0]
-    frame = CubeFrame.for_grid(GRID, CELL); z = AXIS
+    frame = CubeFrame.for_grid(GRID, CELL)
+    z = AXIS
     wall = line_wall(line, frame, z)
     assert wall.values.shape == (z.nz, wall_columns(line.data.shape[1]))
-    k = z.nz // 2; t = z.times_ns()[k]
+    k = z.nz // 2
+    t = z.times_ns()[k]
     i = int(round((t - line.t0_ns) / line.dt_ns))
     assert wall.values[k, 0] == pytest.approx(line.data[i, 0], rel=0.05)  # near a sample
     assert np.allclose(wall.local[0], frame.to_local(line.coords[:1])[0])
 
+
 def test_a_long_line_wall_is_capped_at_300_columns(): ...
-def test_a_cut_wall_samples_the_filled_cube_along_the_cut(): ...
+def test_a_cut_wall_samples_the_filled_cube_along_the_cut():
+    ...
     # a filled cube with a known ramp in x -> the wall's values follow the ramp along a cut in x
+
+
 def test_a_cut_wall_is_nan_where_the_cube_has_no_data(): ...
 def test_wall_points_stand_at_stretched_depth(): ...
 def test_structured_grid_round_trips_and_its_size_is_exact(tmp_path):
-    pts = np.random.default_rng(0).random((4, 5, 3)); amp = np.arange(20.0).reshape(4, 5)
+    pts = np.random.default_rng(0).random((4, 5, 3))
+    amp = np.arange(20.0).reshape(4, 5)
     n = write_structured_grid(tmp_path / "w.vts", pts, {"amplitude": amp})
     doc = read_vtk_xml(tmp_path / "w.vts")
     assert np.allclose(doc["points"].reshape(4, 5, 3), pts)

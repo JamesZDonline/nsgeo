@@ -21,7 +21,9 @@ mean, pop, cell, shape = load(name)
 plan = plan_curvature(pop, cell, md)
 t = time.perf_counter()
 H = Hierarchy(fine_stencil(plan), kind=kind, degree=degree, ratio=ratio)
-print(f"{name} md={md} {kind} cheb deg {degree} ratio {ratio}: setup {time.perf_counter() - t:.2f} s")
+print(
+    f"{name} md={md} {kind} cheb deg {degree} ratio {ratio}: setup {time.perf_counter() - t:.2f} s"
+)
 print("  levels", H.describe())
 reach = plan.reach.reshape(shape) & ~pop
 for k0, k1 in WINDOWS[:nwin]:
@@ -34,5 +36,7 @@ for k0, k1 in WINDOWS[:nwin]:
     out, it1 = solve_mg(plan, H, v)
     t1 = time.perf_counter() - t
     err = np.abs(out - ref)[reach] / rng
-    print(f"  levels {k0}-{k1}: today {t0:.2f} s ({it0} its)  mg {t1:.3f} s ({it1} its)"
-          f"  x{t0 / t1:.1f}  |diff| max {err.max():.1e} p99 {np.percentile(err, 99):.1e}")
+    print(
+        f"  levels {k0}-{k1}: today {t0:.2f} s ({it0} its)  mg {t1:.3f} s ({it1} its)"
+        f"  x{t0 / t1:.1f}  |diff| max {err.max():.1e} p99 {np.percentile(err, 99):.1e}"
+    )

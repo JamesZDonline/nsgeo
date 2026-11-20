@@ -266,64 +266,67 @@ In `__init__`, after `self._selection`:
 After the `selection` property (~line 136), add:
 
 ```python
-    @property
-    def preview_key(self) -> str | None:
-        return self._preview_key
+@property
+def preview_key(self) -> str | None:
+    return self._preview_key
 
-    @property
-    def preview_trace(self) -> int:
-        return self._preview_trace
 
-    @property
-    def display_key(self) -> str | None:
-        """The line the profile should be SHOWING -- the preview when there
-        is one, otherwise the working line.
+@property
+def preview_trace(self) -> int:
+    return self._preview_trace
 
-        Deliberately distinct from `current_key`, which is the line every
-        write resolves through. A caller that is about to change data wants
-        `current_key`; a caller that is about to draw wants this. Getting
-        those two confused is exactly the C2 defect class (a write target
-        resolved from a different source than the thing the user believes
-        they are editing), so they do not share a name.
-        """
-        return self._preview_key or self._current_key
+
+@property
+def display_key(self) -> str | None:
+    """The line the profile should be SHOWING -- the preview when there
+    is one, otherwise the working line.
+
+    Deliberately distinct from `current_key`, which is the line every
+    write resolves through. A caller that is about to change data wants
+    `current_key`; a caller that is about to draw wants this. Getting
+    those two confused is exactly the C2 defect class (a write target
+    resolved from a different source than the thing the user believes
+    they are editing), so they do not share a name.
+    """
+    return self._preview_key or self._current_key
 ```
 
 In the "current line, samples, cursor" section, after `clear_selection` (~line 632), add:
 
 ```python
-    # ---- preview (spec §3.3) ----------------------------------------------
-    def set_preview(self, key: str | None, trace: int = -1) -> None:
-        """Set what the pointer is over. NOT a write target, ever.
+# ---- preview (spec §3.3) ----------------------------------------------
+def set_preview(self, key: str | None, trace: int = -1) -> None:
+    """Set what the pointer is over. NOT a write target, ever.
 
-        `current_key` is not merely what is displayed: `replace_step`,
-        `apply_to_grid`, `apply_preset` and `remove_step` all resolve
-        their target through it, and the processing dock binds to it. If
-        hovering the map moved `current_key`, moving the pointer would
-        silently repoint every destructive operation in the plugin -- edit
-        a parameter, and it lands on a line the user only passed over,
-        with no error and no cue. That is C2's defect class exactly, and
-        C2 is already on this codebase's record. Hence a second, weaker
-        notion that cannot reach any of those paths.
+    `current_key` is not merely what is displayed: `replace_step`,
+    `apply_to_grid`, `apply_preset` and `remove_step` all resolve
+    their target through it, and the processing dock binds to it. If
+    hovering the map moved `current_key`, moving the pointer would
+    silently repoint every destructive operation in the plugin -- edit
+    a parameter, and it lands on a line the user only passed over,
+    with no error and no cue. That is C2's defect class exactly, and
+    C2 is already on this codebase's record. Hence a second, weaker
+    notion that cannot reach any of those paths.
 
-        Never sets dirty: a preview is a view state, not an edit. Never
-        touches `_current_key`, `_current_trace` or `_selection`.
-        """
-        if key is None:
-            self.clear_preview()
-            return
-        line = self.line_for_key(key)  # raises KeyError before anything changes
-        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
-        if (key, index) == (self._preview_key, self._preview_trace):
-            return  # loop guard: a marker update that round-trips is a no-op
-        self._preview_key, self._preview_trace = key, index
-        self.preview_changed.emit(key, index)
+    Never sets dirty: a preview is a view state, not an edit. Never
+    touches `_current_key`, `_current_trace` or `_selection`.
+    """
+    if key is None:
+        self.clear_preview()
+        return
+    line = self.line_for_key(key)  # raises KeyError before anything changes
+    index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+    if (key, index) == (self._preview_key, self._preview_trace):
+        return  # loop guard: a marker update that round-trips is a no-op
+    self._preview_key, self._preview_trace = key, index
+    self.preview_changed.emit(key, index)
 
-    def clear_preview(self) -> None:
-        if self._preview_key is None and self._preview_trace == -1:
-            return
-        self._preview_key, self._preview_trace = None, -1
-        self.preview_changed.emit("", -1)
+
+def clear_preview(self) -> None:
+    if self._preview_key is None and self._preview_trace == -1:
+        return
+    self._preview_key, self._preview_trace = None, -1
+    self.preview_changed.emit("", -1)
 ```
 
 - [ ] **Step 5: Make `open_line` and `close_site` forget the preview**
@@ -482,7 +485,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
 
     session.set_preview(keys[1], 5)
     assert dock._effective_difference_index == -1  # not computed on someone else's stack
-    assert dock._difference_index == 0             # but remembered
+    assert dock._difference_index == 0  # but remembered
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
@@ -566,28 +569,29 @@ In `__init__`, replace `self._key: str | None = None` with:
 Add the property next to the `percentile` / `colormap_name` properties:
 
 ```python
-    @property
-    def _key(self) -> str | None:
-        """The line being DISPLAYED -- the preview when there is one.
+@property
+def _key(self) -> str | None:
+    """The line being DISPLAYED -- the preview when there is one.
 
-        Every read site in this file wants this: a stack_changed on the
-        line currently on screen should re-render it whether that line is
-        the working one or a preview, and `_on_trace_changed`'s key filter
-        should reject the working line's cursor while a preview is up.
-        The two assignment sites became `_working_key` instead.
-        """
-        return self._preview_key or self._working_key
+    Every read site in this file wants this: a stack_changed on the
+    line currently on screen should re-render it whether that line is
+    the working one or a preview, and `_on_trace_changed`'s key filter
+    should reject the working line's cursor while a preview is up.
+    The two assignment sites became `_working_key` instead.
+    """
+    return self._preview_key or self._working_key
 
-    @property
-    def _effective_difference_index(self) -> int:
-        """`-1` while previewing: the difference view is a property of a
-        step in the WORKING line's stack, and `_difference_index` indexes
-        that stack. Computing it against a previewed line's stack would be
-        an index into the wrong list -- at best an IndexError, at worst a
-        plausible-looking image of the wrong subtraction. Kept separate
-        from `_difference_index` itself so the mode is remembered and
-        returns intact when the view snaps back (spec §3.3)."""
-        return -1 if self._preview_key is not None else self._difference_index
+
+@property
+def _effective_difference_index(self) -> int:
+    """`-1` while previewing: the difference view is a property of a
+    step in the WORKING line's stack, and `_difference_index` indexes
+    that stack. Computing it against a previewed line's stack would be
+    an index into the wrong list -- at best an IndexError, at worst a
+    plausible-looking image of the wrong subtraction. Kept separate
+    from `_difference_index` itself so the mode is remembered and
+    returns intact when the view snaps back (spec §3.3)."""
+    return -1 if self._preview_key is not None else self._difference_index
 ```
 
 Change line 268 (`_open`) from `self._key = key or None` to `self._working_key = key or None`, and line 350 (`_clear`) from `self._key = None` to:
@@ -663,51 +667,53 @@ Keep the existing C1 comment block that sits above those two view calls; it expl
 - [ ] **Step 6: Add the preview slot**
 
 ```python
-    def _on_preview_changed(self, key: str, trace: int) -> None:
-        try:
-            if key and key != self._working_key:
-                self._enter_preview(key, trace)
-            else:
-                # Either the preview was cleared, or the pointer is over
-                # the line already being worked on -- which is not a
-                # preview at all: showing a banner and hiding the gain
-                # strip for the line the user is editing would be pure
-                # noise, and a re-render of what is already on screen.
-                self._exit_preview()
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
-
-    def _enter_preview(self, key: str, trace: int) -> None:
-        if self._preview_key is None:
-            self._strip_was_visible = self.gain_strip.isVisible()
-        self._preview_key = key
-        self.gain_strip.hide()
-        self.difference_label.setText("")
-        line = self.session.line_for_key(key)
-        label = getattr(line.placement, "label", None) or line.path.stem
-        self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
-        self._show_line(key)
-        self.view.clear_selection()
-        self.view.set_cursor(trace)
-
-    def _exit_preview(self) -> None:
-        if self._preview_key is None:
-            return
-        self._preview_key = None
-        self.preview_label.setText("")
-        if self._working_key is None:
-            self._clear_view_only()
-            return
-        self._show_line(self._working_key)
-        self.view.set_cursor(self.session.current_trace)
-        start, end = self.session.selection
-        if start < 0 or end < 0:
-            self.view.clear_selection()
+def _on_preview_changed(self, key: str, trace: int) -> None:
+    try:
+        if key and key != self._working_key:
+            self._enter_preview(key, trace)
         else:
-            self.view.set_selection(start, end)
-        if self._strip_was_visible:
-            self.gain_strip.show()
-        self._strip_was_visible = False
+            # Either the preview was cleared, or the pointer is over
+            # the line already being worked on -- which is not a
+            # preview at all: showing a banner and hiding the gain
+            # strip for the line the user is editing would be pure
+            # noise, and a re-render of what is already on screen.
+            self._exit_preview()
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
+
+
+def _enter_preview(self, key: str, trace: int) -> None:
+    if self._preview_key is None:
+        self._strip_was_visible = self.gain_strip.isVisible()
+    self._preview_key = key
+    self.gain_strip.hide()
+    self.difference_label.setText("")
+    line = self.session.line_for_key(key)
+    label = getattr(line.placement, "label", None) or line.path.stem
+    self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
+    self._show_line(key)
+    self.view.clear_selection()
+    self.view.set_cursor(trace)
+
+
+def _exit_preview(self) -> None:
+    if self._preview_key is None:
+        return
+    self._preview_key = None
+    self.preview_label.setText("")
+    if self._working_key is None:
+        self._clear_view_only()
+        return
+    self._show_line(self._working_key)
+    self.view.set_cursor(self.session.current_trace)
+    start, end = self.session.selection
+    if start < 0 or end < 0:
+        self.view.clear_selection()
+    else:
+        self.view.set_selection(start, end)
+    if self._strip_was_visible:
+        self.gain_strip.show()
+    self._strip_was_visible = False
 ```
 
 `_strip_was_visible` is captured only on the *first* `_enter_preview` of a run: hovering straight from one line to another re-enters without an intervening exit, and re-reading the (now hidden) strip would lose the memory that it had been showing.
@@ -1537,70 +1543,72 @@ In `__init__`, after the geometry cache is declared:
 And the slots:
 
 ```python
-    # ---- ambient hover ----------------------------------------------------
-    def _on_xy(self, point: QgsPointXY) -> None:
-        """Fired on every mouse move over the canvas, whatever tool is
-        active -- that is the whole reason this feature needs no tool slot.
-        Cheap on purpose: it records a position and restarts the dwell."""
-        try:
-            self._last_point = QgsPointXY(point)
-            self._dwell.start(self.HOVER_DWELL_MS)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
+# ---- ambient hover ----------------------------------------------------
+def _on_xy(self, point: QgsPointXY) -> None:
+    """Fired on every mouse move over the canvas, whatever tool is
+    active -- that is the whole reason this feature needs no tool slot.
+    Cheap on purpose: it records a position and restarts the dwell."""
+    try:
+        self._last_point = QgsPointXY(point)
+        self._dwell.start(self.HOVER_DWELL_MS)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
 
-    def _on_dwell(self) -> None:
-        try:
-            point = self._last_point
-            if point is None or not self.session.is_open:
-                return
-            hit = self._hit_test(point)
-            if hit is None:
-                # Clearing goes through the same dwell as previewing, so
-                # crossing a gap between two lines does not flicker the
-                # profile back to the working line and out again.
-                self.session.clear_preview()
-                return
-            key, trace = hit
-            if key == self.session.current_key:
-                # The pointer is over the line already being worked on,
-                # which is NOT a preview. The working line's cursor is
-                # `current_trace`; routing it through `set_preview` would
-                # give one line two sources of truth for one cursor, and
-                # the map marker would then stop following a drag in the
-                # profile. Any preview in progress ends here.
-                self.session.clear_preview()
-                self.session.set_trace(key, trace)
-            else:
-                self.session.set_preview(key, trace)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
-    def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
-        """The (line_key, trace) under `point`, or None if nothing is close
-        enough. `point` is in canvas CRS, and so is the geometry cache.
+def _on_dwell(self) -> None:
+    try:
+        point = self._last_point
+        if point is None or not self.session.is_open:
+            return
+        hit = self._hit_test(point)
+        if hit is None:
+            # Clearing goes through the same dwell as previewing, so
+            # crossing a gap between two lines does not flicker the
+            # profile back to the working line and out again.
+            self.session.clear_preview()
+            return
+        key, trace = hit
+        if key == self.session.current_key:
+            # The pointer is over the line already being worked on,
+            # which is NOT a preview. The working line's cursor is
+            # `current_trace`; routing it through `set_preview` would
+            # give one line two sources of truth for one cursor, and
+            # the map marker would then stop following a drag in the
+            # profile. Any preview in progress ends here.
+            self.session.clear_preview()
+            self.session.set_trace(key, trace)
+        else:
+            self.session.set_preview(key, trace)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
-        `closestVertexWithContext` returns a SQUARED distance, so the
-        tolerance is squared to match rather than the distance rooted --
-        getting this backwards silently widens the hit radius by 12x and
-        is invisible to any test that hovers exactly on a line.
 
-        Nearest *vertex* rather than nearest point on the segment: the
-        vertex index is the trace index, which is the answer being asked
-        for, and traces are centimetres apart, so the two differ by less
-        than the pointer's own precision.
-        """
-        tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
-        limit = tolerance * tolerance
-        best: tuple[float, str, int] | None = None
-        for key, geom in self._geometries().items():
-            if geom.isEmpty():
-                continue
-            sq_dist, index = geom.closestVertexWithContext(point)
-            if index < 0 or sq_dist > limit:
-                continue
-            if best is None or sq_dist < best[0]:
-                best = (sq_dist, key, index)
-        return None if best is None else (best[1], best[2])
+def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
+    """The (line_key, trace) under `point`, or None if nothing is close
+    enough. `point` is in canvas CRS, and so is the geometry cache.
+
+    `closestVertexWithContext` returns a SQUARED distance, so the
+    tolerance is squared to match rather than the distance rooted --
+    getting this backwards silently widens the hit radius by 12x and
+    is invisible to any test that hovers exactly on a line.
+
+    Nearest *vertex* rather than nearest point on the segment: the
+    vertex index is the trace index, which is the answer being asked
+    for, and traces are centimetres apart, so the two differ by less
+    than the pointer's own precision.
+    """
+    tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
+    limit = tolerance * tolerance
+    best: tuple[float, str, int] | None = None
+    for key, geom in self._geometries().items():
+        if geom.isEmpty():
+            continue
+        sq_dist, index = geom.closestVertexWithContext(point)
+        if index < 0 or sq_dist > limit:
+            continue
+        if best is None or sq_dist < best[0]:
+            best = (sq_dist, key, index)
+    return None if best is None else (best[1], best[2])
 ```
 
 Add `self._dwell.stop()` as the first line of `dispose()` (Task 5 gives that method its final form).
@@ -1705,9 +1713,7 @@ def test_promotion_goes_through_open_line_so_it_cannot_diverge(linked):
 def test_selecting_several_lines_promotes_none(linked):
     link, session, layers, _canvas, keys = linked
 
-    layers.layers["lines"].selectByIds(
-        [_feature_id(layers, keys[0]), _feature_id(layers, keys[1])]
-    )
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[0]), _feature_id(layers, keys[1])])
 
     assert session.current_key == keys[0]
 
@@ -1880,51 +1886,52 @@ Expected: the selection tests FAIL (`assert session.current_key == keys[1]` — 
 In `map_link.py`'s `__init__`, add `self._lines_layer_bound: QgsVectorLayer | None = None`, and call `self._rebind_layer()` at the end of `__init__`. Add `self._rebind_layer()` as the first statement of `_on_lines_changed`'s try block, before `self._invalidate()`.
 
 ```python
-    def _rebind_layer(self) -> None:
-        """Follow the `lines` layer across rebuilds.
+def _rebind_layer(self) -> None:
+    """Follow the `lines` layer across rebuilds.
 
-        `SiteLayers.refresh()` replaces the layer object, so a connection
-        made once at construction would point at a dead wrapper after the
-        first refresh and promotion would silently stop working -- with no
-        error, which is the worst kind of stop.
-        """
-        old = self._lines_layer_bound
-        if old is not None and not sip.isdeleted(old):
-            try:
-                old.selectionChanged.disconnect(self._on_selection)
-            except TypeError:
-                pass  # already gone; disconnect raises rather than no-ops
-        layer = self._lines_layer()
-        self._lines_layer_bound = layer
-        if layer is not None:
-            layer.selectionChanged.connect(self._on_selection)
-
-    def _on_selection(self, *_: Any) -> None:
-        """A preview becomes the working line when the user selects the
-        line feature with QGIS's ordinary Select tool.
-
-        No event filter, no tool of our own, no stolen clicks, and it
-        composes with everything else QGIS does with selection. Promotion
-        goes through `session.open_line` -- the same path the survey tree
-        uses -- so opening from the map and opening from the tree cannot
-        diverge.
-        """
+    `SiteLayers.refresh()` replaces the layer object, so a connection
+    made once at construction would point at a dead wrapper after the
+    first refresh and promotion would silently stop working -- with no
+    error, which is the worst kind of stop.
+    """
+    old = self._lines_layer_bound
+    if old is not None and not sip.isdeleted(old):
         try:
-            layer = self._lines_layer()
-            if layer is None or not self.session.is_open:
-                return
-            ids = layer.selectedFeatureIds()
-            if len(ids) != 1:
-                # A multi-selection has no single answer, and guessing one
-                # is worse than doing nothing (spec §3.4). An empty
-                # selection is the ordinary result of clicking empty map
-                # and must not close the line the user is working on.
-                return
-            key = str(layer.getFeature(ids[0])["line_key"])
-            if key in self.session.keys():
-                self.session.open_line(key)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
+            old.selectionChanged.disconnect(self._on_selection)
+        except TypeError:
+            pass  # already gone; disconnect raises rather than no-ops
+    layer = self._lines_layer()
+    self._lines_layer_bound = layer
+    if layer is not None:
+        layer.selectionChanged.connect(self._on_selection)
+
+
+def _on_selection(self, *_: Any) -> None:
+    """A preview becomes the working line when the user selects the
+    line feature with QGIS's ordinary Select tool.
+
+    No event filter, no tool of our own, no stolen clicks, and it
+    composes with everything else QGIS does with selection. Promotion
+    goes through `session.open_line` -- the same path the survey tree
+    uses -- so opening from the map and opening from the tree cannot
+    diverge.
+    """
+    try:
+        layer = self._lines_layer()
+        if layer is None or not self.session.is_open:
+            return
+        ids = layer.selectedFeatureIds()
+        if len(ids) != 1:
+            # A multi-selection has no single answer, and guessing one
+            # is worse than doing nothing (spec §3.4). An empty
+            # selection is the ordinary result of clicking empty map
+            # and must not close the line the user is working on.
+            return
+        key = str(layer.getFeature(ids[0])["line_key"])
+        if key in self.session.keys():
+            self.session.open_line(key)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
 ```
 
 `dispose()` gains the layer unbind, so the link stops promoting as well as drawing.

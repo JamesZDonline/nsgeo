@@ -373,9 +373,7 @@ def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
     assert np.nanmax(coverage) >= 1.0
     assert np.allclose(coverage[np.isfinite(coverage)] % 1.0, 0.0), "counts are whole traces"
     dock.coverage_check.setChecked(False)
-    assert not np.allclose(
-        np.nan_to_num(dock.current_values()), np.nan_to_num(coverage)
-    )
+    assert not np.allclose(np.nan_to_num(dock.current_values()), np.nan_to_num(coverage))
 
 
 def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):

@@ -129,13 +129,23 @@ def test_flipping_twice_is_no_change_at_all():
 
 def test_snap_puts_each_line_at_its_own_edge():
     assert LineEdit("k", STALE).snapped().placed(FRAMES).start_along == 15.0
-    assert LineEdit("k", dataclasses.replace(FWD, start_along=0.4)).snapped().placed(FRAMES).start_along == 0.0
+    assert (
+        LineEdit("k", dataclasses.replace(FWD, start_along=0.4))
+        .snapped()
+        .placed(FRAMES)
+        .start_along
+        == 0.0
+    )
     assert LineEdit("k", XREV).snapped().placed(FRAMES).start_along == 10.0
 
 
 def test_a_move_keeps_the_inset_against_the_new_grids_length():
-    assert LineEdit("k", REV, grid_id="B").placed(FRAMES) == GridPlacement("B", "y", 0.75, 9.0, -1, "line 2")
-    assert LineEdit("k", REV, start_along=14.5).moved_to("B", FRAMES).placed(FRAMES).start_along == pytest.approx(8.5)
+    assert LineEdit("k", REV, grid_id="B").placed(FRAMES) == GridPlacement(
+        "B", "y", 0.75, 9.0, -1, "line 2"
+    )
+    assert LineEdit("k", REV, start_along=14.5).moved_to("B", FRAMES).placed(
+        FRAMES
+    ).start_along == pytest.approx(8.5)
 
 
 def test_an_inset_start_is_worked_out_against_the_length_when_applied():
@@ -151,19 +161,32 @@ def test_shift_moves_the_offset_and_placed_names_a_missing_grid():
 
 def test_the_note_judges_only_the_start_and_the_offset():
     assert placement_note(STALE, GRID) == "starts 1.00 m past the far edge"
-    assert placement_note(dataclasses.replace(FWD, start_along=0.4), GRID) == "starts 0.40 m inside the near edge"
+    assert (
+        placement_note(dataclasses.replace(FWD, start_along=0.4), GRID)
+        == "starts 0.40 m inside the near edge"
+    )
     assert placement_note(dataclasses.replace(FWD, start_along=0.04), GRID) == ""
-    assert placement_note(dataclasses.replace(REV, offset=10.3), GRID) == "offset 10.30 m is outside the grid's 10.00 m width"
+    assert (
+        placement_note(dataclasses.replace(REV, offset=10.3), GRID)
+        == "offset 10.30 m is outside the grid's 10.00 m width"
+    )
     assert placement_note(REV, GRID) == ""
 
 
 def test_the_messages_say_what_changed_and_name_what_was_left_alone():
     out = EditOutcome(changed=("a", "b"), skipped=(Skipped("c", "line 8", CHANGED_ELSEWHERE),))
-    assert out.message() == "changed 2 line(s); line 8 changed elsewhere while the table was open, so it was left as it is"
+    assert (
+        out.message()
+        == "changed 2 line(s); line 8 changed elsewhere while the table was open, so it was left as it is"
+    )
     assert EditOutcome().message() == "nothing changed"
-    assert EditOutcome(changed=("a",), reordered=True).message() == "changed 1 line(s) and reordered the lines"
+    assert (
+        EditOutcome(changed=("a",), reordered=True).message()
+        == "changed 1 line(s) and reordered the lines"
+    )
     assert GridEditReport("Grid5", moved=(("y", 15.0, 15),)).message() == (
-        "Grid5 is now 15.00 m along y; its 15 reversed line(s) moved with the far edge.")
+        "Grid5 is now 15.00 m along y; its 15 reversed line(s) moved with the far edge."
+    )
     assert GridEditReport("A").message() == ""
 ```
 

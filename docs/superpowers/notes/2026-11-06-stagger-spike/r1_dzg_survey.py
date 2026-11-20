@@ -144,11 +144,15 @@ lon_ref = rows[0]["lon0"]
 R = 6371000.0
 print("\nstart/end in common local metres (E, N) relative to FILE__001 start; times UTC s-of-day")
 for r in rows:
+
     def loc(la, lo):
         return (
             (lo - lon_ref) * math.pi / 180 * R * math.cos(math.radians(lat_ref)),
             (la - lat_ref) * math.pi / 180 * R,
         )
+
     s = loc(r["lat0"], r["lon0"])
     e = loc(r["latN"], r["lonN"])
-    print(f"{r['name']}  start ({s[0]:7.2f},{s[1]:7.2f})  end ({e[0]:7.2f},{e[1]:7.2f})  t {r['t0']:.1f}-{r['t1']:.1f}  alt {r['alt'][0]:.2f}-{r['alt'][1]:.2f} hdop {r['hdop'][0]}-{r['hdop'][1]}")
+    print(
+        f"{r['name']}  start ({s[0]:7.2f},{s[1]:7.2f})  end ({e[0]:7.2f},{e[1]:7.2f})  t {r['t0']:.1f}-{r['t1']:.1f}  alt {r['alt'][0]:.2f}-{r['alt'][1]:.2f} hdop {r['hdop'][0]}-{r['hdop'][1]}"
+    )

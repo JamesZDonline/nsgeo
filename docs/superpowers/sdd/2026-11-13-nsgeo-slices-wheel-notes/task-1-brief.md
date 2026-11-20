@@ -103,6 +103,7 @@ def test_a_half_typed_value_survives_a_whole_site_ready_tick(plugin):
     scope._run_tick()
     assert dock.dz_spin.cleanText() == typed
 
+
 def test_an_unchanged_value_is_not_set_again(plugin, monkeypatch):
     dock = whole_site(plugin)
     calls = []

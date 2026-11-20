@@ -28,7 +28,9 @@ puts row 0 at −11.0864 ns with `dt = 0.216531`, so `time_zero(sample=51)` make
 `zero = -0.0433` ns.
 
 ```python
-def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(fake_iface, tmp_path, answer_modal):
+def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(
+    fake_iface, tmp_path, answer_modal
+):
     plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
     try:
         s.append_step(key, build_step("time_cutoff", end_ns=60.0))

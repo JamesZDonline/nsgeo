@@ -297,7 +297,7 @@ Generalised rather than special-cased, per the instruction:
 ```python
 SHADOWED_CONNECT_COUNTS = {
     "pick_requested": 1,  # ProfileView's connected; ProfileDock's own is not
-    "error": 1,           # ProfileDock's connected; ParamForm's own is not
+    "error": 1,  # ProfileDock's connected; ParamForm's own is not
 }
 ```
 

@@ -78,7 +78,9 @@ def view(qgis_app):
     v.resize(800, 300)
     v.show()
     rg = _rg()
-    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=np.arange(rg.n_traces) / 60.0)
+    v.set_axes(
+        rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=np.arange(rg.n_traces) / 60.0
+    )
     v.set_image(RadargramImage(rg).image)
     return v, rg
 
@@ -88,7 +90,11 @@ def test_paints_the_image_inside_the_margins(view):
     shot = v.grab_image()
     r = v.image_rect()
     assert r.left() == MARGIN_LEFT and r.top() == MARGIN_TOP
-    inside = [QColor(shot.pixel(r.left() + 5 + i, r.top() + 5 + j)).value() for i in range(20) for j in range(20)]
+    inside = [
+        QColor(shot.pixel(r.left() + 5 + i, r.top() + 5 + j)).value()
+        for i in range(20)
+        for j in range(20)
+    ]
     assert np.std(inside) > 5  # radargram texture, not a flat fill
     margin = QColor(shot.pixel(5, r.top() + 5))
     assert margin.red() == margin.green() == margin.blue()  # axis gutter is neutral
@@ -153,9 +159,19 @@ def test_drag_selects_a_trace_range(view):
     sel = []
     v.range_selected.connect(lambda a, b: sel.append((a, b)))
     r = v.image_rect()
-    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() + 100, r.top() + 50))
+    QTest.mousePress(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 100, r.top() + 50),
+    )
     QTest.mouseMove(v, QPoint(r.left() + 300, r.top() + 50))
-    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() + 300, r.top() + 50))
+    QTest.mouseRelease(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 300, r.top() + 50),
+    )
     assert sel == [(28, 86)]  # floor(100/696*200), floor(300/696*200)
 
 
@@ -163,7 +179,9 @@ def test_depth_axis_uses_the_velocity_model(view):
     v, rg = view
     v.set_velocity(VelocityModel.constant(0.1))
     labels = v.depth_tick_labels()
-    assert labels and labels[0].startswith("-") or labels[0] == "0"  # top of the record is above time zero
+    assert (
+        labels and labels[0].startswith("-") or labels[0] == "0"
+    )  # top of the record is above time zero
 
 
 @needs_real_data
@@ -382,7 +400,9 @@ class ProfileView(QWidget):
             return
         t = self.transform
         r = self.image_rect()
-        self.transform = ViewTransform.fit(t.n_traces, t.n_samples, t.t0_ns, t.dt_ns, r.width(), r.height())
+        self.transform = ViewTransform.fit(
+            t.n_traces, t.n_samples, t.t0_ns, t.dt_ns, r.width(), r.height()
+        )
         self.view_changed.emit()
         self.update()
 
@@ -475,25 +495,45 @@ class ProfileView(QWidget):
         for tick in nice_ticks(t.time_lo, t.time_hi):
             y = r.top() + t.y_of_time(float(tick))
             p.drawLine(QPointF(r.left() - 4, y), QPointF(r.left(), y))
-            p.drawText(QRectF(0, y - 8, r.left() - 6, 16), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), f"{tick:g}")
-        p.drawText(QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns")
+            p.drawText(
+                QRectF(0, y - 8, r.left() - 6, 16),
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                f"{tick:g}",
+            )
+        p.drawText(
+            QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns"
+        )
         # right: depth
         p.drawLine(r.topRight(), r.bottomRight())
         if self._velocity is not None:
             for label, y in self._depth_ticks(t):
                 yy = r.top() + y
                 p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                p.drawText(QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
-            p.drawText(QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignLeft), "m")
+                p.drawText(
+                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    label,
+                )
+            p.drawText(
+                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, MARGIN_TOP + 10),
+                int(Qt.AlignmentFlag.AlignLeft),
+                "m",
+            )
         # bottom: distance along the line, or trace index
         p.drawLine(r.bottomLeft(), r.bottomRight())
         for label, x in self._distance_ticks(t):
             xx = r.left() + x
             p.drawLine(QPointF(xx, r.bottom()), QPointF(xx, r.bottom() + 4))
-            p.drawText(QRectF(xx - 30, r.bottom() + 6, 60, 14), int(Qt.AlignmentFlag.AlignHCenter), label)
+            p.drawText(
+                QRectF(xx - 30, r.bottom() + 6, 60, 14), int(Qt.AlignmentFlag.AlignHCenter), label
+            )
         unit = "m" if self._distance is not None else "trace"
         arrow = "→" if self._direction == 1 else "←"
-        p.drawText(QRectF(r.left(), r.bottom() + 14, r.width(), 14), int(Qt.AlignmentFlag.AlignHCenter), f"{unit} along line {arrow}")
+        p.drawText(
+            QRectF(r.left(), r.bottom() + 14, r.width(), 14),
+            int(Qt.AlignmentFlag.AlignHCenter),
+            f"{unit} along line {arrow}",
+        )
 
     def _depth_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         assert self._velocity is not None
@@ -540,7 +580,9 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
-                self.pick_requested.emit(self.transform.trace_index_at(x), self.transform.time_of_y(y))
+                self.pick_requested.emit(
+                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
+                )
                 return
             self._press = event_pos(event)
             self._dragging = False

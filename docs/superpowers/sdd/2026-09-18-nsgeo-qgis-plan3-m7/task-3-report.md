@@ -116,9 +116,7 @@ note 3 says explicitly not to simplify that condition:
 
 ```python
 trace = (
-    self.session.preview_trace
-    if self.session.preview_key == key
-    else self.session.current_trace
+    self.session.preview_trace if self.session.preview_key == key else self.session.current_trace
 )
 self._set_marker(key, trace)
 self._set_band(key, *self.session.selection)

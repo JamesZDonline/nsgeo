@@ -69,6 +69,7 @@ This is what makes a single repository safe: the rule fails the build rather
 than relying on vigilance. It also catches scipy becoming a hard dependency
 and matplotlib appearing at all, neither of which a repo split would catch.
 """
+
 from __future__ import annotations
 
 import ast
@@ -121,6 +122,7 @@ Create `packages/nsgeo-core/src/nsgeo/__init__.py`:
 
 ```python
 """nsgeo — near-surface geophysics core library."""
+
 from __future__ import annotations
 
 __version__ = "0.1.0.dev0"
@@ -266,6 +268,7 @@ Create `packages/nsgeo-core/tests/synthetic.py`:
 ```python
 """Test-only DZT writer. Produces files with known headers and known samples
 so the reader can be round-trip tested without committing real survey data."""
+
 from __future__ import annotations
 
 import struct
@@ -304,15 +307,15 @@ def write_dzt(
     struct.pack_into("<H", head, 2, rh_data)
     struct.pack_into("<H", head, 4, n_samples)
     struct.pack_into("<H", head, 6, bits)
-    struct.pack_into("<h", head, 8, 105)          # rh_zero: junk, as in real files
-    struct.pack_into("<f", head, 10, 250.0)       # rhf_sps
+    struct.pack_into("<h", head, 8, 105)  # rh_zero: junk, as in real files
+    struct.pack_into("<f", head, 10, 250.0)  # rhf_sps
     struct.pack_into("<f", head, 14, traces_per_metre)
-    struct.pack_into("<f", head, 18, 5.0)         # rhf_mpm
-    struct.pack_into("<f", head, 22, -11.086)     # rhf_position
+    struct.pack_into("<f", head, 18, 5.0)  # rhf_mpm
+    struct.pack_into("<f", head, 22, -11.086)  # rhf_position
     struct.pack_into("<f", head, 26, range_ns)
     struct.pack_into("<H", head, 52, n_channels)
-    struct.pack_into("<f", head, 54, 14.0)        # rhf_epsr
-    head[98:98 + 7] = b"HS350US"
+    struct.pack_into("<f", head, 54, 14.0)  # rhf_epsr
+    head[98 : 98 + 7] = b"HS350US"
 
     headsize = MINHEADSIZE * rh_data if rh_data < MINHEADSIZE else MINHEADSIZE * n_channels
     blob = bytearray(headsize)
@@ -357,7 +360,7 @@ def test_parses_verified_real_world_field_values(tmp_path):
     p = tmp_path / "c.DZT"
     write_dzt(p, np.zeros((512, 10), dtype=np.int32))
     h = read_header(p)
-    assert h.tag == 2047          # real files use 0x07FF, not the cited 255
+    assert h.tag == 2047  # real files use 0x07FF, not the cited 255
     assert h.n_samples == 512
     assert h.bits == 32
     assert h.n_channels == 1
@@ -381,10 +384,11 @@ def test_rejects_short_file():
 def test_rejects_unknown_bit_depth(tmp_path):
     raw = bytearray(1024)
     import struct
+
     struct.pack_into("<H", raw, 0, 2047)
     struct.pack_into("<H", raw, 2, 128)
     struct.pack_into("<H", raw, 4, 512)
-    struct.pack_into("<H", raw, 6, 24)      # unsupported
+    struct.pack_into("<H", raw, 6, 24)  # unsupported
     struct.pack_into("<H", raw, 52, 1)
     with pytest.raises(DztError, match="bit depth"):
         parse_header(bytes(raw))
@@ -392,6 +396,7 @@ def test_rejects_unknown_bit_depth(tmp_path):
 
 def test_rejects_zero_samples():
     import struct
+
     raw = bytearray(1024)
     struct.pack_into("<H", raw, 0, 2047)
     struct.pack_into("<H", raw, 2, 128)
@@ -413,6 +418,7 @@ Create `packages/nsgeo-core/src/nsgeo/io/__init__.py`:
 
 ```python
 """Format readers."""
+
 from __future__ import annotations
 ```
 
@@ -425,6 +431,7 @@ Written from the format description and verified against ten real SIR-4000
 files. See spec section 6a: several widely cited facts about this format do
 not hold in real data, and each is called out at the point it matters.
 """
+
 from __future__ import annotations
 
 import struct
@@ -608,7 +615,7 @@ def test_non_integer_trace_count_is_a_hard_error(tmp_path):
     p = tmp_path / "d.DZT"
     write_dzt(p, np.zeros((512, 10), dtype=np.int32))
     with open(p, "ab") as fh:
-        fh.write(b"\x00" * 7)          # a partial trace
+        fh.write(b"\x00" * 7)  # a partial trace
     with pytest.raises(DztError, match="non-integer trace count"):
         read_samples(p)
 
@@ -749,8 +756,15 @@ from nsgeo.geometry.grid import Grid
 
 
 def g(azimuth=0.0, origin=(0.0, 0.0)):
-    return Grid(id="G", origin=origin, azimuth=azimuth, size_x=20.0,
-                size_y=20.0, crs="EPSG:32616", default_spacing=0.5)
+    return Grid(
+        id="G",
+        origin=origin,
+        azimuth=azimuth,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
 
 
 def test_zero_azimuth_aligns_local_axes_with_world():
@@ -784,7 +798,7 @@ def test_to_world_translates_by_origin():
 
 def test_to_world_rotates_then_translates():
     grid = g(90.0, origin=(10.0, 20.0))
-    out = grid.to_world(np.array([[0.0, 5.0]]))   # 5 m along local +Y
+    out = grid.to_world(np.array([[0.0, 5.0]]))  # 5 m along local +Y
     np.testing.assert_allclose(out, [[15.0, 20.0]], atol=1e-12)
 
 
@@ -811,6 +825,7 @@ Create `packages/nsgeo-core/src/nsgeo/geometry/__init__.py`:
 
 ```python
 """Coordinate frames and trace placement."""
+
 from __future__ import annotations
 ```
 
@@ -823,6 +838,7 @@ A Grid is not a container of lines. It is an affine frame that converts
 grid-local metres to world coordinates. Lines reference it by id, which is what
 lets one grid hold cross-hatched lines running in both directions.
 """
+
 from __future__ import annotations
 
 import math
@@ -920,22 +936,30 @@ def header(tmp_path):
 
 @pytest.fixture
 def frames():
-    return {"G": Grid(id="G", origin=(0.0, 0.0), azimuth=0.0, size_x=20.0,
-                      size_y=20.0, crs="EPSG:32616", default_spacing=0.5)}
+    return {
+        "G": Grid(
+            id="G",
+            origin=(0.0, 0.0),
+            azimuth=0.0,
+            size_x=20.0,
+            size_y=20.0,
+            crs="EPSG:32616",
+            default_spacing=0.5,
+        )
+    }
 
 
 def test_distance_along_forward(header):
     pl = GridPlacement(grid_id="G", axis="y", offset=0.5)
     d = pl.distance_along(120, header)
     assert d[0] == pytest.approx(0.0)
-    assert d[60] == pytest.approx(1.0)       # 60 traces/m
+    assert d[60] == pytest.approx(1.0)  # 60 traces/m
     assert d[119] == pytest.approx(119 / 60)
 
 
 def test_distance_along_reversed_decreases(header):
     """Zigzag: traces stay in raw file order, the coordinate decreases."""
-    pl = GridPlacement(grid_id="G", axis="y", offset=0.5,
-                       start_along=20.0, direction=-1)
+    pl = GridPlacement(grid_id="G", axis="y", offset=0.5, start_along=20.0, direction=-1)
     d = pl.distance_along(120, header)
     assert d[0] == pytest.approx(20.0)
     assert d[60] == pytest.approx(19.0)
@@ -953,7 +977,7 @@ def test_axis_y_line_varies_in_world_y(header, frames):
     pl = GridPlacement(grid_id="G", axis="y", offset=2.0)
     xy = pl.trace_coords(60, header, frames)
     assert xy.shape == (60, 2)
-    np.testing.assert_allclose(xy[:, 0], 2.0)            # constant cross-axis
+    np.testing.assert_allclose(xy[:, 0], 2.0)  # constant cross-axis
     assert xy[-1, 1] == pytest.approx(59 / 60)
 
 
@@ -976,12 +1000,21 @@ def test_cross_hatched_lines_share_one_grid(header, frames):
 
 
 def test_rotated_grid_places_traces_correctly(header):
-    frames = {"G": Grid(id="G", origin=(100.0, 200.0), azimuth=90.0, size_x=20.0,
-                        size_y=20.0, crs="EPSG:32616", default_spacing=0.5)}
+    frames = {
+        "G": Grid(
+            id="G",
+            origin=(100.0, 200.0),
+            azimuth=90.0,
+            size_x=20.0,
+            size_y=20.0,
+            crs="EPSG:32616",
+            default_spacing=0.5,
+        )
+    }
     pl = GridPlacement(grid_id="G", axis="y", offset=0.0)
     xy = pl.trace_coords(61, header, frames)
     np.testing.assert_allclose(xy[0], [100.0, 200.0], atol=1e-9)
-    np.testing.assert_allclose(xy[60], [101.0, 200.0], atol=1e-9)   # +Y is east
+    np.testing.assert_allclose(xy[60], [101.0, 200.0], atol=1e-9)  # +Y is east
 
 
 def test_unknown_grid_id_raises(header):
@@ -1027,6 +1060,7 @@ Trace index is the join between geometry and data. `Profile.data[:, i]` and
 `placement.trace_coords(...)[i]` describe the same trace, which is what makes
 bidirectional map-to-profile navigation work.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -1036,6 +1070,7 @@ import numpy as np
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.io.dzt import DztHeader
+
 
 class Placement(Protocol):
     """How traces are positioned. Consumers use only these two methods and
@@ -1166,8 +1201,15 @@ def test_recovers_origin_and_azimuth_exactly():
 def test_round_trips_through_grid_to_world():
     world = _rotate(LOCAL, 213.0, (10.0, -5.0))
     fit = fit_grid_from_corners(LOCAL, world)
-    grid = Grid(id="G", origin=fit.origin, azimuth=fit.azimuth, size_x=20.0,
-                size_y=20.0, crs="EPSG:32616", default_spacing=0.5)
+    grid = Grid(
+        id="G",
+        origin=fit.origin,
+        azimuth=fit.azimuth,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
     np.testing.assert_allclose(grid.to_world(LOCAL), world, atol=1e-6)
 
 
@@ -1187,7 +1229,7 @@ def test_azimuth_is_normalised_to_0_360():
 def test_non_square_grid_reports_nonzero_residual():
     """The QC number: a grid stretched on one axis cannot be fitted rigidly."""
     stretched = LOCAL.copy()
-    stretched[:, 0] *= 1.10          # 10% long on one axis
+    stretched[:, 0] *= 1.10  # 10% long on one axis
     world = _rotate(stretched, 12.0, (0.0, 0.0))
     fit = fit_grid_from_corners(LOCAL, world)
     assert fit.residual_rms > 0.3
@@ -1239,6 +1281,7 @@ That is deliberate. A grid that was not actually square shows up as a nonzero
 residual, which is a QC number worth reporting, rather than being silently
 absorbed into a scale factor.
 """
+
 from __future__ import annotations
 
 import math
@@ -1283,8 +1326,9 @@ def fit_grid_from_corners(local: np.ndarray, world: np.ndarray) -> GridFit:
     # grid-local +Y, which is (sin azimuth, cos azimuth).
     azimuth = math.degrees(math.atan2(rot[0, 1], rot[1, 1])) % 360.0
 
-    return GridFit(origin=(float(origin[0]), float(origin[1])),
-                   azimuth=azimuth, residual_rms=residual)
+    return GridFit(
+        origin=(float(origin[0]), float(origin[1])), azimuth=azimuth, residual_rms=residual
+    )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1346,8 +1390,15 @@ def _clean_cache():
 
 @pytest.fixture
 def grid():
-    return Grid(id="G", origin=(0.0, 0.0), azimuth=0.0, size_x=20.0,
-                size_y=20.0, crs="EPSG:32616", default_spacing=0.5)
+    return Grid(
+        id="G",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
 
 
 def _line(tmp_path, name="a.DZT", n_traces=120, n_channels=1, offset=0.5):
@@ -1388,6 +1439,7 @@ def test_load_is_cached(tmp_path):
 
 def test_cache_is_bounded(tmp_path):
     from nsgeo.model.survey import _load_profiles
+
     for i in range(_load_profiles.cache_parameters()["maxsize"] + 3):
         _line(tmp_path, name=f"f{i}.DZT", n_traces=8).load()
     info = _load_profiles.cache_info()
@@ -1439,8 +1491,9 @@ def test_site_validate_rejects_duplicate_grid_ids(grid):
 
 def test_site_accepts_cross_hatched_lines_in_one_grid(tmp_path, grid):
     a = _line(tmp_path, name="y.DZT")
-    b = Line.open(_line(tmp_path, name="x.DZT").path,
-                  GridPlacement(grid_id="G", axis="x", offset=0.5))
+    b = Line.open(
+        _line(tmp_path, name="x.DZT").path, GridPlacement(grid_id="G", axis="x", offset=0.5)
+    )
     site = Site(grids=[grid], lines=[a, b])
     site.validate()
 ```
@@ -1456,6 +1509,7 @@ Create `packages/nsgeo-core/src/nsgeo/model/__init__.py`:
 
 ```python
 """Survey data model."""
+
 from __future__ import annotations
 ```
 
@@ -1468,6 +1522,7 @@ Ownership runs one way: a Line owns its Profiles, and a Profile holds no
 back-reference. That keeps Profile a pure, picklable, trivially testable data
 object with no cycles.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -1536,8 +1591,9 @@ class Line:
         a stat, regardless of file size."""
         path = Path(path)
         header = read_header(path)
-        return cls(path=path, header=header, placement=placement,
-                   n_traces=trace_count(path, header))
+        return cls(
+            path=path, header=header, placement=placement, n_traces=trace_count(path, header)
+        )
 
     def load(self) -> List[Profile]:
         """Sample arrays, one Profile per channel. Cached."""
@@ -1628,16 +1684,33 @@ from tests.synthetic import write_dzt
 
 @pytest.fixture
 def site(tmp_path):
-    grid = Grid(id="G1", origin=(500.0, 700.0), azimuth=30.0, size_x=20.0,
-                size_y=20.0, crs="EPSG:32616", default_spacing=0.5)
+    grid = Grid(
+        id="G1",
+        origin=(500.0, 700.0),
+        azimuth=30.0,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
     lines = []
     for i, axis in enumerate(["y", "y", "x"]):
         p = tmp_path / "data" / f"L{i}.DZT"
         p.parent.mkdir(exist_ok=True)
         write_dzt(p, np.zeros((512, 60), dtype=np.int32))
-        lines.append(Line.open(p, GridPlacement(
-            grid_id="G1", axis=axis, offset=i * 0.5,
-            start_along=0.0, direction=-1 if i == 1 else 1, label=f"line {i}")))
+        lines.append(
+            Line.open(
+                p,
+                GridPlacement(
+                    grid_id="G1",
+                    axis=axis,
+                    offset=i * 0.5,
+                    start_along=0.0,
+                    direction=-1 if i == 1 else 1,
+                    label=f"line {i}",
+                ),
+            )
+        )
     return Site(grids=[grid], lines=lines)
 
 
@@ -1711,7 +1784,7 @@ def test_output_is_human_readable(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     text = out.read_text()
-    assert "\n" in text and "  " in text      # indented, diffable
+    assert "\n" in text and "  " in text  # indented, diffable
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1733,6 +1806,7 @@ layers are regenerable and are explicitly not the source of truth.
 DZT paths are stored relative to the JSON file with POSIX separators, so a
 project directory can be moved or shared across platforms intact.
 """
+
 from __future__ import annotations
 
 import json
@@ -1913,6 +1987,7 @@ def clean_registry():
     """Registering a step is a global side effect. Restore the registry so a
     test double cannot leak into available_steps() for every later test."""
     from nsgeo.processing import base
+
     saved = dict(base._REGISTRY)
     yield
     base._REGISTRY.clear()
@@ -1950,11 +2025,14 @@ def test_registry_round_trip(clean_registry):
     @register
     class _Doubler:
         name = "test_doubler"
+
         def __init__(self, factor: float = 2.0):
             self.factor = factor
+
         @property
         def params(self):
             return {"factor": self.factor}
+
         def apply(self, r: Radargram) -> Radargram:
             return r.replace(data=r.data * self.factor)
 
@@ -1984,9 +2062,9 @@ def test_running_mean_window_one_is_identity():
 def test_running_mean_shrinks_window_at_edges():
     a = np.array([[0.0], [1.0], [2.0], [3.0]])
     out = running_mean(a, 3, axis=0)
-    assert out[0, 0] == pytest.approx(0.5)      # mean of [0, 1]
-    assert out[1, 0] == pytest.approx(1.0)      # mean of [0, 1, 2]
-    assert out[3, 0] == pytest.approx(2.5)      # mean of [2, 3]
+    assert out[0, 0] == pytest.approx(0.5)  # mean of [0, 1]
+    assert out[1, 0] == pytest.approx(1.0)  # mean of [0, 1, 2]
+    assert out[3, 0] == pytest.approx(2.5)  # mean of [2, 3]
 
 
 def test_running_mean_along_trace_axis():
@@ -2012,6 +2090,7 @@ Create `packages/nsgeo-core/src/nsgeo/processing/__init__.py`:
 
 ```python
 """User-ordered processing steps. Nothing here runs automatically."""
+
 from __future__ import annotations
 ```
 
@@ -2019,6 +2098,7 @@ Create `packages/nsgeo-core/src/nsgeo/processing/_util.py`:
 
 ```python
 """Shared numpy helpers. numpy only: scipy is never imported at module level."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -2065,12 +2145,14 @@ correction crops rows, so a step that returned only an array would silently
 desynchronise the time axis from the data. Returning the Radargram makes that
 an obvious test failure instead of a silent bug.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace as _dc_replace
 from typing import Any, Dict, List, Protocol, Type
 
 import numpy as np
+
 
 @dataclass(frozen=True)
 class Radargram:
@@ -2116,11 +2198,9 @@ class Step(Protocol):
     name: str
 
     @property
-    def params(self) -> Dict[str, Any]:
-        ...
+    def params(self) -> Dict[str, Any]: ...
 
-    def apply(self, rg: Radargram) -> Radargram:
-        ...
+    def apply(self, rg: Radargram) -> Radargram: ...
 
 
 _REGISTRY: Dict[str, Type[Any]] = {}
@@ -2196,8 +2276,9 @@ import nsgeo.processing.timezero  # noqa: F401
 
 
 def make(n_samples=100, n_traces=20, dt_ns=0.2, t0_ns=0.0, fill=0.0):
-    return Radargram(data=np.full((n_samples, n_traces), fill, dtype=float),
-                     dt_ns=dt_ns, t0_ns=t0_ns)
+    return Radargram(
+        data=np.full((n_samples, n_traces), fill, dtype=float), dt_ns=dt_ns, t0_ns=t0_ns
+    )
 
 
 def test_time_zero_by_sample_crops_rows():
@@ -2217,9 +2298,8 @@ def test_time_zero_updates_t0_consistently_with_dropped_rows():
 def test_time_zero_first_break_finds_the_onset():
     rg = make(n_samples=200)
     data = rg.data.copy()
-    data[40:, :] = 100.0            # signal starts at row 40
-    out = build_step("time_zero", mode="first_break", threshold=0.5).apply(
-        rg.replace(data=data))
+    data[40:, :] = 100.0  # signal starts at row 40
+    out = build_step("time_zero", mode="first_break", threshold=0.5).apply(rg.replace(data=data))
     assert out.n_samples == 160
 
 
@@ -2229,8 +2309,7 @@ def test_time_zero_first_break_ignores_leading_zero_traces():
     data = rg.data.copy()
     data[40:, 4:] = 100.0
     data[:, :4] = 0.0
-    out = build_step("time_zero", mode="first_break", threshold=0.5).apply(
-        rg.replace(data=data))
+    out = build_step("time_zero", mode="first_break", threshold=0.5).apply(rg.replace(data=data))
     assert out.n_samples == 160
 
 
@@ -2304,6 +2383,7 @@ Create `packages/nsgeo-core/src/nsgeo/processing/timezero.py`:
 
 ```python
 """Time-zero correction: crop rows above the first arrival."""
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -2317,8 +2397,7 @@ from nsgeo.processing.base import Radargram, register
 class TimeZero:
     name = "time_zero"
 
-    def __init__(self, mode: str = "first_break", sample: int = 0,
-                 threshold: float = 0.2) -> None:
+    def __init__(self, mode: str = "first_break", sample: int = 0, threshold: float = 0.2) -> None:
         self.mode = mode
         self.sample = sample
         self.threshold = threshold
@@ -2348,8 +2427,7 @@ class TimeZero:
             return rg
         if k >= rg.n_samples:
             raise ValueError(
-                f"time_zero at sample {k} would leave no samples "
-                f"(radargram has {rg.n_samples})"
+                f"time_zero at sample {k} would leave no samples (radargram has {rg.n_samples})"
             )
         return rg.replace(data=rg.data[k:, :].copy(), t0_ns=rg.t0_ns + k * rg.dt_ns)
 ```
@@ -2358,6 +2436,7 @@ Create `packages/nsgeo-core/src/nsgeo/processing/dewow.py`:
 
 ```python
 """Dewow: remove low-frequency drift by subtracting a running mean in time."""
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -2442,7 +2521,7 @@ def test_agc_equalises_amplitude_with_depth():
     out = build_step("gain_agc", window_ns=20.0).apply(rg)
     early = np.abs(out.data[20:60]).mean()
     late = np.abs(out.data[300:340]).mean()
-    assert late / early > 0.5      # was orders of magnitude smaller before
+    assert late / early > 0.5  # was orders of magnitude smaller before
 
 
 def test_agc_handles_all_zero_traces_without_dividing_by_zero():
@@ -2473,14 +2552,15 @@ def test_power_gain_is_one_at_the_first_sample():
 def test_parametric_rejects_unknown_mode():
     with pytest.raises(ValueError, match="mode"):
         build_step("gain_parametric", mode="wishful").apply(
-            Radargram(data=np.ones((10, 2)), dt_ns=0.2, t0_ns=0.0))
+            Radargram(data=np.ones((10, 2)), dt_ns=0.2, t0_ns=0.0)
+        )
 
 
 def test_curve_applies_decibels_as_a_linear_multiplier():
     rg = Radargram(data=np.ones((100, 3)), dt_ns=0.2, t0_ns=0.0)
     out = build_step("gain_curve", points=[[0.0, 0.0], [19.8, 20.0]]).apply(rg)
-    assert out.data[0, 0] == pytest.approx(1.0)          # 0 dB
-    assert out.data[99, 0] == pytest.approx(10.0)        # 20 dB
+    assert out.data[0, 0] == pytest.approx(1.0)  # 0 dB
+    assert out.data[99, 0] == pytest.approx(10.0)  # 20 dB
 
 
 def test_curve_interpolates_linearly_in_decibels():
@@ -2506,13 +2586,15 @@ def test_curve_sorts_unordered_control_points():
 def test_curve_requires_at_least_two_points():
     with pytest.raises(ValueError, match="two"):
         build_step("gain_curve", points=[[0.0, 0.0]]).apply(
-            Radargram(data=np.ones((10, 2)), dt_ns=0.2, t0_ns=0.0))
+            Radargram(data=np.ones((10, 2)), dt_ns=0.2, t0_ns=0.0)
+        )
 
 
 def test_curve_is_fast_enough_to_drag():
     """One broadcast multiply over a realistic radargram. The cached stack
     makes dragging recompute only this when gain is the last step."""
     import time
+
     rg = Radargram(data=np.ones((512, 3000)), dt_ns=0.2, t0_ns=0.0)
     step = build_step("gain_curve", points=[[0.0, 0.0], [100.0, 30.0]])
     start = time.perf_counter()
@@ -2539,6 +2621,7 @@ Note the distinction from display gain, which lives in the front end: clip
 percentile and colour range change how amplitude maps to colour, not the data,
 and are never recorded in a stack.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
@@ -2555,8 +2638,7 @@ class GainAgc:
 
     name = "gain_agc"
 
-    def __init__(self, window_ns: float = 20.0, target: float = 1.0,
-                 eps: float = 1e-12) -> None:
+    def __init__(self, window_ns: float = 20.0, target: float = 1.0, eps: float = 1e-12) -> None:
         self.window_ns = window_ns
         self.target = target
         self.eps = eps
@@ -2569,7 +2651,7 @@ class GainAgc:
         window = int(round(self.window_ns / rg.dt_ns))
         if window < 1:
             raise ValueError(f"window_ns={self.window_ns} is shorter than one sample")
-        rms = np.sqrt(running_mean(rg.data ** 2, window, axis=0))
+        rms = np.sqrt(running_mean(rg.data**2, window, axis=0))
         # eps guards all-zero traces, which are normal at the start of a line.
         return rg.replace(data=rg.data * (self.target / np.maximum(rms, self.eps)))
 
@@ -2580,8 +2662,9 @@ class GainParametric:
 
     name = "gain_parametric"
 
-    def __init__(self, mode: str = "exponential", alpha: float = 0.05,
-                 exponent: float = 1.0) -> None:
+    def __init__(
+        self, mode: str = "exponential", alpha: float = 0.05, exponent: float = 1.0
+    ) -> None:
         self.mode = mode
         self.alpha = alpha
         self.exponent = exponent
@@ -2676,7 +2759,7 @@ import pytest
 import nsgeo.processing.bandpass  # noqa: F401
 from nsgeo.processing.base import Radargram, build_step
 
-DT_NS = 0.2                      # 5 GHz sampling -> 2500 MHz Nyquist
+DT_NS = 0.2  # 5 GHz sampling -> 2500 MHz Nyquist
 
 
 def tone(freq_mhz, n_samples=1024, n_traces=4, dt_ns=DT_NS):
@@ -2711,13 +2794,11 @@ def test_attenuates_a_tone_above_the_band():
 def test_tapering_reduces_ringing_versus_a_brick_wall():
     """The reason the taper exists: brick-wall ringing looks like stratigraphy."""
     data = np.zeros((1024, 1))
-    data[512, 0] = 1.0                    # impulse
+    data[512, 0] = 1.0  # impulse
     rg = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0)
-    brick = build_step("bandpass", low_mhz=150.0, high_mhz=600.0,
-                       taper_frac=0.0).apply(rg)
-    tapered = build_step("bandpass", low_mhz=150.0, high_mhz=600.0,
-                         taper_frac=0.5).apply(rg)
-    far = np.r_[0:400, 624:1024]          # away from the main lobe
+    brick = build_step("bandpass", low_mhz=150.0, high_mhz=600.0, taper_frac=0.0).apply(rg)
+    tapered = build_step("bandpass", low_mhz=150.0, high_mhz=600.0, taper_frac=0.5).apply(rg)
+    far = np.r_[0:400, 624:1024]  # away from the main lobe
     assert np.abs(tapered.data[far, 0]).sum() < np.abs(brick.data[far, 0]).sum()
 
 
@@ -2766,6 +2847,7 @@ equally valid *provided* the passband edges are tapered: a brick-wall filter
 rings, and that ringing can be mistaken for real stratigraphy. The taper is
 the whole reason this implementation is acceptable without scipy.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -2786,8 +2868,7 @@ class Bandpass:
 
     @property
     def params(self) -> Dict[str, Any]:
-        return {"low_mhz": self.low_mhz, "high_mhz": self.high_mhz,
-                "taper_frac": self.taper_frac}
+        return {"low_mhz": self.low_mhz, "high_mhz": self.high_mhz, "taper_frac": self.taper_frac}
 
     def _mask(self, freqs_mhz: np.ndarray) -> np.ndarray:
         width = self.taper_frac * (self.high_mhz - self.low_mhz)
@@ -2808,13 +2889,11 @@ class Bandpass:
         return mask
 
     def apply(self, rg: Radargram) -> Radargram:
-        nyquist_mhz = 500.0 / rg.dt_ns          # (1 / (2 * dt_ns * 1e-9)) / 1e6
+        nyquist_mhz = 500.0 / rg.dt_ns  # (1 / (2 * dt_ns * 1e-9)) / 1e6
         if self.low_mhz < 0:
             raise ValueError(f"low_mhz must be >= 0, got {self.low_mhz}")
         if self.low_mhz >= self.high_mhz:
-            raise ValueError(
-                f"low_mhz ({self.low_mhz}) must be below high_mhz ({self.high_mhz})"
-            )
+            raise ValueError(f"low_mhz ({self.low_mhz}) must be below high_mhz ({self.high_mhz})")
         if self.high_mhz > nyquist_mhz:
             raise ValueError(
                 f"high_mhz ({self.high_mhz}) exceeds the Nyquist frequency "
@@ -2949,9 +3028,11 @@ def test_svd_rejects_negative_components():
 def test_none_of_the_steps_mutate_their_input():
     rg, _, _ = banded()
     before = rg.data.copy()
-    for name, kwargs in [("background_mean", {}),
-                         ("background_sliding", {"window_traces": 20}),
-                         ("background_svd", {"n_components": 1})]:
+    for name, kwargs in [
+        ("background_mean", {}),
+        ("background_sliding", {"window_traces": 20}),
+        ("background_svd", {"n_components": 1}),
+    ]:
         build_step(name, **kwargs).apply(rg)
     np.testing.assert_array_equal(rg.data, before)
 ```
@@ -2973,6 +3054,7 @@ and fails when the background drifts along the line. Sliding handles drift but
 can eat genuine flat-lying features if the window is short. SVD removes
 banding that is not perfectly flat, at higher cost.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -3013,9 +3095,7 @@ class BackgroundSliding:
     def apply(self, rg: Radargram) -> Radargram:
         if self.window_traces < 1:
             raise ValueError(f"window_traces must be >= 1, got {self.window_traces}")
-        return rg.replace(
-            data=rg.data - running_mean(rg.data, self.window_traces, axis=1)
-        )
+        return rg.replace(data=rg.data - running_mean(rg.data, self.window_traces, axis=1))
 
 
 @register
@@ -3044,9 +3124,7 @@ class BackgroundSvd:
             return rg
         rank = min(rg.n_samples, rg.n_traces)
         if n > rank:
-            raise ValueError(
-                f"n_components={n} exceeds the rank of this radargram ({rank})"
-            )
+            raise ValueError(f"n_components={n} exceeds the rank of this radargram ({rank})")
         u, s, vt = np.linalg.svd(rg.data, full_matrices=False)
         s = s.copy()
         s[:n] = 0.0
@@ -3105,8 +3183,7 @@ from nsgeo.processing.stack import StepStack
 def source(n_samples=64, n_traces=120, seed=0):
     rng = np.random.default_rng(seed)
     band = np.linspace(4.0, 1.0, n_samples)[:, None] * np.ones((1, n_traces))
-    return Radargram(data=band + rng.normal(0, 0.2, (n_samples, n_traces)),
-                     dt_ns=0.2, t0_ns=0.0)
+    return Radargram(data=band + rng.normal(0, 0.2, (n_samples, n_traces)), dt_ns=0.2, t0_ns=0.0)
 
 
 def stack_of(*specs):
@@ -3141,7 +3218,7 @@ def test_appending_reuses_the_cached_prefix():
     st.result()
     before = st.cache_size
     st.append(build_step("background_mean"))
-    assert st.cache_size == before          # prefix survived
+    assert st.cache_size == before  # prefix survived
     st.result()
     assert st.cache_size == before + 1
 
@@ -3192,8 +3269,10 @@ def test_difference_shows_what_a_step_removed():
     st = stack_of(("background_mean", {}))
     diff = st.difference(0)
     np.testing.assert_allclose(
-        diff.data, np.tile(st.source.data.mean(axis=1, keepdims=True), (1, st.source.n_traces)),
-        atol=1e-9)
+        diff.data,
+        np.tile(st.source.data.mean(axis=1, keepdims=True), (1, st.source.n_traces)),
+        atol=1e-9,
+    )
 
 
 def test_difference_rejects_an_out_of_range_index():
@@ -3237,8 +3316,15 @@ def test_project_round_trips_stacks(tmp_path):
 
     p = tmp_path / "L0.DZT"
     write_dzt(p, np.zeros((512, 60), dtype=np.int32))
-    grid = Grid(id="G", origin=(0.0, 0.0), azimuth=0.0, size_x=20.0, size_y=20.0,
-                crs="EPSG:32616", default_spacing=0.5)
+    grid = Grid(
+        id="G",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
     line = Line.open(p, GridPlacement(grid_id="G", axis="y", offset=0.0))
     site = Site(grids=[grid], lines=[line])
     st = StepStack()
@@ -3270,6 +3356,7 @@ Because steps are pure functions of (params, radargram), cache invalidation is
 not a hard problem: editing anything at index i invalidates i onward, and that
 is the entire rule.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -3397,6 +3484,7 @@ Replace `packages/nsgeo-core/src/nsgeo/processing/__init__.py` with:
 Importing this package registers every built-in step, so `build_step` and
 `available_steps` work without the caller importing each module.
 """
+
 from __future__ import annotations
 
 from nsgeo.processing import (  # noqa: F401
@@ -3446,13 +3534,13 @@ and use `"lines": lines_doc` in the document.
 In `load_site`, collect stacks alongside lines:
 
 ```python
-    stacks: Dict[str, StepStack] = {}
-    for entry in doc.get("lines", []):
-        ...                                    # existing line construction
-        if "stack" in entry:
-            stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
-    site = Site(grids=grids, lines=lines)
-    site.stacks = stacks
+stacks: Dict[str, StepStack] = {}
+for entry in doc.get("lines", []):
+    ...  # existing line construction
+    if "stack" in entry:
+        stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+site = Site(grids=grids, lines=lines)
+site.stacks = stacks
 ```
 
 In `packages/nsgeo-core/src/nsgeo/model/survey.py`, add the field to `Site`:
@@ -3503,6 +3591,7 @@ These files are gitignored: DZT headers can carry GPS and publishing site
 locations is not reversible. The suite skips when they are absent, so CI
 remains green while local runs get real validation.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -3523,8 +3612,8 @@ pytestmark = pytest.mark.skipif(not FILES, reason="no real DZT files in tests/da
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
 def test_header_matches_verified_expectations(path):
     h = read_header(path)
-    assert h.tag == 2047                    # not the widely cited 255
-    assert h.data_offset == 131072          # 1024 * rh_data, not the 1024 minimum
+    assert h.tag == 2047  # not the widely cited 255
+    assert h.data_offset == 131072  # 1024 * rh_data, not the 1024 minimum
     assert h.n_samples == 512
     assert h.bits == 32
     assert h.n_channels == 1
@@ -3539,7 +3628,7 @@ def test_trace_count_is_a_whole_number(path):
     n = trace_count(path, h)
     assert n > 0
     length_m = n / h.traces_per_metre
-    assert 9.0 < length_m < 13.0            # recorded lines are 10.1-11.1 m
+    assert 9.0 < length_m < 13.0  # recorded lines are 10.1-11.1 m
 
 
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
@@ -3547,7 +3636,7 @@ def test_samples_are_int32_centred_near_zero(path):
     data = read_samples(path)
     assert data.shape[0] == 1
     assert data.dtype == np.int32
-    assert abs(float(data.mean())) < 5_000        # real means are around -300
+    assert abs(float(data.mean())) < 5_000  # real means are around -300
     assert np.abs(data).max() > 1_000_000
 
 
@@ -3575,10 +3664,10 @@ def test_a_full_stack_runs_on_a_real_profile():
     out = stack.result()
     assert np.isfinite(out.data).all()
     assert out.n_traces == rg.n_traces
-    assert out.n_samples <= rg.n_samples         # time_zero cropped rows
+    assert out.n_samples <= rg.n_samples  # time_zero cropped rows
     assert out.t0_ns >= rg.t0_ns
 
-    removed = stack.difference(3)                # what background removal took
+    removed = stack.difference(3)  # what background removal took
     assert removed.data.shape == out.data.shape
 ```
 

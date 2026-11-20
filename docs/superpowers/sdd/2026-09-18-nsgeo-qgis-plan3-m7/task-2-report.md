@@ -74,8 +74,8 @@ behaviour in that test changed.
 visually aligned two trailing comments:
 
 ```python
-    assert dock._effective_difference_index == -1  # not computed on someone else's stack
-    assert dock._difference_index == 0             # but remembered
+assert dock._effective_difference_index == -1  # not computed on someone else's stack
+assert dock._difference_index == 0  # but remembered
 ```
 
 `ruff format --check .` flagged the second line as needing reformatting (it

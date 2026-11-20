@@ -25,6 +25,12 @@ GRID_A = Grid("A", (500_000.0, 5_000_000.0), 0.0, 5.0, 11.0, "EPSG:32632", 0.5)
 NO_GRID = "This site has no grid yet. Add one with Add grid…, or place the lines by GPS."
 
 
+def name_it(dialog, name="N1"):
+    """Name the new grid a GPS import makes and type its spacing (one file: nothing to measure)."""
+    dialog.gps_page.name_edit.setText(name)
+    dialog.gps_page.spacing.setValue(0.5)
+
+
 def gps_file(folder, name, fixes=True):
     track = [(t, LAT0 + t * 0.1 / M_PER_DEG, LON0, 4) for t in (25, 75, 125, 175)] if fixes else []
     return synthetic_gps_dzt(folder, name, track, traces_per_metre=10.0)
@@ -84,7 +90,7 @@ def test_set_mode_swaps_the_page_retitles_and_hides_the_note(session, tmp_path):
     assert d.mode() == GPS and d.gps_button.isChecked() and not d.grid_button.isChecked()
     assert d.gps_page.isVisibleTo(d) and not d.grid_page.isVisibleTo(d)
     assert not d.gps_note.isVisibleTo(d)
-    assert d.windowTitle() == d.gps_page.title() == "Add GPR data"
+    assert d.windowTitle() == d.gps_page.title() == "Add GPR data into A"  # opened on A
     d.set_mode(GRID)
     assert d.windowTitle() == "Add GPR data into A"
     d.reject()
@@ -107,7 +113,8 @@ def test_the_import_button_follows_the_current_page(session, tmp_path):
     d.add_files([synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)])
     assert d.import_button.text() == "Import 2 line(s) into A" and d.import_button.isEnabled()
     d.set_mode(GPS)  # tape-only files: GPS has nothing ready
-    assert d.import_button.text() == "Import" and not d.import_button.isEnabled()
+    assert d.import_button.text() == "Import 0 line(s) into A"
+    assert not d.import_button.isEnabled()
     d.reject()
 
 
@@ -219,8 +226,9 @@ def test_grid_mode_on_a_site_with_no_grid_says_so_and_gps_is_still_offered(bare_
 
 def test_a_grid_import_remembers_grid_and_a_gps_import_remembers_gps(session, tmp_path):
     raw = tmp_path / "raw"
-    d = AddDataDialog(session, grid_id="A", mode=GPS)
+    d = AddDataDialog(session, mode=GPS)
     d.add_files([gps_file(raw, "FILE__001.DZT")])
+    name_it(d)
     d.accept()
     assert QgsSettings().value(MODE_KEY) == GPS
     d = AddDataDialog(session, grid_id="A", mode=GRID)
@@ -248,8 +256,9 @@ def test_opening_mode_follows_what_a_grid_holds(session, tmp_path):
     for gid, east in (("B", 600_000.0), ("C", 700_000.0)):
         session.add_grid(_grid(gid, east))
     raw = tmp_path / "raw"
-    gps = AddDataDialog(session, grid_id="A", mode=GPS)
+    gps = AddDataDialog(session, mode=GPS)
     gps.add_files([gps_file(raw, "FILE__001.DZT")])
+    name_it(gps)
     gps.accept()
     (gps_key,) = session.keys()
     session.move_lines([gps_key], "B")  # B: all GPS
@@ -337,8 +346,9 @@ def test_the_survey_panels_add_gpr_data_opens_it_on_that_grid_in_its_mode(plugin
     assert d is not None and d.grid_page.grid_combo.currentData() == "B"
     d.reject()
     path = gps_file(tmp_path / "raw", "FILE__001.DZT")
-    dlg = AddDataDialog(plugin.session, grid_id="B", mode=GPS)
+    dlg = AddDataDialog(plugin.session, mode=GPS)
     dlg.add_files([path])
+    name_it(dlg)
     dlg.accept()
     (key,) = plugin.session.keys()
     plugin.session.move_lines([key], "B")
@@ -446,3 +456,14 @@ def test_a_grid_removed_under_the_dialog_leaves_the_combo_and_import_refuses(ses
     only.accept()
     assert "no longer exists" in only.grid_page.status.text()
     only.reject()
+
+
+def test_the_gps_page_opens_on_the_grid_the_dialog_was_opened_for(session):
+    d = AddDataDialog(session, grid_id="A", mode=GPS)
+    assert d.gps_page.target() == "A" and d.gps_page.target_combo.currentText() == "A"
+    d.reject()
+    d = AddDataDialog(session, mode=GPS)
+    assert d.gps_page.target() is None  # New grid
+    d.retarget("A")
+    assert d.gps_page.target() == "A"
+    d.reject()

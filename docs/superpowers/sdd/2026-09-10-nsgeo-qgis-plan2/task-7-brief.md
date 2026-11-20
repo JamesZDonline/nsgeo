@@ -213,7 +213,9 @@ def trailing_number(stem: str) -> int | None:
 
 def sort_files(paths: Sequence[str | Path]) -> list[Path]:
     ps = [Path(p) for p in paths]
-    return sorted(ps, key=lambda p: (trailing_number(p.stem) is None, trailing_number(p.stem) or 0, p.name))
+    return sorted(
+        ps, key=lambda p: (trailing_number(p.stem) is None, trailing_number(p.stem) or 0, p.name)
+    )
 
 
 @dataclass(frozen=True)

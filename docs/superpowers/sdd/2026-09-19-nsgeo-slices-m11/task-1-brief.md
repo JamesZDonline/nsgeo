@@ -803,7 +803,9 @@ def _unpadded_fill(values, counts, radius_cells, min_count=0.5):
     denominator = np.where(finite, counts, 0.0)
     shape = (ny + 2 * r, nx + 2 * r)
     spectrum = np.fft.rfft2(kernel, s=shape)
-    num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)[r : r + ny, r : r + nx]
+    num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)[
+        r : r + ny, r : r + nx
+    ]
     den = np.fft.irfft2(np.fft.rfft2(denominator, s=shape) * spectrum, s=shape)[
         r : r + ny, r : r + nx
     ]

@@ -18,17 +18,22 @@
   NEIGHBOURS_PER_QUADRANT: int = 3
   DISTANCE_TOL_M: float = 1e-9
 
+
   @dataclass(frozen=True, eq=False)
   class FillWeights:
-      shape: tuple[int, int]      # (ny, nx)
-      populated: np.ndarray       # (ny*nx,) bool: cells that hold data
-      targets: np.ndarray         # (m,) intp, ascending flat ids of empty cells to fill
-      sources: np.ndarray         # (m, 4*NEIGHBOURS_PER_QUADRANT) int32 flat ids, -1 = empty slot
-      weights: np.ndarray         # same shape, float32, 0.0 in empty slots
-      def apply(self, values: np.ndarray) -> np.ndarray: ...            # (ny, nx) -> (ny, nx) float32
-      def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray: ...  # (k,) flat ids -> (k,) float32
+      shape: tuple[int, int]  # (ny, nx)
+      populated: np.ndarray  # (ny*nx,) bool: cells that hold data
+      targets: np.ndarray  # (m,) intp, ascending flat ids of empty cells to fill
+      sources: np.ndarray  # (m, 4*NEIGHBOURS_PER_QUADRANT) int32 flat ids, -1 = empty slot
+      weights: np.ndarray  # same shape, float32, 0.0 in empty slots
+
+      def apply(self, values: np.ndarray) -> np.ndarray: ...  # (ny, nx) -> (ny, nx) float32
+      def apply_at(
+          self, values: np.ndarray, cells: np.ndarray
+      ) -> np.ndarray: ...  # (k,) flat ids -> (k,) float32
       @property
       def nbytes(self) -> int: ...
+
 
   def plan_fill(
       populated: np.ndarray, cell: float, method: str, max_distance_m: float, search_radius_m: float

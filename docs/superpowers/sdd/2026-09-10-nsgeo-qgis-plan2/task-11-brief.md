@@ -25,7 +25,14 @@ from qgis.PyQt.QtCore import Qt
 
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.import_dialog import COL_DIR, COL_INCLUDE, COL_LABEL, COL_NOTE, COL_OFFSET, ImportDialog
+from nsgeo_qgis.ui.import_dialog import (
+    COL_DIR,
+    COL_INCLUDE,
+    COL_LABEL,
+    COL_NOTE,
+    COL_OFFSET,
+    ImportDialog,
+)
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -43,11 +50,18 @@ def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
     d = ImportDialog(session, grid_id="A")
     d.add_files(files)
     assert d.table.rowCount() == 3
-    assert [d.table.item(r, COL_LABEL).text() for r in range(3)] == ["FILE__001", "FILE__002", "FILE__003"]
+    assert [d.table.item(r, COL_LABEL).text() for r in range(3)] == [
+        "FILE__001",
+        "FILE__002",
+        "FILE__003",
+    ]
     assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.00", "0.50", "1.00"]
     assert d.table.item(1, COL_DIR).text() == "−1"
     d.set_include(1, False)
-    assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == ["0.00", "0.50"]
+    assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == [
+        "0.00",
+        "0.50",
+    ]
     d.set_offset(2, 3.25)
     d.set_include(1, True)
     assert d.rows[2].offset == 3.25 and d.rows[2].offset_edited
@@ -101,7 +115,13 @@ def test_axis_and_spacing_options_come_from_the_widgets(session, tmp_path):
     d.direction_forward.setChecked(True)
     d.label_number.setChecked(True)
     o = d.options()
-    assert (o.axis, o.spacing, o.first_offset, o.direction_mode, o.label_source) == ("x", 0.25, 1.0, "forward", "number")
+    assert (o.axis, o.spacing, o.first_offset, o.direction_mode, o.label_source) == (
+        "x",
+        0.25,
+        1.0,
+        "forward",
+        "number",
+    )
     assert o.grid_size_along == 5.0  # size_x when lines run along x
 
 
@@ -159,16 +179,46 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.lookup import ImportOptions, ImportRow, plan_import, recompute_offsets, rows_to_lines
+from nsgeo_qgis.lookup import (
+    ImportOptions,
+    ImportRow,
+    plan_import,
+    recompute_offsets,
+    rows_to_lines,
+)
 from nsgeo_qgis.session import SiteSession
 
-COL_INCLUDE, COL_FILE, COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_TRACES, COL_LENGTH, COL_SIDECAR, COL_NOTE = range(10)
-HEADERS = ["", "File", "Label", "Offset (m)", "Dir", "Start (m)", "Traces", "Length (m)", "Sidecar", "Note"]
+(
+    COL_INCLUDE,
+    COL_FILE,
+    COL_LABEL,
+    COL_OFFSET,
+    COL_DIR,
+    COL_START,
+    COL_TRACES,
+    COL_LENGTH,
+    COL_SIDECAR,
+    COL_NOTE,
+) = range(10)
+HEADERS = [
+    "",
+    "File",
+    "Label",
+    "Offset (m)",
+    "Dir",
+    "Start (m)",
+    "Traces",
+    "Length (m)",
+    "Sidecar",
+    "Note",
+]
 EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START}
 
 
 class ImportDialog(QDialog):
-    def __init__(self, session: SiteSession, grid_id: str | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, session: SiteSession, grid_id: str | None = None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.session = session
         self.rows: list[ImportRow] = []
@@ -248,7 +298,9 @@ class ImportDialog(QDialog):
 
         self.status = QLabel("")
         layout.addWidget(self.status)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         self.import_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.import_button.setText("Import")
         self.buttons.accepted.connect(self.accept)
@@ -260,7 +312,13 @@ class ImportDialog(QDialog):
             w.currentIndexChanged.connect(self._replan)
         for s in (self.spacing, self.first_offset, self.start_along):
             s.valueChanged.connect(self._replan)
-        for b in (self.direction_alternate, self.direction_forward, self.direction_reverse, self.label_stem, self.label_number):
+        for b in (
+            self.direction_alternate,
+            self.direction_forward,
+            self.direction_reverse,
+            self.label_stem,
+            self.label_number,
+        ):
             b.toggled.connect(self._replan)
         self._grid_changed()
 
@@ -281,7 +339,13 @@ class ImportDialog(QDialog):
         along = None
         if grid is not None:
             along = grid.size_y if axis == "y" else grid.size_x
-        mode = "alternate" if self.direction_alternate.isChecked() else "forward" if self.direction_forward.isChecked() else "reverse"
+        mode = (
+            "alternate"
+            if self.direction_alternate.isChecked()
+            else "forward"
+            if self.direction_forward.isChecked()
+            else "reverse"
+        )
         return ImportOptions(
             grid_id=grid.id if grid else "",
             axis=axis,
@@ -295,7 +359,9 @@ class ImportDialog(QDialog):
 
     # ---- rows -------------------------------------------------------------
     def _choose_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Select DZT files", "", "GSSI DZT (*.DZT *.dzt);;All files (*)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select DZT files", "", "GSSI DZT (*.DZT *.dzt);;All files (*)"
+        )
         if paths:
             self.add_files([Path(p) for p in paths])
 
@@ -351,7 +417,11 @@ class ImportDialog(QDialog):
             self.table.setRowCount(len(self.rows))
             for r, row in enumerate(self.rows):
                 inc = QTableWidgetItem("")
-                inc.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                inc.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
                 inc.setCheckState(Qt.CheckState.Checked if row.include else Qt.CheckState.Unchecked)
                 if not row.placeable:
                     inc.setFlags(Qt.ItemFlag.ItemIsSelectable)

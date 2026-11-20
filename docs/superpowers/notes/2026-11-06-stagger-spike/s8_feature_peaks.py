@@ -35,7 +35,9 @@ for dzg in sorted(D.glob("*.DZG")):
     dzt = dzg.with_suffix(".DZT")
     h = read_header(dzt)
     data = read_samples(dzt, h)[0].astype(float)
-    rg = bg.apply(dewow.apply(Radargram(data=data, dt_ns=h.dt_ns, t0_ns=h.position_ns, dx_m=1 / 60)))
+    rg = bg.apply(
+        dewow.apply(Radargram(data=data, dt_ns=h.dt_ns, t0_ns=h.position_ns, dx_m=1 / 60))
+    )
     env = analytic_envelope(rg.data)
     t = h.position_ns + np.arange(h.n_samples) * h.dt_ns
     win = {w: env[(t >= w[0]) & (t < w[1])].mean(axis=0) for w in WINDOWS}
@@ -105,7 +107,7 @@ for w in WINDOWS:
         li0, bi0 = np.unravel_index(np.nanargmax(flat), flat.shape)
         u0 = edges[bi0]
         # block this neighbourhood for later picks
-        used[max(0, li0 - 4): li0 + 5, max(0, bi0 - 25): bi0 + 26] = True
+        used[max(0, li0 - 4) : li0 + 5, max(0, bi0 - 25) : bi0 + 26] = True
         peaks_n, peaks_s = [], []
         for lj in range(max(0, li0 - 3), min(len(rows), li0 + 4)):
             name, u, ok, win, north = rows[lj]
@@ -122,7 +124,9 @@ for w in WINDOWS:
         if len(peaks_n) >= 2 and len(peaks_s) >= 2:
             found += 1
             dn, ds = np.mean(peaks_n), np.mean(peaks_s)
-            print(f"feature at line {rows[li0][0]}, {u0 - u_all.min():5.1f} m along: "
-                  f"north-going peaks {np.round(np.array(peaks_n) - u0, 2)}  "
-                  f"south-going peaks {np.round(np.array(peaks_s) - u0, 2)}  "
-                  f"south minus north = {ds - dn:+.2f} m")
+            print(
+                f"feature at line {rows[li0][0]}, {u0 - u_all.min():5.1f} m along: "
+                f"north-going peaks {np.round(np.array(peaks_n) - u0, 2)}  "
+                f"south-going peaks {np.round(np.array(peaks_s) - u0, 2)}  "
+                f"south minus north = {ds - dn:+.2f} m"
+            )

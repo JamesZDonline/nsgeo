@@ -285,9 +285,9 @@ module that no test now protects. One assertion closes it, and it is the same `m
 parked N7 already wanted:
 
 ```python
-with pytest.raises(ValueError, match="non-finite view window"):   # with_window's own message
+with pytest.raises(ValueError, match="non-finite view window"):  # with_window's own message
     FIT.with_window(float("nan"), 110.0, 0.0, 20.0)
-with pytest.raises(ValueError, match="requires finite axes"):     # __post_init__'s message
+with pytest.raises(ValueError, match="requires finite axes"):  # __post_init__'s message
     ViewTransform.fit(608, 512, float("nan"), 0.2165, 800, 300)
 ```
 
@@ -312,13 +312,31 @@ own third case:
 
 ```python
 # dt_ns alone non-finite, everything else finite -- currently untested
-ViewTransform(n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=float("nan"),
-              width=800, height=300, trace_lo=0.0, trace_hi=608.0,
-              time_lo=-11.09, time_hi=99.758)
+ViewTransform(
+    n_traces=608,
+    n_samples=512,
+    t0_ns=-11.09,
+    dt_ns=float("nan"),
+    width=800,
+    height=300,
+    trace_lo=0.0,
+    trace_hi=608.0,
+    time_lo=-11.09,
+    time_hi=99.758,
+)
 # window alone non-finite, axes finite -- currently untested
-ViewTransform(n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165,
-              width=800, height=300, trace_lo=0.0, trace_hi=float("nan"),
-              time_lo=-11.09, time_hi=99.758)
+ViewTransform(
+    n_traces=608,
+    n_samples=512,
+    t0_ns=-11.09,
+    dt_ns=0.2165,
+    width=800,
+    height=300,
+    trace_lo=0.0,
+    trace_hi=float("nan"),
+    time_lo=-11.09,
+    time_hi=99.758,
+)
 # inf rather than nan -- currently untested
 ViewTransform.fit(608, 512, float("inf"), 0.2165, 800, 300)
 ```

@@ -308,10 +308,18 @@ class SiteLayers(QObject):
 
     @staticmethod
     def _table_exists(path: str, name: str) -> bool:
-        return Path(path).exists() and QgsVectorLayer(f"{path}|layername={name}", name, "ogr").isValid()
+        return (
+            Path(path).exists()
+            and QgsVectorLayer(f"{path}|layername={name}", name, "ogr").isValid()
+        )
 
     def _create_table(
-        self, path: str, name: str, wkb: Any, spec: list[tuple[str, str]], crs: QgsCoordinateReferenceSystem
+        self,
+        path: str,
+        name: str,
+        wkb: Any,
+        spec: list[tuple[str, str]],
+        crs: QgsCoordinateReferenceSystem,
     ) -> None:
         opts = QgsVectorFileWriter.SaveVectorOptions()
         opts.driverName = "GPKG"
@@ -363,7 +371,9 @@ class SiteLayers(QObject):
         assert site is not None
         feats = []
         for grid in site.grids:
-            local = np.array([[0.0, 0.0], [grid.size_x, 0.0], [grid.size_x, grid.size_y], [0.0, grid.size_y]])
+            local = np.array(
+                [[0.0, 0.0], [grid.size_x, 0.0], [grid.size_x, grid.size_y], [0.0, grid.size_y]]
+            )
             ring = self._points(grid.to_world(local), grid.crs)
             f = QgsFeature(self.layers["grids"].fields())
             f.setGeometry(QgsGeometry.fromPolygonXY([ring]))
@@ -385,7 +395,9 @@ class SiteLayers(QObject):
             if grid is None:
                 continue  # trackless lines arrive with TrackPlacement, later
             f = QgsFeature(self.layers["lines"].fields())
-            f.setGeometry(QgsGeometry.fromPolylineXY(self._points(line.trace_coords(site.frames), grid.crs)))
+            f.setGeometry(
+                QgsGeometry.fromPolylineXY(self._points(line.trace_coords(site.frames), grid.crs))
+            )
             p: Any = line.placement
             f["line_key"] = self.session.line_key(line)
             f["grid_id"] = grid.id

@@ -411,8 +411,9 @@ trace being recorded when it arrived. If your lines have DZG files, you can
 place them by where the cart really went instead of by tapes and a grid.
 
 Click **Add data ▾**, then **GPR…**, and switch **Place lines by** to **GPS**. It
-needs an open site; a grid is not needed. Switching keeps the files you have
-added, so you do not add them again.
+needs an open site; it does not need a grid yet, because the lines can make
+their own. Switching keeps the files you have added, so you do not add them
+again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
    with the same name. A row shows the number of traces, how many fixes were RTK
@@ -421,11 +422,26 @@ added, so you do not add them again.
    first line lies, and the dialog says which. Every later import goes into that
    system. A file that cannot be placed in it is refused, with the reason in its
    **Status** cell.
-3. Set **Destagger (m)** if you already know it. It applies to every line in
+3. Choose the **Target grid**. GPS lines always go into a grid: pick one the site
+   already has, or leave **New grid** and type a **Name** for it.
+   * With an existing grid the lines go in as they are. An **Outside** column
+     shows how many metres of each line lie outside the grid's rectangle (those
+     metres are left out of its slices). A line that lies wholly outside is
+     refused.
+   * With **New grid**, nsgeo fits a rectangle around the tracks, turned to the
+     direction the lines share, half a **Spacing** outside the outer lines. The
+     spacing is measured from the tracks and shown so you can type over it; with
+     one line, or lines that share no direction, there is nothing to measure and
+     you type one. **Fitted** says the size and angle, and while the dialog is
+     open the new grid is drawn dashed on the map. A refused file never
+     stretches it: the grid is made from the ready rows only.
+4. Set **Destagger (m)** if you already know it. It applies to every line in
    the import, and you can change it per line afterwards (below).
-4. Click **Import**.
+5. Click **Import**. The button names what it will do, for example **Import 60
+   line(s) into new grid North**. A new grid is made and the lines are added in
+   one step; if adding the lines fails, the new grid is taken away again.
 
-The lines are drawn along the walk, in the **No grid** colour, so the turns at
+The lines are drawn along the walk, in their grid's colour, so the turns at
 the line ends show. Only RTK-fixed positions place a line. Past the first and
 last of them, the line carries on in a straight line by the wheel. If the log
 loses its RTK fix part way, the traces in between are spread along the straight
@@ -444,7 +460,6 @@ RTK and away from lifts of the cart until true-distance profiles arrive.
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
 cannot yet measure the destagger from GPS lines; that comes with GPS areas.
-**Edit line…** and **Move to grid** are also for tape-placed lines only, for now.
 
 A line is placed either by tapes or by GPS, not both. To switch a tape-placed
 line to its GPS track, remove it and import it again with **Place lines by:

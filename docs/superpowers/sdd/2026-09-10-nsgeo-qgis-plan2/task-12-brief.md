@@ -60,7 +60,9 @@ def test_opening_a_line_loads_it_in_the_background(session, tmp_path):
 def test_reopening_a_loaded_line_does_not_reload(session, tmp_path):
     p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
     q = synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")
-    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0)), Line.open(q, GridPlacement("A", "y", 0.5))])
+    session.add_lines(
+        [Line.open(p, GridPlacement("A", "y", 0.0)), Line.open(q, GridPlacement("A", "y", 0.5))]
+    )
     a, b = session.keys()
     loader = LineLoader(session)
     session.open_line(a)

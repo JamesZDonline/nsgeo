@@ -262,9 +262,15 @@ def test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact(
 
     # Rewrite `picks` with the pre-M8 field set and put two authored rows
     # in it, exactly as a site created before this milestone would have.
-    old_spec = [(name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")]
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
     old_fields = QgsFields()
-    kinds = {"str": QMetaType.Type.QString, "int": QMetaType.Type.Int, "float": QMetaType.Type.Double}
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
     for name, kind in old_spec:
         old_fields.append(QgsField(name, kinds[kind]))
     opts = QgsVectorFileWriter.SaveVectorOptions()
@@ -385,27 +391,28 @@ In `SiteSession.__init__`, after `self._preview_trace = -1`:
 Add the accessor and the registration in a new section, placed immediately before the `# ---- preview (spec §3.3) ----` banner:
 
 ```python
-    # ---- picks (spec §4) --------------------------------------------------
-    @property
-    def pick_store(self) -> Any | None:
-        return self._pick_store
+# ---- picks (spec §4) --------------------------------------------------
+@property
+def pick_store(self) -> Any | None:
+    return self._pick_store
 
-    def set_pick_store(self, store: Any) -> None:
-        """Register the object that actually writes picks.
 
-        Spec §4.1 names `session.add_pick`, and the invariant it enforces
-        (a pick targets the WORKING line) belongs here beside
-        `set_trace`'s and `set_selection`'s identical guards. The *write*
-        cannot be here: this object holds no `QgsVectorLayer`, and the
-        parent spec §4.3 rule 2 forbids opening a second OGR handle on a
-        GeoPackage QGIS already has open. `SiteLayers` holds the loaded
-        layer and registers itself from its own constructor.
+def set_pick_store(self, store: Any) -> None:
+    """Register the object that actually writes picks.
 
-        This makes the reference cycle session <-> layers explicit.
-        Deliberate: neither class defines `__del__`, so Python's cycle
-        collector handles it, and `plugin.unload()` drops both together.
-        """
-        self._pick_store = store
+    Spec §4.1 names `session.add_pick`, and the invariant it enforces
+    (a pick targets the WORKING line) belongs here beside
+    `set_trace`'s and `set_selection`'s identical guards. The *write*
+    cannot be here: this object holds no `QgsVectorLayer`, and the
+    parent spec §4.3 rule 2 forbids opening a second OGR handle on a
+    GeoPackage QGIS already has open. `SiteLayers` holds the loaded
+    layer and registers itself from its own constructor.
+
+    This makes the reference cycle session <-> layers explicit.
+    Deliberate: neither class defines `__del__`, so Python's cycle
+    collector handles it, and `plugin.unload()` drops both together.
+    """
+    self._pick_store = store
 ```
 
 - [ ] **Step 4: Add the two fields to the `picks` schema**
@@ -458,142 +465,146 @@ In `SiteLayers.__init__`, immediately after `self.project.layersWillBeRemoved.co
 Add these methods after `feature_count`, before the `# ---- derived tables ----` banner:
 
 ```python
-    # ---- picks (authored; spec §4) ----------------------------------------
-    def _picks_layer(self) -> QgsVectorLayer | None:
-        layer = self.layers.get("picks")
-        if layer is None or sip.isdeleted(layer):
-            return None
-        return layer
+# ---- picks (authored; spec §4) ----------------------------------------
+def _picks_layer(self) -> QgsVectorLayer | None:
+    layer = self.layers.get("picks")
+    if layer is None or sip.isdeleted(layer):
+        return None
+    return layer
 
-    def _pick_point(self, pick: Pick) -> QgsPointXY | None:
-        """The pick's position in the package CRS, or None when the line
-        cannot be placed at all.
 
-        Same path `refill_marks` uses for a mark, and for the same
-        reason: the trace index IS the vertex index, so the pick lands
-        exactly where the line is drawn rather than somewhere
-        independently computed that could disagree with it.
-        """
-        site = self.session.site
-        if site is None:
-            return None
-        line = self.session.line_for_key(pick.line_key)
-        grid = self.session.grid_for_line(line)
-        if grid is None:
-            return None
-        coords = self._line_points(line, grid, site.frames)
-        if coords is None:
-            return None
-        return coords[max(0, min(pick.trace, len(coords) - 1))]
+def _pick_point(self, pick: Pick) -> QgsPointXY | None:
+    """The pick's position in the package CRS, or None when the line
+    cannot be placed at all.
 
-    def write_pick(self, pick: Pick) -> None:
-        """Write one authored pick through the loaded layer's data
-        provider (parent spec §4.3 rule 2: never a second OGR handle on a
-        package QGIS already has open).
+    Same path `refill_marks` uses for a mark, and for the same
+    reason: the trace index IS the vertex index, so the pick lands
+    exactly where the line is drawn rather than somewhere
+    independently computed that could disagree with it.
+    """
+    site = self.session.site
+    if site is None:
+        return None
+    line = self.session.line_for_key(pick.line_key)
+    grid = self.session.grid_for_line(line)
+    if grid is None:
+        return None
+    coords = self._line_points(line, grid, site.frames)
+    if coords is None:
+        return None
+    return coords[max(0, min(pick.trace, len(coords) - 1))]
 
-        Raises rather than returning a flag. `picks` is the one table
-        `survey.nsgeo.json` cannot regenerate, so a write that fails must
-        say so loudly enough to reach the user -- `SiteSession.add_pick`
-        deliberately does not emit `picks_changed` if this raises, and
-        `plugin.py`'s relay puts the message on the bar.
-        """
-        layer = self._picks_layer()
-        if layer is None:
-            raise RuntimeError("the picks table is not open; no site is loaded")
-        point = self._pick_point(pick)
-        if point is None:
-            # Time is the truth and the pick is authored data with no
-            # other source: a line with no geometry (a time-triggered
-            # acquisition, or one whose grid is gone) still gets its pick
-            # recorded, with a null geometry, and the log says why it
-            # will not appear on the canvas. Refusing the write would
-            # lose the one thing that cannot be recomputed.
-            _log(
-                f"{pick.line_key} cannot be placed on the map; its pick is recorded "
-                f"but will not appear on the canvas"
-            )
-        feature = QgsFeature(layer.fields())
-        if point is not None:
-            feature.setGeometry(QgsGeometry.fromPointXY(point))
-        # By field NAME against the layer's own fields, never positionally
-        # against `_fields(spec)`: a GPKG table carries an implicit
-        # leading "fid" that `spec` does not list, and attributes keyed
-        # off a Fields object one short of the provider's own silently
-        # land one column over. That was measured on this very table
-        # during the package-naming migration -- a pick's `line_key` came
-        # back as its `time_ns`.
-        names = {f.name() for f in layer.fields()}
-        for name, value in (
-            ("line_key", pick.line_key),
-            ("trace", int(pick.trace)),
-            ("distance_m", pick.distance_m),
-            ("time_ns", float(pick.time_ns)),
-            ("depth_m", pick.depth_m),
-            ("velocity_m_ns", pick.velocity_m_ns),
-            ("stack_json", pick.stack_json),
-            ("note", pick.note),
-            ("created", pick.created),
-            ("feature_id", pick.feature_id),
-            ("seq", pick.seq),
-        ):
-            if name in names:
-                feature[name] = value  # None writes NULL
-        ok, _ = layer.dataProvider().addFeatures([feature])
-        if not ok:
-            raise RuntimeError(f"could not write the pick: {layer.dataProvider().error().message()}")
-        layer.updateExtents()
-        layer.triggerRepaint()
 
-    def picks_for(self, key: str) -> list[Pick]:
-        """Every pick on `key`, ordered by (trace, time).
+def write_pick(self, pick: Pick) -> None:
+    """Write one authored pick through the loaded layer's data
+    provider (parent spec §4.3 rule 2: never a second OGR handle on a
+    package QGIS already has open).
 
-        A plain scan rather than a `QgsFeatureRequest` filter expression:
-        a line key is a relative POSIX path and can legitimately contain
-        a quote, and the quoting bug that would cause is silent and
-        occasional. Picks number in the handful to the low thousands, so
-        the scan is not a cost worth that risk.
-        """
-        layer = self._picks_layer()
-        if layer is None:
-            return []
-        picks = []
-        for feature in layer.getFeatures():
-            if _as_str(feature["line_key"]) != key:
-                continue
-            pick = self._row_to_pick(feature, key)
-            if pick is not None:
-                picks.append(pick)
-        picks.sort(key=lambda p: (p.trace, p.time_ns))
-        return picks
-
-    def _row_to_pick(self, feature: QgsFeature, key: str) -> Pick | None:
-        """One `picks` row as a `Pick`, or None if the row cannot be one.
-
-        `picks` is deliberately editable in QGIS, so a user can digitise a
-        point into it with the ordinary tools and leave the attributes
-        blank. `float(NULL)` raises, and this is read from a Qt slot --
-        which means the CI container turns it into `qFatal()` and aborts
-        the whole job. Skipping the row and naming it is the only safe
-        answer; refusing to read the layer at all would hide every good
-        pick because of one bad one.
-        """
-        trace, time_ns = feature["trace"], feature["time_ns"]
-        if trace == NULL or time_ns == NULL:
-            _log(f"a pick on {key} has no trace or time and was skipped; edit or delete it")
-            return None
-        return Pick(
-            line_key=key,
-            trace=int(trace),
-            time_ns=float(time_ns),
-            distance_m=_as_float(feature["distance_m"]),
-            depth_m=_as_float(feature["depth_m"]),
-            velocity_m_ns=_as_float(feature["velocity_m_ns"]),
-            stack_json=_as_str(feature["stack_json"]),
-            note=_as_str(feature["note"]),
-            created=_as_str(feature["created"]),
-            feature_id=_as_opt_str(feature["feature_id"]),
-            seq=None if feature["seq"] == NULL else int(feature["seq"]),
+    Raises rather than returning a flag. `picks` is the one table
+    `survey.nsgeo.json` cannot regenerate, so a write that fails must
+    say so loudly enough to reach the user -- `SiteSession.add_pick`
+    deliberately does not emit `picks_changed` if this raises, and
+    `plugin.py`'s relay puts the message on the bar.
+    """
+    layer = self._picks_layer()
+    if layer is None:
+        raise RuntimeError("the picks table is not open; no site is loaded")
+    point = self._pick_point(pick)
+    if point is None:
+        # Time is the truth and the pick is authored data with no
+        # other source: a line with no geometry (a time-triggered
+        # acquisition, or one whose grid is gone) still gets its pick
+        # recorded, with a null geometry, and the log says why it
+        # will not appear on the canvas. Refusing the write would
+        # lose the one thing that cannot be recomputed.
+        _log(
+            f"{pick.line_key} cannot be placed on the map; its pick is recorded "
+            f"but will not appear on the canvas"
         )
+    feature = QgsFeature(layer.fields())
+    if point is not None:
+        feature.setGeometry(QgsGeometry.fromPointXY(point))
+    # By field NAME against the layer's own fields, never positionally
+    # against `_fields(spec)`: a GPKG table carries an implicit
+    # leading "fid" that `spec` does not list, and attributes keyed
+    # off a Fields object one short of the provider's own silently
+    # land one column over. That was measured on this very table
+    # during the package-naming migration -- a pick's `line_key` came
+    # back as its `time_ns`.
+    names = {f.name() for f in layer.fields()}
+    for name, value in (
+        ("line_key", pick.line_key),
+        ("trace", int(pick.trace)),
+        ("distance_m", pick.distance_m),
+        ("time_ns", float(pick.time_ns)),
+        ("depth_m", pick.depth_m),
+        ("velocity_m_ns", pick.velocity_m_ns),
+        ("stack_json", pick.stack_json),
+        ("note", pick.note),
+        ("created", pick.created),
+        ("feature_id", pick.feature_id),
+        ("seq", pick.seq),
+    ):
+        if name in names:
+            feature[name] = value  # None writes NULL
+    ok, _ = layer.dataProvider().addFeatures([feature])
+    if not ok:
+        raise RuntimeError(f"could not write the pick: {layer.dataProvider().error().message()}")
+    layer.updateExtents()
+    layer.triggerRepaint()
+
+
+def picks_for(self, key: str) -> list[Pick]:
+    """Every pick on `key`, ordered by (trace, time).
+
+    A plain scan rather than a `QgsFeatureRequest` filter expression:
+    a line key is a relative POSIX path and can legitimately contain
+    a quote, and the quoting bug that would cause is silent and
+    occasional. Picks number in the handful to the low thousands, so
+    the scan is not a cost worth that risk.
+    """
+    layer = self._picks_layer()
+    if layer is None:
+        return []
+    picks = []
+    for feature in layer.getFeatures():
+        if _as_str(feature["line_key"]) != key:
+            continue
+        pick = self._row_to_pick(feature, key)
+        if pick is not None:
+            picks.append(pick)
+    picks.sort(key=lambda p: (p.trace, p.time_ns))
+    return picks
+
+
+def _row_to_pick(self, feature: QgsFeature, key: str) -> Pick | None:
+    """One `picks` row as a `Pick`, or None if the row cannot be one.
+
+    `picks` is deliberately editable in QGIS, so a user can digitise a
+    point into it with the ordinary tools and leave the attributes
+    blank. `float(NULL)` raises, and this is read from a Qt slot --
+    which means the CI container turns it into `qFatal()` and aborts
+    the whole job. Skipping the row and naming it is the only safe
+    answer; refusing to read the layer at all would hide every good
+    pick because of one bad one.
+    """
+    trace, time_ns = feature["trace"], feature["time_ns"]
+    if trace == NULL or time_ns == NULL:
+        _log(f"a pick on {key} has no trace or time and was skipped; edit or delete it")
+        return None
+    return Pick(
+        line_key=key,
+        trace=int(trace),
+        time_ns=float(time_ns),
+        distance_m=_as_float(feature["distance_m"]),
+        depth_m=_as_float(feature["depth_m"]),
+        velocity_m_ns=_as_float(feature["velocity_m_ns"]),
+        stack_json=_as_str(feature["stack_json"]),
+        note=_as_str(feature["note"]),
+        created=_as_str(feature["created"]),
+        feature_id=_as_opt_str(feature["feature_id"]),
+        seq=None if feature["seq"] == NULL else int(feature["seq"]),
+    )
 ```
 
 And the three tiny converters, module level in `layers.py`, immediately after `_log`:
@@ -942,102 +953,104 @@ Add `import json` and `import math` to `session.py`'s imports (`datetime as _dt`
 Add to the `# ---- picks (spec §4) ----` section, after `set_pick_store`:
 
 ```python
-    def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
-        """Author one pick on the WORKING line.
+def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
+    """Author one pick on the WORKING line.
 
-        `key` must be `current_key`. This is the same guard `set_trace`
-        and `set_selection` carry, and it exists here rather than only in
-        the dock for the reason spec §3.3 gives: `current_key` is what
-        every destructive operation resolves through, and a preview must
-        never reach one. M7's reviews found three separate attempts by a
-        preview to reach a write; the structural answer is to refuse in
-        the session, where no caller can forget.
+    `key` must be `current_key`. This is the same guard `set_trace`
+    and `set_selection` carry, and it exists here rather than only in
+    the dock for the reason spec §3.3 gives: `current_key` is what
+    every destructive operation resolves through, and a preview must
+    never reach one. M7's reviews found three separate attempts by a
+    preview to reach a write; the structural answer is to refuse in
+    the session, where no caller can forget.
 
-        Unlike `set_trace`, this RAISES rather than returning silently. A
-        trace that does not move is invisible and harmless; a pick that
-        does not appear is authored data lost with no message. The caller
-        is `plugin.py`'s relay, which puts the reason on the message bar.
+    Unlike `set_trace`, this RAISES rather than returning silently. A
+    trace that does not move is invisible and harmless; a pick that
+    does not appear is authored data lost with no message. The caller
+    is `plugin.py`'s relay, which puts the reason on the message bar.
 
-        `picks_changed` is emitted only after the store's write returns:
-        announcing a pick that is not on disk is the worst report
-        available for the one table `survey.nsgeo.json` cannot
-        regenerate.
+    `picks_changed` is emitted only after the store's write returns:
+    announcing a pick that is not on disk is the worst report
+    available for the one table `survey.nsgeo.json` cannot
+    regenerate.
 
-        Does NOT dirty the session. A pick goes straight into the
-        GeoPackage; `survey.nsgeo.json` is untouched, so `Save site`
-        would have nothing to write and prompting for it would be a lie.
-        """
-        if key != self._current_key:
-            raise ValueError(
-                f"a pick targets the working line ({self._current_key!r}), not {key!r}; "
-                f"select the line on the map to work on it"
-            )
-        if self._pick_store is None:
-            raise RuntimeError("no pick store is attached to this session; cannot author a pick")
-        if not math.isfinite(time_ns):
-            raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
-        line = self.line_for_key(key)
-        index = max(0, min(int(trace), line.n_traces - 1))
-        # The view emits a pick for any left click in the widget, and
-        # ViewTransform.time_of_y does not clamp -- a click in the top
-        # margin yields a time before the record starts. Clamped into the
-        # line's own recorded window, the same way the trace is.
-        t0 = float(line.header.position_ns)
-        t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
-        lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
-        time = max(lo, min(float(time_ns), hi))
-        model = self.resolved_velocity(key)
-        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
-        # call `np.asarray` on whatever they are handed, so this keeps
-        # numpy out of session.py's imports entirely for one scalar.
-        times = [time]
-        pick = Pick(
-            line_key=key,
-            trace=index,
-            time_ns=time,
-            distance_m=self._pick_distance(line, index),
-            depth_m=float(model.depth_at(times)[0]),
-            velocity_m_ns=float(model.velocity_at(times)[0]),
-            # insert=False: reading the stack to record it must not be
-            # what creates one. M7's Finding 4 is the same shape -- a
-            # hovered line persisted an empty StepStack purely because
-            # something asked for it.
-            stack_json=json.dumps(self.stack_for(key, insert=False).to_dicts()),
-            note="",
-            created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    Does NOT dirty the session. A pick goes straight into the
+    GeoPackage; `survey.nsgeo.json` is untouched, so `Save site`
+    would have nothing to write and prompting for it would be a lie.
+    """
+    if key != self._current_key:
+        raise ValueError(
+            f"a pick targets the working line ({self._current_key!r}), not {key!r}; "
+            f"select the line on the map to work on it"
         )
-        self._pick_store.write_pick(pick)
-        self.picks_changed.emit()
-        return pick
+    if self._pick_store is None:
+        raise RuntimeError("no pick store is attached to this session; cannot author a pick")
+    if not math.isfinite(time_ns):
+        raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
+    line = self.line_for_key(key)
+    index = max(0, min(int(trace), line.n_traces - 1))
+    # The view emits a pick for any left click in the widget, and
+    # ViewTransform.time_of_y does not clamp -- a click in the top
+    # margin yields a time before the record starts. Clamped into the
+    # line's own recorded window, the same way the trace is.
+    t0 = float(line.header.position_ns)
+    t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
+    lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
+    time = max(lo, min(float(time_ns), hi))
+    model = self.resolved_velocity(key)
+    # A plain list, not a numpy array: `depth_at`/`velocity_at` both
+    # call `np.asarray` on whatever they are handed, so this keeps
+    # numpy out of session.py's imports entirely for one scalar.
+    times = [time]
+    pick = Pick(
+        line_key=key,
+        trace=index,
+        time_ns=time,
+        distance_m=self._pick_distance(line, index),
+        depth_m=float(model.depth_at(times)[0]),
+        velocity_m_ns=float(model.velocity_at(times)[0]),
+        # insert=False: reading the stack to record it must not be
+        # what creates one. M7's Finding 4 is the same shape -- a
+        # hovered line persisted an empty StepStack purely because
+        # something asked for it.
+        stack_json=json.dumps(self.stack_for(key, insert=False).to_dicts()),
+        note="",
+        created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    )
+    self._pick_store.write_pick(pick)
+    self.picks_changed.emit()
+    return pick
 
-    @staticmethod
-    def _pick_distance(line: Line, index: int) -> float | None:
-        """Distance along the line at `index`, or None when the line has
-        no distance axis at all. `Line.distance_along()` raises
-        `ValueError` for a time-triggered acquisition
-        (`traces_per_metre <= 0`); `ProfileDock._safe_distance` and
-        `SiteLayers._line_points` already treat that as a property of the
-        file rather than an error. Time is the truth here, so a missing
-        distance is a null field, not a refused pick.
-        """
-        try:
-            return float(line.distance_along()[index])
-        except (ValueError, IndexError):
-            return None
 
-    def picks_for(self, key: str) -> list[Pick]:
-        """Every pick on `key`, ordered by (trace, time).
+@staticmethod
+def _pick_distance(line: Line, index: int) -> float | None:
+    """Distance along the line at `index`, or None when the line has
+    no distance axis at all. `Line.distance_along()` raises
+    `ValueError` for a time-triggered acquisition
+    (`traces_per_metre <= 0`); `ProfileDock._safe_distance` and
+    `SiteLayers._line_points` already treat that as a property of the
+    file rather than an error. Time is the truth here, so a missing
+    distance is a null field, not a refused pick.
+    """
+    try:
+        return float(line.distance_along()[index])
+    except (ValueError, IndexError):
+        return None
 
-        Empty rather than raising when no store is attached: this is read
-        from a render slot, and a raise there reaches `qFatal()` in the
-        CI container. Reading is not authoring, so unlike `add_pick`
-        there is no invariant to protect -- a preview may show its own
-        line's picks.
-        """
-        if self._pick_store is None:
-            return []
-        picks: list[Pick] = self._pick_store.picks_for(key)
-        return picks
+
+def picks_for(self, key: str) -> list[Pick]:
+    """Every pick on `key`, ordered by (trace, time).
+
+    Empty rather than raising when no store is attached: this is read
+    from a render slot, and a raise there reaches `qFatal()` in the
+    CI container. Reading is not authoring, so unlike `add_pick`
+    there is no invariant to protect -- a preview may show its own
+    line's picks.
+    """
+    if self._pick_store is None:
+        return []
+    picks: list[Pick] = self._pick_store.picks_for(key)
+    return picks
 ```
 
 `session.py` needs no new numpy import for any of this — `VelocityModel.depth_at` and `velocity_at` both `np.asarray` their argument, so a one-element list is enough.
@@ -1181,12 +1194,18 @@ def test_pick_mode_also_ignores_a_click_outside_the_radargram(view):
     r = v.image_rect()
 
     QTest.mouseClick(
-        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() - 5, r.top() + 10)
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() - 5, r.top() + 10),
     )
     assert picks == []
 
     QTest.mouseClick(
-        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(r.left() + 10, r.top() + 10)
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 10, r.top() + 10),
     )
     assert len(picks) == 1
 ```
@@ -1339,9 +1358,7 @@ def test_a_pick_from_the_profile_reaches_the_picks_table(fake_iface, tmp_path):
         plugin.unload()
 
 
-def test_a_pick_that_cannot_be_written_is_reported_not_swallowed(
-    fake_iface, tmp_path, monkeypatch
-):
+def test_a_pick_that_cannot_be_written_is_reported_not_swallowed(fake_iface, tmp_path, monkeypatch):
     """session.add_pick raises by design. It is never connected directly
     to a signal: an exception escaping a slot reaches qFatal() in the CI
     container and aborts the job. The relay catches it and puts the
@@ -1398,25 +1415,23 @@ Expected: `test_shadowed_signals_match_their_pinned_shape` fails in the pure tie
 In `profile_view.py`, `mousePressEvent`, inside the `LeftButton` branch:
 
 ```python
-        if event.button() == Qt.MouseButton.LeftButton:
-            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            if self._pick_mode or shift:
-                # Only inside the radargram itself. This handler runs for
-                # the whole widget, axis margins included, and
-                # `time_of_y` does not clamp -- a shift click on the
-                # depth-axis label reaches here with a negative local y
-                # and would author a pick at a time before the record
-                # starts. `add_pick` clamps such a time into the record,
-                # which is precisely what makes the bad pick look
-                # plausible once written. Hover already applies the same
-                # bound (`_handle_mouse_move`'s `0 <= x < width`); this
-                # is that rule for the other axis and the other gesture.
-                if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
-                    return
-                self.pick_requested.emit(
-                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
-                )
-                return
+if event.button() == Qt.MouseButton.LeftButton:
+    shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+    if self._pick_mode or shift:
+        # Only inside the radargram itself. This handler runs for
+        # the whole widget, axis margins included, and
+        # `time_of_y` does not clamp -- a shift click on the
+        # depth-axis label reaches here with a negative local y
+        # and would author a pick at a time before the record
+        # starts. `add_pick` clamps such a time into the record,
+        # which is precisely what makes the bad pick look
+        # plausible once written. Hover already applies the same
+        # bound (`_handle_mouse_move`'s `0 <= x < width`); this
+        # is that rule for the other axis and the other gesture.
+        if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
+            return
+        self.pick_requested.emit(self.transform.trace_index_at(x), self.transform.time_of_y(y))
+        return
 ```
 
 - [ ] **Step 4: Add `set_pick_mode` and the spoken refusal to `ProfileDock`**
@@ -1533,34 +1548,35 @@ Extend `_update_enabled`:
 Add the two new slots beside `_on_gain_points`:
 
 ```python
-    def _toggle_pick_mode(self, checked: bool) -> None:
-        """The Pick toolbar toggle. Drives the dock, never the view
-        directly: `ProfileDock` owns `ProfileView`."""
-        try:
-            if self.profile_dock is None:
-                return
-            self.profile_dock.set_pick_mode(bool(checked))
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+def _toggle_pick_mode(self, checked: bool) -> None:
+    """The Pick toolbar toggle. Drives the dock, never the view
+    directly: `ProfileDock` owns `ProfileView`."""
+    try:
+        if self.profile_dock is None:
+            return
+        self.profile_dock.set_pick_mode(bool(checked))
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
 
-    def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
-        """Relay a pick from the profile to the session.
 
-        `session.add_pick` is NEVER connected to a signal directly. It
-        raises by design -- on a non-working line, on a non-finite time,
-        on a failed provider write -- and an exception escaping a slot
-        prints and passes on this build but reaches `qFatal()` in the
-        `qgis/qgis:ltr` container and aborts the whole job. It also has
-        somewhere better to go: a pick is authored data with no other
-        source of truth, so the reason it did not land belongs on the
-        message bar, not in a log the user is not reading.
-        """
-        try:
-            if self.session is None:
-                return
-            self.session.add_pick(key, trace, time_ns)
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
+def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
+    """Relay a pick from the profile to the session.
+
+    `session.add_pick` is NEVER connected to a signal directly. It
+    raises by design -- on a non-working line, on a non-finite time,
+    on a failed provider write -- and an exception escaping a slot
+    prints and passes on this build but reaches `qFatal()` in the
+    `qgis/qgis:ltr` container and aborts the whole job. It also has
+    somewhere better to go: a pick is authored data with no other
+    source of truth, so the reason it did not land belongs on the
+    message bar, not in a log the user is not reading.
+    """
+    try:
+        if self.session is None:
+            return
+        self.session.add_pick(key, trace, time_ns)
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
 ```
 
 Check `unload()` for the list of actions it tears down — `self.toolbar_actions` already covers `act_pick` because `_toolbar_action` appends to it, but confirm `unload()` does not also enumerate the `act_*` attributes by name; if it does, add `act_pick` there too.
@@ -1745,28 +1761,29 @@ In `profile_dock.py`, add the connection with the others in `__init__`, after `s
 Add the slot and the helper beside `_on_stack_changed`:
 
 ```python
-    def _on_picks_changed(self) -> None:
-        try:
-            self._refresh_picks()
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not refresh the picks on the profile: {exc}", Qgis.MessageLevel.Critical)
+def _on_picks_changed(self) -> None:
+    try:
+        self._refresh_picks()
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not refresh the picks on the profile: {exc}", Qgis.MessageLevel.Critical)
 
-    def _refresh_picks(self) -> None:
-        """Put the DISPLAYED line's picks on the view.
 
-        `self._key`, not `_working_key`: a preview shows the hovered
-        line's own picks, because seeing what has been interpreted on a
-        line is most of the point of glancing at it. That is not a breach
-        of spec §3.3 -- reading is not authoring, and `session.add_pick`
-        refuses a preview independently. `picks_changed` carries no key
-        (it is a "something changed" signal), so this recomputes from
-        whatever is on screen rather than filtering on one.
-        """
-        key = self._key
-        if key is None:
-            self.view.set_picks([])
-            return
-        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
+def _refresh_picks(self) -> None:
+    """Put the DISPLAYED line's picks on the view.
+
+    `self._key`, not `_working_key`: a preview shows the hovered
+    line's own picks, because seeing what has been interpreted on a
+    line is most of the point of glancing at it. That is not a breach
+    of spec §3.3 -- reading is not authoring, and `session.add_pick`
+    refuses a preview independently. `picks_changed` carries no key
+    (it is a "something changed" signal), so this recomputes from
+    whatever is on screen rather than filtering on one.
+    """
+    key = self._key
+    if key is None:
+        self.view.set_picks([])
+        return
+    self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
 ```
 
 At the end of `_show_line`, after `self._refresh_velocity()`:
@@ -2144,14 +2161,15 @@ Replace the `_lines_layer_bound` attribute in `__init__` with a per-layer map, a
 Replace `_lines_layer()`'s single-purpose body with a general lookup, keeping `_lines_layer` itself (the geometry cache and the hit test both call it):
 
 ```python
-    def _selectable_layer(self, name: str) -> QgsVectorLayer | None:
-        layer = self.layers.layers.get(name)
-        if layer is None or sip.isdeleted(layer):
-            return None
-        return layer
+def _selectable_layer(self, name: str) -> QgsVectorLayer | None:
+    layer = self.layers.layers.get(name)
+    if layer is None or sip.isdeleted(layer):
+        return None
+    return layer
 
-    def _lines_layer(self) -> QgsVectorLayer | None:
-        return self._selectable_layer("lines")
+
+def _lines_layer(self) -> QgsVectorLayer | None:
+    return self._selectable_layer("lines")
 ```
 
 Rewrite `_rebind_layer`'s **body**. Do not retype its docstring: M7's Ruling 14 is exactly this situation — a plan handed an implementer a complete method that had been hardened across four review rounds, and following it literally would have dropped the hardening. Change the docstring's first line from "Follow the `lines` layer across rebuilds." to "Follow the selectable layers across rebuilds.", leave every existing paragraph below it untouched (the site-reopen reasoning is unchanged and is why this method exists at all), and append this one paragraph at the end of it:
@@ -2189,54 +2207,56 @@ Then replace everything below the docstring with:
 Keep `_on_selection` exactly as it is (it is the `lines` slot) and add the two new ones plus the shared body beneath it:
 
 ```python
-    def _on_pick_selection(self, *_: Any) -> None:
-        try:
-            self._jump_to_feature("picks", "trace")
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not jump to the selected pick: {exc}", Qgis.MessageLevel.Critical)
+def _on_pick_selection(self, *_: Any) -> None:
+    try:
+        self._jump_to_feature("picks", "trace")
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not jump to the selected pick: {exc}", Qgis.MessageLevel.Critical)
 
-    def _on_mark_selection(self, *_: Any) -> None:
-        try:
-            self._jump_to_feature("marks", "scan")
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not jump to the selected mark: {exc}", Qgis.MessageLevel.Critical)
 
-    def _jump_to_feature(self, name: str, trace_field: str) -> None:
-        """Open the selected feature's line and put the cursor on its
-        trace (spec §3.4's closing promise, and §4.4 for marks).
+def _on_mark_selection(self, *_: Any) -> None:
+    try:
+        self._jump_to_feature("marks", "scan")
+    except Exception as exc:  # noqa: BLE001 -- see the module docstring
+        _log(f"could not jump to the selected mark: {exc}", Qgis.MessageLevel.Critical)
 
-        `open_line` first, `set_trace` second, and not the other way
-        round: `set_trace` structurally ignores a key that is not
-        `current_key`, so a trace set before the promotion would be
-        silently dropped. That ordering is the whole reason this is one
-        method rather than two call sites.
 
-        Promotion goes through `session.open_line`, the same path the
-        survey tree and the `lines` layer already use, so no two ways of
-        opening a line can diverge.
-        """
-        layer = self._selectable_layer(name)
-        if layer is None or not self.session.is_open:
-            return
-        ids = layer.selectedFeatureIds()
-        if len(ids) != 1:
-            # A multi-selection has no single answer, and guessing one is
-            # worse than doing nothing (spec §3.4). An empty selection is
-            # the ordinary result of clicking empty map and must not
-            # close the line the user is working on.
-            return
-        feature = layer.getFeature(ids[0])
-        key = str(feature["line_key"])
-        if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
-            return
-        self.session.open_line(key)
-        trace = feature[trace_field]
-        if trace == NULL:
-            # `picks` is editable, so a hand-digitised row can carry a
-            # line_key and nothing else. Opening its line is still the
-            # right answer; `int(NULL)` raises, and this runs in a slot.
-            return
-        self.session.set_trace(key, int(trace))
+def _jump_to_feature(self, name: str, trace_field: str) -> None:
+    """Open the selected feature's line and put the cursor on its
+    trace (spec §3.4's closing promise, and §4.4 for marks).
+
+    `open_line` first, `set_trace` second, and not the other way
+    round: `set_trace` structurally ignores a key that is not
+    `current_key`, so a trace set before the promotion would be
+    silently dropped. That ordering is the whole reason this is one
+    method rather than two call sites.
+
+    Promotion goes through `session.open_line`, the same path the
+    survey tree and the `lines` layer already use, so no two ways of
+    opening a line can diverge.
+    """
+    layer = self._selectable_layer(name)
+    if layer is None or not self.session.is_open:
+        return
+    ids = layer.selectedFeatureIds()
+    if len(ids) != 1:
+        # A multi-selection has no single answer, and guessing one is
+        # worse than doing nothing (spec §3.4). An empty selection is
+        # the ordinary result of clicking empty map and must not
+        # close the line the user is working on.
+        return
+    feature = layer.getFeature(ids[0])
+    key = str(feature["line_key"])
+    if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        return
+    self.session.open_line(key)
+    trace = feature[trace_field]
+    if trace == NULL:
+        # `picks` is editable, so a hand-digitised row can carry a
+        # line_key and nothing else. Opening its line is still the
+        # right answer; `int(NULL)` raises, and this runs in a slot.
+        return
+    self.session.set_trace(key, int(trace))
 ```
 
 In `dispose()`, replace the single-layer unbind block with the loop, keeping the surrounding docstring paragraph and updating its wording from "The `lines` layer's `selectionChanged` connection" to "Each selectable layer's `selectionChanged` connection":

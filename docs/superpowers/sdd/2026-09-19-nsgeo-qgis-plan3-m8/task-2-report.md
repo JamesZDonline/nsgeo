@@ -26,15 +26,15 @@ In `packages/nsgeo-qgis/tests/qgis/test_plugin_session.py`:
 
 2. **Step 5's mutation script targets the wrong guard.** The brief's script does:
    ```python
-   s = s.replace('        if key != self._current_key:\n', '        if False:\n', 1)
+   s = s.replace("        if key != self._current_key:\n", "        if False:\n", 1)
    ```
    This exact 8-space-indented line `        if key != self._current_key:\n` appears **three times** in `session.py`: in `set_trace`, in `set_selection`, and in `add_pick`. `str.replace(..., count=1)` hits the *first* occurrence in file order, which is `set_trace`'s guard (line ~754) — `add_pick` is defined later in the file (~line 828). Running the script as literally written and then filtering to `-k add_pick` produced **9 passed, 0 failed**, i.e. it looked like the refusal test was robust when in fact the wrong function had been mutated and `add_pick`'s own guard was never touched.
 
    I corrected the mutation to match `add_pick`'s guard specifically, using the following line (`raise ValueError(`) as disambiguating context, since that continuation is unique to `add_pick` (`set_trace`/`set_selection` both follow their guard with `return`):
    ```python
-   needle = '        if key != self._current_key:\n            raise ValueError('
+   needle = "        if key != self._current_key:\n            raise ValueError("
    assert s.count(needle) == 1
-   s = s.replace(needle, '        if False:\n            raise ValueError(', 1)
+   s = s.replace(needle, "        if False:\n            raise ValueError(", 1)
    ```
    See "Mutation evidence" below for the corrected run. I flagged this rather than silently fixing it because it affects how future tasks in this milestone should write their own mutation checks: matching only the guard line by itself is not enough once more than one method in the file shares the same guard text.
 
@@ -94,9 +94,9 @@ This is the "trivially passes" failure mode the step exists to catch, except her
 
 **Attempt 2 (corrected — targets `add_pick`'s guard specifically):**
 ```python
-needle = '        if key != self._current_key:\n            raise ValueError('
+needle = "        if key != self._current_key:\n            raise ValueError("
 assert s.count(needle) == 1
-s = s.replace(needle, '        if False:\n            raise ValueError(', 1)
+s = s.replace(needle, "        if False:\n            raise ValueError(", 1)
 ```
 ```
 QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 .venv-qgis/bin/python -m pytest \
