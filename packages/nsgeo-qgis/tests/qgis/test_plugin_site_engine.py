@@ -1555,7 +1555,9 @@ def test_a_footprint_lands_when_nothing_has_moved(site3, make_site):
 def test_a_footprint_for_another_lattice_is_refused(site3, make_site):
     site, _ = prepared(make_site, site3)
     job = _footprint_job(site, "B")
-    site.set_resolution(dataclasses.replace(RES, cell=RES.cell * 2))
+    # The lattice alone: frames and readiness stay as they were.
+    site._lattice = dataclasses.replace(site.lattice, pixel=site.lattice.pixel * 2)
+    assert site.engine_for("B").frame == job.frame
     assert job.land() is False
     assert job.footprint is None
     assert "B" not in site._gathers
@@ -1564,9 +1566,12 @@ def test_a_footprint_for_another_lattice_is_refused(site3, make_site):
 def test_a_footprint_for_a_grid_no_longer_ready_is_refused(site3, make_site):
     site, _ = prepared(make_site, site3)
     job = _footprint_job(site, "C")
-    site.set_source(site3.source("AB"))
-    wait_for_site(site, 60_000)
+    # Readiness alone: the lattice and the frames stay as they were.
+    lattice = site.lattice
+    site._states["C"] = "preparing"
     assert "C" not in site.ready_grids
+    assert site.lattice is lattice
+    assert site.engine_for("C").frame == job.frame
     assert job.land() is False
     assert job.footprint is None
     assert "C" not in site._gathers
