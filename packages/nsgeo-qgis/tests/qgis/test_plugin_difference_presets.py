@@ -89,8 +89,8 @@ def test_a_drag_reorder_reaims_the_difference_view(plugin):
 
 def test_selecting_time_zero_with_difference_on_shows_the_result(plugin):
     """#48, the issue's exact repro, re-pinned for #158 (spec §4.11, §4.13): in
-    `sample` mode the profile shows what Time zero receives, so the fall
-    through after the declined difference draws the source. Fails if the
+    `sample` mode the profile shows the bypass (§4.14 Q3), so the fall
+    through after the declined difference draws it. Fails if the
     decline returns None instead of falling through."""
     plugin, s, key = plugin
     pd, prd = plugin.processing_dock, plugin.profile_dock
@@ -101,7 +101,7 @@ def test_selecting_time_zero_with_difference_on_shows_the_result(plugin):
     pd.list.setCurrentRow(0)
     assert not pd.diff_button.isChecked()
     assert prd.difference_label.text() == ""
-    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).source.data)
+    np.testing.assert_array_equal(prd.image.rg.data, s.stack_for(key).result_bypassing(0).data)
 
 
 def test_selecting_time_zero_in_first_break_mode_with_difference_on_shows_the_result(plugin):

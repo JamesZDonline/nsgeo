@@ -394,6 +394,8 @@ class ProfileDock(QgsDockWidget):
         # clock, not one the user zoomed on, so the clock rule skips them.
         self._axes_from_header = False
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
+        # Whether a row handle's view drew the bypass (True) or the input (False).
+        self._row_view_is_bypass = False
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
@@ -2131,9 +2133,11 @@ class ProfileDock(QgsDockWidget):
             if row >= 0:
                 spec = self._handle_spec_at(row)
                 if spec is not None and spec.kind == "row":
-                    # What Time zero receives, on the line's clock (spec
-                    # §4.11): nothing after it runs, so nothing can refuse it.
+                    # Every step but Time zero, on the line's clock (spec
+                    # §4.14 Q3): the processed look. Falls back to what Time
+                    # zero receives (§4.11) where the bypass can't be drawn.
                     received = stack.source if row == 0 else stack.intermediate(row - 1)
+                    self._row_view_is_bypass = False
                     try:
                         line_zero = stack.zero_ns()
                     except ValueError:
@@ -2141,7 +2145,17 @@ class ProfileDock(QgsDockWidget):
                         # end): the input, on its own clock, is what the user
                         # needs in order to fix the row.
                         return received
-                    return relabel_onto(received, line_zero)
+                    try:
+                        bypass = stack.result_bypassing(row)
+                    except ValueError:
+                        # A later step refuses the uncropped record
+                        # (migrate_fk does): no error, the input view.
+                        return relabel_onto(received, line_zero)
+                    if (bypass.n_samples, bypass.t0_ns) != (received.n_samples, received.t0_ns):
+                        # Other rows: the line's row would mean something else.
+                        return relabel_onto(received, line_zero)
+                    self._row_view_is_bypass = True
+                    return relabel_onto(bypass, line_zero)
                 return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
@@ -2251,16 +2265,17 @@ class ProfileDock(QgsDockWidget):
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
-        for a difference view or a row handle's input view (each is its own
-        scale), else the displayed stack with every enabled gain-curve step
+        for a difference view or a row handle's fallback input view (each is
+        its own scale), else the displayed stack with every enabled gain-curve step
         bypassed (just `result()` when there is none). Never bypasses the
         time cutoff -- see the module docstring. Called after
         `current_radargram`, so a declined difference has already reset
         `_effective_difference_index`."""
         if self._effective_difference_index >= 0 or self._key is None:
             return shown
-        if self._shows_row_handle():
-            return shown  # the record Time zero receives: no stack runs below it
+        handle_row = self._handle_row() if self._shows_row_handle() else -1
+        if handle_row >= 0 and not self._row_view_is_bypass:
+            return shown  # the fallback: the record Time zero receives
         try:
             stack = self.session.stack_for(self._key, insert=self._preview_key is None)
             rows = [
@@ -2268,6 +2283,9 @@ class ProfileDock(QgsDockWidget):
                 for i, (step, enabled) in enumerate(stack.entries)
                 if enabled and curve_param_name(step) is not None
             ]
+            if handle_row >= 0:
+                rows.append(handle_row)  # the bypassed Time zero (§4.14 Q3)
+                rows.sort()
             return stack.result_bypassing(*rows)
         except ValueError as exc:
             _log(f"could not measure the display scale without the gain curves: {exc}")

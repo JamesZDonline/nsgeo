@@ -20,6 +20,7 @@ from nsgeo_qgis.ui.profile_dock import (
     SLICE_BAND_KEY,
     STEPS_REFUSED_TEXT,
     ProfileDock,
+    relabel_onto,
     velocity_source,
 )
 from nsgeo_qgis.ui.ruler import trace_units_at
@@ -2836,14 +2837,15 @@ def _stack_of(session, key, *entries):
     return session.stack_for(key)
 
 
-def test_selecting_time_zero_in_sample_mode_draws_its_input_on_the_lines_clock(opened):
+def test_selecting_time_zero_in_sample_mode_draws_the_bypass_on_the_lines_clock(opened):
     session, dock, key, line = opened
     stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)), ("dewow", {}))
     src = stack.source
     assert dock.image.rg.data.shape[0] == 492
     dock.set_selected_step(0)
     drawn = dock.image.rg
-    np.testing.assert_array_equal(drawn.data, src.data)
+    # §4.14 Q3: every step but Time zero, on the uncropped record
+    np.testing.assert_array_equal(drawn.data, stack.result_bypassing(0).data)
     assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
     assert dock.view.transform.t0_ns == pytest.approx(src.t0_ns + (src.zero_ns - stack.zero_ns()))
     assert dock.view.transform.n_samples == src.data.shape[0]
@@ -2860,7 +2862,7 @@ def test_first_break_mode_selected_draws_the_ordinary_result(opened):
     assert dock._handle_row() == -1
 
 
-def test_a_time_zero_that_is_not_first_draws_what_it_receives(opened):
+def test_a_time_zero_that_is_not_first_draws_the_bypass(opened):
     session, dock, key, line = opened
     stack = _stack_of(
         session,
@@ -2870,7 +2872,7 @@ def test_a_time_zero_that_is_not_first_draws_what_it_receives(opened):
         ("gain_agc", {}),
     )
     dock.set_selected_step(1)
-    np.testing.assert_array_equal(dock.image.rg.data, stack.intermediate(0).data)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result_bypassing(1).data)
     assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
 
 
@@ -2980,7 +2982,7 @@ def test_a_time_zero_that_is_not_first_draws_its_line_on_its_input_rows(opened):
     )
     dock.set_selected_step(1)
     rg = dock._shown_radargram
-    np.testing.assert_array_equal(rg.data, stack.intermediate(0).data)
+    np.testing.assert_array_equal(rg.data, stack.result_bypassing(1).data)
     assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
     assert dock.view._cutoff_text(dock.view.transform).endswith("sample 20")
 
@@ -3033,12 +3035,19 @@ def test_a_disabled_time_zero_draws_its_line_as_the_cutoff_does(opened):
     assert session.stack_for(key).entries[0][1] is False
 
 
-def test_a_row_handles_input_view_is_its_own_scale(opened):
-    """The display limit is taken from the drawn input, not the processed
-    stack, whose scale can differ by orders of magnitude."""
+def test_a_row_handles_fallback_input_view_is_its_own_scale(opened):
+    """The fallback view (a later step refuses the bypass) takes its display
+    limit from the drawn input, not the processed stack, whose scale can
+    differ by orders of magnitude."""
     session, dock, key, line = opened
-    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)), ("gain_agc", {}))
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
     dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
     assert dock.image.reference is dock.image.rg
     assert dock.image.limit == _clip(dock)(stack.source.data)
 
@@ -3053,3 +3062,53 @@ def test_a_time_zero_that_refuses_still_draws_its_input(opened):
     dock.set_selected_step(0)
     assert errors == []
     np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+
+
+def test_selecting_time_zero_keeps_the_processed_look(opened):
+    """§4.14 Q3: the bypass is drawn, on the ordinary view's display scale."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("gain_agc", {}),
+    )
+    ordinary = dock.image.limit
+    dock.set_selected_step(0)
+    expect = relabel_onto(stack.result_bypassing(0), stack.zero_ns())
+    np.testing.assert_array_equal(dock.image.rg.data, expect.data)
+    assert dock.image.limit == pytest.approx(ordinary, rel=0.05)
+
+
+def test_a_later_step_that_refuses_falls_back_to_the_input(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+    assert dock.view.cutoff_ns is not None
+
+
+def test_a_bypass_with_other_rows_falls_back(opened):
+    """A second Time zero crops the bypass, so its rows are not the input's:
+    the input is drawn and the line's row is the step's own `sample`."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("time_zero", dict(mode="sample", sample=10)),
+    )
+    assert stack.result_bypassing(0).data.shape[0] != stack.source.data.shape[0]
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, relabel_onto(stack.source, stack.zero_ns()).data)
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
