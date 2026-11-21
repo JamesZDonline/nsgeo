@@ -129,6 +129,12 @@ release's notes list everything in it.
   read-out; a time zoom stays put when Time zero changes; and Time zero set
   by dragging its line on the profile. Built and reviewed in two plans;
   walkthrough next.
+- **3-D: the follow-ups** ([#204], [#203], [#219], [#218], [#228]). Surfaces
+  stay fresh after an untouched ParaView export and after a reopen without
+  Save site; the 3-D view reads a line it can't read only once, and reads
+  time zero from channel 0, as the volume does; Plan D's tidy-ups, with a
+  cut pick in the outlier list moving the profile's cursor to it.
+  Designing.
 
 ### Next, in order
 
@@ -206,14 +212,9 @@ Grouped by area. The order within a group is not a priority.
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]); cuts that show the wiggle, read from the lines they cross with
   one smooth gain, instead of the slice's squared amplitudes ([#215]).
-- **3-D:** surfaces stay fresh after a reopen without Save site in the cases
-  the walkthrough fix left open, such as a Slices transform other than the
-  default ([#203]); an untouched ParaView export no longer marks surfaces stale
-  when the cell is not a 3-decimal number ([#204]); on a multi-channel line,
-  read time zero from the same channel the volume is built from ([#218]); a
-  line whose time zero can't be read is not re-read on every 3-D view refresh
-  ([#219]); hand-check the 3-D view in a real QGIS 4.2 and 3.40 window ([#220]);
-  Plan D's tidy-ups: cut-pick reasons, one time-base reader, the outlier cursor ([#228]).
+- **3-D:** hand-check the 3-D view in a real QGIS 4.2 and 3.40 window
+  ([#220]); on a multi-channel line, build the volume, surfaces and 3-D view
+  from the channel you chose, with that choice saved per line ([#237]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -321,6 +322,7 @@ Grouped by area. The order within a group is not a priority.
 [#235]: https://github.com/JamesZDonline/nsgeo/pull/235
 [#236]: https://github.com/JamesZDonline/nsgeo/issues/236
 [#232]: https://github.com/JamesZDonline/nsgeo/issues/232
+[#237]: https://github.com/JamesZDonline/nsgeo/issues/237
 
 ## Why
 
