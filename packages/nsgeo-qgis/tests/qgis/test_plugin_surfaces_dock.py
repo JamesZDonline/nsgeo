@@ -135,10 +135,11 @@ def test_a_cut_pick_outlier_with_no_distance_asks_for_nothing(surface_plugin, mo
     real = dock._pick_of(dock._current(), dock._outliers[index])
     bare = SimpleNamespace(fid=real.fid, pick=dataclasses.replace(real.pick, distance_m=None))
     monkeypatch.setattr(dock, "_pick_of", lambda fid, outlier: bare)
-    asked = []
+    asked, problems = [], []
     dock.cut_pick_requested.connect(lambda key, d: asked.append((key, d)))
+    dock.problem.connect(problems.append)  # a swallowed error would arrive here
     dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
-    assert asked == []
+    assert asked == [] and problems == []
     assert plugin.session.current_key == cut_key  # the cut still opens
 
 

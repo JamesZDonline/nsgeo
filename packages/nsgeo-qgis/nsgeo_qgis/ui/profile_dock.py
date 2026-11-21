@@ -1137,28 +1137,33 @@ class ProfileDock(QgsDockWidget):
         self._refresh_velocity()
         self._refresh_picks()
         if not is_preview:
-            self._apply_cut_aim(key, section)
+            self._apply_cut_aim(key)
 
     def aim_at_cut_distance(self, key: str, distance_m: float) -> None:
         """Put the cursor on the column of cut `key` nearest `distance_m` along it: at once when
-        that cut's section is on screen, else when `_show_cut` next shows it. Showing any other
-        key (a preview does not count) drops the target."""
+        that cut's section is on screen, else when `_show_cut` next shows it. The working line
+        changing or closing drops the target; a preview never does."""
         self._cut_aim = (key, float(distance_m))
-        section = self.shown_cut_section(key)
-        if section is not None and key == self._working_key and self._preview_key is None:
-            self._apply_cut_aim(key, section)
+        if (
+            self.shown_cut_section(key) is not None
+            and key == self._working_key
+            and self._preview_key is None
+        ):
+            self._apply_cut_aim(key)
 
-    def _apply_cut_aim(self, key: str, section: CutSection) -> None:
-        """Move the cursor to the pending target when it is for `key`, then drop it."""
+    def _apply_cut_aim(self, key: str) -> None:
+        """Move the cursor to the pending target when it is for `key`, then drop it. With no
+        column to be found yet, the target is kept for the next show."""
         aim = self._cut_aim
         if aim is None or aim[0] != key:
             return
-        self._cut_aim = None
         sections = self._cut_sections
         # The same rule as the pick markers and the map link, so cursor and marker agree.
         column = None if sections is None else sections.column_at(key, aim[1])
-        if column is not None:
-            self.session.set_trace(key, column)
+        if column is None:
+            return
+        self._cut_aim = None
+        self.session.set_trace(key, column)
 
     def _apply_cut_title(self) -> None:
         """The one place a cut's window title is set: the text built for the

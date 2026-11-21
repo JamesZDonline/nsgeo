@@ -271,7 +271,7 @@ def test_a_target_held_on_a_message_is_used_when_the_section_arrives(profile):
     _ready(dock)
     assert _shown_cut(pd)
     # It moved once the section came, to the column the cut's own rule gives at that moment.
-    assert moves and moves[0][0] == moves[0][1] and moves[0][0] >= 0, moves
+    assert moves and moves[0][0] == moves[0][1] and 0 <= moves[0][0] < moves[0][2], moves
 
 
 def test_a_cut_recovers_after_its_grid_is_shrunk_under_it(profile):
