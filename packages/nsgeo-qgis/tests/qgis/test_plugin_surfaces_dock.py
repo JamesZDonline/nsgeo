@@ -122,6 +122,26 @@ def test_clicking_a_cut_pick_outlier_asks_for_its_distance(surface_plugin, monke
     assert asked == [(cut_key, 3.0)]
 
 
+def test_a_cut_pick_outlier_with_no_distance_asks_for_nothing(surface_plugin, monkeypatch):
+    import dataclasses
+    from types import SimpleNamespace
+
+    plugin = surface_plugin
+    monkeypatch.setattr(plugin.layers, "select_picks", lambda ids: None)
+    cut_key, _ = _surface_with_a_cut_pick(plugin, strength=1e9)
+    dock = plugin.surfaces_dock
+    dock.table.selectRow(0)
+    index = next(i for i, o in enumerate(dock._outliers) if o["line_key"] == cut_key)
+    real = dock._pick_of(dock._current(), dock._outliers[index])
+    bare = SimpleNamespace(fid=real.fid, pick=dataclasses.replace(real.pick, distance_m=None))
+    monkeypatch.setattr(dock, "_pick_of", lambda fid, outlier: bare)
+    asked = []
+    dock.cut_pick_requested.connect(lambda key, d: asked.append((key, d)))
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
+    assert asked == []
+    assert plugin.session.current_key == cut_key  # the cut still opens
+
+
 def test_the_panels_menu_lists_surfaces(surface_plugin):
     plugin = surface_plugin
     entries = [a.text() for a in plugin.panels_menu.actions() if a.text()]

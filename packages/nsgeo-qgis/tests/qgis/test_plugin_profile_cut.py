@@ -255,6 +255,25 @@ def test_a_cut_on_another_grid_draws_once_that_grid_is_shown(profile):
     assert pd.windowTitle() == "nsgeo Profile · cut: Cut 1 · B · 4.0 m · Kriging"
 
 
+def test_a_target_held_on_a_message_is_used_when_the_section_arrives(profile):
+    """The cut is open and shows a message; the cursor goes to the aimed distance once it loads."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("B", H)
+    session.open_line(key)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="B")
+    pd.aim_at_cut_distance(key, 2.4)
+    assert session.current_trace == -1  # nothing to move on yet
+    moves = []
+    session.trace_changed.connect(
+        lambda k, i: moves.append((i, sections.column_at(key, 2.4), pd.view.transform.n_traces))
+    )
+    dock.grid_combo.setCurrentText("B")
+    _ready(dock)
+    assert _shown_cut(pd)
+    # It moved once the section came, to the column the cut's own rule gives at that moment.
+    assert moves and moves[0][0] == moves[0][1] and moves[0][0] >= 0, moves
+
+
 def test_a_cut_recovers_after_its_grid_is_shrunk_under_it(profile):
     """(b) `grids_changed` arrives while the grid re-prepares; the cut comes back."""
     import dataclasses

@@ -901,7 +901,9 @@ class ProfileDock(QgsDockWidget):
         if was_diff:
             self.difference_cleared.emit()
         self._working_key = key or None
-        if not key:
+        if self._cut_aim is not None and self._cut_aim[0] != key:
+            # Another line (or none) became the working one. A preview coming and going
+            # does not come through here, so it leaves the target alone.
             self._cut_aim = None
         # Finding 2 (M7 final review): remove_line() resets ONLY the
         # dropped key's own current/preview fields (see its own docstring)
@@ -983,8 +985,6 @@ class ProfileDock(QgsDockWidget):
         in this milestone. The caller already knows which case it is;
         saying so directly is the honest version.
         """
-        if not is_preview and self._cut_aim is not None and self._cut_aim[0] != key:
-            self._cut_aim = None
         if is_cut_key(key):
             self._show_cut(key, is_preview=is_preview)
             return
@@ -1154,8 +1154,11 @@ class ProfileDock(QgsDockWidget):
         if aim is None or aim[0] != key:
             return
         self._cut_aim = None
-        column = int(np.argmin(np.abs(section.columns.distance_m - aim[1])))
-        self.session.set_trace(key, column)
+        sections = self._cut_sections
+        # The same rule as the pick markers and the map link, so cursor and marker agree.
+        column = None if sections is None else sections.column_at(key, aim[1])
+        if column is not None:
+            self.session.set_trace(key, column)
 
     def _apply_cut_title(self) -> None:
         """The one place a cut's window title is set: the text built for the
