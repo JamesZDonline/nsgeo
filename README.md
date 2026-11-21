@@ -128,7 +128,8 @@ release's notes list everything in it.
   Save site; the 3-D view reads a line it can't read only once, and reads
   time zero from channel 0, as the volume does; Plan D's tidy-ups, with a
   cut pick in the outlier list moving the profile's cursor to it.
-  Designing.
+  Built and reviewed, with session F's Profile panel merged in;
+  walkthrough next.
 - **M17c: true-distance profiles** ([#134]). A GPS line's profile draws each
   trace at its true distance, with a gap where the cart was lifted; picks,
   the velocity fit and migration follow. GPS lines in a grid share the
