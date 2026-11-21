@@ -550,6 +550,33 @@ So the user sees the toast, then the line view.
 - One new pin covers `sample` mode on a line with migration after Time zero: exactly one toast,
   the button off, and the line up.
 
+### 4.14 After the walkthrough (2026-11-21)
+
+All 13 walkthrough checks passed. Q1, Q2 and Q4 are kept as built. Three changes follow from the user's notes and answers.
+
+**Q3. Time zero's selected view keeps the processed look.** This supersedes Q6's "what Time zero receives" as the first choice.
+
+- **What it draws.** While a `row` handle's step is selected, the profile draws `stack.result_bypassing(row)`, relabelled onto the line's zero. That is every step except Time zero, run on the uncropped record (picture 4 on the follow-up page). Its display limit is the ordinary view's, taken with Time zero also bypassed, so selecting the row doesn't change the look.
+- **When it falls back.** It draws today's view instead (the step's input on its own scale, §4.11) when either:
+  - the bypass raises, because a later step refuses the uncropped record; `migrate_fk` does, with `MAX_T0_NS`. That fallback emits no error; or
+  - the bypass's rows aren't the input's rows (a different `n_samples` or `t0_ns`), so the line's row would mean something else.
+- **Why.** Taken literally, "the processed scale" saturates the raw record: its limit is about 9.7 million against about 2.3. The user picked the processed record with this fallback.
+- **E's rule is unchanged.** With migration after Time zero, there is still exactly one toast, and the profile shows the fallback view.
+
+**W1. The band toggle is a checkbox.**
+
+- It becomes a `QCheckBox` labelled **Show slice band**, placed after the colormap combo with the other display settings, away from Fit and 1:1, which it isn't part of.
+- Its behaviour is §4.2's: it remembers its state, is greyed out with no window, and keeps the window while hidden.
+- The attribute stays `slice_band_button`, so the tests keep their names.
+
+**W5. Distance while dragging a selection.**
+
+- While a range selection is being dragged on the profile (the drag that colours the map), the read-out shows the selection instead of the pointer:
+  - `f"{d:.2f} m selected (trace {a}–{b})"`, where `d` is `abs(m(b + 0.5) − m(a + 0.5))` through the helper pair;
+  - `f"{b − a + 1} traces selected (trace {a}–{b})"` when the line has no metres.
+- It goes back to the cursor read-out on release.
+- The distance comes through the helper pair, so M17c's true distance reaches it too.
+
 ## 5. Tests to pin
 
 Each test must fail before its fix; the plan records the failing run. **Real-data tests** are
