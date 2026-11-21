@@ -1410,3 +1410,19 @@ def test_an_empty_import_presets_is_not_written(tmp_path):
     save_site(_two_grid_site(), path)
     assert "import_presets" not in json.loads(path.read_text())
     assert load_site(path).import_presets == {}
+
+
+def test_gap_over_round_trips_and_is_saved_only_when_typed(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())["lines"][0]["placement"]
+    assert "gap_m" not in doc
+    assert load_site(out).lines[0].placement.gap_m is None
+
+    placement = dataclasses.replace(site.lines[0].placement, gap_m=0.25)
+    site.lines = [dataclasses.replace(site.lines[0], placement=placement)]
+    save_site(site, out)
+    doc = json.loads(out.read_text())["lines"][0]["placement"]
+    assert doc["gap_m"] == 0.25
+    assert load_site(out).lines[0].placement.gap_m == 0.25

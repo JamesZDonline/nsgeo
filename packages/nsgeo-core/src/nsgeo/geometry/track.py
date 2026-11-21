@@ -92,7 +92,8 @@ class TrackPlacement:
     `fixes` are every fix of the log in trace order, whatever the quality: a
     non-RTK fix between two anchors is what marks a bridge. `travel_shift` is
     metres, positive moving every trace forward along the way the line was
-    walked.
+    walked. `gap_m` is the line's typed Gap over in metres (None: automatic, see
+    `nsgeo.geometry.spacing`).
     """
 
     fixes: tuple[TrackFix, ...]
@@ -100,6 +101,7 @@ class TrackPlacement:
     grid_id: str | None = None
     label: str | None = None
     travel_shift: float = 0.0
+    gap_m: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fixes", tuple(self.fixes))
@@ -115,6 +117,8 @@ class TrackPlacement:
             raise ValueError("the RTK-fixed positions all lie at one point")
         if not math.isfinite(self.travel_shift):
             raise ValueError(f"travel_shift must be finite, got {self.travel_shift!r}")
+        if self.gap_m is not None and not (math.isfinite(self.gap_m) and self.gap_m > 0):
+            raise ValueError(f"gap_m must be None or a finite length above 0, got {self.gap_m!r}")
 
     def anchors(self) -> tuple[TrackFix, ...]:
         """The RTK-fixed fixes with a position: the only ones traces are placed by."""

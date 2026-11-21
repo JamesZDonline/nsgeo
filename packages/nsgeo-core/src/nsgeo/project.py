@@ -169,6 +169,8 @@ def _placement_to_dict(placement: Any) -> dict[str, Any]:
         track["label"] = placement.label
         if placement.travel_shift != 0.0:
             track["travel_shift"] = placement.travel_shift
+        if placement.gap_m is not None:
+            track["gap_m"] = placement.gap_m
         track["fixes"] = [_fix_to_row(f) for f in placement.fixes]
         return track
     raise ProjectError(f"cannot serialise placement of type {type(placement).__name__}")
@@ -224,6 +226,7 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement | TrackPlacement:
             grid_id=doc.get("grid_id"),
             label=doc.get("label"),
             travel_shift=float(doc.get("travel_shift", 0.0)),
+            gap_m=_opt_float(doc.get("gap_m")),
         )
     if kind != "grid":
         raise ProjectError(f"unknown placement type {kind!r}")
