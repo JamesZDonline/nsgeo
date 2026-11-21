@@ -4,6 +4,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+from nsgeo_qgis.ui.trace_axis import TraceAxis
 from nsgeo_qgis.ui.view_transform import (
     MIN_SAMPLE_SPAN,
     MIN_TRACE_SPAN,
@@ -445,3 +446,142 @@ def test_a_window_in_the_middle_keeps_its_radar_times():
     c = carry_time_window(old, new, 0.0, -0.6)
     assert (c.time_lo - 0.6, c.time_hi - 0.6) == pytest.approx((30.0, 45.0))  # radar = zero + t
     assert (c.trace_lo, c.trace_hi) == pytest.approx((20.0, 120.0))
+
+
+# ---- a trace axis (M17c): screen x linear in metres along the line ------------
+def _axis_vt(distance, *, width=800, height=300, mirrored=False, gap_m=None):
+    n = len(distance)
+    ax = TraceAxis.from_distance(distance, gap_m)
+    return ViewTransform.fit(n, 512, 0.0, 0.2, width, height, mirrored=mirrored, axis=ax), ax
+
+
+def _wspan(ax, t):
+    return float(ax.walk_at(t.trace_hi) - ax.walk_at(t.trace_lo))
+
+
+_UNEVEN = np.concatenate(
+    [np.arange(15) * 0.02, 0.28 + np.arange(1, 16) * 0.05, 0.28 + 0.75 + 1.0 + np.arange(15) * 0.02]
+)
+
+
+def test_an_even_axis_matches_the_linear_transform():
+    d = np.arange(20) * 0.05
+    plain = ViewTransform.fit(20, 512, 0.0, 0.2, 800, 300)
+    vt, _ = _axis_vt(d)
+    for i in np.linspace(0.0, 20.0, 20):
+        assert vt.x_of_trace(i) == pytest.approx(plain.x_of_trace(i), abs=1e-9)
+    for x in np.linspace(0.0, 800.0, 20):
+        assert vt.trace_of_x(x) == pytest.approx(plain.trace_of_x(x), abs=1e-9)
+
+
+def test_x_is_linear_in_metres_along_the_line():
+    vt, ax = _axis_vt(_UNEVEN)
+    w0 = float(ax.walk_at(vt.trace_lo))
+    xs = np.array([vt.x_of_trace(i + 0.5) for i in range(len(_UNEVEN))])
+    m = _UNEVEN - w0
+    k = xs[-1] / m[-1]
+    assert xs == pytest.approx(m * k, abs=1e-6)
+    assert vt.trace_of_x(vt.x_of_trace(7.3)) == pytest.approx(7.3)
+
+
+def test_hover_in_a_gap_finds_no_trace():
+    vt, ax = _axis_vt(_UNEVEN)
+    mid = (_UNEVEN[14] + _UNEVEN[15]) / 2  # the first step is not a gap; use the real one
+    gaps = np.flatnonzero(np.diff(_UNEVEN) > 6 * 0.02 * 1.01)
+    assert gaps.size
+    g = gaps[0]
+    mid = (_UNEVEN[g] + _UNEVEN[g + 1]) / 2
+    x = vt.x_of_trace(float(ax.units_at_walk(mid)))
+    assert vt.trace_at(x) is None
+    assert vt.trace_index_at(x) in (g, g + 1)
+    assert vt.trace_at(vt.x_of_trace(3.5)) == 3
+
+
+def test_zoom_keeps_the_metre_under_the_pointer():
+    vt, ax = _axis_vt(_UNEVEN)
+    for mirrored in (False, True):
+        vt, ax = _axis_vt(_UNEVEN, mirrored=mirrored)
+        before = float(ax.walk_at(vt.trace_of_x(300.0)))
+        z = vt.zoomed(2.0, 300.0, 100.0)
+        assert float(ax.walk_at(z.trace_of_x(300.0))) == pytest.approx(before, abs=1e-9)
+        assert _wspan(ax, z) == pytest.approx(_wspan(ax, vt) / 2)
+
+
+def test_pan_moves_by_metres():
+    vt, ax = _axis_vt(_UNEVEN)
+    z = vt.zoomed(3.0, 400.0, 100.0)
+    p = z.panned(40.0, 0.0)
+    wl = lambda t: float(ax.walk_at(t.trace_lo))  # noqa: E731
+    wh = lambda t: float(ax.walk_at(t.trace_hi))  # noqa: E731
+    assert wl(z) - wl(p) == pytest.approx(40.0 / 800 * (wh(z) - wl(z)), abs=1e-9)
+
+
+def test_a_window_edge_inside_a_gap_survives_zoom_and_pan():
+    vt, ax = _axis_vt(_UNEVEN)
+    g = int(np.flatnonzero(np.diff(_UNEVEN) > 0.12)[0])
+    mid = (_UNEVEN[g] + _UNEVEN[g + 1]) / 2
+    centre = float(ax.units_at_walk(mid))
+    t = vt.with_window(centre - 6, centre + 20, vt.time_lo, vt.time_hi)
+    for out in (t.zoomed(1.5, 200.0, 10.0), t.zoomed(0.8, 600.0, 10.0), t.fit_width()):
+        assert out.trace_hi > out.trace_lo
+    p = t.panned(1.0, 0.0)
+    span = float(ax.walk_at(t.trace_hi) - ax.walk_at(t.trace_lo))
+    moved = float(ax.walk_at(t.trace_lo) - ax.walk_at(p.trace_lo))
+    assert moved == pytest.approx(span / 800, abs=1e-9)
+
+
+def test_true_scale_is_exact_on_an_uneven_axis():
+    vt, ax = _axis_vt(_UNEVEN)
+    vt = vt.zoomed(3.0, 400.0, 100.0)
+    npm = 20.0  # ns per metre
+    ts = true_scale_window(vt, 0.02, npm)
+    wspan = float(ax.walk_at(ts.trace_hi) - ax.walk_at(ts.trace_lo))
+    across = ts.width / wspan
+    down = ts.height / ((ts.time_hi - ts.time_lo) / npm)
+    assert across == pytest.approx(down, rel=0.01)
+
+
+def test_true_scale_narrows_a_long_line_about_its_middle_metre():
+    vt, ax = _axis_vt(_UNEVEN, height=3000)
+    ts = true_scale_window(vt, 0.02, 20.0)
+    assert (ts.time_lo, ts.time_hi) == (vt.t0_ns, vt.t_end)
+    mid = (float(ax.walk_at(vt.trace_lo)) + float(ax.walk_at(vt.trace_hi))) / 2
+    got = (float(ax.walk_at(ts.trace_lo)) + float(ax.walk_at(ts.trace_hi))) / 2
+    assert got == pytest.approx(mid, abs=1e-6)
+
+
+def test_paint_spans_cover_the_drawn_traces_and_skip_gaps():
+    vt, ax = _axis_vt(_UNEVEN)
+    spans = vt.paint_spans()
+    assert len(spans) >= 3
+    g = int(np.flatnonzero(np.diff(_UNEVEN) > 0.12)[0])
+    gx = vt.x_of_trace(float(ax.units_at_walk((_UNEVEN[g] + _UNEVEN[g + 1]) / 2)))
+    assert all(not (x0 < gx < x1) for x0, x1, _, _ in spans)
+    assert all(x0 < x1 for x0, x1, _, _ in spans)
+    lo, hi = ax.drawn()
+    px_per_m = vt.width / float(ax.walk_at(vt.trace_hi) - ax.walk_at(vt.trace_lo))
+    assert sum(x1 - x0 for x0, x1, _, _ in spans) == pytest.approx(
+        float((hi - lo).sum()) * px_per_m, abs=1.0
+    )
+
+
+def test_a_mirrored_axis_puts_the_last_trace_on_the_left():
+    vt, _ = _axis_vt(_UNEVEN, mirrored=True)
+    assert vt.x_of_trace(len(_UNEVEN) - 0.5) < vt.x_of_trace(0.5)
+    assert vt.trace_at(5.0) == len(_UNEVEN) - 1
+    spans = vt.paint_spans()
+    assert spans[0][0] < spans[-1][0]
+    assert all(x0 < x1 for x0, x1, _, _ in spans)
+
+
+def test_repeated_distances_give_finite_transforms():
+    d = np.array([0.0, 0.02, 0.02, 0.02, 0.06, 0.08, 0.08, 0.1, 0.12, 0.14, 0.16, 0.18])
+    vt, _ = _axis_vt(d)
+    for x in (0.0, 100.0, 799.0):
+        assert np.isfinite(vt.trace_of_x(x))
+        assert np.isfinite(vt.x_of_trace(vt.trace_of_x(x)))
+        vt.trace_index_at(x)
+        vt.trace_at(x)
+    for out in (vt.zoomed(2.0, 300.0, 5.0), vt.panned(10.0, 0.0), vt.fit_width()):
+        assert np.isfinite(out.trace_lo) and np.isfinite(out.trace_hi)
+    assert all(np.isfinite(v) for s in vt.paint_spans() for v in s[:2])

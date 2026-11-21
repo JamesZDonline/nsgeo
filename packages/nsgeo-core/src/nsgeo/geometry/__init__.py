@@ -5,6 +5,12 @@ from __future__ import annotations
 from nsgeo.geometry.fit import GridFit, fit_grid_from_corners
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement, Placement
+from nsgeo.geometry.spacing import (
+    check_gap_m,
+    gap_steps,
+    left_out,
+    usual_step,
+)
 from nsgeo.geometry.track import (
     END_LIMIT_M,
     Bridge,
@@ -36,10 +42,14 @@ __all__ = [
     "TrackFix",
     "TrackFrame",
     "TrackPlacement",
+    "check_gap_m",
     "fit_frame",
     "fit_grid_from_corners",
+    "gap_steps",
+    "left_out",
     "main_direction",
     "measure_spacing",
     "metres_outside",
     "track_from_log",
+    "usual_step",
 ]

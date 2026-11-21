@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from nsgeo_qgis.ui.trace_axis import TraceAxis
 
 MIN_TRACE_SPAN = 4.0
 MIN_SAMPLE_SPAN = 4.0
@@ -33,6 +37,8 @@ class ViewTransform:
     mirrored: bool = False
     # None means (0.0, n_traces): the window may not leave the data.
     bounds: tuple[float, float] | None = None
+    # A GPS line's metres-along-the-line layout; None keeps trace units linear.
+    axis: TraceAxis | None = None
 
     def __post_init__(self) -> None:
         # Checked before the axes: a bad bounds must always name itself.
@@ -79,6 +85,7 @@ class ViewTransform:
         *,
         bounds: tuple[float, float] | None = None,
         mirrored: bool = False,
+        axis: TraceAxis | None = None,
     ) -> ViewTransform:
         return cls(
             n_traces=n_traces,
@@ -93,6 +100,7 @@ class ViewTransform:
             time_hi=t0_ns + n_samples * dt_ns,
             mirrored=mirrored,
             bounds=bounds,
+            axis=axis,
         )
 
     @property
@@ -104,7 +112,32 @@ class ViewTransform:
         return self.t0_ns + self.n_samples * self.dt_ns
 
     # ---- forward and inverse ------------------------------------------------
+    def _walk_window(self) -> tuple[float, float]:
+        assert self.axis is not None
+        return (
+            float(self.axis.walk_at(self.trace_lo)),
+            float(self.axis.walk_at(self.trace_hi)),
+        )
+
+    def x_of_walk(self, w: float) -> float:
+        """Local pixel of a position `w` metres along the line (axis only)."""
+        wlo, whi = self._walk_window()
+        span = whi - wlo
+        if span <= 0.0:
+            return 0.0
+        if self.mirrored:
+            return (whi - w) / span * self.width
+        return (w - wlo) / span * self.width
+
+    def walk_of_x(self, x: float) -> float:
+        wlo, whi = self._walk_window()
+        if self.mirrored:
+            return whi - x / self.width * (whi - wlo)
+        return wlo + x / self.width * (whi - wlo)
+
     def x_of_trace(self, i: float) -> float:
+        if self.axis is not None:
+            return self.x_of_walk(float(self.axis.walk_at(i)))
         span = self.trace_hi - self.trace_lo
         if span == 0.0:  # n_traces == 0: a valid, empty-axis ViewTransform (see M6)
             return 0.0
@@ -113,6 +146,8 @@ class ViewTransform:
         return (i - self.trace_lo) / span * self.width
 
     def trace_of_x(self, x: float) -> float:
+        if self.axis is not None:
+            return float(self.axis.units_at_walk(self.walk_of_x(x)))
         span = self.trace_hi - self.trace_lo
         if self.mirrored:
             return self.trace_hi - x / self.width * span
@@ -148,6 +183,8 @@ class ViewTransform:
         return math.ceil(t) - 1 if self.mirrored else math.floor(t)
 
     def trace_index_at(self, x: float) -> int:
+        if self.axis is not None:
+            return self.axis.nearest_drawn(self.walk_of_x(x))
         # max(0, ...) on the upper bound first: n_traces == 0 must clamp to 0,
         # never to -1, which would be numpy's "last trace" rather than "no trace".
         upper = max(0, self.n_traces - 1)
@@ -156,12 +193,19 @@ class ViewTransform:
     def trace_at(self, x: float) -> int | None:
         """The trace whose column holds `x`, or None past the data (blank
         space on the ruler): unlike `trace_index_at` it never snaps."""
+        if self.axis is not None:
+            return self.axis.trace_at_walk(self.walk_of_x(x))
         c = self._column_at(x)
         return c if 0 <= c < self.n_traces else None
 
     def traces_between(self, x0: float, x1: float) -> tuple[int, int] | None:
         """The data traces whose columns the pixel span touches, ascending and
         clamped into the data; None when the span misses the data."""
+        if self.axis is not None:
+            wa, wb = sorted((self.walk_of_x(x0), self.walk_of_x(x1)))
+            lo, hi = self.axis.drawn()
+            hit = np.flatnonzero((hi > lo) & (lo <= wb) & (hi > wa))
+            return (int(hit[0]), int(hit[-1])) if hit.size else None
         first, last = sorted((self._column_at(x0), self._column_at(x1)))
         a, b = max(first, 0), min(last, self.n_traces - 1)
         return (a, b) if a <= b else None
@@ -228,6 +272,8 @@ class ViewTransform:
     def zoomed(self, factor: float, anchor_x: float, anchor_y: float) -> ViewTransform:
         """Scale both spans by 1/factor keeping the data point under the
         anchor pixel fixed. Clamped by with_window."""
+        if self.axis is not None:
+            return self._zoomed_walk(factor, anchor_x, anchor_y)
         at = self.trace_of_x(anchor_x)
         tt = self.time_of_y(anchor_y)
         t_span = (self.trace_hi - self.trace_lo) / factor
@@ -246,6 +292,8 @@ class ViewTransform:
     def panned(self, dx_px: float, dy_px: float) -> ViewTransform:
         """Drag by (dx, dy) pixels: positive dx moves the data right, i.e.
         the window moves to lower trace indices (higher ones when mirrored)."""
+        if self.axis is not None:
+            return self._panned_walk(dx_px, dy_px)
         dt = dx_px / self.width * (self.trace_hi - self.trace_lo)
         if not self.mirrored:
             dt = -dt
@@ -253,6 +301,59 @@ class ViewTransform:
         return self.with_window(
             self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
         )
+
+    def with_walk_window(
+        self, w_lo: float, w_hi: float, time_lo: float, time_hi: float
+    ) -> ViewTransform:
+        """`with_window` for a window given in metres along the line (axis only)."""
+        assert self.axis is not None
+        return self.with_window(
+            float(self.axis.units_at_walk(w_lo)),
+            float(self.axis.units_at_walk(w_hi)),
+            time_lo,
+            time_hi,
+        )
+
+    def _zoomed_walk(self, factor: float, anchor_x: float, anchor_y: float) -> ViewTransform:
+        wlo, whi = self._walk_window()
+        aw = self.walk_of_x(anchor_x)
+        tt = self.time_of_y(anchor_y)
+        w_span = (whi - wlo) / factor
+        s_span = (self.time_hi - self.time_lo) / factor
+        fx = anchor_x / self.width
+        fy = anchor_y / self.height
+        w_hi = aw + fx * w_span if self.mirrored else aw - fx * w_span + w_span
+        return self.with_walk_window(
+            w_hi - w_span, w_hi, tt - fy * s_span, tt - fy * s_span + s_span
+        )
+
+    def _panned_walk(self, dx_px: float, dy_px: float) -> ViewTransform:
+        wlo, whi = self._walk_window()
+        dw = dx_px / self.width * (whi - wlo)
+        if not self.mirrored:
+            dw = -dw
+        ds = -dy_px / self.height * (self.time_hi - self.time_lo)
+        return self.with_walk_window(wlo + dw, whi + dw, self.time_lo + ds, self.time_hi + ds)
+
+    def paint_spans(self) -> list[tuple[float, float, int, int]]:
+        """`(x0, x1, first, last)` for each visible run of equal columns, in
+        local pixels with `x0 < x1`, clipped to the window; `first`/`last` are
+        the run's traces that meet the window. A mirrored caller flips each
+        span's image. Gaps and left-out traces have no span. Axis only."""
+        assert self.axis is not None
+        wlo, whi = self._walk_window()
+        out: list[tuple[float, float, int, int]] = []
+        lo, hi = self.axis.drawn()
+        for first, last, r_lo, r_hi in self.axis.runs():
+            if r_hi <= wlo or r_lo >= whi:
+                continue
+            a, b = sorted((self.x_of_walk(max(r_lo, wlo)), self.x_of_walk(min(r_hi, whi))))
+            if not b > a:
+                continue
+            f = first + int(np.searchsorted(hi[first : last + 1], wlo, side="right"))
+            e = first + int(np.searchsorted(lo[first : last + 1], whi, side="left")) - 1
+            out.append((a, b, f, e))
+        return sorted(out)
 
     def resized(self, width: int, height: int) -> ViewTransform:
         # replace() carries mirrored and bounds along with the window.
@@ -293,6 +394,8 @@ def true_scale_window(
     Otherwise (a long line) keeps the whole record and narrows the trace span
     about the window's middle. `with_window` clamps at the minimum spans.
     """
+    if t.axis is not None:
+        return _true_scale_walk(t, ns_per_metre)
     across = t.width / ((t.trace_hi - t.trace_lo) * metres_per_trace_unit)  # px per metre along
     span = t.height / across * ns_per_metre  # ns that make px/m equal
     record = t.n_samples * t.dt_ns
@@ -303,6 +406,23 @@ def true_scale_window(
     traces = t.width / down / metres_per_trace_unit
     mid = (t.trace_lo + t.trace_hi) / 2
     return t.with_window(mid - traces / 2, mid + traces / 2, t.t0_ns, t.t_end)
+
+
+def _true_scale_walk(t: ViewTransform, ns_per_metre: float) -> ViewTransform:
+    """`true_scale_window` on a trace axis: the metres across are the window's
+    own, and the long-line branch narrows about the middle metre."""
+    assert t.axis is not None
+    wlo, whi = t._walk_window()
+    across = t.width / (whi - wlo)  # px per metre along
+    span = t.height / across * ns_per_metre
+    record = t.n_samples * t.dt_ns
+    if span <= record:
+        mid = (t.time_lo + t.time_hi) / 2
+        return t.with_window(t.trace_lo, t.trace_hi, mid - span / 2, mid + span / 2)
+    down = t.height / (record / ns_per_metre)
+    metres = t.width / down
+    mid_w = (wlo + whi) / 2
+    return t.with_walk_window(mid_w - metres / 2, mid_w + metres / 2, t.t0_ns, t.t_end)
 
 
 def nice_ticks(vmin: float, vmax: float, target: int = 6) -> np.ndarray:

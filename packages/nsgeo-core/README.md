@@ -77,6 +77,10 @@ Coordinate frames and trace placement.
 | `main_direction` | The axial azimuth in [0, 180) the tracks share (length-weighted, lines within `ALONG_DEG`), or `None` when they share none. |
 | `measure_spacing` | The median gap between neighbouring along lines, or `None` with fewer than two or no main direction. |
 | `metres_outside` | Metres of trace-to-trace steps whose midpoint lies outside a `Grid`, and whether any trace lies inside. |
+| `check_gap_m` | Raise `ValueError` unless Gap over is `None` (automatic) or a finite length above 0. |
+| `gap_steps` | Per step along a GPS line: is it longer than Gap over (6 usual steps when automatic). |
+| `left_out` | Per trace: gaps on both sides (lifted over an obstacle); never the first or last trace. |
+| `usual_step` | The median step between neighbouring traces along a line. |
 | `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
 | `END_LIMIT_M` | A start or end run longer than this many metres (2.0) is flagged. |
 
