@@ -233,6 +233,18 @@ def migrate_fk(
     return np.real(np.fft.ifft2(unsorted))[:n_samples, pad : pad + n_traces]
 
 
+# The most columns, as a multiple of the trace count, a line's even grid may have.
+MAX_EVEN_GROWTH = 4
+
+
+def _even_columns(x: np.ndarray) -> int:
+    """How many columns `resample_even` would give the line at its usual step."""
+    step = usual_step(x)
+    if not (math.isfinite(step) and step > 0):
+        return 0
+    return int(math.ceil(abs(float(x[-1]) - float(x[0])) / step)) + 1
+
+
 def _needs_resample(trace_x_m: np.ndarray | None) -> bool:
     """True for a trace axis with a usable usual step whose steps are not even."""
     if trace_x_m is None:
@@ -303,9 +315,11 @@ class MigrateFk:
 
     def apply(self, rg: Radargram) -> Radargram:
         x = rg.trace_x_m
-        if x is not None and _needs_resample(x):
+        if x is not None and _needs_resample(x) and _even_columns(x) <= MAX_EVEN_GROWTH * x.size:
             # A GPS line at its true spacing: onto an even grid at the usual
-            # step (nothing in gaps), migrate, read each trace back.
+            # step (nothing in gaps), migrate, read each trace back. A line whose
+            # even grid would be more than MAX_EVEN_GROWTH times its trace count
+            # (a huge jump) takes the plain path below instead.
             even, x0, step = resample_even(rg.data, x, rg.gap_m)
             migrated = migrate_fk(
                 even,

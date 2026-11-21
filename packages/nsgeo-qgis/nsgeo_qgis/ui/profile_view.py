@@ -47,6 +47,7 @@ the one `drawImage`, never a mirrored copy of the image.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -112,6 +113,16 @@ def cutoff_label(end_ns: float, velocity: VelocityModel | None) -> str:
         depth = float(velocity.depth_at(np.array([end_ns]))[0])
         label += f" \u00b7 {depth:.2f} m"
     return label
+
+
+def _centres(t: ViewTransform, points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Local (x, y) of (trace, time) points at their column centres. With a
+    trace axis the trace -> x map runs as one array pass; without, today's
+    per-point code."""
+    if t.axis is None or not points:
+        return [(t.x_of_trace(trace + 0.5), t.y_of_time(time_ns)) for trace, time_ns in points]
+    xs = t.x_of_traces(np.array([trace for trace, _ in points], dtype=float) + 0.5)
+    return [(float(x), t.y_of_time(time_ns)) for x, (_, time_ns) in zip(xs, points, strict=True)]
 
 
 class ProfileView(QWidget):
@@ -909,7 +920,7 @@ class ProfileView(QWidget):
         """Local (unoffset) (x, y) of each pick marker's centre. Factored
         out the same way `_selection_bounds` is, and for the same reason:
         a plain list of coordinates a test can assert on directly."""
-        return [(t.x_of_trace(trace + 0.5), t.y_of_time(time_ns)) for trace, time_ns in self._picks]
+        return _centres(t, self._picks)
 
     def _paint_picks(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         p.setPen(QPen(QColor(255, 255, 255), 1))
@@ -939,10 +950,7 @@ class ProfileView(QWidget):
     def _velocity_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
         """Local (x, y) of each working fit point, in list order, so an
         index into this list is the index `velocity_point_discarded` emits."""
-        return [
-            (t.x_of_trace(trace + 0.5), t.y_of_time(time_ns))
-            for trace, time_ns in self._velocity_points
-        ]
+        return _centres(t, self._velocity_points)
 
     def _paint_velocity_fit(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         faint = QColor(CURSOR_COLOUR)
@@ -952,10 +960,7 @@ class ProfileView(QWidget):
             lit = None
 
         def _draw(curve: list[tuple[float, float]]) -> None:
-            pts = [
-                QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
-                for trace, time_ns in curve
-            ]
+            pts = [QPointF(r.left() + x, r.top() + y) for x, y in _centres(t, curve)]
             for a, b in zip(pts, pts[1:], strict=False):
                 p.drawLine(a, b)
 

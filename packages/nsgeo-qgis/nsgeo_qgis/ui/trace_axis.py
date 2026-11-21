@@ -30,6 +30,7 @@ class TraceAxis:
     _hi: np.ndarray = field(init=False, repr=False)
     _runs: tuple[tuple[int, int, float, float], ...] = field(init=False, repr=False)
     _shown: np.ndarray = field(init=False, repr=False)
+    _sign: float = field(init=False, repr=False, default=1.0)
 
     @classmethod
     def from_distance(cls, distance: Any, gap_m: float | None = None) -> TraceAxis:
@@ -46,6 +47,7 @@ class TraceAxis:
             raise ValueError("a trace axis needs a line with some length")
         steps = np.diff(d)
         sign = 1.0 if d[-1] >= d[0] else -1.0
+        object.__setattr__(self, "_sign", sign)
         if np.any(steps * sign < 0):
             raise ValueError("a trace axis needs a distance that never turns back")
         d.flags.writeable = False
@@ -96,7 +98,7 @@ class TraceAxis:
 
     @property
     def sign(self) -> float:
-        return 1.0 if self.distance[-1] >= self.distance[0] else -1.0
+        return self._sign
 
     def walk_at(self, units: Any) -> Any:
         """Metres along the line at trace `units`, rising with them."""

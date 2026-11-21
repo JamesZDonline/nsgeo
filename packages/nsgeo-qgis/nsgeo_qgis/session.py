@@ -788,18 +788,26 @@ class SiteSession(QObject):
             placement = dataclasses.replace(line.placement, travel_shift=metres)  # type: ignore[type-var]
             self._replace_line(key, dataclasses.replace(line, placement=placement))
         self._set_dirty(True)
+        # Before the signal, so a view told the line moved never draws the old
+        # record under the new axis; `stack_changed` follows the signal.
+        reattached = self._reattach_gps_sources([key for key, _ in changing])
         self.lines_changed.emit()
-        self._reattach_gps_sources([key for key, _ in changing])
+        for key in reattached:
+            self.stack_changed.emit(key)
 
-    def _reattach_gps_sources(self, keys: Iterable[str]) -> None:
+    def _reattach_gps_sources(self, keys: Iterable[str]) -> list[str]:
         """A GPS line's source carries its walked distance, so a changed
-        placement (a destagger) re-attaches it and tells whoever shows it. Call
-        after the site is dirty. A line with no stack yet has nothing to attach."""
+        destagger or Gap over re-attaches it. Call after the site is dirty and
+        before `lines_changed`; returns the keys re-attached, for the caller to
+        emit `stack_changed` for afterwards. A line with no stack, or a stack
+        with no source, has nothing to attach."""
+        done = []
         for key in keys:
             stack = self._require_site().stacks.get(key)
-            if stack is not None:
+            if stack is not None and stack.source is not None:
                 self._attach_source(key, stack)
-                self.stack_changed.emit(key)
+                done.append(key)
+        return done
 
     def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
         """Take `keys` (all known) out of the site and every per-line
@@ -970,12 +978,23 @@ class SiteSession(QObject):
         rebuilt = {key_of[id(ln)]: ln for ln in site.lines}
         self._lines_by_key.clear()
         self._lines_by_key.update(rebuilt)
+        reattached: list[str] = []
         if applied or reordered:
             self._set_dirty(True)
+            # Only a changed destagger or Gap over changes what the record is;
+            # re-attach before the signal (see `set_travel_shift`).
+            reattached = self._reattach_gps_sources(
+                [
+                    key
+                    for key, old, new in applied
+                    if isinstance(old, TrackPlacement)
+                    and isinstance(new, TrackPlacement)
+                    and (old.travel_shift != new.travel_shift or old.gap_m != new.gap_m)
+                ]
+            )
             self.lines_changed.emit()
-        self._reattach_gps_sources(
-            [key for key, _, new in applied if isinstance(new, TrackPlacement)]
-        )
+        for key in reattached:
+            self.stack_changed.emit(key)
         return EditOutcome(
             changed=tuple(key for key, _, _ in applied),
             reordered=reordered,

@@ -243,3 +243,44 @@ def test_the_bulk_destagger_reattaches_a_gps_lines_source(site):
     np.testing.assert_allclose(after - before, 0.2)
     assert spy.calls == [(IN_A,)]
     assert dirty_at_emit == [True]
+
+
+def test_a_label_only_or_grid_only_edit_does_not_reattach_a_gps_lines_source(site):
+    """M2: only a changed destagger or Gap over changes what the record is."""
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    source = s.stack_for(IN_A).source
+    spy = Spy(s.stack_changed)
+    s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, label="renamed")])
+    assert spy.calls == [] and s.stack_for(IN_A).source is source
+    s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, grid_id="B")])
+    assert s.line_for_key(IN_A).placement.grid_id == "B"
+    assert spy.calls == [] and s.stack_for(IN_A).source is source
+
+
+def test_a_gap_over_edit_reattaches_and_a_stack_with_no_source_is_not_touched(site):
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    s.stack_for(LOOSE).source = None  # a stack that never had a source
+    stack = s.stack_for(LOOSE)
+    spy = Spy(s.stack_changed)
+    s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, gap_m=0.7)])
+    assert spy.calls == [(IN_A,)]
+    assert s.stack_for(IN_A).source.gap_m == 0.7
+    s.edit_lines([TrackEdit(LOOSE, s.line_for_key(LOOSE).placement, travel_shift=0.3)])
+    s.set_travel_shift([LOOSE], 0.4)
+    assert spy.calls == [(IN_A,)]
+    assert s.stack_for(LOOSE) is stack and stack.source is None
+
+
+def test_the_source_is_reattached_before_lines_changed(site):
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    log = []
+    s.lines_changed.connect(lambda: log.append(("lines", s.stack_for(IN_A).source.gap_m)))
+    s.stack_changed.connect(lambda k: log.append(("stack", k)))
+    s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, gap_m=0.7)])
+    assert log == [("lines", 0.7), ("stack", IN_A)]
+    log.clear()
+    s.set_travel_shift([IN_A], 0.2)
+    assert log == [("lines", 0.7), ("stack", IN_A)]

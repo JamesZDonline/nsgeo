@@ -98,7 +98,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry import TrackPlacement
+from nsgeo.geometry import TrackPlacement, left_out
 from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
@@ -1552,6 +1552,20 @@ class ProfileDock(QgsDockWidget):
         shown = rg.zero_ns
         # The box and the times are on the drawn axis; the fit's clock is the line's own.
         times = retime_ns(rg.times_ns(), shown, zero)
+        data = rg.data
+        keep = None
+        line = self.session.line_for_key(self._working_key)  # type: ignore[arg-type]
+        if isinstance(line.placement, TrackPlacement):
+            # A lift's air traces are left out of the profile (the axis's own
+            # rule), so the tracer never sees them; each trace keeps its distance.
+            out = left_out(np.asarray(distance, dtype=float), line.placement.gap_m)
+            if out.any():
+                keep = np.flatnonzero(~out)
+                data = data[:, keep]
+                distance = np.asarray(distance, dtype=float)[keep]
+                lo, hi = sorted((first_trace, last_trace))
+                first_trace = int(np.searchsorted(keep, lo))
+                last_trace = max(first_trace, int(np.searchsorted(keep, hi, side="right")) - 1)
         box = TraceBox(
             first_trace,
             last_trace,
@@ -1560,9 +1574,11 @@ class ProfileDock(QgsDockWidget):
         )
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            dots = trace_hyperbola(rg.data, times, distance, box)
+            dots = trace_hyperbola(data, times, distance, box)
         finally:
             QApplication.restoreOverrideCursor()
+        if keep is not None:
+            dots = [(int(keep[tr]), t) for tr, t in dots]
         self._velocity_points = [(int(tr), float(retime_ns(t, zero, 0.0))) for tr, t in dots]
         self._just_saved = None
 

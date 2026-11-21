@@ -2809,3 +2809,34 @@ def test_a_pick_on_a_left_out_trace_is_still_drawn(make_view):
     ex, ey = v._velocity_positions(t)[0]
     _click(v, Qt.MouseButton.RightButton, QPoint(int(r.left() + ex), int(r.top() + ey)))
     assert discarded == [0]
+
+
+def test_painting_a_gps_profile_interpolates_a_handful_of_times(make_view, monkeypatch):
+    """I1: picks, working dots and saved fits map in one array pass each, and
+    the walk window is not recomputed per point."""
+    from nsgeo_qgis.ui import trace_axis as ta
+    from nsgeo_qgis.ui.trace_axis import TraceAxis
+
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    rg = _rg()
+    d = np.cumsum(np.full(rg.n_traces, 0.02))
+    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, d, axis=TraceAxis.from_distance(d))
+    v.set_image(RadargramImage(rg).image)
+    ns = rg.t0_ns + 10 * rg.dt_ns
+    pts = [(i, ns) for i in range(30)]
+    curve = [(i * 2.0, ns) for i in range(100)]
+    v.set_picks(pts)
+    v.set_velocity_fit(pts, curve)
+    v.set_saved_velocity_fits([curve, curve, curve])
+    real = ta.metres_at
+    calls = []
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(ta, "metres_at", spy)
+    v.grab_image()
+    assert len(calls) <= 15  # one per array pass, never one per point

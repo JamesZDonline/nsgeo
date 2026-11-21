@@ -10,7 +10,7 @@ x = 0 and `trace_lo` at the right edge; the trace index stays the recorded one.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -39,6 +39,8 @@ class ViewTransform:
     bounds: tuple[float, float] | None = None
     # A GPS line's metres-along-the-line layout; None keeps trace units linear.
     axis: TraceAxis | None = None
+    # The window's ends in walk metres, worked out once (axis only).
+    _wwin: tuple[float, float] = field(init=False, repr=False, compare=False, default=(0.0, 0.0))
 
     def __post_init__(self) -> None:
         if self.axis is not None and self.axis.distance.size != self.n_traces:
@@ -76,6 +78,9 @@ class ViewTransform:
                 f"t0_ns={self.t0_ns}, dt_ns={self.dt_ns}, "
                 f"trace=[{self.trace_lo}, {self.trace_hi}), time=[{self.time_lo}, {self.time_hi})"
             )
+        if self.axis is not None:
+            wl, wh = self.axis.walk_at(np.array([self.trace_lo, self.trace_hi]))
+            object.__setattr__(self, "_wwin", (float(wl), float(wh)))
 
     @classmethod
     def fit(
@@ -118,10 +123,19 @@ class ViewTransform:
     # ---- forward and inverse ------------------------------------------------
     def _walk_window(self) -> tuple[float, float]:
         assert self.axis is not None
-        return (
-            float(self.axis.walk_at(self.trace_lo)),
-            float(self.axis.walk_at(self.trace_hi)),
-        )
+        return self._wwin
+
+    def x_of_traces(self, i: np.ndarray) -> np.ndarray:
+        """`x_of_trace` for an array of trace units (axis only: one interpolation)."""
+        assert self.axis is not None
+        wlo, whi = self._wwin
+        span = whi - wlo
+        w = self.axis.walk_at(np.asarray(i, dtype=float))
+        if span <= 0.0:
+            return np.zeros_like(w)
+        if self.mirrored:
+            return (whi - w) / span * self.width
+        return (w - wlo) / span * self.width
 
     def x_of_walk(self, w: float) -> float:
         """Local pixel of a position `w` metres along the line (axis only)."""

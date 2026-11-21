@@ -3365,6 +3365,44 @@ def test_fit_and_one_to_one_keep_a_gps_lines_axis(gps_open):
         assert dock.view.transform.axis is axis
     dock.view.zoom_at(2.0, 100.0, 50.0)
     assert dock.view.transform.axis is axis
-    if dock.view.can_true_scale():
-        dock.view.true_scale()
-        assert dock.view.transform.axis is axis
+    assert dock.view.can_true_scale()
+    dock.view.true_scale()
+    assert dock.view.transform.axis is axis
+
+
+def test_a_velocity_box_across_a_lift_traces_nothing_on_a_left_out_trace(bare, monkeypatch):
+    """M3: the tracer never sees the air traces a lift leaves out of the profile."""
+    from nsgeo.geometry import left_out
+    from nsgeo_qgis.ui import profile_dock as pd
+    from plugin_testing import LAT0, LON0, M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.set_site_crs("EPSG:32632")
+    metres = {0: 0.0, 99: 9.9, 100: 11.0, 101: 12.1, 102: 13.2, 199: 22.9}
+    track = [(t, LAT0 + m / M_PER_DEG, LON0, 4) for t, m in metres.items()]
+    path = synthetic_gps_dzt(tmp_path / "raw", "FILE__001.DZT", track, 200, traces_per_metre=10.0)
+    line = open_gps(path)
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    out = left_out(line.distance_along(), None)
+    assert out[100] and out[101]
+    seen = {}
+
+    def spy(data, times, distance, box):
+        seen["n"] = data.shape[1]
+        seen["distance"] = np.array(distance)
+        return [
+            (c, float(times[len(times) // 2])) for c in range(box.first_trace, box.last_trace + 1)
+        ]
+
+    monkeypatch.setattr(pd, "trace_hyperbola", spy)
+    dock._working_key = key
+    dock._trace_box(90, 110, 5.0, 20.0)
+    traces = [tr for tr, _ in dock.velocity_points()]
+    assert traces and not any(out[tr] for tr in traces)
+    assert seen["n"] == 200 - 2 == len(seen["distance"])
+    assert set(traces) == set(range(90, 111)) - {100, 101}
+    np.testing.assert_allclose(seen["distance"], line.distance_along()[~out])

@@ -643,3 +643,47 @@ def test_repeated_distances_give_finite_transforms():
     for out in (vt.zoomed(2.0, 300.0, 5.0), vt.panned(10.0, 0.0), vt.fit_width()):
         assert np.isfinite(out.trace_lo) and np.isfinite(out.trace_hi)
     assert all(np.isfinite(v) for s in vt.paint_spans() for v in s[:2])
+
+
+def _axis_transform(n=400, **kw):
+    d = np.cumsum(np.full(n, 0.05))
+    return ViewTransform.fit(
+        n_traces=n, n_samples=64, t0_ns=0.0, dt_ns=0.2, width=800, height=300,
+        axis=TraceAxis.from_distance(d), **kw,
+    )  # fmt: skip
+
+
+def test_an_axis_transform_interpolates_once_per_trace_lookup_not_three_times(monkeypatch):
+    """I1: the walk window is worked out once, not on every scalar call."""
+    from nsgeo_qgis.ui import trace_axis as ta
+
+    t = _axis_transform()
+    real = ta.metres_at
+    calls = []
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(ta, "metres_at", spy)
+    for i in range(50):
+        t.x_of_trace(i + 0.5)
+    assert len(calls) == 50
+    calls.clear()
+    t.trace_of_x(100.0)
+    t.walk_of_x(100.0)
+    assert len(calls) == 0
+    calls.clear()
+    xs = t.x_of_traces(np.arange(50) + 0.5)
+    assert len(calls) == 1
+    np.testing.assert_allclose(xs, [t.x_of_trace(i + 0.5) for i in range(50)])
+
+
+def test_the_walk_window_follows_replace_and_with_window():
+    t = _axis_transform()
+    w = t.with_window(100.0, 200.0, 0.0, 12.0)
+    assert w.x_of_trace(100.0) == pytest.approx(0.0)
+    assert w.x_of_trace(200.0) == pytest.approx(800.0)
+    m = dataclasses.replace(w, mirrored=True)
+    assert m.x_of_trace(100.0) == pytest.approx(800.0)
+    assert w == dataclasses.replace(w) and hash(w) == hash(dataclasses.replace(w))

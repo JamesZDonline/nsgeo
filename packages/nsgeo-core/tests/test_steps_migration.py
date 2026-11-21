@@ -591,6 +591,27 @@ def _ramp_axis():
     return np.concatenate([[0.0], np.cumsum(steps)])
 
 
+def test_an_even_trace_axis_migrates_exactly_as_dx():
+    n = 120
+    data = _diffraction(256, n, DT_NS, 0.02, V, 60, 20.0)
+    a = build_step("migrate_fk", velocity_m_ns=V).apply(
+        Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02)
+    )
+    b = build_step("migrate_fk", velocity_m_ns=V).apply(
+        Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02, trace_x_m=np.arange(n) * 0.02)
+    )
+    np.testing.assert_allclose(a.data, b.data, atol=1e-9 * np.abs(a.data).max())
+
+
+def test_a_huge_jump_takes_the_plain_path_not_a_giant_even_grid():
+    x = np.concatenate([np.arange(60) * 0.02, 500.0 + np.arange(60) * 0.02])
+    data = _diffraction(128, x.size, DT_NS, 0.02, V, 30, 15.0)
+    rg = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02, trace_x_m=x)
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(rg).data
+    plain = migrate_fk(data, dt_ns=DT_NS, dx_m=0.02, velocity_m_ns=V)
+    np.testing.assert_array_equal(out, plain)
+
+
 def _diffraction_on(x, apex_x, v=V, apex_t_ns=20.0):
     times = np.arange(256) * DT_NS
     data = np.zeros((256, x.size))

@@ -85,7 +85,7 @@ def test_file028s_lift_has_no_traces_left_out(shown):
 @pytest.mark.skipif(not CAMPUS_LINES, reason="needs the campus lines in tests/data/local")
 def test_a_tape_lines_profile_gets_no_axis(shown):
     session, dock, show = shown
-    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 12.0, 12.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 12.0, 12.0, "EPSG:32632", 0.5))
     (path,) = [p for p in CAMPUS_LINES if p.stem == "FILE__007"]
     t = show(Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__007")))
     assert t.axis is None
