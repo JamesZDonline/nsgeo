@@ -130,7 +130,7 @@ Display gain [slider] 99.0 % [colormap] [Difference label] [Fit|▾] [1:1] [Slic
 
 - **Fit** is a `QToolButton` in `MenuButtonPopup` mode (§4.3).
 - **1:1** is a `QToolButton` (§4.4).
-- **Slice band** is a checkable `QToolButton` (§4.2).
+- **Slice band** is a checkable `QToolButton` (§4.2). *Superseded by §4.14 W1: a "Show slice band" `QCheckBox` after the colormap.*
 - The velocity label becomes a `slices_dock.ElidedLabel`, imported, not moved (see §3.1). It takes the remaining width with stretch 1, elides on the right, and
   keeps its full text in its tooltip. The spacer before it goes.
 
@@ -140,7 +140,7 @@ label elides.
 
 ### 4.2 #131: the Slice band button
 
-- **Placement and default.** A checkable "Slice band" button after 1:1, on by default.
+- **Placement and default.** A checkable "Slice band" button after 1:1, on by default. *Placement and widget superseded by §4.14 W1; the behaviour below stands.*
 - **Turning it off** hides the band in the view. The dock keeps `_slice_band` (the cube-clock
   window from `SlicesDock.window_changed`), so nothing is forgotten.
 - **Turning it back on** draws the band at the current window, even if the window changed while
@@ -459,7 +459,7 @@ Nothing else is needed for it now.
 
 - **`time` handle (the cutoff):** unchanged. The profile draws `stack.result_bypassing(row)`,
   i.e. every step except the cutoff.
-- **`row` handle (Time zero):** the profile draws **what the step receives**,
+- **`row` handle (Time zero):** *superseded by §4.14 Q3 (the bypass, with this as its fallback).* The profile draws **what the step receives**,
   `stack.intermediate(row − 1)`, or the source for row 0.
   - On the user's lines Time zero is first, so that is the record as recorded. The direct wave,
     which the zero is judged by, is drawn plainly.
@@ -625,7 +625,8 @@ lines:
   - The line shows only in `sample` mode, while the row is selected.
   - Selecting shows the line at 0 ns on the line's clock, with the dimming above it.
   - Selecting draws Time zero's input, not the bypass. On a line with `migrate_fk` after Time
-    zero this shows the input, where the bypass would have refused.
+    zero this shows the input, where the bypass would have refused. *Superseded by §4.14 Q3:
+    the bypass is drawn, and this input view is its fallback.*
   - The drag snaps to rows and stays in range.
   - A released drag writes `sample`, and the form shows it.
   - A typed `sample` moves the line.
