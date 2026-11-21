@@ -275,7 +275,8 @@ def place_picks(
 
 class ParaViewExport:
     """Writes a grid's ParaView folder. `dock` is the Slices dock (read only). `surfaces` (a
-    `Surfaces`) puts the grid's built surfaces in features.vtp; without it that file is empty."""
+    `Surfaces`) puts the grid's built surfaces in features.vtp (without it that file is empty).
+    It is also the fallback for a grid whose 3-D record is empty (#203)."""
 
     def __init__(self, session: Any, dock: Any, surfaces: Any = None) -> None:
         self.session = session

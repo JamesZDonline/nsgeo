@@ -160,11 +160,9 @@ class Surfaces:
         self.refused: list[str] = []
         #: Each grid's newest built choice, kept so `defaults()` never scans the folder (#203).
         self._built_choices: dict[str, dict[str, float | str] | None] = {}
-        # A test may pass a session without these signals.
-        for name in ("site_opened", "site_closed", "features_changed"):
-            signal = getattr(session, name, None)
-            if signal is not None:
-                signal.connect(self.forget_built_choices)
+        session.site_opened.connect(self.forget_built_choices)
+        session.site_closed.connect(self.forget_built_choices)
+        session.features_changed.connect(self.forget_built_choices)
 
     # ---- reading ------------------------------------------------------------
     def records(self) -> list[FeatureRecord]:

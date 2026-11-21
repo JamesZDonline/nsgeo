@@ -572,6 +572,33 @@ def open_walk_site(tmp_path: Path, *, edit: Callable[[dict], None] | None = None
     return session
 
 
+@contextlib.contextmanager
+def reopened(session: Any, layers: Any) -> Any:
+    """Reopen the saved site in a new session, as after quitting without Save site. Yields
+    `(again, dock2, export2, reopened)`; `export2.surfaces` is `reopened`, as the plugin does."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from nsgeo_qgis.surfaces import Surfaces
+    from qgis.core import QgsProject
+
+    layers.detach()
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=QgsProject.instance())
+    dock2 = None
+    try:
+        again.open_site(session.json_path)
+        dock2 = Dock(again)
+        export2 = ParaViewExport(again, dock2)
+        surfaces2 = Surfaces(again, layers2, export_for=lambda: export2)
+        export2.surfaces = surfaces2
+        yield again, dock2, export2, surfaces2
+    finally:
+        layers2.detach()
+        if dock2 is not None:
+            dock2.dispose()
+
+
 # ---- the export dialog and the background export task -------------------------------
 
 

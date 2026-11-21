@@ -10,7 +10,7 @@ import pytest
 from nsgeo.slices import SurfaceSettings
 from nsgeo_qgis.session import Pick
 from nsgeo_qgis.ui.site_scope import source_keys
-from plugin_testing import Dock, needs_walk_site, open_walk_site
+from plugin_testing import Dock, needs_walk_site, open_walk_site, reopened
 
 pytestmark = needs_walk_site
 
@@ -62,12 +62,7 @@ def walk(qgis_app, tmp_path):
 def test_the_walk_site_keeps_a_built_surface_fresh(walk):
     """#204: an untouched export of the float-tail cell leaves the surface fresh. #203: so does
     a reopen without Save site, whatever the Slices panel's transform then is."""
-    from nsgeo_qgis.layers import SiteLayers
-    from nsgeo_qgis.paraview_export import ParaViewExport
-    from nsgeo_qgis.session import SiteSession
-    from nsgeo_qgis.surfaces import Surfaces
     from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
-    from qgis.core import QgsProject
 
     session, dock, export, layers, surfaces = walk
     dock.transform_combo = types.SimpleNamespace(value=lambda: "amp_abs")
@@ -90,18 +85,8 @@ def test_the_walk_site_keeps_a_built_surface_fresh(walk):
     assert session.volume_record(GRID)["cell"] == 0.05
     assert surfaces.state(record.feature_id).stale == ()
     # A reopen of the saved copy: the round trip's record was never saved, so it is empty.
-    layers.detach()
-    again = SiteSession()
-    layers2 = SiteLayers(again, project=QgsProject.instance())
-    again.open_site(session.json_path)
-    dock2 = Dock(again)
-    try:
+    with reopened(session, layers) as (again, dock2, _export2, again_surfaces):
         dock2.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
-        export2 = ParaViewExport(again, dock2)
-        reopened = Surfaces(again, layers2, export_for=lambda: export2)
-        export2.surfaces = reopened
         assert again.volume_record(GRID) == {}
-        assert reopened.state(record.feature_id).stale == ()
-    finally:
-        layers2.detach()
-        dock2.dispose()
+        state = again_surfaces.state(record.feature_id)
+        assert state.built and state.stale == ()
