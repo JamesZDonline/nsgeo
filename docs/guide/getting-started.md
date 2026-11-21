@@ -573,8 +573,11 @@ changed.
   **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
 - Select a **Time cutoff** step, or a **Time zero** step set to **sample**, and
   a line on the profile marks it. Drag the line or type the value, and the two
-  always agree. While Time zero is selected the profile shows the record it
-  receives, with the rows it crops dimmed above the line, which reads 0 ns.
+  always agree. While Time zero is selected the profile shows the processed
+  record without Time zero, to its full depth (a time cutoff after it is left
+  out too), with the rows it crops dimmed above the line, which reads 0 ns.
+  Where a later step refuses that record (migration does), it shows the record
+  Time zero receives instead.
   Switching its **Mode** to **sample** starts the row at the automatic first
   break, so nothing moves until you drag.
 
