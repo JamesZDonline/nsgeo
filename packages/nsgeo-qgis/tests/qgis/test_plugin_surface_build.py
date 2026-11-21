@@ -532,6 +532,34 @@ def test_building_then_exporting_at_the_dialogs_defaults_keeps_surfaces_fresh(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("cell", [0.15 - 0.1, 0.1234, 0.05000000000000002])
+@pytest.mark.parametrize("where", ["panel", "record"])
+def test_an_untouched_export_keeps_a_surface_fresh_at_any_cell(built_site, cell, where):
+    """#204: the dialog's Cell box has 3 decimals, so an untouched export writes back the
+    rounded cell. The build must have used that same cell."""
+    from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
+
+    session, _, export, _, surfaces = built_site
+    if where == "panel":
+        session.remember_slice_resolution(GRID, cell=cell)
+    else:
+        session.remember_volume(GRID, cell=cell)
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    built = surfaces.state(record.feature_id).report["resolution"]["cell"]
+    assert built == round(cell, 3)
+    dialog = ParaViewExportDialog(
+        [GRID], GRID, export.defaults, export.summary, "", hints_for=export.panel_values
+    )
+    try:
+        choice = dialog.choice()
+    finally:
+        dialog.deleteLater()
+    session.remember_volume(GRID, **choice.to_record())  # as `export_paraview` does
+    assert session.volume_record(GRID)["cell"] == built
+    assert surfaces.state(record.feature_id).stale == ()
+
+
 def test_one_too_small_surface_never_blocks_its_grids_rebuild(built_site):
     session, _, _, layers, surfaces = built_site
     ok, _ = _surface(built_site, "Ok")

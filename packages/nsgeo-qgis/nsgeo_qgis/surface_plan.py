@@ -315,6 +315,17 @@ def remembered_step(dz_ns: float) -> float:
     return rounded if rounded > 0.0 else dz_ns
 
 
+def remembered_cell(cell: float, floor: float) -> float:
+    """The 3-D cell a build uses and remembers: as the export dialog shows it, to three
+    decimals (#204), so a float tail such as 0.05000000000000002 lands on 0.05. When that rounds
+    below `floor` (the grid's smallest safe cell) it rounds up instead; never below the
+    dialog's minimum, 0.001."""
+    rounded = round(cell, 3)
+    if rounded < floor - 1e-9:
+        rounded = round(math.ceil(cell * 1000 - 1e-6) / 1000, 3)
+    return max(rounded, 0.001)
+
+
 def remembered_end(t1_ns: float | None) -> float | None:
     """The depth end a build remembers for `t1_ns`: rounded UP to four decimals (the export
     dialog's precision), so the next fill is clipped at nothing this one was not. A

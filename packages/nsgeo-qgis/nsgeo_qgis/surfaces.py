@@ -69,6 +69,7 @@ from nsgeo_qgis.surface_plan import (
     new_feature_id,
     now_iso,
     rebuild_refusal,
+    remembered_cell,
     remembered_end,
     remembered_step,
     remove_refusal,
@@ -384,7 +385,7 @@ class Surfaces:
             # Once a build or an export remembers a depth end, the panel never reaches it (R10).
             "resolution": input_hash(
                 {
-                    "cell": choice.cell,
+                    "cell": remembered_cell(choice.cell, export.cell_floor(record.grid_id)),
                     "dz_ns": remembered_step(choice.dz_ns),
                     "t1_ns": remembered_end(choice.t1_ns),
                 }
@@ -574,7 +575,11 @@ class Surfaces:
         choice = export.defaults(grid_id)
         # The export dialog shows the depth step to four decimals, so an untouched dialog writes
         # that back: build with it, or the next export would call the surface stale (R11).
-        choice = replace(choice, dz_ns=remembered_step(choice.dz_ns))
+        choice = replace(
+            choice,
+            cell=remembered_cell(choice.cell, export.cell_floor(grid_id)),
+            dz_ns=remembered_step(choice.dz_ns),
+        )
 
         def report(done: float) -> None:
             if not progress(int(done), 100):

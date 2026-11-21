@@ -522,6 +522,53 @@ needs_sunnyside = pytest.mark.skipif(
     not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
 )
 
+#: The M16 walkthrough site: a hand-fitted survey whose Grid1 has 40 lines and a float-tail
+#: Slices cell. Opening a copy migrates it in memory; the original is never written.
+WALK_SITE = LOCAL_DATA / "hand-fits" / "site-2.nsgeo.json"
+
+
+def _walk_site_ready() -> bool:
+    if not WALK_SITE.exists():
+        return False
+    try:
+        import json
+
+        doc = json.loads(WALK_SITE.read_text())
+        first = next(
+            line["path"]
+            for line in doc["lines"]
+            if (line.get("placement") or {}).get("grid_id") == "Grid1"
+        )
+        return Path(first).exists()
+    except (OSError, ValueError, KeyError, StopIteration):
+        return False
+
+
+needs_walk_site = pytest.mark.skipif(
+    not _walk_site_ready(), reason="no M16 walkthrough site in tests/data/local"
+)
+
+
+def open_walk_site(tmp_path, *, edit=None):
+    """A `SiteSession` on a copy of the walkthrough site, in `tmp_path / "walk site"`.
+    `edit(doc)` may change the copy's json first."""
+    import json
+    import shutil
+
+    from nsgeo_qgis.session import SiteSession
+
+    folder = Path(tmp_path) / "walk site"
+    folder.mkdir()
+    copy = folder / "survey.nsgeo.json"
+    shutil.copyfile(WALK_SITE, copy)
+    if edit is not None:
+        doc = json.loads(copy.read_text())
+        edit(doc)
+        copy.write_text(json.dumps(doc))
+    session = SiteSession()
+    session.open_site(copy)
+    return session
+
 
 # ---- the export dialog and the background export task -------------------------------
 

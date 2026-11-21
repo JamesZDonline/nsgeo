@@ -29,7 +29,7 @@ import re
 import shutil
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,7 +91,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
-from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids
+from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids, remembered_cell
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -291,8 +291,14 @@ class ParaViewExport:
         self.skipped_surfaces: list[str] = []
 
     # ---- settings ----------------------------------------------------------
+    def cell_floor(self, grid_id: str) -> float:
+        """The grid's smallest safe 3-D cell."""
+        grid = self.session.grid(grid_id)
+        return smallest_safe_cell(grid.size_x, grid.size_y)
+
     def defaults(self, grid_id: str) -> VolumeChoice:
-        """The grid's 3-D choice: its record, with the Slices panel's values filling gaps."""
+        """The grid's 3-D choice: its record, with the Slices panel's values filling gaps.
+        The cell is as the dialog shows it, to three decimals (#204)."""
         grid = self.session.grid(grid_id)
         resolution = self.session.slice_resolution(grid_id)
         cell = resolution.get("cell")
@@ -306,13 +312,14 @@ class ParaViewExport:
                 raise ValueError(f"grid {grid_id!r} has no lines to export")
             dz = float(self.session.line_for_key(keys[0]).header.dt_ns)
         t1 = resolution.get("t1_ns")
-        return volume_choice(
+        choice = volume_choice(
             self.session.volume_record(grid_id),
             cell_default=float(cell),
             dz_default=float(dz),
             transform_default=transform_value(self.dock.transform_combo.value()),
             t1_default=t1 if isinstance(t1, float) and t1 > 0.0 else None,
         )
+        return replace(choice, cell=remembered_cell(choice.cell, self.cell_floor(grid_id)))
 
     def _source(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
         preset = default_preset(self.session, grid_id)
