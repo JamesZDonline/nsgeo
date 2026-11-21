@@ -30,3 +30,8 @@ Final re-review (opus aa17b3da8a7244a36): all addressed, no new Critical/Importa
 Ruling: the I1 reorder makes a lost left release (pre-Plan C) keep "… m selected" showing off the image; left, under the earlier ruling. Cost if wrong: a stale length after a lost release until the next click.
 Ruling: Q5 added to the walkthrough so the user rules on the cutoff-in-bypass behaviour (the task review ruling) themselves.
 CI: run 44846964364 on be27cba — success (all jobs incl. plugin-qgis 3.44 and 4.2).
+
+## After walkthrough round 2 (2026-11-21)
+Round 2: W14, W15, W16 pass (W16 "amazing"); Q5 → "Leave the cutoff out too".
+Q5: spec 17bfd41; implementer (sonnet) 1d0b47c — Time zero's bypass also skips enabled time-kind handle steps after it; the scale (`_scale_reference`) unchanged, keeps the cutoff. RED on the re-pinned test (shapes (150,240) vs (512,240)); two new pins (cutoff before Time zero stays; cutoff + migration falls back, no error). Controller reviewed the 10-line diff inline (right-sized) and fixed the stale guide bullet (66e6f47).
+Ruling: no separate review seat for the Q5 change (10 lines, tests pin both the full depth and the kept-cutoff scale). Cost if wrong: a defect in the cut-row selection a reviewer would have caught; the user re-checks it as W17.
