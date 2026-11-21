@@ -64,6 +64,7 @@ from nsgeo_qgis.ui.ruler import (
     metres_at,
     trace_units_at,
 )
+from nsgeo_qgis.ui.trace_axis import TraceAxis
 from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks, true_scale_window
 
 # The axis captions ("ns" / "m") get a row of their own above the image,
@@ -196,6 +197,8 @@ class ProfileView(QWidget):
         dt_ns: float,
         distance_along: np.ndarray | None = None,
         ruler: Ruler | None = None,
+        *,
+        axis: TraceAxis | None = None,
     ) -> None:
         # C1c: `ViewTransform.__post_init__` checks `dt_ns` for finiteness only,
         # not positivity -- `dt_ns == 0.0` is finite and constructs a transform
@@ -227,6 +230,14 @@ class ProfileView(QWidget):
                     f"expected ({n_traces},); ignoring it"
                 )
                 distance_along = None
+        # M17c: a trace axis lays a GPS line out in metres. One of the wrong
+        # length is dropped here, as a wrong-length distance is above.
+        if axis is not None and axis.distance.size != n_traces:
+            _log(
+                f"set_axes: trace axis has {axis.distance.size} traces, "
+                f"expected {n_traces}; ignoring it"
+            )
+            axis = None
         r = self.image_rect()
         # A ruler needs a distance axis of at least two traces to place
         # anything on it; without one the view is today's.
@@ -257,10 +268,11 @@ class ProfileView(QWidget):
                 r.height(),
                 bounds=bounds,
                 mirrored=is_reversed(distance_along),
+                axis=axis,
             )
         else:
             self.transform = ViewTransform.fit(
-                n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height()
+                n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height(), axis=axis
             )
         self._ruler = ruler
         self._message = "loading…"
@@ -480,6 +492,7 @@ class ProfileView(QWidget):
             r.height(),
             bounds=t.bounds,
             mirrored=t.mirrored,
+            axis=t.axis,
         )
         self.view_changed.emit()
         self.update()
@@ -631,7 +644,9 @@ class ProfileView(QWidget):
                 # rect, then draw only the part of the window that has traces.
                 painter.fillRect(r, QBrush(NO_DATA_HATCH, Qt.BrushStyle.BDiagPattern))
                 x, y, w, h = t.source_rect()
-                if w > 0:
+                if t.axis is not None:
+                    self._paint_spans(painter, r, t, sx, sy)
+                elif w > 0:
                     x0, x1 = t.target_span()
                     target = QRectF(r.left() + x0, r.top(), x1 - x0, r.height())
                     src = QRectF(x * sx, y * sy, w * sx, h * sy)
@@ -664,6 +679,23 @@ class ProfileView(QWidget):
         finally:
             painter.end()
 
+    def _paint_spans(self, p: QPainter, r: QRect, t: ViewTransform, sx: float, sy: float) -> None:
+        """A GPS line's runs of equal columns, each at its own metres; what lies
+        between them is the hatch already laid down. Each span is flipped about
+        its own target when the view is mirrored."""
+        _, y, _, h = t.source_rect()
+        for x0, x1, c0, c1 in t.paint_spans():
+            target = QRectF(r.left() + x0, r.top(), x1 - x0, r.height())
+            src = QRectF(c0 * sx, y * sy, (c1 - c0) * sx, h * sy)
+            if t.mirrored:
+                p.save()
+                p.translate(target.left() + target.right(), 0)
+                p.scale(-1, 1)
+                p.drawImage(target, self._image, src)
+                p.restore()
+            else:
+                p.drawImage(target, self._image, src)
+
     def readout_text(self) -> str:
         """What is under the pointer, in the axes' units; "" off the image, over
         blank ruler space or while there is no image to point at. While a range
@@ -686,7 +718,13 @@ class ProfileView(QWidget):
             return ""
         i = t.trace_at(x)
         if i is None:
-            return ""
+            if t.axis is None:
+                return ""
+            lo, hi = t.axis.drawn()
+            if not lo[0] <= t.walk_of_x(x) < hi[-1]:
+                return ""  # blank ruler space past the line, not a gap in it
+            m = self.metres_at_trace_units(t.trace_of_x(x))
+            return "" if m is None else f"{float(m):.2f} m along (gap)"
         s = t.sample_index_at(y)
         time_ns = t.t0_ns + s * t.dt_ns
         m = self.metres_at_trace_units(i + 0.5)

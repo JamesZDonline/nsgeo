@@ -353,3 +353,11 @@ def test_a_cut_without_velocity_greys_1_to_1_and_still_reads_out(profile, monkey
     send_hover(v, QPoint(r.left() + r.width() // 2, r.top() + r.height() // 2))
     assert v.readout_text() != ""
     assert "deep" not in v.readout_text()
+
+
+def test_a_cut_gets_no_trace_axis(profile):
+    """M17c: only a GPS line has a trace axis; a cut draws as before."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", [(5.0, 1.0), (1.0, 1.0)])
+    session.open_line(key)
+    assert pd.view.transform is not None and pd.view.transform.axis is None

@@ -3238,3 +3238,133 @@ def test_a_bypass_view_measures_its_scale_with_the_gain_curve_and_time_zero_off(
     )
     dock.set_selected_step(0)
     np.testing.assert_array_equal(dock.image.reference.data, stack.result_bypassing(0, 2).data)
+
+
+# ---- M17c (#134): the profile draws a GPS line at true distance ------------
+def _gps_with_a_gap(folder, name="FILE__001.DZT", gap_m=None):
+    """A GPS line at 10 traces a metre with a 1.1 m step after trace 99."""
+    from plugin_testing import LAT0, LON0, M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    metres = {0: 0.0, 99: 9.9, 100: 11.0, 199: 20.9}
+    track = [(t, LAT0 + m / M_PER_DEG, LON0, 4) for t, m in metres.items()]
+    path = synthetic_gps_dzt(folder, name, track, n_traces=200, traces_per_metre=10.0)
+    line = open_gps(path)
+    if gap_m is not None:
+        line = dataclasses.replace(line, placement=dataclasses.replace(line.placement, gap_m=gap_m))
+    return line
+
+
+@pytest.fixture
+def gps_open(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.set_site_crs("EPSG:32632")
+    line = _gps_with_a_gap(tmp_path / "raw")
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    return session, dock, key, line
+
+
+def test_a_gps_line_gets_a_trace_axis_with_its_gap_over(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.set_site_crs("EPSG:32632")
+    auto = _gps_with_a_gap(tmp_path / "raw", "FILE__001.DZT")
+    typed = _gps_with_a_gap(tmp_path / "raw", "FILE__002.DZT", gap_m=0.5)
+    session.add_lines([auto, typed])
+    for key, line, want in zip(session.keys(), (auto, typed), (None, 0.5), strict=True):
+        session.open_line(key)
+        session.set_profiles(key, line.load())
+        axis = dock.view.transform.axis
+        assert axis is not None and axis.gap_m == want
+        np.testing.assert_allclose(axis.distance, line.distance_along())
+        assert axis.trace_at_walk(float(axis.walk_at(50.5))) == 50
+        assert axis.trace_at_walk(float(axis.walk_at(100.5)) - 0.5) is None  # inside the gap
+
+
+def test_a_gap_over_change_reaches_an_open_profile(gps_open):
+    """R4: every path that sets the axes builds the trace axis again."""
+    session, dock, key, line = gps_open
+    assert dock.view.transform.axis.gap_m is None
+    session._replace_line(
+        key, dataclasses.replace(line, placement=dataclasses.replace(line.placement, gap_m=2.0))
+    )
+    session.lines_changed.emit()
+    assert dock.view.transform.axis.gap_m == 2.0
+    assert (
+        dock.view.transform.axis.trace_at_walk(10.45) == 100
+    )  # no gap now: 99 and 100 meet halfway
+
+
+def test_a_tape_line_gets_no_trace_axis(opened):
+    from nsgeo_qgis.ui.view_transform import ViewTransform
+
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    t = dock.view.transform
+    assert t.axis is None
+    plain = ViewTransform.fit(
+        t.n_traces,
+        t.n_samples,
+        t.t0_ns,
+        t.dt_ns,
+        t.width,
+        t.height,
+        bounds=t.bounds,
+        mirrored=t.mirrored,
+    )
+    for i in np.linspace(0.0, t.n_traces, 10):
+        assert t.x_of_trace(float(i)) == plain.x_of_trace(float(i))
+
+
+def test_the_difference_view_keeps_the_trace_axis(gps_open):
+    session, dock, key, line = gps_open
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    before = dock.view.transform.axis
+    dock.set_difference_index(0)
+    after = dock.view.transform.axis
+    assert after is not None and after.gap_m == before.gap_m
+    np.testing.assert_array_equal(after.distance, before.distance)
+    assert after.trace_at_walk(10.45) is None
+
+
+def test_the_fit_curve_is_sampled_evenly_in_metres(gps_open):
+    from nsgeo.velocity_fit import HyperbolaFit
+
+    session, dock, key, line = gps_open
+    fit = HyperbolaFit(
+        apex_x_m=5.0, t0_ns=20.0, v_m_ns=0.1, v_stderr_m_ns=0.0, rms_ns=0.0, n_points=3
+    )
+    pts = dock.velocity_curve_points(fit)
+    traces = np.array([a for a, _ in pts])
+    assert np.all(np.diff(traces) > 0)  # ascending in trace order
+    metres = np.interp(traces, np.arange(line.n_traces), line.distance_along())
+    steps = np.diff(metres)
+    assert np.std(steps) / np.mean(steps) < 0.01
+
+
+def test_a_tape_lines_curve_stays_even_in_traces(opened):
+    from nsgeo.velocity_fit import HyperbolaFit
+
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    fit = HyperbolaFit(
+        apex_x_m=2.0, t0_ns=20.0, v_m_ns=0.1, v_stderr_m_ns=0.0, rms_ns=0.0, n_points=3
+    )
+    traces = np.array([a for a, _ in dock.velocity_curve_points(fit)])
+    np.testing.assert_allclose(traces, np.linspace(0.0, line.n_traces - 1, 200))
+
+
+def test_fit_and_one_to_one_keep_a_gps_lines_axis(gps_open):
+    session, dock, key, line = gps_open
+    axis = dock.view.transform.axis
+    for action in (dock.fit_width_action, dock.fit_height_action, dock.fit_all_action):
+        action.trigger()
+        assert dock.view.transform.axis is axis
+    dock.view.zoom_at(2.0, 100.0, 50.0)
+    assert dock.view.transform.axis is axis
+    if dock.view.can_true_scale():
+        dock.view.true_scale()
+        assert dock.view.transform.axis is axis

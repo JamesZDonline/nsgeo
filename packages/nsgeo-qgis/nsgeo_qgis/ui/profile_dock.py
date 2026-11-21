@@ -98,6 +98,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from nsgeo.geometry import TrackPlacement
 from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
@@ -153,6 +154,7 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import AXIS_UNITS, MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.ui.trace_axis import TraceAxis
 from nsgeo_qgis.ui.view_transform import carry_time_window
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
@@ -217,6 +219,13 @@ def handle_spec(step: Any) -> ParamSpec | None:
         if spec.kind in ("time", "row") and param_visible(spec, params):
             return spec
     return None
+
+
+def _same_axis(a: TraceAxis | None, b: TraceAxis | None) -> bool:
+    """True when two trace axes lay a line out the same way (both None counts)."""
+    if a is None or b is None:
+        return a is b
+    return a.gap_m == b.gap_m and np.array_equal(a.distance, b.distance)
 
 
 def relabel_onto(rg: Radargram, zero_ns: float) -> Radargram:
@@ -720,6 +729,18 @@ class ProfileDock(QgsDockWidget):
                 distances.append(d)
         return ruler_for(grid, axis, distances)
 
+    def _trace_axis_for(self, line: Any, distance: Any) -> TraceAxis | None:
+        """The trace axis `line` is drawn on: a GPS line's walked distance with
+        its Gap over. None for a tape line, a cut, a line with no distance and
+        any distance that cannot make one (logged); those draw as before."""
+        if distance is None or not isinstance(line.placement, TrackPlacement):
+            return None
+        try:
+            return TraceAxis.from_distance(distance, line.placement.gap_m)
+        except ValueError as exc:
+            _log(f"no trace axis for {line.path.name}: {exc}", Qgis.MessageLevel.Warning)
+            return None
+
     def _set_axes_holding(
         self,
         key: str,
@@ -761,12 +782,10 @@ class ProfileDock(QgsDockWidget):
         self._file_window()
         # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
         # against its own distance along the path (cut spec call 5).
-        ruler = (
-            None
-            if not key or is_cut_key(key)
-            else self._ruler_for(self.session.line_for_key(key), distance)
-        )
-        view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
+        line = None if not key or is_cut_key(key) else self.session.line_for_key(key)
+        ruler = None if line is None else self._ruler_for(line, distance)
+        axis = None if line is None else self._trace_axis_for(line, distance)
+        view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler, axis=axis)
         new = view.transform
         if (
             old is not None
@@ -775,6 +794,7 @@ class ProfileDock(QgsDockWidget):
             and zero_ns == self._axes_zero
             and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
             == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
+            and _same_axis(new.axis, old.axis)
         ):
             view.transform = old
         elif (
@@ -801,6 +821,7 @@ class ProfileDock(QgsDockWidget):
             and not (old_key and is_cut_key(old_key))
             and (old.n_traces, old.n_samples, old.t0_ns, old.dt_ns)
             == (n_traces, n_samples, t0_ns, dt_ns)
+            and _same_axis(new.axis, old.axis)
         ):
             view.transform = old
         self._axes_key = key
@@ -1598,6 +1619,24 @@ class ProfileDock(QgsDockWidget):
         zero = self.session.line_zero(self._working_key)
         return 0.0 if zero is None else zero
 
+    def _curve_traces(self, distance: Any) -> Any:
+        """The trace positions a fit curve is sampled at, ascending: evenly in
+        trace index, except on a GPS line (a trace axis), where a drawn trace is
+        wider or narrower with its step, so evenly in metres."""
+        last = len(distance) - 1
+        key = self._working_key
+        placed = (
+            self.session.line_for_key(key).placement
+            if key is not None and not is_cut_key(key)
+            else None
+        )
+        if not isinstance(placed, TrackPlacement) or last < 1:
+            return np.linspace(0.0, last, self._CURVE_SAMPLES)
+        d = np.asarray(distance, dtype=float)
+        metres = np.linspace(d[0], d[-1], self._CURVE_SAMPLES)
+        traces = np.asarray(metres_to_trace(d, metres), dtype=float)
+        return np.sort(np.clip(traces, 0.0, float(last)))
+
     def velocity_curve_points(
         self, fit: HyperbolaFit, distance: Any = None, zero: float | None = None
     ) -> list[tuple[float, float]]:
@@ -1609,7 +1648,7 @@ class ProfileDock(QgsDockWidget):
             distance, _, _ = self._velocity_axis()
         if zero is None:
             zero = self._line_zero()
-        traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
+        traces = self._curve_traces(distance)
         t = retime_ns(
             hyperbola_time(fit, trace_to_metres(distance, traces)),
             zero,

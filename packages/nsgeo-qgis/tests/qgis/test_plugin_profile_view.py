@@ -2699,3 +2699,113 @@ def test_set_axes_refuses_a_non_finite_clock_and_changes_nothing(view):
     assert (v.transform, v._distance, v.ruler) == before
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, float("inf"))
     assert (v.transform, v._distance, v.ruler) == before
+
+
+# ---- M17c (#134): a GPS line at true distance -----------------------------
+def _axis_view(make_view, distance, gap_m=None, n_samples=128):
+    """A view on a trace axis over `distance`, its image a strong band on noise."""
+    from nsgeo_qgis.ui.trace_axis import TraceAxis
+
+    n = len(distance)
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    rg = _rg(n, n_samples)
+    v.set_axes(
+        n,
+        rg.n_samples,
+        rg.t0_ns,
+        rg.dt_ns,
+        distance_along=distance,
+        axis=TraceAxis.from_distance(distance, gap_m),
+    )
+    v.set_image(RadargramImage(rg).image)
+    return v, rg
+
+
+def _with_a_gap():
+    d = np.arange(200) * 0.1
+    d[100:] += 1.0  # a 1.1 m step after trace 99: one gap
+    return d
+
+
+def _with_a_lift():
+    d = np.concatenate([np.arange(100) * 0.1, [12.0], 14.0 + np.arange(99) * 0.1])
+    return d  # trace 100 has a gap on both sides: left out
+
+
+def test_a_gap_is_hatched_and_the_traces_sit_at_their_distance(make_view):
+    v, rg = _axis_view(make_view, _with_a_gap())
+    t = v.transform
+    shot = v.grab_image()
+    r = v.image_rect()
+    empty = {BACKGROUND.rgb(), NO_DATA_HATCH.rgb()}
+    # the gap runs 9.95 .. 10.95 m: its middle shows no radargram
+    gx = int(t.x_of_walk(10.45))
+    gap_px = {
+        QColor(shot.pixel(r.left() + gx + dx, r.top() + dy)).rgb()
+        for dx in range(-3, 4)
+        for dy in range(10, 250)
+    }
+    assert gap_px <= empty
+    # a drawn trace beside it is the radargram
+    dx = int(t.x_of_trace(50.5))
+    drawn = {QColor(shot.pixel(r.left() + dx, r.top() + dy)).rgb() for dy in range(10, 250)}
+    assert not drawn <= empty
+    assert len(drawn - empty) > 5
+
+
+def test_the_readout_says_gap_over_a_gap(make_view):
+    v, rg = _axis_view(make_view, _with_a_gap())
+    t = v.transform
+    r = v.image_rect()
+    px = int(t.x_of_walk(10.45))
+    send_hover(v, QPoint(r.left() + px, r.top() + 20))
+    m = float(v.metres_at_trace_units(t.trace_of_x(px)))
+    assert v.readout_text() == f"{m:.2f} m along (gap)"
+    send_hover(v, QPoint(r.left() + int(t.x_of_trace(50.5)), r.top() + 20))
+    assert "(trace 50)" in v.readout_text()
+
+
+def test_a_click_in_a_gap_picks_nothing(make_view):
+    v, rg = _axis_view(make_view, _with_a_gap())
+    picks = []
+    v.pick_requested.connect(lambda i, ns: picks.append(i))
+    v.set_pick_mode(True)
+    t = v.transform
+    r = v.image_rect()
+    y = r.top() + 30
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + int(t.x_of_walk(10.45)), y),
+    )
+    assert picks == []
+    # the positive control: a drawn trace takes the same click
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + int(t.x_of_trace(50.5)), y),
+    )
+    assert picks == [50]
+
+
+def test_a_pick_on_a_left_out_trace_is_still_drawn(make_view):
+    v, rg = _axis_view(make_view, _with_a_lift())
+    t = v.transform
+    assert float(t.axis.drawn()[1][100] - t.axis.drawn()[0][100]) == 0.0  # left out
+    v.set_picks([(100, 50.0)])
+    ((x, y),) = v._pick_positions(t)
+    assert x == pytest.approx(t.x_of_walk(12.0))  # its walked metre
+    assert y == pytest.approx(t.y_of_time(50.0))
+    # a velocity point there is still found by a right click, as any other
+    v.set_velocity_fit_mode(True)
+    v.set_velocity_fit([(100, 50.0)], [])
+    discarded = []
+    v.velocity_point_discarded.connect(discarded.append)
+    r = v.image_rect()
+    ex, ey = v._velocity_positions(t)[0]
+    _click(v, Qt.MouseButton.RightButton, QPoint(int(r.left() + ex), int(r.top() + ey)))
+    assert discarded == [0]
