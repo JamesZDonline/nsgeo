@@ -520,7 +520,7 @@ class ParaViewExport:
 
     def _zero_of(self, key: str, steps: Sequence[dict[str, Any]]) -> float:
         """Where the preset puts time zero on one line: one read of one file, kept, and a
-        failed read kept too. It reads the line's first channel, the one the volume is made
+        failure kept too. It reads the line's first channel, the one the volume is made
         from, whichever channel the Profile panel shows (#218)."""
         memo = self._zero_memo(key, steps)
         if memo in self._zero_failures:

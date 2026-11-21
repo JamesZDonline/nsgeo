@@ -125,8 +125,8 @@ def selection_refusal(
     minimum: int = MIN_PICKS,
 ) -> str:
     """Why the selected picks cannot make (or join) a surface, or "". Checked
-    in order: none selected, unsaved, unreadable, not on a grid's line, two grids,
-    too few or in a straight line. `minimum` is 3 for a new surface and 1 for
+    in order: none selected, unsaved, unreadable, on a deleted cut, not on a grid's
+    line, two grids, too few or in a straight line. `minimum` is 3 for a new surface and 1 for
     picks added to one."""
     if n <= 0:
         return (

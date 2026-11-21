@@ -669,6 +669,8 @@ class Surfaces:
                 if spot is None and is_cut_key(key):
                     if key not in cuts:
                         why = WHY_NO_CUT
+                    elif pick.distance_m is None:
+                        why = WHY_NO_DEPTH
                     elif not cut_pick_on_clock(pick, got.prov.steps):
                         why = WHY_OTHER_CLOCK
                     else:

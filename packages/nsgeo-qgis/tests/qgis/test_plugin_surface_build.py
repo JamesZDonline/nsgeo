@@ -21,7 +21,14 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export
 from nsgeo_qgis.paraview_export import ParaViewExportCancelled, place_picks
 from nsgeo_qgis.session import Pick
-from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS, WHY_NO_CUT, WHY_OTHER_CLOCK, input_hash
+from nsgeo_qgis.surface_plan import (
+    INPUTS,
+    STALE_REASONS,
+    WHY_NO_CUT,
+    WHY_NO_DEPTH,
+    WHY_OTHER_CLOCK,
+    input_hash,
+)
 from nsgeo_qgis.surfaces import Surfaces
 from plugin_testing import STEPS_RADAR, STEPS_ZERO, synthetic_dzt
 from plugin_testing import reopened as _reopened
@@ -870,6 +877,21 @@ def test_a_cut_pick_on_another_clock_is_reported_not_placed(built_site):
     (made,) = surfaces.build([record.feature_id], progress=_noop)
     assert made.report["fit"]["picks"] == 4
     assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_OTHER_CLOCK}]
+
+
+def test_a_cut_pick_with_no_distance_is_reported_as_having_no_depth(built_site):
+    session, _, _, layers, surfaces = built_site
+    session.site.presets["p"] = list(STEPS_ZERO)
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4), (8.0, 11.0)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    # a hand edit empties one distance
+    layer = layers.layers["picks"]
+    index = layer.fields().indexOf("distance_m")
+    assert layer.dataProvider().changeAttributeValues({cut_fids[0]: {index: None}})
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_NO_DEPTH}]
 
 
 def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
