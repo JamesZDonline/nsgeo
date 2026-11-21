@@ -536,8 +536,6 @@ def _walk_site_ready() -> bool:
     if not WALK_SITE.exists():
         return False
     try:
-        import json
-
         doc = json.loads(WALK_SITE.read_text())
         first = next(
             line["path"]

@@ -1143,13 +1143,17 @@ class ProfileDock(QgsDockWidget):
         """Put the cursor on the column of cut `key` nearest `distance_m` along it: at once when
         that cut's section is on screen, else when `_show_cut` next shows it. The working line
         changing or closing drops the target; a preview never does."""
-        self._cut_aim = (key, float(distance_m))
-        if (
-            self.shown_cut_section(key) is not None
-            and key == self._working_key
-            and self._preview_key is None
-        ):
-            self._apply_cut_aim(key)
+        # Connected across docks in `plugin.py`: guarded like `set_slice_band` in the view.
+        try:
+            self._cut_aim = (key, float(distance_m))
+            if (
+                self.shown_cut_section(key) is not None
+                and key == self._working_key
+                and self._preview_key is None
+            ):
+                self._apply_cut_aim(key)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not aim at the cut distance: {exc}", Qgis.MessageLevel.Critical)
 
     def _apply_cut_aim(self, key: str) -> None:
         """Move the cursor to the pending target when it is for `key`, then drop it. With no
@@ -1164,6 +1168,8 @@ class ProfileDock(QgsDockWidget):
             return
         self._cut_aim = None
         self.session.set_trace(key, column)
+        # A trace already at `column` emits nothing; a re-prepare may have cleared the cursor.
+        self.view.set_cursor(column)
 
     def _apply_cut_title(self) -> None:
         """The one place a cut's window title is set: the text built for the

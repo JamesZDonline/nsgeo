@@ -301,7 +301,8 @@ class ParaViewExport:
         return smallest_safe_cell(grid.size_x, grid.size_y)
 
     def defaults(self, grid_id: str) -> VolumeChoice:
-        """The grid's 3-D choice: its record, with the Slices panel's values filling gaps.
+        """The grid's 3-D choice: its record; else the newest built surface's saved choice (#203);
+        else the Slices panel's values, filling gaps.
         The cell is as the dialog shows it, to three decimals (#204)."""
         grid = self.session.grid(grid_id)
         resolution = self.session.slice_resolution(grid_id)

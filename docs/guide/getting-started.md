@@ -1036,9 +1036,10 @@ picks are written to `site.nsgeo.gpkg` the moment you change them, with no need 
 **Save site**. The built surfaces and the exports are regenerable files in the
 site folder (`surfaces` and `paraview`), so deleting them loses nothing. One thing
 is saved with **Save site** after all: a build remembers the grid's 3-D settings
-in `survey.nsgeo.json`. If you close without saving, the grid takes them from its
-newest built surface the next time, so its surfaces reopen as you left them. Deleting the
-`surfaces` folder then loses only those unsaved settings.
+in `survey.nsgeo.json`. If you close without saving, the grid reopens on the 3-D
+settings you last saved. If it had none saved, it takes them from its newest built
+surface, so that surface reopens fresh. A surface built after your last save at other
+settings reopens stale; **Rebuild** clears it.
 
 A few things to know:
 

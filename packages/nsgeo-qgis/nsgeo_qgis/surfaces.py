@@ -414,8 +414,8 @@ class Surfaces:
                     "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
                 }
             ),
-            # What a rebuild would use, field by field: the grid's record, or the Slices panel's
-            # values while the grid has none (nothing remembered since the last Save site, A1).
+            # What a rebuild would use, field by field: the grid's record; else the newest built
+            # surface's saved choice (#203); else the Slices panel's values (A1).
             # Once a build or an export remembers a depth end, the panel never reaches it (R10).
             "resolution": input_hash(
                 {

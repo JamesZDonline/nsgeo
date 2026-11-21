@@ -503,6 +503,16 @@ def test_aiming_at_a_cut_distance_moves_the_cursor_at_once_when_the_section_is_s
     assert plugin.profile_dock.view._cursor == want
 
 
+def test_aiming_again_redraws_a_cursor_a_re_prepare_cleared(opened):
+    plugin, key = opened
+    want = _nearest_column(plugin, key, 2.6)
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)
+    assert plugin.profile_dock.view._cursor == want
+    plugin.profile_dock.view.set_cursor(-1)  # what a re-prepare's clear does to the view
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)  # the session's trace is already `want`
+    assert plugin.profile_dock.view._cursor == want
+
+
 def test_a_cut_pick_requested_by_the_surfaces_panel_aims_the_profile(opened):
     plugin, key = opened
     session = plugin.session
