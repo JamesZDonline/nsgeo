@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import math
+import shutil
 import threading
 import time
 import types
 import zlib
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from tests.real_data import CAMPUS_LINES
+
+if TYPE_CHECKING:
+    from nsgeo_qgis.session import SiteSession
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
 LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
@@ -549,12 +554,9 @@ needs_walk_site = pytest.mark.skipif(
 )
 
 
-def open_walk_site(tmp_path, *, edit=None):
+def open_walk_site(tmp_path: Path, *, edit: Callable[[dict], None] | None = None) -> SiteSession:
     """A `SiteSession` on a copy of the walkthrough site, in `tmp_path / "walk site"`.
     `edit(doc)` may change the copy's json first."""
-    import json
-    import shutil
-
     from nsgeo_qgis.session import SiteSession
 
     folder = Path(tmp_path) / "walk site"

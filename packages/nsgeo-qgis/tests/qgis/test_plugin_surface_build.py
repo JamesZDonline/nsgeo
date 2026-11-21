@@ -6,6 +6,7 @@ writes what it made."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import math
@@ -650,12 +651,6 @@ def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
     grid falls back to the Slices panel's cell, depth step and depth end, the ones the surface
     was built at, so it must not read stale. (The synthetic header's depth step has more than
     four decimals, which the build rounds as the export dialog does.)"""
-    from nsgeo_qgis.layers import SiteLayers
-    from nsgeo_qgis.paraview_export import ParaViewExport
-    from nsgeo_qgis.session import SiteSession
-    from plugin_testing import Dock
-    from qgis.core import QgsProject
-
     session, _, export, layers, surfaces = built_site
     record, _ = _surface(built_site)
     assert round(export.defaults(GRID).dz_ns, 4) != export.defaults(GRID).dz_ns
@@ -666,22 +661,100 @@ def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
     surfaces.build([record.feature_id], progress=_noop)
     assert session.volume_record(GRID).get("t1_ns") == round(end - 1.0, 1)
     assert surfaces.state(record.feature_id).stale == ()
+    with _reopened(session, layers) as (again, _dock2, _export2, reopened):
+        assert again.volume_record(GRID) == {}  # the build's record was never saved
+        state = reopened.state(record.feature_id)
+        assert state.built and state.stale == ()
+
+
+def test_defaults_rounds_the_remembered_cell_itself(built_site):
+    """#204: `defaults()` shows the cell as the dialog does, with no build to round it."""
+    session, _, export, _, _ = built_site
+    session.remember_slice_resolution(GRID, cell=0.15 - 0.1)
+    assert export.defaults(GRID).cell == 0.05
+
+
+@contextlib.contextmanager
+def _reopened(session, layers):
+    """Reopen the saved site in a new session, as after quitting without Save site. Yields
+    `(again, dock2, export2, reopened)`; `export2.surfaces` is `reopened`, as the plugin does."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import Dock
+    from qgis.core import QgsProject
+
     layers.detach()
     again = SiteSession()
     layers2 = SiteLayers(again, project=QgsProject.instance())
     dock2 = None
     try:
         again.open_site(session.json_path)
-        assert again.volume_record(GRID) == {}  # the build's record was never saved
         dock2 = Dock(again)
         export2 = ParaViewExport(again, dock2)
         reopened = Surfaces(again, layers2, export_for=lambda: export2)
-        state = reopened.state(record.feature_id)
-        assert state.built and state.stale == ()
+        export2.surfaces = reopened
+        yield again, dock2, export2, reopened
     finally:
         layers2.detach()
         if dock2 is not None:
             dock2.dispose()
+
+
+@pytest.mark.parametrize("what", ["transform", "volume", "cell"])
+def test_a_reopen_without_save_site_keeps_the_built_choice(built_site, what):
+    """#203: after a reopen without Save site the grid's record is empty, so the 3-D choice
+    falls back to the newest built surface's, not the Slices panel's."""
+    session, dock, export, layers, surfaces = built_site
+    record, _ = _surface(built_site)
+    fid = record.feature_id
+    export.surfaces = surfaces
+    session.save(allow_absolute=True)
+    if what == "transform":
+        dock.transform_combo = types.SimpleNamespace(value=lambda: "amp_abs")
+    elif what == "volume":
+        session.remember_volume(GRID, period_ns=2 * export.defaults(GRID).settings.period_ns)
+    else:
+        session.remember_slice_resolution(GRID, cell=0.2)
+    surfaces.build([fid], progress=_noop)
+    first = surfaces.state(fid).report["choice"]
+    with _reopened(session, layers) as (again, dock2, _export2, reopened):
+        assert again.volume_record(GRID) == {}
+        assert reopened.state(fid).stale == ()
+        if what == "transform":
+            dock2.transform_combo = types.SimpleNamespace(value=lambda: "amp_envelope")
+        elif what == "cell":
+            again.remember_slice_resolution(GRID, cell=0.3)
+        assert reopened.state(fid).stale == ()
+        reopened.build([fid], progress=_noop)
+        assert reopened.state(fid).report["choice"] == first
+        assert again.volume_record(GRID) == first
+
+
+def test_the_newest_built_surface_is_the_fallback(built_site):
+    session, _, export, layers, surfaces = built_site
+    export.surfaces = surfaces
+    session.save(allow_absolute=True)
+    a, _ = _surface(built_site, "A")
+    b, _ = _surface(built_site, "B")
+    panel_cell = export.defaults(GRID).cell
+    session.remember_volume(GRID, cell=0.2)
+    surfaces.build([a.feature_id], progress=_noop)
+    session.remember_volume(GRID, cell=0.25)
+    surfaces.build([b.feature_id], progress=_noop)  # straight after A, usually the same second
+    with _reopened(session, layers) as (again, _dock2, export2, reopened):
+        assert again.volume_record(GRID) == {}
+        assert export2.defaults(GRID).cell == 0.25
+        assert reopened.state(a.feature_id).stale == ("resolution",)
+        assert reopened.state(b.feature_id).stale == ()
+        path = reopened._json_path(reopened._record(b.feature_id))
+        doc = json.loads(path.read_text())
+        del doc["choice"]  # a build from before this change
+        path.write_text(json.dumps(doc))
+        reopened.forget_built_choices()
+        assert export2.defaults(GRID).cell == 0.2
+        reopened.delete(a.feature_id)  # its features_changed clears the memo
+        assert export2.defaults(GRID).cell == panel_cell
 
 
 def test_a_changed_depth_step_marks_the_surface_stale(built_site):

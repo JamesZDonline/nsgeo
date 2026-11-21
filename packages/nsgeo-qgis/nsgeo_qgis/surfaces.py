@@ -158,10 +158,46 @@ class Surfaces:
         self.building = 0
         #: The refusals (too few picks left) of the surfaces the last `build` skipped.
         self.refused: list[str] = []
+        #: Each grid's newest built choice, kept so `defaults()` never scans the folder (#203).
+        self._built_choices: dict[str, dict[str, float | str] | None] = {}
+        # A test may pass a session without these signals.
+        for name in ("site_opened", "site_closed", "features_changed"):
+            signal = getattr(session, name, None)
+            if signal is not None:
+                signal.connect(self.forget_built_choices)
 
     # ---- reading ------------------------------------------------------------
     def records(self) -> list[FeatureRecord]:
         return [r for r in self.layers.feature_records() if r.kind == KIND_SURFACE]
+
+    def built_choice(self, grid_id: str) -> dict[str, float | str] | None:
+        """The 3-D choice of the grid's newest built surface that has one (#203), or None.
+        Newest by `built_utc` (to the second), ties by the json's modification time."""
+        if grid_id in self._built_choices:
+            return self._built_choices[grid_id]
+        best: tuple[str, int] | None = None
+        found: dict[str, float | str] | None = None
+        for record in self.records():
+            if record.grid_id != grid_id:
+                continue
+            report = self._read_report(record)
+            if report is None or not isinstance(report.get("choice"), dict):
+                continue
+            try:
+                stamp = (
+                    str(report.get("built_utc", "")),
+                    self._json_path(record).stat().st_mtime_ns,
+                )
+            except OSError:
+                continue
+            if best is None or stamp > best:
+                best, found = stamp, dict(report["choice"])
+        self._built_choices[grid_id] = found
+        return found
+
+    def forget_built_choices(self) -> None:
+        """Drop the kept newest choices; the next `built_choice` reads the folder again."""
+        self._built_choices.clear()
 
     def _record(self, feature_id: str) -> FeatureRecord:
         for record in self.records():
@@ -560,6 +596,7 @@ class Surfaces:
             raise
         finally:
             self.building -= 1
+            self.forget_built_choices()
         return out
 
     def _compute(
@@ -574,7 +611,8 @@ class Surfaces:
         Returns the choice the build used (remembered, with its depth) and each result."""
         choice = export.defaults(grid_id)
         # The export dialog shows the depth step to four decimals, so an untouched dialog writes
-        # that back: build with it, or the next export would call the surface stale (R11).
+        # that back: build with it, or the next export would call the surface stale (R11). The
+        # cell is rounded the same way, for the dialog's three decimals (#204).
         choice = replace(
             choice,
             cell=remembered_cell(choice.cell, export.cell_floor(grid_id)),
@@ -750,6 +788,7 @@ class Surfaces:
             "built_utc": now_iso(),
             "nsgeo_version": nsgeo.__version__,
             "inputs": inputs,
+            "choice": choice.to_record(),
             "resolution": {"cell": choice.cell, "dz_ns": choice.dz_ns},
             "settings": record.settings.to_dict(),
             "offset_m": float(surface.offset_m),

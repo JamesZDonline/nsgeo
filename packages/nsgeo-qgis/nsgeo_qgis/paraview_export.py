@@ -312,8 +312,12 @@ class ParaViewExport:
                 raise ValueError(f"grid {grid_id!r} has no lines to export")
             dz = float(self.session.line_for_key(keys[0]).header.dt_ns)
         t1 = resolution.get("t1_ns")
+        record = self.session.volume_record(grid_id)
+        if not record and self.surfaces is not None:
+            # A reopen without Save site: the newest built surface's choice (#203).
+            record = self.surfaces.built_choice(grid_id) or {}
         choice = volume_choice(
-            self.session.volume_record(grid_id),
+            record,
             cell_default=float(cell),
             dz_default=float(dz),
             transform_default=transform_value(self.dock.transform_combo.value()),
