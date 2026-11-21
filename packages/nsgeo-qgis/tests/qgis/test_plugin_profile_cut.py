@@ -11,6 +11,8 @@ from nsgeo.render import colormap, section_rgba8
 from nsgeo_qgis.cut_sections import NO_CUBE_TEXT, NO_SOURCE_TEXT, CutSection
 from nsgeo_qgis.render.qimage import rgba_to_qimage
 from nsgeo_qgis.ui.profile_dock import PALETTE_ON_CUT_TIP, ProfileDock
+from plugin_testing import send_hover
+from qgis.PyQt.QtCore import QPoint
 from qgis.PyQt.QtWidgets import QMessageBox
 from test_plugin_cut_sections import (  # noqa: F401 -- fixtures
     H,
@@ -313,3 +315,41 @@ def test_showing_a_cut_and_removing_its_grid_logs_nothing_from_the_velocity_fit(
     session.remove_grid("A", with_lines=True)
     pd._update_velocity_fit()
     assert not [m for m in message_log if "velocity fit" in m or "time zero" in m], message_log
+
+
+def test_a_cut_section_has_a_readout_and_a_units_menu(profile, message_log):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    sections.section(key, build_cube=True)
+    session.open_line(key)
+    v = pd.view
+    r = v.image_rect()
+    send_hover(v, QPoint(r.left() + r.width() // 2, r.top() + r.height() // 2))
+    assert v.readout_text() != ""
+    pd._on_axis_menu_requested("left", QPoint(0, 0))
+    try:
+        next(a for a in pd.axis_menu.actions() if a.data() == "sample").trigger()
+        v.grab_image()  # repaints without raising
+        assert v.axis_units[0] == "sample"
+    finally:
+        pd.axis_menu.hide()
+    assert not any("could not paint the profile view" in m for m in message_log)
+
+
+def test_a_cut_without_velocity_greys_1_to_1_and_still_reads_out(profile, monkeypatch):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    sections.section(key, build_cube=True)
+
+    def no_velocity(_key):
+        raise KeyError(_key)
+
+    monkeypatch.setattr(session, "resolved_velocity", no_velocity)
+    session.open_line(key)
+    v = pd.view
+    assert not v.has_velocity
+    assert not pd.one_to_one_button.isEnabled()
+    r = v.image_rect()
+    send_hover(v, QPoint(r.left() + r.width() // 2, r.top() + r.height() // 2))
+    assert v.readout_text() != ""
+    assert "deep" not in v.readout_text()

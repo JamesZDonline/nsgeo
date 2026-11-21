@@ -13,10 +13,12 @@ from nsgeo.render import DEFAULT_COLORMAP, PercentileClip
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.render.qimage import RadargramImage, rgb_to_qimage
 from nsgeo_qgis.ui.profile_view import (
+    AXIS_UNITS,
     BACKGROUND,
     CAPTION_ROW,
     CURSOR_COLOUR,
     MARGIN_LEFT,
+    MARGIN_RIGHT,
     MARGIN_TOP,
     NO_DATA_HATCH,
     PICK_COLOUR,
@@ -27,10 +29,12 @@ from nsgeo_qgis.ui.ruler import Ruler, trace_units_at
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
+
+VIEW_W = 696 + MARGIN_LEFT + MARGIN_RIGHT
 
 
 def _rg(n_traces=200, n_samples=128):
@@ -231,7 +235,7 @@ def test_decimated_image_paints_the_correctly_scaled_source_rect(make_view):
     )  # exact: 20_000 / 10 traces per decimated column, no ragged tail
 
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(n_traces, n_samples, 0.0, 0.5)
     v.set_image(ri.image)
@@ -286,7 +290,7 @@ def test_vertical_scaling_reconciles_an_image_shorter_than_n_samples(make_view):
     assert (img.width(), img.height()) == (20, 2)
 
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(20, 8, 0.0, 1.0)  # n_samples=8, dt_ns=1.0 -> time range [0, 8)
     v.set_image(img)
@@ -315,7 +319,7 @@ def view(make_view):
     v = make_view()
     # An 800x300 widget under the original 8-px top margin: a 696x264 image
     # rect, which the hard-coded tick and zoom numbers below are derived from.
-    v.resize(800, 264 + MARGIN_TOP + 28)
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     rg = _rg()
     v.set_axes(
@@ -400,7 +404,7 @@ def test_set_axes_rejects_a_mismatched_distance_along_and_logs_it(make_view, mes
     axes anyway, and logs instead of storing the bad array.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5, distance_along=np.arange(100) / 60.0)
     v.set_image(RadargramImage(_rg()).image)
     v.grab_image()  # must not raise
@@ -418,7 +422,7 @@ def test_set_axes_rejects_a_non_positive_dt_ns_and_logs_it(make_view, message_lo
     caller between it and a header value, so it enforces its own contract.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     before = v.transform
     v.set_axes(200, 128, 0.0, 0.0)
     assert v.transform is before  # rejected outright; nothing was changed
@@ -1160,7 +1164,9 @@ def test_depth_axis_uses_the_velocity_model(view):
     # or (labels[0] == "0")` -- if `labels` were ever empty, the left disjunct
     # is `[]` (falsy) and evaluation falls through to `labels[0] == "0"`,
     # indexing an empty list: `IndexError`, not a clean assertion failure.
-    assert labels == ["0", "1", "2", "3"]
+    # Depth is drawn only from time 0 on the shown clock (#11), so the span is
+    # depths [0, 3] and nice_ticks steps by 0.5.
+    assert labels == ["0", "0.5", "1", "1.5", "2", "2.5", "3"]
 
     # tick *positions* are untested by the label list alone (`out.append((...,
     # 0.0))` also survives a labels-only check): each depth tick's y must be
@@ -1168,7 +1174,9 @@ def test_depth_axis_uses_the_velocity_model(view):
     # pinned constant. Values below computed independently (np.linspace/
     # depth_at/y_of_time), not by calling `_depth_ticks` itself.
     ys = [y for _, y in v._depth_ticks(v.transform)]
-    assert ys == [pytest.approx(expected) for expected in (16.5, 99.0, 181.5, 264.0)]
+    assert ys == [
+        pytest.approx(expected) for expected in (16.5, 57.75, 99.0, 140.25, 181.5, 222.75, 264.0)
+    ]
 
 
 def test_time_ticks_use_the_actual_time_range_and_positions(view):
@@ -1253,7 +1261,7 @@ def test_distance_ticks_fall_back_to_trace_ticks_without_distance_along(make_vie
     all 18 tests because the `view` fixture always supplies
     `distance_along` -- nothing exercised this branch at all."""
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5)  # no distance_along
     ticks = v._distance_ticks(v.transform)
     assert ticks  # "return []" would make this empty
@@ -1290,7 +1298,7 @@ def test_set_axes_and_fit_emit_view_changed(make_view):
     removals survive); only `zoom_at`'s emission is covered, via
     `test_wheel_zooms_about_the_cursor_and_emits_view_changed`."""
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     changed = []
     v.view_changed.connect(lambda: changed.append(1))
     v.set_axes(200, 128, -4.0, 0.5)
@@ -1299,25 +1307,20 @@ def test_set_axes_and_fit_emit_view_changed(make_view):
     assert len(changed) == 2
 
 
-def test_one_to_one_sets_a_trace_per_pixel_column_and_emits_view_changed(make_view):
-    """m9: `one_to_one()` was never called by any test at all.
-
-    Needs `n_traces > width` (696 for this fixture's 800px resize) -- the
-    `view` fixture's 200-trace radargram would have `with_window`'s own
-    `n_traces - t_span` clamp cap the requested 696-trace span back down to
-    200 (there simply aren't 696 traces to show one-per-pixel), which would
-    make a `trace_hi - trace_lo == width` assertion pass at 200 == 200 by
-    coincidence of clamping, not because one_to_one asked for `width`.
-    """
-    v = make_view()
-    v.resize(800, 300)
-    v.set_axes(1000, 128, -4.0, 0.5)
+def test_true_scale_matches_metres_across_and_down_and_emits_view_changed(view):
+    v, rg = view
+    v.set_velocity(VelocityModel.constant(0.1))
+    v.zoom_at(2.0, 100.0, 100.0)
     changed = []
     v.view_changed.connect(lambda: changed.append(1))
-    v.one_to_one()
-    assert changed
-    assert v.transform.trace_hi - v.transform.trace_lo == pytest.approx(v.transform.width)
-    assert v.transform.trace_lo == pytest.approx(0.0)  # anchored at the window's left
+    v.true_scale()
+    assert len(changed) == 1
+    t = v.transform
+    lo, hi = t.trace_lo, t.trace_hi
+    m_per_unit = abs(v.metres_at_trace_units(hi) - v.metres_at_trace_units(lo)) / (hi - lo)
+    across = t.width / ((hi - lo) * m_per_unit)
+    down = t.height / ((t.time_hi - t.time_lo) * 0.1 / 2)  # depth = 0.1 m/ns * ns / 2
+    assert down == pytest.approx(across, rel=0.01)
 
 
 def test_clear_resets_state_and_paints_safely(view):
@@ -1350,11 +1353,11 @@ def test_resize_after_axes_are_set_updates_the_transform(make_view):
     the correct 178 (`800/896*200`) the new width gives.
     """
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     v.set_axes(200, 128, -4.0, 0.5)  # transform now set, unlike every other fixture's resize
     assert v.transform.width == 696
-    v.resize(1000, 300)
+    v.resize(VIEW_W + 200, 300)
     QApplication.processEvents()  # a resize on an unshown/unexposed widget can otherwise be queued
     assert v.transform.width == 896  # updated, not left at the stale 696
     assert (
@@ -1607,6 +1610,102 @@ def test_the_cutoff_dims_the_samples_below_it(view):
     below = QColor(shot.pixel(x, line + 10)).value()
     assert below > above
     assert QColor(shot.pixel(x, line)).red() >= 150
+
+
+def test_a_start_handle_dims_above_and_tags_its_row(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_axes(100, 200, 0.0, 0.5)
+    t0 = v.transform.t0_ns
+    v.set_cutoff(t0 + 60 * 0.5, kind="start")
+    shot = v.grab_image()
+    r = v.image_rect()
+    t = v.transform
+    line = r.top() + round(t.y_of_time(30.0))
+    x = r.left() + 20
+    above = QColor(shot.pixel(x, line - 10)).value()
+    below = QColor(shot.pixel(x, line + 10)).value()
+    assert above > below
+    assert v._cutoff_text(t) == "Time zero \u00b7 sample 60"
+
+
+def test_a_start_handle_snaps_to_row_tops_and_tags_the_drag(view):
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    v.set_cutoff(10.0, kind="start")
+    r = v.image_rect()
+    t = v.transform
+    y = round(t.y_of_time(10.0))
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    _press_left(v, r.left() + 30, r.top() + y)
+    _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + y + 40))
+    assert v.cutoff_ns == pytest.approx(t.snap_row(t.time_of_y(y + 40)))
+    k = round(v.cutoff_ns / 0.5)
+    assert 20 < k < 99
+    assert v._cutoff_text(t) == f"sample {k} \u00b7 {v.cutoff_ns:.2f} ns"
+    assert v._cutoff_text(t) == f"sample {k} \u00b7 {k * 0.5:.2f} ns"
+    _release_left(v, r.left() + 30, r.top() + y + 40)
+    assert got == [pytest.approx(v.cutoff_ns)]
+    assert v._cutoff_text(t).startswith("Time zero")
+
+
+def test_a_start_handle_dragged_off_either_edge_lands_on_row_0_and_the_last_row(view):
+    """Review Focus 5, in the view itself: row 0 above and row n - 1 below
+    (the end cutoff's snap would keep row 1 and reach t_end instead)."""
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    t = v.transform
+    r = v.image_rect()
+    for target_y, want in (
+        (-80, t.t0_ns),
+        (t.height + 80, t.t0_ns + (t.n_samples - 1) * t.dt_ns),
+    ):
+        v.set_cutoff(10.0, kind="start")
+        got = []
+        v.cutoff_dragged.connect(got.append)
+        y = round(t.y_of_time(10.0))
+        _press_left(v, r.left() + 30, r.top() + y)
+        _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + target_y))
+        _release_left(v, r.left() + 30, r.top() + target_y)
+        assert got == [pytest.approx(want)]
+        assert v.cutoff_ns == pytest.approx(want)
+        v.cutoff_dragged.disconnect(got.append)
+
+
+def test_the_drag_tag_never_reads_minus_zero(view):
+    """The relabelled line's own row is 0 ns up to float residue; the tag must
+    not print it as -0.00. Here t0 + 53 * dt is -1.8e-15."""
+    v, _ = view
+    v.set_axes(100, 200, -11.4745, 0.2165)
+    line = v.transform.t0_ns + 53 * v.transform.dt_ns
+    assert line < 0 and f"{line:.2f}" == "-0.00"
+    v.set_cutoff(line, kind="start")
+    r = v.image_rect()
+    y = round(v.transform.y_of_time(line))
+    _press_left(v, r.left() + 30, r.top() + y)
+    _send_move_while_pressed(v, QPoint(r.left() + 30, r.top() + y + 1))
+    assert v._cutoff_text(v.transform) == "sample 53 \u00b7 0.00 ns"
+    _release_left(v, r.left() + 30, r.top() + y + 1)
+
+
+def test_an_unknown_cutoff_kind_hides_the_line_and_is_logged(view, message_log):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.set_cutoff(40.0, kind="strat")
+    assert v.cutoff_ns is None
+    assert len(message_log) == 1
+
+
+def test_set_cutoff_default_kind_is_still_the_end_cutoff(view):
+    """Guard: the default kind is today's cutoff."""
+    v, _ = view
+    v.set_cutoff(40.0, kind="start")
+    v.set_cutoff(40.0)
+    assert v._cutoff_kind == "end"
+    assert v._cutoff_text(v.transform) == cutoff_label(40.0, None)
 
 
 def test_the_cutoff_label_stays_inside_the_image_near_its_top(view):
@@ -1881,7 +1980,7 @@ def _local(v, x, y):
 @pytest.fixture
 def ruled(make_view):
     v = make_view()
-    v.resize(800, 264 + MARGIN_TOP + 28)
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
     v.show()
     rg = _rg()
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=D, ruler=R)
@@ -2007,7 +2106,7 @@ def test_wheel_and_middle_drag_follow_the_pointer_when_mirrored(ruled):
     assert v.transform.x_of_trace(100.0) == pytest.approx(start - 50, abs=1.0)
 
 
-def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
+def test_fit_and_true_scale_keep_the_ruler_and_the_mirror(ruled):
     v = ruled
     r = v.image_rect()
     v.zoom_at(4.0, r.width() / 2, r.height() / 2)
@@ -2015,19 +2114,34 @@ def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
     assert v.transform.mirrored and (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx(
         (-59.5, 300.5)
     )
-    # A ruler wider than the panel (1680 trace units > 696 px), zoomed in past 1:1,
-    # so the 1:1 window neither clamps back to the bounds nor is a no-op.
-    # Mirrored, the screen-left edge is trace_hi and stays.
+    # A ruler wider than the panel, zoomed in, so true scale moves the window.
+    # Mirrored, the ruler and the mirror stay.
     rg = _rg()
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, D, Ruler("A", "y", -12.0, 16.0))
+    v.set_velocity(VelocityModel.constant(0.1))
     v.zoom_at(8.0, r.width() / 2, r.height() / 2)
+    assert v.can_true_scale()
+    before = v.transform
+    v.true_scale()
     t = v.transform
-    assert t.trace_hi - t.trace_lo < t.width
-    left = t.trace_hi
-    v.one_to_one()
-    t = v.transform
-    assert t.trace_hi == pytest.approx(left) and t.mirrored
-    assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
+    assert t.mirrored and v.ruler == Ruler("A", "y", -12.0, 16.0)
+    assert t.bounds == before.bounds
+    assert (t.time_lo, t.time_hi) != (before.time_lo, before.time_hi)
+
+
+def test_true_scale_needs_a_velocity_and_metres_and_a_nonzero_span(make_view):
+    v = make_view()
+    v.set_axes(200, 128, -4.0, 0.5)  # no distance, no velocity
+    assert v.metres_at_trace_units(10.0) is None and v.trace_units_at_metres(1.0) is None
+    assert not v.can_true_scale()
+    v.set_velocity(VelocityModel.constant(0.1))
+    assert not v.can_true_scale()  # still no metres
+    v.set_axes(200, 128, -4.0, 0.5, distance_along=np.zeros(200))  # a constant distance
+    v.set_velocity(VelocityModel.constant(0.1))
+    assert not v.can_true_scale()
+    before = v.transform
+    v.true_scale()  # must not raise
+    assert v.transform == before
 
 
 def test_distance_ticks_rise_left_to_right_across_blank_space(ruled):
@@ -2081,14 +2195,14 @@ def test_a_window_entirely_in_blank_space_paints_without_error(ruled, monkeypatc
 
 def test_set_axes_drops_a_ruler_without_a_distance(make_view):
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.set_axes(200, 128, -4.0, 0.5, None, R)
     assert v.ruler is None and not v.transform.mirrored and v.transform.bounds is None
 
 
 def test_a_one_trace_line_with_a_distance_paints_its_axes_without_error(make_view, monkeypatch):
     v = make_view()
-    v.resize(800, 300)
+    v.resize(VIEW_W, 300)
     v.show()
     logged = []
     monkeypatch.setattr(profile_view_module, "_log", lambda *a, **k: logged.append(a))
@@ -2106,3 +2220,482 @@ def test_a_constant_distance_axis_drops_the_ruler_instead_of_raising(make_view):
     assert v.ruler is None
     t = v.transform
     assert (t.trace_lo, t.trace_hi) == (0.0, 30.0)
+
+
+def test_fit_width_and_fit_height_emit_view_changed_once(view):
+    v, _ = view
+    r = v.image_rect()
+    v.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    seen = []
+    v.view_changed.connect(lambda: seen.append(1))
+    v.fit_width()
+    assert len(seen) == 1
+    v.fit_height()
+    assert len(seen) == 2
+
+
+def test_the_metre_helpers_are_the_only_road(view, monkeypatch):
+    v, rg = view
+    calls = []
+    real = ProfileView.metres_at_trace_units
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: (calls.append(u), real(self, u))[1]
+    )
+    v.grab_image()
+    assert calls  # the distance ticks went through it
+
+
+def test_the_metre_helpers_decide_the_outputs_not_just_the_calls(make_view, monkeypatch):
+    """Spec 3.1: the ticks, the ruler's bounds (what Fit and Fit width show) and
+    `window_m` all follow the pair. A pair that scales metres by 2 moves them."""
+
+    def fresh():
+        v = make_view()
+        v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+        v.show()
+        rg = _rg()
+        v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance_along=D, ruler=R)
+        return v
+
+    plain = fresh()
+    plain_ticks = [text for text, _ in plain._distance_ticks(plain.transform)]
+    real_m, real_t = ProfileView.metres_at_trace_units, ProfileView.trace_units_at_metres
+    monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda s, u: 2.0 * real_m(s, u))
+    monkeypatch.setattr(ProfileView, "trace_units_at_metres", lambda s, m: real_t(s, m / 2.0))
+    v = fresh()
+    expected = sorted(float(real_t(v, m / 2.0)) for m in (R.lo_m, R.hi_m))
+    assert v.transform.trace_bounds == pytest.approx(tuple(expected))
+    assert v.transform.trace_bounds != pytest.approx(plain.transform.trace_bounds)
+    assert [text for text, _ in v._distance_ticks(plain.transform)] != plain_ticks
+    ends = sorted(2.0 * float(real_m(v, u)) for u in (v.transform.trace_lo, v.transform.trace_hi))
+    assert v.window_m() == pytest.approx(tuple(ends))
+
+
+def test_the_metre_helpers_carry_the_held_window(ruled, monkeypatch):
+    v = ruled
+    fwd, back = [], []
+    real_m, real_t = ProfileView.metres_at_trace_units, ProfileView.trace_units_at_metres
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: (fwd.append(u), real_m(self, u))[1]
+    )
+    monkeypatch.setattr(
+        ProfileView, "trace_units_at_metres", lambda self, m: (back.append(m), real_t(self, m))[1]
+    )
+    lo, hi = v.window_m()
+    v.set_window_m(lo + 0.5, hi - 0.5, v.transform.time_lo, v.transform.time_hi)
+    assert fwd and back  # window_m and set_window_m both went through the pair
+
+
+def test_true_scale_is_off_where_the_metre_span_is_not_finite(make_view):
+    v = make_view()
+    v.set_axes(200, 128, -4.0, 0.5, distance_along=np.r_[np.arange(199.0), np.inf] / 60.0)
+    v.set_velocity(VelocityModel.constant(0.1))
+    with np.errstate(invalid="ignore"):  # inf - inf in the ruler's extrapolation
+        assert not v.can_true_scale()
+        before = v.transform
+        v.true_scale()
+    assert v.transform == before
+
+
+def _sampled(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25, distance_along=np.arange(200) / 60.0)
+    v.set_velocity(VelocityModel.constant(0.1))
+    return v
+
+
+def _imaged(make_view):
+    """`_sampled` with a picture up: the read-out only shows over an image."""
+    v = _sampled(make_view)
+    img = QImage(200, 128, QImage.Format.Format_RGB32)
+    img.fill(QColor(0, 0, 0))
+    v.set_image(img)
+    return v
+
+
+def _click(v, button, pos):
+    QTest.mousePress(v, button, Qt.KeyboardModifier.NoModifier, pos)
+    QTest.mouseRelease(v, button, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_an_axis_in_samples_ticks_row_centres(make_view):
+    v = _sampled(make_view)
+    v.set_axis_units("sample", "m")
+    ticks = v._axis_ticks("sample", v.transform)
+    # nice_ticks(-0.5, 127.5) steps by 50 at the default target of 6
+    assert [label for label, _ in ticks] == ["0", "50", "100"]
+    assert ticks[1][1] == pytest.approx(v.transform.y_of_time(50.5 * 0.25))
+
+
+def test_each_side_takes_each_unit(make_view):
+    v = _sampled(make_view)
+    for left in AXIS_UNITS:
+        for right in AXIS_UNITS:
+            v.set_axis_units(left, right)
+            assert v.axis_units == (left, right)
+            v.grab_image()  # paints without raising
+
+
+def test_a_unit_outside_the_three_is_refused(make_view):
+    v = _sampled(make_view)
+    with pytest.raises(ValueError):
+        v.set_axis_units("feet", "m")
+    assert v.axis_units == ("ns", "m")
+
+
+def test_depth_is_blank_without_a_velocity(make_view):
+    v = _sampled(make_view)
+    v.set_velocity(None)
+    assert not v.has_velocity
+    assert v._axis_ticks("m", v.transform) == []
+
+
+def test_depth_ticks_start_at_zero_on_a_shifted_clock(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, -10.0, 0.25)  # depths would span [-0.5, 1.1]
+    v.set_velocity(VelocityModel.constant(0.1))
+    ticks = v._axis_ticks("m", v.transform)
+    assert [label for label, _ in ticks] == ["0", "0.2", "0.4", "0.6", "0.8", "1"]
+    # no depth is drawn above time 0
+    assert min(y for _, y in ticks) >= v.transform.y_of_time(0.0) - 1e-6
+
+
+def test_the_strips_are_the_margins_beside_the_image(make_view):
+    v = _sampled(make_view)
+    w, h = v.transform.width, v.transform.height
+    assert v.axis_strip_at(-5, 50) == "left"
+    assert v.axis_strip_at(w + 5, 50) == "right"
+    assert v.axis_strip_at(-5, -MARGIN_TOP) == "left"
+    assert v.axis_strip_at(w, h - 1) == "right"
+    assert v.axis_strip_at(-1, h) is None
+    assert v.axis_strip_at(-1, -MARGIN_TOP - 1) is None
+    assert v.axis_strip_at(0, 50) is None
+    assert v.axis_strip_at(w - 1, 50) is None
+    assert v.axis_strip_at(50, h + 5) is None
+
+
+def test_a_press_on_an_axis_strip_asks_for_its_menu_and_keeps_the_selection(make_view):
+    v = _sampled(make_view)
+    v.set_selection(10, 40)
+    got = []
+    v.axis_menu_requested.connect(lambda side, pos: got.append(side))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(10, MARGIN_TOP + 50))
+    QTest.mousePress(
+        v,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(v.width() - 10, MARGIN_TOP + 50),
+    )
+    QTest.mouseRelease(
+        v,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(v.width() - 10, MARGIN_TOP + 50),
+    )
+    assert got == ["left", "right"]
+    assert v._selection == (10, 40)
+
+
+def test_a_strip_press_in_velocity_mode_opens_the_menu_and_starts_no_gesture(make_view):
+    """Guard (spec 4.6): passes on the code as it stands; pins it before the
+    next plan edits `_handle_mouse_press`."""
+    v = _sampled(make_view)
+    v.set_velocity_fit_mode(True)
+    menus, points, boxes = [], [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.velocity_point_requested.connect(lambda tr, ns: points.append(tr))
+    v.velocity_box_drawn.connect(lambda *a: boxes.append(a))
+    QTest.mousePress(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(10, MARGIN_TOP + 50)
+    )
+    assert menus == ["left"]
+    assert v.velocity_box_rect() is None
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(10, MARGIN_TOP + 50)
+    )
+    assert points == [] and boxes == []
+
+
+def test_a_right_click_in_the_image_in_velocity_mode_still_discards_a_point(make_view):
+    """Guard (spec 4.6): passes on the code as it stands."""
+    v = _sampled(make_view)
+    v.set_velocity_fit_mode(True)
+    v.set_velocity_fit([(100, 10.0)], [])
+    menus, gone = [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.velocity_point_discarded.connect(gone.append)
+    t, r = v.transform, v.image_rect()
+    _click(
+        v,
+        Qt.MouseButton.RightButton,
+        QPoint(int(r.left() + t.x_of_trace(100.5)), int(r.top() + t.y_of_time(10.0))),
+    )
+    assert gone == [0] and menus == []
+
+
+def test_a_strip_press_in_pick_mode_opens_the_menu_and_requests_no_pick(make_view):
+    """Guard (spec 4.6): passes on the code as it stands."""
+    v = _sampled(make_view)
+    v.set_pick_mode(True)
+    menus, picks = [], []
+    v.axis_menu_requested.connect(lambda side, pos: menus.append(side))
+    v.pick_requested.connect(lambda tr, ns: picks.append(tr))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(v.width() - 10, MARGIN_TOP + 50))
+    assert menus == ["right"] and picks == []
+
+
+def test_a_press_on_the_bottom_axis_still_clears_the_selection(make_view):
+    v = _sampled(make_view)
+    v.set_selection(10, 40)
+    got = []
+    v.axis_menu_requested.connect(lambda side, pos: got.append(side))
+    _click(v, Qt.MouseButton.LeftButton, QPoint(MARGIN_LEFT + 100, v.height() - 10))
+    assert v._selection == (-1, -1)
+    assert got == []
+
+
+# ---- the cursor read-out (#11) -------------------------------------------------
+def _hover_at(v, trace, sample):
+    t, r = v.transform, v.image_rect()
+    x = int(r.left() + t.x_of_trace(trace + 0.5))
+    y = int(r.top() + t.y_of_time(v.transform.t0_ns + (sample + 0.5) * 0.25))
+    send_hover(v, QPoint(x, y))
+
+
+def test_the_readout_is_empty_while_there_is_no_image(make_view):
+    v = _sampled(make_view)
+    assert v._image is None  # "loading..."
+    r = v.image_rect()
+    send_hover(v, QPoint(r.left() + r.width() // 2, r.top() + r.height() // 2))
+    assert v.readout_text() == ""
+
+
+def test_the_readout_reads_the_sample_under_the_pointer(make_view):
+    v = _imaged(make_view)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 10.00 ns \u00b7 0.50 m deep"
+
+
+def test_the_readout_follows_the_axis_units(make_view):
+    v = _imaged(make_view)
+    v.set_axis_units("sample", "m")
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 sample 40 \u00b7 0.50 m deep"
+    v.set_axis_units("ns", "ns")
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 10.00 ns"
+
+
+def test_the_readout_without_metres_or_velocity(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
+    _hover_at(v, 100, 40)
+    assert v.readout_text() == "trace 100 \u00b7 10.00 ns"
+
+
+def test_the_readout_leaves_depth_out_above_zero(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, -2.0, 0.25, distance_along=np.arange(200) / 60.0)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
+    v.set_velocity(VelocityModel.constant(0.1))
+    t, r = v.transform, v.image_rect()
+    send_hover(
+        v,
+        QPoint(int(r.left() + t.x_of_trace(100.5)), int(r.top() + t.y_of_time(-2.0 + 4.5 * 0.25))),
+    )
+    assert v.readout_text() == "1.67 m along (trace 100) \u00b7 -1.00 ns"
+
+
+def test_the_readout_clears_off_the_image(make_view):
+    v = _imaged(make_view)
+    _hover_at(v, 100, 40)
+    assert v.readout_text() != ""
+    send_hover(v, QPoint(5, MARGIN_TOP + 40))  # the left axis strip
+    assert v.readout_text() == ""
+    # Over an image column but outside the image: `sample_index_at` would clamp.
+    for y in (v.height() - 10, 5):
+        _hover_at(v, 100, 40)
+        assert v.readout_text() != ""
+        send_hover(v, QPoint(MARGIN_LEFT + 100, y))
+        assert v.readout_text() == ""
+
+
+def test_the_readout_is_painted_and_clears_when_the_pointer_leaves(make_view, message_log):
+    v = _imaged(make_view)
+
+    def strip_has_ink():
+        shot, r = v.grab_image(), v.image_rect()
+        bg = BACKGROUND.rgb()
+        x0 = r.right() - 150
+        return any(
+            shot.pixel(x, y) != bg
+            for x in range(x0, r.right())
+            for y in range(MARGIN_TOP // 2 - 4, MARGIN_TOP // 2 + 4)
+        )
+
+    assert not strip_has_ink()
+    _hover_at(v, 100, 40)
+    assert v.readout_text() != ""
+    assert strip_has_ink()
+    QApplication.sendEvent(v, QEvent(QEvent.Type.Leave))
+    assert v.readout_text() == ""
+    assert not strip_has_ink()
+    assert not any("could not paint the profile view" in m for m in message_log)
+
+
+def test_the_readout_is_empty_after_the_view_shrinks(make_view):
+    v = _imaged(make_view)
+    r = v.image_rect()
+    send_hover(v, QPoint(r.right() - 5, r.bottom() - 5))
+    assert v.readout_text() != ""
+    v.resize(VIEW_W, 150)
+    assert v.readout_text() == ""
+
+
+def test_a_mirrored_line_reads_its_own_metres(ruled):
+    v = ruled
+    t, r = v.transform, v.image_rect()
+    for i in (10, 11, 150):
+        send_hover(v, QPoint(round(r.left() + t.x_of_trace(i + 0.5)), int(r.top() + 30)))
+        text = v.readout_text()
+        assert text.startswith(f"{D[i]:.2f} m along (trace {i})")
+        # half a trace (1/120 m) is under the 2 dp rounding step, so also check the
+        # unrounded value through a finer helper: the pair must be asked at i + 0.5
+        assert float(v.metres_at_trace_units(i + 0.5)) == pytest.approx(D[i], abs=1e-9)
+
+
+def test_the_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatch):
+    v = _imaged(make_view)
+    monkeypatch.setattr(ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(42.0))
+    _hover_at(v, 100, 40)
+    assert v.readout_text().startswith("42.00 m along")
+
+
+def _drag_traces(v, a, b, *, release=True):
+    """Presses on trace `a`'s centre and moves to trace `b`'s; releases unless told not to."""
+    t, r = v.transform, v.image_rect()
+    y = int(r.top() + 30)
+    xa = round(r.left() + t.x_of_trace(a + 0.5))
+    xb = round(r.left() + t.x_of_trace(b + 0.5))
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xa, y))
+    _send_move_while_pressed(v, QPoint(xb, y))
+    if release:
+        QTest.mouseRelease(
+            v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xb, y)
+        )
+
+
+def test_the_readout_shows_the_selections_length_while_dragging(make_view):
+    # W5. Traces are 0-based, as in the pointer read-out ("trace 100").
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "1.00 m selected (trace 20\u201380)"
+
+
+def test_the_selection_length_stays_while_the_drag_leaves_the_image(make_view):
+    """Plan C final review I1: the pointer past the image edge (or up in the top
+    strip) clears the hover, but the drag goes on, so its length still reads."""
+    v = _imaged(make_view)
+    t, r = v.transform, v.image_rect()
+    y = int(r.top() + 30)
+    xa = round(r.left() + t.x_of_trace(20 + 0.5))
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xa, y))
+    out = QPoint(int(r.right()) + 15, y)
+    _send_move_while_pressed(v, out)
+    assert v._hover is None
+    a, b = v._selection
+    assert a == 20 and b > 20
+    assert v.readout_text().endswith(f"m selected (trace {a}\u2013{b})")
+    assert v.readout_text() != ""
+    xin = round(r.left() + t.x_of_trace(77 + 0.5))
+    _send_move_while_pressed(v, QPoint(xin, y))
+    _send_move_while_pressed(v, QPoint(xin, int(r.top()) - 5))  # up into the top strip
+    assert v._hover is None
+    a, b = v._selection
+    assert v.readout_text().endswith(f"m selected (trace {a}\u2013{b})")
+    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, out)
+    assert v.readout_text() == ""
+
+
+def test_releasing_a_drag_repaints_the_readout_strip(make_view, monkeypatch):
+    """Plan C final review M1: nothing echoes a selection back for an identical
+    range, so the release itself must repaint the strip the length was drawn in."""
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80, release=False)
+    seen = []
+    real = ProfileView.update
+    monkeypatch.setattr(ProfileView, "update", lambda self, *a: (seen.append(a), real(self, *a))[1])
+    t, r = v.transform, v.image_rect()
+    xb = round(r.left() + t.x_of_trace(80 + 0.5))
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xb, int(r.top() + 30))
+    )
+    assert any(a and a[0] == QRect(0, 0, v.width(), MARGIN_TOP) for a in seen)
+
+
+def test_the_readout_returns_to_the_cursor_on_release(make_view):
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80)
+    assert " selected " not in v.readout_text()
+    assert v.readout_text().startswith("1.33 m along (trace 80)")
+
+
+def test_the_selection_readout_without_metres_counts_traces(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "61 traces selected (trace 20\u201380)"
+
+
+def test_a_mirrored_line_reads_its_own_selected_metres(ruled):
+    v = ruled
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "1.00 m selected (trace 20\u201380)"  # absolute, though D falls
+
+
+def test_the_selection_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatch):
+    v = _imaged(make_view)
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(2.0 * float(u))
+    )
+    _drag_traces(v, 20, 80, release=False)
+    assert v.readout_text() == "120.00 m selected (trace 20\u201380)"
+
+
+def test_a_selection_set_without_a_drag_leaves_the_readout_alone(make_view):
+    v = _imaged(make_view)
+    _hover_at(v, 100, 40)
+    before = v.readout_text()
+    v.set_selection(20, 80)
+    assert v.readout_text() == before
+    assert " selected " not in before
+
+
+def test_set_axes_refuses_a_non_finite_clock_and_changes_nothing(view):
+    v, rg = view
+    before = (v.transform, v._distance, v.ruler)
+    v.set_axes(
+        rg.n_traces,
+        rg.n_samples,
+        float("nan"),
+        rg.dt_ns,
+        distance_along=np.arange(rg.n_traces) / 30.0,
+    )
+    assert (v.transform, v._distance, v.ruler) == before
+    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, float("inf"))
+    assert (v.transform, v._distance, v.ruler) == before

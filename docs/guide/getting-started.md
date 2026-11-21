@@ -140,9 +140,18 @@ any other QGIS panel.
   leaves hatched blank space. Zoom and pan stay on the same stretch of ground
   when another line on the same grid, parallel to it and walked in either
   direction, opens or is hovered on the map, and they come back after a glance
-  at a cross-line. **Fit** shows the whole grid length, and **1:1** shows one trace
-  per screen pixel. The arrow under the distance axis shows which way the line
-  was walked. The mouse wheel zooms, and dragging with the middle button pans.
+  at a cross-line. **Fit** is a button with a menu (**Fit**, **Fit width** and
+  **Fit height**): it shows the whole grid length and the whole record, or just
+  one of the two, and the button repeats whichever you picked last. **1:1**
+  shows true scale, a metre down as long as a metre along the line, at the
+  line's velocity; it is greyed out where the line has no velocity or no
+  distance along it. The **Show slice band** checkbox, next to the colormap,
+  hides or shows the depth window of the slice on the profile. Click an axis
+  beside the profile to show it in ns, samples or metres of depth. The read-out
+  above the profile gives the position under the pointer in those units, and the
+  length of the stretch while you drag a selection. The arrow under the
+  distance axis shows which way the line was walked. The mouse wheel zooms, and
+  dragging with the middle button pans.
 - **nsgeo Processing** (right) holds the processing steps for the open line:
   **Add step**, **Remove**, **↑** and **↓**, **Difference**, **Apply to grid…** and
   **Presets**.
@@ -562,6 +571,15 @@ changed.
   profile. The strip stops at 120 dB either way. A point outside the record
   sits on the strip's edge, where you can drag it in or right-click it away.
   **Reset**, at the foot of the strip, puts back a flat 0 dB curve after asking.
+- Select a **Time cutoff** step, or a **Time zero** step set to **sample**, and
+  a line on the profile marks it. Drag the line or type the value, and the two
+  always agree. While Time zero is selected the profile shows the processed
+  record without Time zero, to its full depth (a time cutoff after it is left
+  out too), with the rows it crops dimmed above the line, which reads 0 ns.
+  Where a later step refuses that record (migration does), it shows the record
+  Time zero receives instead.
+  Switching its **Mode** to **sample** starts the row at the automatic first
+  break, so nothing moves until you drag.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

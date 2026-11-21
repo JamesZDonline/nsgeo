@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo_qgis.ui.ruler import (
-    bounds_on,
     is_reversed,
     metres_at,
     ruler_for,
@@ -48,9 +47,3 @@ def test_the_ruler_is_the_grid_widened_to_every_line():
 def test_a_ruler_with_no_lines_is_the_grid_along_that_axis():
     assert (ruler_for(GRID, "y", []).lo_m, ruler_for(GRID, "y", []).hi_m) == (0.0, 11.0)
     assert ruler_for(GRID, "x", [np.array([1.0])]).hi_m == 5.0  # a one-trace line has no spacing
-
-
-def test_bounds_put_both_lines_on_the_same_metres():
-    r = ruler_for(GRID, "y", [FWD, REV])
-    assert bounds_on(r, FWD) == pytest.approx((0.0, 666.0))
-    assert bounds_on(r, REV) == pytest.approx((-5.0, 661.0))
