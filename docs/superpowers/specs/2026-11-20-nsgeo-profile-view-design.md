@@ -465,12 +465,14 @@ Nothing else is needed for it now.
     which the zero is judged by, is drawn plainly.
   - Nothing after Time zero runs, so nothing can refuse it.
   - Its rows are exactly the step's rows.
-- **Why not the bypass.** `migrate_fk` refuses a record that starts more than 2 ns from zero
+- **Why not the bypass.** *Now the reason the fallback exists (§4.14 Q3).* `migrate_fk` refuses a record that starts more than 2 ns from zero
   (`MAX_T0_NS`, `nsgeo/processing/migration.py`). With Time zero skipped, the record starts at
   −11.09 ns, so the bypass fails on every line that is migrated. That was found in the design
   review and shown to the user, side by side, on a GPS line.
 - **The display limit** for this view is taken from the drawn record itself, as for a
-  difference view. `_scale_reference` must not run the stack below it.
+  difference view. `_scale_reference` must not run the stack below it. *Since §4.14 Q3 this
+  holds for the fallback only; the bypass view takes the ordinary view's limit with Time zero
+  also bypassed.*
 
 **The selected view is on the line's clock (Build 2).**
 
@@ -560,7 +562,7 @@ All 13 walkthrough checks passed. Q1, Q2 and Q4 are kept as built. Three changes
 - **When it falls back.** It draws today's view instead (the step's input on its own scale, §4.11) when either:
   - the bypass raises, because a later step refuses the uncropped record; `migrate_fk` does, with `MAX_T0_NS`. That fallback emits no error; or
   - the bypass's rows don't start where the input's do: its first row is at a different radar-clock time (`t0_ns + zero_ns`), or its `dt_ns` differs. Then the line's row would mean something else; a second Time zero further down does this.
-- **A shorter record is fine (task review ruling, 2026-11-21).** A time cutoff after Time zero cuts the bottom off the bypass. The top rows still line up, so the bypass is drawn, not the fallback. A guard on `n_samples` would make the usual stack (Time zero, then a cutoff) always fall back. In the bypass, the cutoff reads its `end_ns` on the clock Time zero would have changed, so its cut lands `zero_ns` earlier than in the ordinary view. That is what leaving Time zero out means. The line's drag stops at the drawn record's last row.
+- **A shorter record is fine (task review ruling, 2026-11-21).** A time cutoff after Time zero cuts the bottom off the bypass. The top rows still line up, so the bypass is drawn, not the fallback. A guard on `n_samples` would make the usual stack (Time zero, then a cutoff) always fall back. In the bypass, the cutoff reads its `end_ns` on the clock Time zero would have changed, so its cut lands `zero_ns` earlier on the radar clock than in the ordinary view (later when `zero_ns` is negative). On the user's GSSI lines the header already puts zero near the first break, so `zero_ns` is about −0.5 ns: two rows. That is what leaving Time zero out means. The line's drag stops at the drawn record's last row.
 - **Why.** Taken literally, "the processed scale" saturates the raw record: its limit is about 9.7 million against about 2.3. The user picked the processed record with this fallback.
 - **E's rule is unchanged.** With migration after Time zero, there is still exactly one toast, and the profile shows the fallback view.
 

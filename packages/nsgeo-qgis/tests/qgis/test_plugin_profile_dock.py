@@ -3155,10 +3155,11 @@ def test_a_cutoff_after_time_zero_still_draws_the_bypass(opened):
     assert dock.image.limit == _clip(dock)(ref.data)
 
 
-def test_a_later_time_zero_that_only_moves_the_zero_still_falls_back(opened):
-    """Plan C final review Z1: a later Time zero at sample 0 keeps the bypass's
-    first row on the radar clock but changes its zero (`zero_ns`): the guard must
-    look at the zero term too, or the drawn rows' line would mean something else."""
+def test_a_later_time_zero_that_only_moves_the_zero_still_draws_the_bypass(opened):
+    """Plan C final review Z1: a later Time zero at sample 0 crops nothing. It
+    sets the bypass's `t0_ns` to 0 and moves the same radar-clock time into
+    `zero_ns`, so the first row is where the input's is and the bypass is drawn.
+    A guard on `t0_ns` alone would fall back for no reason."""
     session, dock, key, line = opened
     stack = _stack_of(
         session,
