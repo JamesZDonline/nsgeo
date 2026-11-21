@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import time_base_of
+from nsgeo.processing import TIME_BASE_RADAR, time_base_of
 from nsgeo.slices import SurfaceSettings
 
 KIND_SURFACE = "surface"
@@ -250,14 +250,20 @@ WHY_OTHER_CLOCK = "they were made on a cut on another clock"
 WHY_NO_CUT = "their cut has been deleted"
 
 
-def cut_pick_base(pick: Any) -> str:
-    """The time base a cut pick was made on, from the section's provenance in its `stack_json`
-    (`"time_zero"` or `"radar"`); `"radar"` when that is empty, unreadable or names none."""
+def time_base_of_provenance(text: str | None) -> str:
+    """The clock a provenance JSON names (`"time_zero"` or `"radar"`); `"radar"` when the text is
+    empty, unreadable, not an object, or names no non-empty `time_base` (a pick from before the
+    clock was recorded). The one reader the Profile panel and the surface build share."""
     try:
-        base = json.loads(pick.stack_json or "")["time_base"]
-    except (ValueError, KeyError, TypeError):
-        return "radar"
-    return base if isinstance(base, str) and base else "radar"
+        base = json.loads(text or "")["time_base"]
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return TIME_BASE_RADAR
+    return base if isinstance(base, str) and base else TIME_BASE_RADAR
+
+
+def cut_pick_base(pick: Any) -> str:
+    """The time base a cut pick was made on, from the section's provenance in its `stack_json`."""
+    return time_base_of_provenance(pick.stack_json)
 
 
 def cut_pick_on_clock(pick: Any, steps: Iterable[Mapping[str, Any]]) -> bool:

@@ -109,6 +109,19 @@ def test_clicking_a_cut_pick_outlier_opens_its_cut(surface_plugin, monkeypatch):
     assert session.current_key == other
 
 
+def test_clicking_a_cut_pick_outlier_asks_for_its_distance(surface_plugin, monkeypatch):
+    plugin = surface_plugin
+    monkeypatch.setattr(plugin.layers, "select_picks", lambda ids: None)
+    cut_key, _ = _surface_with_a_cut_pick(plugin, strength=1e9)
+    dock = plugin.surfaces_dock
+    dock.table.selectRow(0)
+    asked = []
+    dock.cut_pick_requested.connect(lambda key, d: asked.append((key, d)))
+    index = next(i for i, o in enumerate(dock._outliers) if o["line_key"] == cut_key)
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
+    assert asked == [(cut_key, 3.0)]
+
+
 def test_the_panels_menu_lists_surfaces(surface_plugin):
     plugin = surface_plugin
     entries = [a.text() for a in plugin.panels_menu.actions() if a.text()]

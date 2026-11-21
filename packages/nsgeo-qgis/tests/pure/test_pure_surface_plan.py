@@ -29,6 +29,7 @@ from nsgeo_qgis.surface_plan import (
     remove_refusal,
     selection_refusal,
     stale_text,
+    time_base_of_provenance,
 )
 
 
@@ -420,3 +421,21 @@ def test_remembered_cell(cell, floor, want):
 def test_remembered_cell_is_its_own_fixed_point(cell):
     once = remembered_cell(cell, 0.051)
     assert remembered_cell(once, 0.051) == once
+
+
+@pytest.mark.parametrize(
+    "text, want",
+    [
+        ('{"time_base": "time_zero"}', "time_zero"),
+        ('{"time_base": "radar"}', "radar"),
+        ('{"time_base": ""}', "radar"),  # the case the two readers disagreed on
+        ('{"time_base": 3}', "radar"),
+        ("{}", "radar"),
+        ("[]", "radar"),
+        ("not json", "radar"),
+        ("", "radar"),
+        (None, "radar"),
+    ],
+)
+def test_time_base_of_provenance(text, want):
+    assert time_base_of_provenance(text) == want

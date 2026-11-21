@@ -17,6 +17,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.cut_sections import CutSection
 from nsgeo_qgis.map_link import CUT_GONE_TEXT
 from nsgeo_qgis.session import Pick
+from nsgeo_qgis.surface_plan import cut_pick_base
 from qgis.core import (
     NULL,
     QgsCoordinateReferenceSystem,
@@ -463,3 +464,67 @@ def test_a_line_stack_change_never_rezeroes_cut_picks(opened):
     assert (rows[key]["time_ns"], rows[key]["zero_ns"]) == before
     assert rows[line_key]["zero_ns"] == pytest.approx(session.line_zero(line_key))
     assert rows[line_key]["zero_ns"] != 0.0
+
+
+def test_the_profile_panel_reads_a_time_base_with_the_shared_reader(opened):
+    from nsgeo_qgis.ui import profile_dock
+
+    plugin, key = opened
+    assert "_time_base_of_provenance" not in vars(profile_dock)
+    # An empty `time_base` reads as "radar" on the panel's filter, as in `cut_pick_base`.
+    session = plugin.session
+    session.add_cut_pick(key, 5, 1.0, T, json.dumps({"time_base": ""}))
+    pick = session.picks_for(key)[-1]
+    assert cut_pick_base(pick) == "radar"
+    # The cube is on "time_zero", so the pick is counted as on another clock.
+    assert plugin.profile_dock.windowTitle().endswith(" · 1 picks on another clock")
+
+
+def _nearest_column(plugin, key, distance_m):
+    section = plugin.cut_sections.section(key, build_cube=True)
+    return int(np.argmin(np.abs(section.columns.distance_m - distance_m)))
+
+
+def test_aiming_at_a_cut_distance_moves_the_cursor_at_once_when_the_section_is_shown(opened):
+    plugin, key = opened
+    session = plugin.session
+    want = _nearest_column(plugin, key, 2.6)
+    assert session.current_trace != want
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)
+    assert session.current_trace == want
+    assert plugin.profile_dock.view._cursor == want
+
+
+def test_a_cut_pick_requested_by_the_surfaces_panel_aims_the_profile(opened):
+    plugin, key = opened
+    session = plugin.session
+    session.open_line(session.keys()[0])
+    plugin.surfaces_dock.cut_pick_requested.emit(key, 1.1)  # the cut is not on screen yet
+    session.open_line(key)
+    assert session.current_trace == _nearest_column(plugin, key, 1.1)
+
+
+def test_a_target_waits_for_its_cuts_section_and_is_used_once(opened):
+    plugin, key = opened
+    session = plugin.session
+    other = session.keys()[0]
+    session.open_line(other)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    assert session.current_trace != _nearest_column(plugin, key, 3.2)  # nothing moved yet
+    session.open_line(key)
+    want = _nearest_column(plugin, key, 3.2)
+    assert session.current_trace == want
+    session.set_trace(key, 0)
+    plugin.profile_dock._show_line(key)  # the section is shown again: the target is spent
+    assert session.current_trace == 0
+
+
+def test_opening_another_line_first_drops_the_target(opened):
+    plugin, key = opened
+    session = plugin.session
+    first, second = session.keys()[:2]
+    session.open_line(first)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    session.open_line(second)
+    session.open_line(key)
+    assert session.current_trace != _nearest_column(plugin, key, 3.2)
