@@ -129,6 +129,11 @@ release's notes list everything in it.
   time zero from channel 0, as the volume does; Plan D's tidy-ups, with a
   cut pick in the outlier list moving the profile's cursor to it.
   Designing.
+- **M17c: true-distance profiles** ([#134]). A GPS line's profile draws each
+  trace at its true distance, with a gap where the cart was lifted; picks,
+  the velocity fit and migration follow. GPS lines in a grid share the
+  grid's ruler, so reversed lines are mirrored like tape lines, and
+  destagger's Measure works on them. Planning, probably in two plans.
 
 ### Next, in order
 
@@ -142,7 +147,7 @@ than reworking M16–M17 afterwards.
    with GPS lines drawn on their grid's ruler (reversed lines mirrored, as
    tape lines are) and their destagger measured, both moved up from M17d at
    the M17b walkthrough; and **M17d**,
-   outlines with holes and Place by GPS. M17c is next.
+   outlines with holes and Place by GPS. M17c is in progress (above).
 2. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 3. **M19: magnetometer data.** The first instrument other than GPR:
