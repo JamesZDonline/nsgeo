@@ -108,9 +108,10 @@ def test_the_placement_keeps_a_typed_gap_over():
 
 
 def _with_gap():
-    """1.0 m of 0.02 m steps, a 1.0 m gap, 1.0 m more; and a lift (two gap steps)."""
+    """1.0 m of 0.02 m steps, a 1.011 m gap, 1.0 m more. The right block starts
+    off the 0.02 m grid on purpose, so an edge trace is never on a column."""
     left = np.arange(0.0, 1.0001, 0.02)
-    right = left + 2.0
+    right = left + 2.011
     return np.concatenate([left, right])
 
 
@@ -119,7 +120,7 @@ def test_nothing_is_invented_inside_a_gap():
     data = np.ones((4, x.size))
     even, x0, step = resample_even(data, x)
     cols = x0 + np.arange(even.shape[1]) * step
-    edge_l, edge_r = 1.0, 2.0
+    edge_l, edge_r = 1.0, 2.011
     far = (np.abs(cols - edge_l) >= step - 1e-9) & (np.abs(cols - edge_r) >= step - 1e-9)
     inside = (cols > edge_l) & (cols < edge_r) & far
     assert inside.sum() > 40
@@ -163,3 +164,13 @@ def test_a_falling_distance_resamples_like_its_reverse():
 def test_a_line_with_no_usual_step_cannot_be_resampled():
     with pytest.raises(ValueError):
         resample_even(np.ones((2, 5)), np.full(5, 3.0))
+
+
+def test_a_line_ending_in_a_near_zero_step_does_not_blow_up():
+    x = np.arange(0.0, 1.0001, 0.02)
+    data = 1.0 + 0.5 * x[None, :] * np.ones((3, 1))
+    longer = np.append(x, x[-1] + 1e-5)
+    more = np.append(data, data[:, -1:] + 0.3, axis=1)
+    even, _, _ = resample_even(more, longer)
+    assert even.max() <= 1.8
+    assert even.min() >= 0.9

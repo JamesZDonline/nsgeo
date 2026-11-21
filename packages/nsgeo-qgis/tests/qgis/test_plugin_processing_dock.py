@@ -488,6 +488,37 @@ def test_migration_is_addable_to_a_stack_that_already_corrects_time_zero(opened)
     assert dialog.ok_button.isEnabled()
 
 
+def test_the_add_step_dialog_opens_and_validates_on_a_gps_line(qgis_app, tmp_path):
+    """A GPS line's record carries one distance per trace; the dialog's
+    one-trace probe must slice that axis too."""
+    from plugin_testing import CRS, LAT0, LON0, M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    session = SiteSession()
+    dock = ProcessingDock(session)
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    path = synthetic_gps_dzt(
+        tmp_path / "raw",
+        "FILE__001.DZT",
+        [(t, LAT0 + t * 0.1 / M_PER_DEG, LON0, 4) for t in (25, 175)],
+        n_traces=200,
+        traces_per_metre=10.0,
+    )
+    line = open_gps(path)
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    assert session.stack_for(key).source.trace_x_m is not None
+
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    dialog = dock.build_add_dialog("migrate_fk")
+    dialog.form.set_value("velocity_m_ns", "0.0733")
+
+    assert dialog.form.message.text() == ""
+    assert dialog.ok_button.isEnabled()
+
+
 def test_the_velocity_is_prefilled_from_the_line(opened):
     """`resolve_velocity`'s existing chain, so the prefill is the same
     number the depth axis and every pick already use. With no line

@@ -220,9 +220,26 @@ def test_a_destagger_edit_reattaches_a_gps_lines_source(site):
     before = s.stack_for(IN_A).source.trace_x_m.copy()
     tape_source = s.stack_for(TAPE).source
     spy = Spy(s.stack_changed)
+    dirty_at_emit = []
+    s.stack_changed.connect(lambda _k: dirty_at_emit.append(s.dirty))
     s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, travel_shift=0.2)])
+    assert dirty_at_emit == [True]
     after = s.stack_for(IN_A).source.trace_x_m
     np.testing.assert_allclose(after - before, 0.2)
     np.testing.assert_array_equal(after, s.line_for_key(IN_A).distance_along())
     assert spy.calls == [(IN_A,)]
     assert s.stack_for(TAPE).source is tape_source
+
+
+def test_the_bulk_destagger_reattaches_a_gps_lines_source(site):
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    before = s.stack_for(IN_A).source.trace_x_m.copy()
+    spy = Spy(s.stack_changed)
+    dirty_at_emit = []
+    s.stack_changed.connect(lambda _k: dirty_at_emit.append(s.dirty))
+    s.set_travel_shift([IN_A], 0.2)
+    after = s.stack_for(IN_A).source.trace_x_m
+    np.testing.assert_allclose(after - before, 0.2)
+    assert spy.calls == [(IN_A,)]
+    assert dirty_at_emit == [True]

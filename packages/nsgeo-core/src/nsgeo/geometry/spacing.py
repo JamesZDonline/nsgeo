@@ -104,8 +104,9 @@ def resample_even(
     with np.errstate(divide="ignore", invalid="ignore"):
         w = np.where(span > 0, (g - xl) / np.where(span > 0, span, 1.0), 0.0)
     # Past the last trace the column carries on the last pair's slope (one
-    # column at most), unless that pair straddles a gap: then it holds the end trace.
-    beyond = (g > xs[-1]) & (span <= threshold)
+    # column at most), unless that pair straddles a gap or is under half a
+    # usual step apart (the slope would blow up): then it holds the end trace.
+    beyond = (g > xs[-1]) & (span <= threshold) & (span >= 0.5 * step)
     w = np.where(beyond, w, np.clip(w, 0.0, 1.0))
     even = ds[:, hi - 1] * (1.0 - w) + ds[:, hi] * w
     nearest = np.minimum(np.abs(g - xl), np.abs(g - xr))

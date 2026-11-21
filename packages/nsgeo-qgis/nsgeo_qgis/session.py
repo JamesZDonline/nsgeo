@@ -789,6 +789,17 @@ class SiteSession(QObject):
             self._replace_line(key, dataclasses.replace(line, placement=placement))
         self._set_dirty(True)
         self.lines_changed.emit()
+        self._reattach_gps_sources([key for key, _ in changing])
+
+    def _reattach_gps_sources(self, keys: Iterable[str]) -> None:
+        """A GPS line's source carries its walked distance, so a changed
+        placement (a destagger) re-attaches it and tells whoever shows it. Call
+        after the site is dirty. A line with no stack yet has nothing to attach."""
+        for key in keys:
+            stack = self._require_site().stacks.get(key)
+            if stack is not None:
+                self._attach_source(key, stack)
+                self.stack_changed.emit(key)
 
     def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
         """Take `keys` (all known) out of the site and every per-line
@@ -921,13 +932,6 @@ class SiteSession(QObject):
         for key, _, new in applied:
             line = self._lines_by_key[key]
             self._replace_line(key, dataclasses.replace(line, placement=new))
-        # A GPS line's source carries its walked distance, so a changed
-        # placement (a destagger) re-attaches it; a tape line's is untouched.
-        for key, _, new in applied:
-            stack = site.stacks.get(key)
-            if isinstance(new, TrackPlacement) and stack is not None:
-                self._attach_source(key, stack)
-                self.stack_changed.emit(key)
         # A line that changed grid joins the new grid at the end of the survey
         # order, the way an imported line does, and leaves the old grid's
         # remembered slice lines.
@@ -969,6 +973,9 @@ class SiteSession(QObject):
         if applied or reordered:
             self._set_dirty(True)
             self.lines_changed.emit()
+        self._reattach_gps_sources(
+            [key for key, _, new in applied if isinstance(new, TrackPlacement)]
+        )
         return EditOutcome(
             changed=tuple(key for key, _, _ in applied),
             reordered=reordered,

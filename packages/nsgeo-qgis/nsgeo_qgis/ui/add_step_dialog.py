@@ -67,7 +67,10 @@ class AddStepDialog(QDialog):
             self.ok_button.setEnabled(False)
             return
         if self.radargram is not None:
-            probe = self.radargram.replace(data=self.radargram.data[:, :1])
+            axis = self.radargram.trace_x_m
+            probe = self.radargram.replace(
+                data=self.radargram.data[:, :1], trace_x_m=None if axis is None else axis[:1]
+            )
             try:
                 step.apply(probe)
             except Exception as exc:

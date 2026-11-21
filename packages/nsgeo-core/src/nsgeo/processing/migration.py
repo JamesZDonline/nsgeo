@@ -302,20 +302,29 @@ class MigrateFk:
         )
 
     def apply(self, rg: Radargram) -> Radargram:
-        kwargs: dict[str, Any] = {
-            "dt_ns": rg.dt_ns,
-            "velocity_m_ns": self.velocity_m_ns,
-            "t0_ns": rg.t0_ns,
-            "max_dip_deg": self.max_dip_deg,
-        }
-        if _needs_resample(rg.trace_x_m):
+        x = rg.trace_x_m
+        if x is not None and _needs_resample(x):
             # A GPS line at its true spacing: onto an even grid at the usual
             # step (nothing in gaps), migrate, read each trace back.
-            even, x0, step = resample_even(rg.data, rg.trace_x_m, rg.gap_m)  # type: ignore[arg-type]
-            migrated = migrate_fk(even, dx_m=step, **kwargs)
-            migrated = sample_back(migrated, x0, step, rg.trace_x_m)  # type: ignore[arg-type]
+            even, x0, step = resample_even(rg.data, x, rg.gap_m)
+            migrated = migrate_fk(
+                even,
+                dt_ns=rg.dt_ns,
+                dx_m=step,
+                velocity_m_ns=self.velocity_m_ns,
+                t0_ns=rg.t0_ns,
+                max_dip_deg=self.max_dip_deg,
+            )
+            migrated = sample_back(migrated, x0, step, x)
         else:
-            migrated = migrate_fk(rg.data, dx_m=rg.dx_m, **kwargs)
+            migrated = migrate_fk(
+                rg.data,
+                dt_ns=rg.dt_ns,
+                dx_m=rg.dx_m,
+                velocity_m_ns=self.velocity_m_ns,
+                t0_ns=rg.t0_ns,
+                max_dip_deg=self.max_dip_deg,
+            )
         # replace(), not a new Radargram: dx_m and anything else the record
         # carries has to survive the step.
         return rg.replace(data=migrated)
