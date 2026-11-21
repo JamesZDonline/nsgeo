@@ -3128,9 +3128,10 @@ def test_a_bypass_with_other_rows_falls_back(opened):
     assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
 
 
-def test_a_cutoff_after_time_zero_still_draws_the_bypass(opened):
-    """§4.14 Q3: a time cutoff after Time zero cuts the bypass's bottom, which
-    is no reason to fall back: the shorter bypass is drawn, on the line's clock."""
+def test_a_cutoff_after_time_zero_is_left_out_of_its_view(opened):
+    """§4.14 Q5: while Time zero's row is selected, the time cutoff after it is
+    left out too, so the picture runs to the record's full depth on the line's
+    clock. The scale still keeps the cutoff (the module rule)."""
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
     src = session.stack_for(key).source
@@ -3142,17 +3143,55 @@ def test_a_cutoff_after_time_zero_still_draws_the_bypass(opened):
         ("dewow", {}),
         ("time_cutoff", dict(end_ns=end)),
     )
-    bypass = stack.result_bypassing(0)
-    assert bypass.n_samples < src.n_samples
+    bypass = stack.result_bypassing(0, 2)
+    assert stack.result_bypassing(0).n_samples < bypass.n_samples
     dock.set_selected_step(0)
     rg = dock._shown_radargram
     np.testing.assert_array_equal(rg.data, relabel_onto(bypass, stack.zero_ns()).data)
-    assert rg.n_samples < src.n_samples
-    assert rg.t0_ns + rg.zero_ns == pytest.approx(bypass.t0_ns + bypass.zero_ns)
+    assert rg.n_samples == src.n_samples
     assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
     assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)  # row 20 reads 0 on the drawn clock
-    ref = stack.result_bypassing(0)  # no gain curve: the reference is the bypass itself
-    assert dock.image.limit == _clip(dock)(ref.data)
+    kept = _clip(dock)(stack.result_bypassing(0).data)  # the scale keeps the cutoff
+    assert kept != _clip(dock)(bypass.data)
+    assert dock.image.limit == kept
+
+
+def test_a_cutoff_before_time_zero_stays_in_its_view(opened):
+    """§4.14 Q5: a cutoff before Time zero is part of what Time zero receives."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    end = src.t0_ns + 150 * src.dt_ns
+    stack = _stack_of(
+        session,
+        key,
+        ("time_cutoff", dict(end_ns=end)),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+    )
+    cropped = stack.intermediate(0)
+    assert cropped.n_samples < src.n_samples
+    dock.set_selected_step(1)
+    assert dock._shown_radargram.n_samples == cropped.n_samples
+
+
+def test_a_cutoff_and_migration_after_time_zero_still_fall_back(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("time_cutoff", dict(end_ns=src.t0_ns + 150 * src.dt_ns)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+    assert dock.view.cutoff_ns is not None
 
 
 def test_a_later_time_zero_that_only_moves_the_zero_still_draws_the_bypass(opened):

@@ -41,12 +41,14 @@ What the image shows while a handle row is selected depends on its kind. A
 `time` handle (the cutoff) shows the stack with that step bypassed, so there
 is something below the line to drag it over. A `row` handle (Time zero's first
 kept row) shows the same bypass, relabelled onto the line's clock
-(`relabel_onto`), so the processed look holds (spec §4.14 Q3). It falls back
-to what the step receives -- the step before it, or the source -- in two
+(`relabel_onto`), so the processed look holds (spec §4.14 Q3), and leaves
+out the time cutoffs after Time zero too, so it runs to the record's full
+depth (§4.14 Q5); a cutoff before it stays, as part of what it receives. It
+falls back to what the step receives -- the step before it, or the source -- in two
 cases: a later step refuses the uncropped record (migration), or the bypass's
 first row is at another radar-clock time or dt than the input's (a later Time
-zero), where the line's row would mean something else. A shorter bypass (a
-cutoff cut its bottom) is drawn.
+zero), where the line's row would mean something else. A shorter bypass is
+still drawn if one arises, but a cutoff no longer causes it.
 
 The window across lines: every line on a grid, along the same axis, is drawn
 against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
@@ -2140,8 +2142,17 @@ class ProfileDock(QgsDockWidget):
                 spec = self._handle_spec_at(row)
                 if spec is not None and spec.kind == "row":
                     # Every step but Time zero, on the line's clock (spec
-                    # §4.14 Q3): the processed look. Falls back to what Time
+                    # §4.14 Q3), and the time cutoffs after it (Q5): the
+                    # processed look, to full depth. Falls back to what Time
                     # zero receives (§4.11) where the bypass can't be drawn.
+                    cut_rows = [
+                        i
+                        for i, (step, enabled) in enumerate(stack.entries)
+                        if i > row
+                        and enabled
+                        and (cut := handle_spec(step)) is not None
+                        and cut.kind == "time"
+                    ]
                     received = stack.source if row == 0 else stack.intermediate(row - 1)
                     try:
                         line_zero = stack.zero_ns()
@@ -2151,7 +2162,7 @@ class ProfileDock(QgsDockWidget):
                         # needs in order to fix the row.
                         return received
                     try:
-                        bypass = stack.result_bypassing(row)
+                        bypass = stack.result_bypassing(row, *cut_rows)
                     except ValueError:
                         # A later step refuses the uncropped record
                         # (migrate_fk does): no error, the input view.
@@ -2162,8 +2173,8 @@ class ProfileDock(QgsDockWidget):
                         # The bypass's first row is at another radar-clock
                         # time (a later Time zero crops the top): the line's
                         # row would mean something else. A shorter bypass
-                        # (a cutoff cut its bottom) is drawn: snap_row clamps
-                        # the drag to the drawn rows.
+                        # is drawn if one arises (a cutoff no longer causes
+                        # it, Q5): snap_row clamps the drag to the drawn rows.
                         return relabel_onto(received, line_zero)
                     self._row_view_is_bypass = True
                     return relabel_onto(bypass, line_zero)
