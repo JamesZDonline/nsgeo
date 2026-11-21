@@ -373,7 +373,8 @@ A GPS line can be in the table too. It is placed by its track, so its **Offset**
 to set it, or clear the cell to go back to automatic (shown as **auto** and the
 value); a tape line shows **—** there. A change to a whole selection and **Measure**
 leave GPS rows alone and say so: "Left 3 GPS line(s) alone: Offset applies to tape
-lines only."
+lines only." The **Gap over (m)** box under **Destagger** works the other way: **Set**
+and **Automatic** act on the selected GPS rows, leave tape rows alone and say so.
 
 A wheel on rough ground, or one that is slightly out of calibration, makes a
 line read longer or shorter than the grid. **Scale** is the number that corrects
@@ -491,12 +492,11 @@ over (m)** in **Edit lines** sets how long a step between two traces must be to
 count as a gap. Left empty it is automatic: 6 times the line's usual step. A GPS
 line, in a grid or not, has no ruler. A hyperbola fit measures along the walked
 distance at the points you click, so fit hyperbolae away from stretches without
-RTK and away from lifts of the cart.
+RTK; no ground was recorded inside a gap.
 
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
-cannot yet measure the destagger from GPS lines; that comes with true-distance
-profiles.
+cannot yet measure the destagger from GPS lines; that comes later.
 
 To put lines that have no grid (or the wrong one) into a grid fitted around
 them, select only GPS lines in **nsgeo Survey**, right-click, and choose **Fit

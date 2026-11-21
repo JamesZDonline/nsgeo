@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.destagger import EnvelopeBins
-from nsgeo.geometry import Grid, GridPlacement, TrackPlacement, gap_threshold
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement, check_gap_m, gap_threshold
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -935,6 +935,8 @@ class EditLinesDialog(QDialog):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if is_gps and col in GPS_BLANK:
                         item.setToolTip(GPS_TIP)
+                    if not is_gps and col == COL_GAP:
+                        item.setToolTip(GAP_TIP)
                     if differs.get(col):
                         item.setBackground(CHANGED)
                     self.table.setItem(r, col, item)
@@ -1000,25 +1002,21 @@ class EditLinesDialog(QDialog):
             if isinstance(edit, TrackEdit) and c in GPS_BLANK:
                 self._refresh()  # back to "—": a TrackEdit takes no tape cell
                 return
+            if c == COL_GAP and not isinstance(edit, TrackEdit):
+                self._refresh()  # back to "—": Gap over is for GPS lines
+                return
             if c == COL_GAP:
-                if not isinstance(edit, TrackEdit):
-                    self._refresh()  # back to "—": Gap over is for GPS lines
-                    return
                 if not text:
                     edit = dataclasses.replace(edit, gap_m=None, gap_auto=True)
                 else:
                     try:
                         gap = float(text.replace(",", "."))
-                        if not math.isfinite(gap) or gap <= 0:
-                            raise ValueError(text)
+                        check_gap_m(gap)
                     except ValueError:
                         self._refresh(f"{item.text()!r} is not a length above 0; unchanged")
                         return
                     edit = dataclasses.replace(edit, gap_m=gap, gap_auto=False)
-                self._edits[key] = edit
-                self._refresh()
-                return
-            if c == COL_LABEL:
+            elif c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
             elif c == COL_SCALE:
                 try:

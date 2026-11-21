@@ -400,6 +400,7 @@ def test_a_tape_row_shows_a_dash_for_gap_over(fine):
     r = d.keys().index(_k("T1"))
     item = d.table.item(r, COL_GAP)
     assert item.text() == "—"
+    assert item.toolTip() == GAP_TIP
     assert not item.flags() & Qt.ItemFlag.ItemIsEditable
     item.setText("0.5")
     assert _cell(d, r, COL_GAP) == "—"
@@ -426,7 +427,7 @@ def test_bulk_set_and_automatic_act_on_gps_rows_and_skip_tape_rows(mixed):
         d2.auto_gap_button.click()
         assert d2.status.text() == TAPE_SKIP.format(n=1)
         assert d2.edit_for(_k("G1")).gap_auto
-        assert _cell(d2, d2.keys().index(_k("G1")), COL_GAP).startswith("auto ")
+        assert _cell(d2, d2.keys().index(_k("G1")), COL_GAP) == "auto 0.60"
         d2.accept()
     finally:
         d2._measurer.shutdown()
@@ -470,6 +471,7 @@ def test_gap_over_extremes_reach_the_profile(qgis_app, tmp_path):
             d.accept()
             assert s.line_for_key(key).placement.gap_m == want
             assert dock.view.transform.axis.gap_m == want
+            assert s.stack_for(key).source.gap_m == want
             d.hide()
             d._measurer.shutdown()
             d.deleteLater()
@@ -498,3 +500,16 @@ def test_gap_over_survives_save_and_reopen(fine):
         d3._measurer.shutdown()
         d3.hide()
         d3.deleteLater()
+
+
+def test_a_gps_line_with_no_usual_step_shows_auto_dash(fine, monkeypatch):
+    s, _ = fine
+    # a real track cannot stand still (import refuses it), so the distances are zeroed
+    monkeypatch.setattr(Line, "distance_along", lambda self: np.zeros(self.n_traces))
+    d = EditLinesDialog(s, "A")
+    try:
+        assert _cell(d, d.keys().index(_k("G1")), COL_GAP) == "auto —"
+    finally:
+        d._measurer.shutdown()
+        d.hide()
+        d.deleteLater()
