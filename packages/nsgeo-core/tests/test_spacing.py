@@ -23,6 +23,7 @@ def test_the_threshold_is_strictly_longer_than_six_usual_steps():
     base = np.arange(20) * 0.02
     assert not gap_steps(np.append(base, base[-1] + 0.119)).any()
     assert gap_steps(np.append(base, base[-1] + 0.121))[-1]
+    assert not gap_steps(np.array([0.0, 0.5]), gap_m=0.5).any()
 
 
 def test_a_typed_gap_over_replaces_the_automatic_threshold():
@@ -48,6 +49,7 @@ def test_a_falling_distance_has_the_same_gaps_as_its_reverse():
     assert left_out(-d).tolist() == left_out(d).tolist()
 
 
+@pytest.mark.filterwarnings("error")
 def test_a_line_with_no_spacing_has_no_gaps():
     d = np.full(10, 3.0)
     assert usual_step(d) == 0.0
@@ -87,6 +89,8 @@ def test_gap_over_must_be_finite_and_positive(v):
     d = np.arange(5) * 0.02
     with pytest.raises(ValueError):
         gap_steps(d, gap_m=v)
+    with pytest.raises(ValueError):
+        left_out(np.array([1.0]), gap_m=v)
     with pytest.raises(ValueError):
         _placement(gap_m=v)
 

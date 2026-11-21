@@ -30,14 +30,22 @@ def _steps(distance: np.ndarray) -> np.ndarray:
 def usual_step(distance: np.ndarray) -> float:
     """The median step between neighbouring traces; 0 for fewer than 2 traces."""
     steps = _steps(distance)
-    return float(np.median(steps)) if steps.size else 0.0
+    if not steps.size:
+        return 0.0
+    with np.errstate(invalid="ignore"):
+        return float(np.median(steps))
+
+
+def check_gap_m(gap_m: float | None) -> None:
+    """Raise ValueError unless Gap over is None (automatic) or finite and above 0."""
+    if gap_m is not None and not (math.isfinite(gap_m) and gap_m > 0):
+        raise ValueError(f"Gap over must be None or a finite length above 0, got {gap_m!r}")
 
 
 def gap_threshold(distance: np.ndarray, gap_m: float | None = None) -> float:
     """Gap over, in metres: `gap_m` when given, else 6 usual steps (inf if no spacing)."""
+    check_gap_m(gap_m)
     if gap_m is not None:
-        if not (math.isfinite(gap_m) and gap_m > 0):
-            raise ValueError(f"Gap over must be a finite length above 0, got {gap_m!r}")
         return float(gap_m)
     usual = usual_step(distance)
     return GAP_FACTOR * usual if usual > 0 else math.inf
@@ -53,6 +61,7 @@ def gap_steps(distance: np.ndarray, gap_m: float | None = None) -> np.ndarray:
 
 def left_out(distance: np.ndarray, gap_m: float | None = None) -> np.ndarray:
     """Bool per trace: gaps on both sides. Never the first or last trace."""
+    check_gap_m(gap_m)
     n = np.asarray(distance).size
     out = np.zeros(n, dtype=bool)
     if n >= 3:

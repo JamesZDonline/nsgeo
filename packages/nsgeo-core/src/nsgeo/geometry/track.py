@@ -20,6 +20,7 @@ from dataclasses import dataclass, fields
 import numpy as np
 
 from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.spacing import check_gap_m
 from nsgeo.io.dzg import RTK_FIXED, DzgLog
 from nsgeo.io.dzt import DztHeader
 
@@ -117,8 +118,7 @@ class TrackPlacement:
             raise ValueError("the RTK-fixed positions all lie at one point")
         if not math.isfinite(self.travel_shift):
             raise ValueError(f"travel_shift must be finite, got {self.travel_shift!r}")
-        if self.gap_m is not None and not (math.isfinite(self.gap_m) and self.gap_m > 0):
-            raise ValueError(f"gap_m must be None or a finite length above 0, got {self.gap_m!r}")
+        check_gap_m(self.gap_m)
 
     def anchors(self) -> tuple[TrackFix, ...]:
         """The RTK-fixed fixes with a position: the only ones traces are placed by."""
