@@ -8,6 +8,7 @@ from nsgeo.geometry.placement import GridPlacement, Placement
 from nsgeo.geometry.spacing import (
     check_gap_m,
     gap_steps,
+    gap_threshold,
     left_out,
     usual_step,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "fit_frame",
     "fit_grid_from_corners",
     "gap_steps",
+    "gap_threshold",
     "left_out",
     "main_direction",
     "measure_spacing",

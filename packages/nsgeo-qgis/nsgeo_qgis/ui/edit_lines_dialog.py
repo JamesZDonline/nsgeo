@@ -1,8 +1,8 @@
 """Edit a grid's lines in one table, with a panel for changing many at once
 (line editing spec §4.1).
 
-Label, Offset, Dir, Start, Scale, Destagger and Grid are editable; Traces, Length, Along, Picks
-and Note come from the line. Scale and Destagger (m) are the placement
+Label, Offset, Dir, Start, Scale, Destagger, Gap over (GPS lines) and Grid are editable;
+Traces, Length, Along, Picks and Note come from the line. Scale and Destagger (m) are the placement
 corrections (placement corrections plan, call 9): a bulk row sets either on
 the selection, and "Fit to grid edges" puts each selected line's first and
 last traces on the grid's two edges (a line with no recorded length is named
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.destagger import EnvelopeBins
-from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement, gap_threshold
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -83,13 +83,14 @@ from nsgeo_qgis.ui.wheel_guard import guard_wheel
     COL_START,
     COL_SCALE,
     COL_DESTAGGER,
+    COL_GAP,
     COL_GRID,
     COL_ALONG,
     COL_TRACES,
     COL_LENGTH,
     COL_PICKS,
     COL_NOTE,
-) = range(12)
+) = range(13)
 HEADERS = [
     "Label",
     "Offset (m)",
@@ -97,6 +98,7 @@ HEADERS = [
     "Start (m)",
     "Scale",
     "Destagger (m)",
+    "Gap over (m)",
     "Grid",
     "Along",
     "Traces",
@@ -105,7 +107,7 @@ HEADERS = [
     "Note",
 ]
 # Grid is a combo box in its cell, not an editable item.
-EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_SCALE, COL_DESTAGGER}
+EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_SCALE, COL_DESTAGGER, COL_GAP}
 SCALE_TIP = (
     "Grid metres per metre the wheel recorded. Fit to grid edges sets it so the "
     "line's first and last traces sit on the grid's two edges. 1 leaves the line "
@@ -123,6 +125,12 @@ MEASURE_TIP = (
     "Destagger box gets the grid's value and each selected row its line's value. "
     "Nothing changes until OK."
 )
+GAP_TIP = (
+    "On a GPS line, a step between two traces longer than this is drawn as a gap, "
+    "and traces with a gap on both sides (lifted over an obstacle) are left out of "
+    "the profile. Empty means automatic: 6× the line's usual step."
+)
+TAPE_SKIP = "Left {n} tape line(s) alone: Gap over applies to GPS lines only."
 GPS_TIP = "A GPS line is placed by its track: Offset, Dir, Start and Scale do not apply."
 GPS_SKIP = "Left {n} GPS line(s) alone: {what} applies to tape lines only."
 # The cells a GPS row cannot change: the track places it, not a tape.
@@ -202,6 +210,7 @@ class EditLinesDialog(QDialog):
         self._updating = False
         self._order: list[str] = []
         self._edits: dict[str, LineEdit | TrackEdit] = {}
+        self._auto_gap: dict[str, float] = {}  # a GPS row's automatic Gap over, m
         self._walked: dict[str, float] = {}  # a GPS row's walked length, m, without its destagger
         self._traces: dict[str, int] = {}
         self._per_metre: dict[str, float] = {}
@@ -221,6 +230,7 @@ class EditLinesDialog(QDialog):
                 if isinstance(line.placement, TrackPlacement):
                     self._edits[key] = TrackEdit(key, seen=line.placement)
                     walked = line.distance_along()
+                    self._auto_gap[key] = gap_threshold(walked)
                     self._walked[key] = float(walked[-1] - walked[0]) if len(walked) else 0.0
                 else:
                     self._edits[key] = LineEdit(key, seen=line.placement)  # type: ignore[arg-type]
@@ -257,6 +267,7 @@ class EditLinesDialog(QDialog):
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.horizontalHeaderItem(COL_SCALE).setToolTip(SCALE_TIP)
         self.table.horizontalHeaderItem(COL_DESTAGGER).setToolTip(DESTAGGER_TIP)
+        self.table.horizontalHeaderItem(COL_GAP).setToolTip(GAP_TIP)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
@@ -330,6 +341,25 @@ class EditLinesDialog(QDialog):
         destagger_row.addWidget(self.measure_button)
         destagger_row.addStretch(1)
         bulk.addLayout(destagger_row)
+        gap_row = QHBoxLayout()
+        self.gap_spin = QDoubleSpinBox()
+        self.gap_spin.setRange(0.01, 10.0)
+        self.gap_spin.setDecimals(2)
+        self.gap_spin.setSingleStep(0.01)
+        self.gap_spin.setValue(0.10)
+        self.set_gap_button = QPushButton("Set")
+        self.set_gap_button.clicked.connect(lambda: self.set_gap(self.gap_spin.value()))
+        self.auto_gap_button = QPushButton("Automatic")
+        self.auto_gap_button.clicked.connect(self.automatic_gap)
+        gap_label = QLabel("Gap over (m)")
+        for w in (gap_label, self.gap_spin):
+            w.setToolTip(GAP_TIP)
+        gap_row.addWidget(gap_label)
+        gap_row.addWidget(self.gap_spin)
+        gap_row.addWidget(self.set_gap_button)
+        gap_row.addWidget(self.auto_gap_button)
+        gap_row.addStretch(1)
+        bulk.addLayout(gap_row)
         offset_row = QHBoxLayout()
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-1e4, 1e4)
@@ -478,23 +508,31 @@ class EditLinesDialog(QDialog):
         change: Callable[[Any, Mapping[str, Grid]], Any],
         *,
         tape_only: str | None = None,
+        gps_only: bool = False,
     ) -> None:
         """Apply `change` to every selected row. With `tape_only` (what the change
-        is called on the status line), GPS rows are counted and left alone."""
+        is called on the status line), GPS rows are counted and left alone; with
+        `gps_only`, tape rows are, and the status line says `TAPE_SKIP`."""
         try:
             frames = self._frames()
             dropped: list[str] = []
             gps = 0
+            tape = 0
             for key in self.selected_keys():
                 edit = self._edits[key]
                 if tape_only is not None and isinstance(edit, TrackEdit):
                     gps += 1
+                    continue
+                if gps_only and not isinstance(edit, TrackEdit):
+                    tape += 1
                     continue
                 if edit.grid_id is not None and self._target_gone(edit, frames):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = change(self._live(edit, frames), frames)
             if tape_only is not None and gps:
                 dropped.append(GPS_SKIP.format(n=gps, what=tape_only))
+            if tape:
+                dropped.append(TAPE_SKIP.format(n=tape))
         except (KeyError, ProjectError) as exc:
             self._say(self._unavailable(exc))
             return
@@ -517,6 +555,14 @@ class EditLinesDialog(QDialog):
 
     def set_destagger(self, value: float) -> None:
         self._apply(lambda e, f: dataclasses.replace(e, travel_shift=float(value)))
+
+    def set_gap(self, value: float) -> None:
+        self._apply(
+            lambda e, f: dataclasses.replace(e, gap_m=float(value), gap_auto=False), gps_only=True
+        )
+
+    def automatic_gap(self) -> None:
+        self._apply(lambda e, f: dataclasses.replace(e, gap_m=None, gap_auto=True), gps_only=True)
 
     def fit_to_edges(self) -> None:
         """Fit every selected line that has a recorded length; name and leave
@@ -830,12 +876,19 @@ class EditLinesDialog(QDialog):
                     differs = {
                         COL_LABEL: p.label != seen.label,
                         COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
+                        COL_GAP: p.gap_m != seen.gap_m,
                         COL_GRID: gone or p.grid_id != seen.grid_id,
                     }
+                    auto = self._auto_gap[key]
                     values = {
                         COL_LABEL: p.label or Path(key).stem,
                         **dict.fromkeys(GPS_BLANK, "—"),
                         COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_GAP: (
+                            f"{p.gap_m:.2f}"
+                            if p.gap_m is not None
+                            else (f"auto {auto:.2f}" if math.isfinite(auto) else "auto —")
+                        ),
                         COL_GRID: edit.grid_id if gone else p.grid_id,
                         COL_ALONG: "GPS",
                         COL_TRACES: str(self._traces[key]),
@@ -863,6 +916,7 @@ class EditLinesDialog(QDialog):
                         COL_START: f"{p.start_along:.2f}",
                         COL_SCALE: f"{p.scale:.4f}",
                         COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_GAP: "—",
                         COL_GRID: edit.grid_id if gone else p.grid_id,
                         COL_ALONG: p.axis,
                         COL_TRACES: str(self._traces[key]),
@@ -873,7 +927,11 @@ class EditLinesDialog(QDialog):
                 is_gps = isinstance(p, TrackPlacement)
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
-                    if col not in EDITABLE or (is_gps and col in GPS_BLANK):
+                    if (
+                        col not in EDITABLE
+                        or (is_gps and col in GPS_BLANK)
+                        or (not is_gps and col == COL_GAP)
+                    ):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if is_gps and col in GPS_BLANK:
                         item.setToolTip(GPS_TIP)
@@ -940,7 +998,25 @@ class EditLinesDialog(QDialog):
             frames = self._frames()
             note = None
             if isinstance(edit, TrackEdit) and c in GPS_BLANK:
-                self._refresh()  # back to "—": a TrackEdit takes only Label, Destagger, Grid
+                self._refresh()  # back to "—": a TrackEdit takes no tape cell
+                return
+            if c == COL_GAP:
+                if not isinstance(edit, TrackEdit):
+                    self._refresh()  # back to "—": Gap over is for GPS lines
+                    return
+                if not text:
+                    edit = dataclasses.replace(edit, gap_m=None, gap_auto=True)
+                else:
+                    try:
+                        gap = float(text.replace(",", "."))
+                        if not math.isfinite(gap) or gap <= 0:
+                            raise ValueError(text)
+                    except ValueError:
+                        self._refresh(f"{item.text()!r} is not a length above 0; unchanged")
+                        return
+                    edit = dataclasses.replace(edit, gap_m=gap, gap_auto=False)
+                self._edits[key] = edit
+                self._refresh()
                 return
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)

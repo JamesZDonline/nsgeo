@@ -251,3 +251,21 @@ def test_a_track_edit_applies_travel_shift_and_label():
     placed = TrackEdit("k", _track("A"), travel_shift=0.3, label="x").placed(FRAMES)
     assert (placed.travel_shift, placed.label, placed.grid_id) == (0.3, "x", "A")
     assert TrackEdit("k", _track("A"), travel_shift=0.3).changes(FRAMES)
+
+
+def test_a_track_edit_sets_gap_over_and_returns_to_automatic():
+    seen = _track("A")
+    typed = TrackEdit("k", seen, gap_m=0.4)
+    assert typed.placed(FRAMES).gap_m == 0.4
+    assert typed.changes(FRAMES)
+    assert not TrackEdit("k", seen, gap_m=None).changes(FRAMES)
+    assert not TrackEdit("k", seen).changes(FRAMES)
+    same = dataclasses.replace(seen, gap_m=0.4)
+    assert not TrackEdit("k", same, gap_m=0.4).changes(FRAMES)
+    assert TrackEdit("k", same, gap_m=0.5).changes(FRAMES)
+    back = TrackEdit("k", same, gap_auto=True)
+    assert back.placed(FRAMES).gap_m is None
+    assert back.changes(FRAMES)
+    assert not TrackEdit("k", seen, gap_auto=True).changes(FRAMES)  # already automatic
+    both = TrackEdit("k", same, gap_m=0.9, gap_auto=True)
+    assert both.placed(FRAMES).gap_m is None  # automatic wins

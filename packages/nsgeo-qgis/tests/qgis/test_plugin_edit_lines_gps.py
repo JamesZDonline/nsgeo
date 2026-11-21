@@ -14,6 +14,7 @@ from nsgeo_qgis.ui.edit_lines_dialog import (
     COL_ALONG,
     COL_DESTAGGER,
     COL_DIR,
+    COL_GAP,
     COL_LABEL,
     COL_LENGTH,
     COL_OFFSET,
@@ -21,9 +22,11 @@ from nsgeo_qgis.ui.edit_lines_dialog import (
     COL_SCALE,
     COL_START,
     COL_TRACES,
+    GAP_TIP,
     GPS_SKIP,
     GPS_TIP,
     MEASURE_NO_TARGETS,
+    TAPE_SKIP,
     EditLinesDialog,
 )
 from plugin_testing import (
@@ -318,3 +321,180 @@ def test_measure_says_both_when_a_gps_row_and_a_moved_tape_row_are_selected(mixe
     d.measure()
     assert d.status.text() == f"{GPS_SKIP.format(n=1, what='Measure')} {MEASURE_NO_TARGETS}"
     assert not d._measurer.busy
+
+
+# ---- M17c (#134): Gap over -------------------------------------------------
+def _fine_gps(folder, name, lon=LON0):
+    """A GPS line at 60 traces a metre: its usual step is 1/60 m, so automatic is 0.10 m."""
+    path = synthetic_gps_dzt(
+        folder,
+        name,
+        [(t, LAT0 + t / 60.0 / M_PER_DEG, lon, 4) for t in (0, 199)],
+        n_traces=200,
+        traces_per_metre=60.0,
+    )
+    return open_gps(path, grid_id="A")
+
+
+@pytest.fixture
+def fine(qgis_app, tmp_path):
+    s = SiteSession()
+    s.new_site(tmp_path)
+    s.set_site_crs(CRS)
+    s.add_grid(GA)
+    raw = tmp_path / "raw"
+    s.add_lines([_tape(raw, "T1.DZT", 0), _fine_gps(raw, "G1.DZT")])
+    dialog = EditLinesDialog(s, "A")
+    yield s, dialog
+    dialog._measurer.shutdown()
+    dialog.hide()
+    dialog.deleteLater()
+
+
+def test_a_gps_row_shows_its_automatic_gap_over(fine):
+    s, d = fine
+    r = d.keys().index(_k("G1"))
+    assert _cell(d, r, COL_GAP) == "auto 0.10"
+    assert d.table.item(r, COL_GAP).flags() & Qt.ItemFlag.ItemIsEditable
+    assert d.table.horizontalHeaderItem(COL_GAP).text() == "Gap over (m)"
+    assert d.table.horizontalHeaderItem(COL_GAP).toolTip() == GAP_TIP
+    assert COL_GAP == COL_DESTAGGER + 1
+
+
+def test_typing_gap_over_sets_it_and_clearing_returns_to_automatic(fine):
+    s, d = fine
+    key = _k("G1")
+    r = d.keys().index(key)
+    d.table.item(r, COL_GAP).setText("0.5")
+    assert _cell(d, r, COL_GAP) == "0.50"
+    assert d.table.item(r, COL_GAP).background().color() == CHANGED
+    assert d.status.text().startswith("1 line changed")
+    d.accept()
+    assert s.line_for_key(key).placement.gap_m == 0.5
+    d2 = EditLinesDialog(s, "A")
+    try:
+        r2 = d2.keys().index(key)
+        assert _cell(d2, r2, COL_GAP) == "0.50"
+        d2.table.item(r2, COL_GAP).setText("")
+        assert _cell(d2, r2, COL_GAP) == "auto 0.10"
+        d2.accept()
+    finally:
+        d2._measurer.shutdown()
+        d2.hide()
+        d2.deleteLater()
+    assert s.line_for_key(key).placement.gap_m is None
+
+
+@pytest.mark.parametrize("text", ["abc", "0", "-1", "nan", "inf", "1e999"])
+def test_a_bad_gap_over_is_refused(fine, text):
+    s, d = fine
+    r = d.keys().index(_k("G1"))
+    d.table.item(r, COL_GAP).setText("0.5")
+    d.table.item(r, COL_GAP).setText(text)
+    assert d.status.text() == f"{text!r} is not a length above 0; unchanged"
+    assert _cell(d, r, COL_GAP) == "0.50"
+
+
+def test_a_tape_row_shows_a_dash_for_gap_over(fine):
+    s, d = fine
+    r = d.keys().index(_k("T1"))
+    item = d.table.item(r, COL_GAP)
+    assert item.text() == "—"
+    assert not item.flags() & Qt.ItemFlag.ItemIsEditable
+    item.setText("0.5")
+    assert _cell(d, r, COL_GAP) == "—"
+    assert d.status.text() == ""
+    assert not d._changes(d.edit_for(_k("T1")), d._frames())
+
+
+def test_bulk_set_and_automatic_act_on_gps_rows_and_skip_tape_rows(mixed):
+    s, d = mixed
+    tape_before = {k: d.edit_for(_k(k)) for k in ("T1", "T2")}
+    _select(d, ["T1", "G1", "G2", "T2"])
+    d.gap_spin.setValue(0.25)
+    d.set_gap_button.click()
+    assert d.status.text() == TAPE_SKIP.format(n=2)
+    assert [d.edit_for(_k(n)).gap_m for n in GPSES] == [0.25, 0.25]
+    assert {k: d.edit_for(_k(k)) for k in tape_before} == tape_before
+    r = d.keys().index(_k("G1"))
+    assert _cell(d, r, COL_GAP) == "0.25"
+    d.accept()
+    assert [s.line_for_key(_k(n)).placement.gap_m for n in GPSES] == [0.25, 0.25]
+    d2 = EditLinesDialog(s, "A")
+    try:
+        d2.select_keys(_keys(["G1", "T3"]))
+        d2.auto_gap_button.click()
+        assert d2.status.text() == TAPE_SKIP.format(n=1)
+        assert d2.edit_for(_k("G1")).gap_auto
+        assert _cell(d2, d2.keys().index(_k("G1")), COL_GAP).startswith("auto ")
+        d2.accept()
+    finally:
+        d2._measurer.shutdown()
+        d2.hide()
+        d2.deleteLater()
+    assert s.line_for_key(_k("G1")).placement.gap_m is None
+    assert s.line_for_key(_k("G2")).placement.gap_m == 0.25
+
+
+def test_no_tape_note_when_only_gps_rows_are_selected_for_gap_over(mixed):
+    s, d = mixed
+    _select(d, ["G1", "G2"])
+    d.set_gap(0.3)
+    assert "tape" not in d.status.text()
+
+
+def test_gap_over_extremes_reach_the_profile(qgis_app, tmp_path):
+    from nsgeo_qgis.ui.profile_dock import ProfileDock
+
+    s = SiteSession()
+    dock = ProfileDock(s)
+    dock.resize(900, 360)
+    dock.show()
+    s.new_site(tmp_path)
+    s.set_site_crs(CRS)
+    s.add_grid(GA)
+    metres = {0: 0.0, 99: 9.9, 100: 11.0, 199: 20.9}
+    track = [(t, LAT0 + m / M_PER_DEG, LON0, 4) for t, m in metres.items()]
+    path = synthetic_gps_dzt(tmp_path / "raw", "G1.DZT", track, n_traces=200, traces_per_metre=10.0)
+    line = open_gps(path, grid_id="A")
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.open_line(key)
+    s.set_profiles(key, line.load())
+    d = EditLinesDialog(s, "A")
+    try:
+        assert dock.view.transform.axis.gap_m is None
+        r = d.keys().index(key)
+        for typed, want in (("0.01", 0.01), ("100", 100.0)):
+            d.table.item(r, COL_GAP).setText(typed)
+            d.accept()
+            assert s.line_for_key(key).placement.gap_m == want
+            assert dock.view.transform.axis.gap_m == want
+            d.hide()
+            d._measurer.shutdown()
+            d.deleteLater()
+            d = EditLinesDialog(s, "A")
+    finally:
+        d._measurer.shutdown()
+        d.hide()
+        d.deleteLater()
+        dock.hide()
+        dock.deleteLater()
+
+
+def test_gap_over_survives_save_and_reopen(fine):
+    s, d = fine
+    key = _k("G1")
+    d.table.item(d.keys().index(key), COL_GAP).setText("0.35")
+    d.accept()
+    s.save()
+    again = SiteSession()
+    again.open_site(s.json_path)
+    assert again.line_for_key(key).placement.gap_m == 0.35
+    d3 = EditLinesDialog(again, "A")
+    try:
+        assert _cell(d3, d3.keys().index(key), COL_GAP) == "0.35"
+    finally:
+        d3._measurer.shutdown()
+        d3.hide()
+        d3.deleteLater()

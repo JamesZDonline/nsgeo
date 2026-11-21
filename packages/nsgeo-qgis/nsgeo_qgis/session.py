@@ -872,7 +872,7 @@ class SiteSession(QObject):
         longer the one the table saw (`CHANGED_ELSEWHERE`), when its new
         grid no longer exists, or (a GPS line's `TrackEdit`) when its new
         grid is in another CRS than the line's track. The rest still apply.
-        A `TrackEdit` changes only a GPS line's grid, label and destagger.
+        A `TrackEdit` changes only a GPS line's grid, label, destagger and Gap over.
 
         A key is the file path, so editing never changes one: the current
         and preview lines, stacks, profiles, velocity, fits and channels all

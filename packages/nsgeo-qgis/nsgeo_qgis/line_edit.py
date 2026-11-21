@@ -229,7 +229,7 @@ class LineEdit:
 @dataclass(frozen=True)
 class TrackEdit:
     """A GPS line's requested change against the placement the table `seen`.
-    `None` means unchanged. Only the grid, label and destagger can change; the
+    `None` means unchanged. Only the grid, label, destagger and Gap over can change; the
     track never moves (spec C3)."""
 
     key: str
@@ -237,6 +237,8 @@ class TrackEdit:
     label: str | None = None
     grid_id: str | None = None
     travel_shift: float | None = None
+    gap_m: float | None = None  # a typed Gap over; None leaves it as seen
+    gap_auto: bool = False  # True returns Gap over to automatic (wins over `gap_m`)
 
     def placed(self, frames: Mapping[str, Grid]) -> TrackPlacement:
         """`seen` with the set fields applied. `KeyError` for a grid that is
@@ -249,6 +251,7 @@ class TrackEdit:
             grid_id=p.grid_id if self.grid_id is None else self.grid_id,
             label=p.label if self.label is None else self.label,
             travel_shift=p.travel_shift if self.travel_shift is None else self.travel_shift,
+            gap_m=None if self.gap_auto else (p.gap_m if self.gap_m is None else self.gap_m),
         )
 
     def moved_to(self, grid_id: str, frames: Mapping[str, Grid]) -> TrackEdit:
@@ -262,6 +265,7 @@ class TrackEdit:
             p.grid_id == self.seen.grid_id
             and p.label == self.seen.label
             and abs(p.travel_shift - self.seen.travel_shift) <= SAME_M
+            and p.gap_m == self.seen.gap_m
         )
 
 

@@ -369,7 +369,9 @@ edge. The message bar tells you how many moved.
 
 A GPS line can be in the table too. It is placed by its track, so its **Offset**,
 **Dir**, **Start** and **Scale** read **—** and cannot change; only its **Label**,
-**Destagger** and **Grid** can. A change to a whole selection and **Measure**
+**Destagger**, **Gap over (m)** and **Grid** can. Type a length in **Gap over (m)**
+to set it, or clear the cell to go back to automatic (shown as **auto** and the
+value); a tape line shows **—** there. A change to a whole selection and **Measure**
 leave GPS rows alone and say so: "Left 3 GPS line(s) alone: Offset applies to tape
 lines only."
 
@@ -481,11 +483,15 @@ that part of the line. It also draws any run past a line's end that is longer
 than 2 m.
 
 **nsgeo Survey** shows a GPS line as its label, **GPS**, its walked length and
-any **without RTK** length. Its profile reads in distance walked, one column to
-each trace. A GPS line, in a grid or not, has no ruler: it is drawn in distance
-walked until true-distance profiles arrive. A hyperbola fit measures along the walked
+any **without RTK** length. Its profile draws each trace at its true distance
+along the line, so a stretch walked fast or slow is not stretched or squeezed.
+When the cart is lifted over an obstacle, the traces recorded in the air are left
+out and the profile shows one hatched gap; pointing at it reads "(gap)". **Gap
+over (m)** in **Edit lines** sets how long a step between two traces must be to
+count as a gap. Left empty it is automatic: 6 times the line's usual step. A GPS
+line, in a grid or not, has no ruler. A hyperbola fit measures along the walked
 distance at the points you click, so fit hyperbolae away from stretches without
-RTK and away from lifts of the cart until true-distance profiles arrive.
+RTK and away from lifts of the cart.
 
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo

@@ -79,6 +79,7 @@ Coordinate frames and trace placement.
 | `metres_outside` | Metres of trace-to-trace steps whose midpoint lies outside a `Grid`, and whether any trace lies inside. |
 | `check_gap_m` | Raise `ValueError` unless Gap over is `None` (automatic) or a finite length above 0. |
 | `gap_steps` | Per step along a GPS line: is it longer than Gap over (6 usual steps when automatic). |
+| `gap_threshold` | Gap over in metres: the typed value, or 6 usual steps when automatic (`inf` with no spacing). |
 | `left_out` | Per trace: gaps on both sides (lifted over an obstacle); never the first or last trace. |
 | `usual_step` | The median step between neighbouring traces along a line. |
 | `ToXY` | The projection a track is placed with: `(lon, lat)` arrays in degrees to `(x, y)` arrays in metres. |
