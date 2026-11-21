@@ -14,6 +14,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import Radargram, StepStack
 from nsgeo.slices import CubeFrame, VolumeSettings, VolumeStopped
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export, slices_engine
@@ -1200,3 +1201,106 @@ def test_pick_depths_answer_cut_keys_by_the_exports_rule(built_site):
     assert got[0] == pytest.approx(want)
     # another clock, a cut on another grid, a deleted cut
     assert got[1:] == [None, None, None]
+
+
+# ---- time zero is read once, from channel 0 (#219, #218) ------------------------------------
+
+
+def test_a_line_whose_zero_cannot_be_read_is_read_and_logged_once(synth_site, monkeypatch):
+    """#219: the 3-D view calls pick_depths on every refresh."""
+    session, dock, export = synth_site
+    keys = session.keys()
+    rows = [(keys[0], _pick(keys[0], 5, 10.0)), (keys[1], _pick(keys[1], 5, 10.0))]
+    session.line_for_key(keys[0]).path.unlink()
+    reads: list[str] = []
+    original = Line.load
+
+    def counting(self):
+        reads.append(self.path.name)
+        return original(self)
+
+    monkeypatch.setattr(Line, "load", counting)
+    logged: list[str] = []
+    monkeypatch.setattr(paraview_export, "_log", logged.append)
+    first_name = session.line_for_key(keys[0]).path.name
+
+    def line0_reads():
+        return reads.count(first_name)
+
+    for _ in range(2):
+        got = export.pick_depths(GRID.id, rows)
+        assert got[0] is None and isinstance(got[1], float)
+    assert line0_reads() == 1
+    assert [m for m in logged if keys[0] in m] == logged and len(logged) == 1
+    # a changed preset is a new question: asked and logged again
+    session.site.presets["p"] = [
+        *STEPS_ZERO,
+        {"step": "dewow", "params": {}, "enabled": False},
+    ]
+    export.pick_depths(GRID.id, rows)
+    assert line0_reads() == 2 and len(logged) == 2
+    # a new 3-D view tries the line again
+    ParaViewExport(session, dock).pick_depths(GRID.id, rows)
+    assert line0_reads() == 3
+
+
+def test_on_a_two_channel_line_the_3d_work_reads_channel_0(qgis_app, tmp_path):
+    """#218. Synthetic on purpose: every real file so far has one channel."""
+    from plugin_testing import synthetic_dzt
+    from tests.synthetic import write_dzt
+
+    n_samples, n_traces = 512, 60
+    rng = np.random.default_rng(7)
+    data = (rng.normal(size=(2, n_samples, n_traces)) * 1e4).astype(np.int32)
+    data[0, 80:84, :] = 5_000_000  # channel 0's first arrival
+    data[1, 130:134, :] = 5_000_000  # channel 1's, 50 samples later
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    two = raw / "TWO__001.DZT"
+    write_dzt(two, data, n_channels=2)
+    one = synthetic_dzt(raw, "ONE__001.DZT", n_traces=n_traces)
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session = SiteSession()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    session.add_lines(
+        [
+            Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem))
+            for i, path in enumerate([two, one])
+        ]
+    )
+    session.site.presets["p"] = list(STEPS_ZERO)
+    dock = Dock(session)
+    try:
+        export = ParaViewExport(session, dock)
+        key0 = session.keys()[0]
+        session.open_line(key0)
+        session.set_profiles(key0, session.line_for_key(key0).load())
+        profiles = session.line_for_key(key0).load()
+
+        def zero_of_channel(i):
+            stack = StepStack.from_dicts([dict(s) for s in STEPS_ZERO])
+            stack.source = Radargram.from_profile(profiles[i])
+            return float(stack.zero_ns())
+
+        zero0, zero1 = zero_of_channel(0), zero_of_channel(1)
+        session.set_channel(key0, 1)
+        assert abs(zero1 - zero0) > 5.0
+        rows = [(key0, _pick(key0, 30, 12.0, zero_ns=zero1))]
+        got = export.fill(GRID.id, export.defaults(GRID.id), progress=_noop)
+        placed = place_picks(rows, got.lines, got.prov, got.frame, got.velocity)[0]
+        assert export.pick_depths(GRID.id, rows)[0] == pytest.approx(placed.depth_m, abs=1e-9)
+        # the record range of a fresh export, with the panel not prepared, is the engine's
+        source = export.source_choice(GRID.id, export.defaults(GRID.id))
+        fresh = ParaViewExport(session, dock)
+        unprepared = fresh._record_range(source)
+        dock2 = Dock(session)
+        try:
+            dock2.engine.set_source(source)
+            assert dock2.engine.wait_for_preparation(60_000)
+            assert unprepared == pytest.approx(dock2.engine.prepared_z_bounds(), abs=1e-9)
+        finally:
+            dock2.dispose()
+    finally:
+        dock.dispose()

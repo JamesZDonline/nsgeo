@@ -283,6 +283,9 @@ class ParaViewExport:
         self.dock = dock
         self.surfaces = surfaces
         self._zero_probes: dict[tuple[str, str], float] = {}
+        # A line whose zero could not be read is not read again for the life of this object
+        # (the 3-D view refreshes often); a new export object tries again (#219).
+        self._zero_failures: dict[tuple[str, str], Exception] = {}
         # picks_for scans every pick of the site, so a grid's count is read once for as long
         # as this object lives (the dialog's lifetime).
         self._pick_counts: dict[str, int] = {}
@@ -512,14 +515,33 @@ class ParaViewExport:
         return t0, t1
 
     def _zero_of(self, key: str, steps: Sequence[dict[str, Any]]) -> float:
-        """Where the preset puts time zero on one line: one read of one file, kept."""
+        """Where the preset puts time zero on one line: one read of one file, kept, and a
+        failed read kept too. It reads the line's first channel, the one the volume is made
+        from, whichever channel the Profile panel shows (#218)."""
         memo = (key, json.dumps(list(steps), sort_keys=True, default=str))
+        if memo in self._zero_failures:
+            raise self._zero_failures[memo]
         if memo not in self._zero_probes:
-            stack = StepStack.from_dicts([dict(s) for s in steps])
-            profiles = self.session.line_for_key(key).load()
-            stack.source = Radargram.from_profile(profiles[self.session.channel(key)])
-            self._zero_probes[memo] = float(stack.zero_ns())
+            try:
+                stack = StepStack.from_dicts([dict(s) for s in steps])
+                profiles = self.session.line_for_key(key).load()
+                stack.source = Radargram.from_profile(profiles[0])
+                self._zero_probes[memo] = float(stack.zero_ns())
+            except Exception as exc:
+                self._zero_failures[memo] = exc
+                raise
         return self._zero_probes[memo]
+
+    def _zero_or_none(self, key: str, steps: Sequence[dict[str, Any]]) -> float | None:
+        """`_zero_of`, or None when it cannot be read, said once per line and preset."""
+        memo = (key, json.dumps(list(steps), sort_keys=True, default=str))
+        known = memo in self._zero_failures
+        try:
+            return self._zero_of(key, steps)
+        except Exception as exc:
+            if not known:
+                _log(f"3-D view: no time zero for line {key}, its picks are left out: {exc}")
+            return None
 
     def pick_depths(self, grid_id: str, rows: Sequence[tuple[str, Any]]) -> list[float | None]:
         """Each `(line_key, pick)`'s true depth in metres, as `place_picks` gives it, or None
@@ -548,13 +570,7 @@ class ParaViewExport:
             target = 0.0
             if on_zero:
                 if key not in zeros:
-                    try:
-                        zeros[key] = self._zero_of(key, steps)
-                    except Exception as exc:
-                        _log(
-                            f"3-D view: no time zero for line {key}, its picks are left out: {exc}"
-                        )
-                        zeros[key] = None
+                    zeros[key] = self._zero_or_none(key, steps)
                 zero = zeros[key]
                 if zero is None:
                     continue

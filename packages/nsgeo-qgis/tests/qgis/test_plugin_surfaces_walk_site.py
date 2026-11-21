@@ -90,3 +90,46 @@ def test_the_walk_site_keeps_a_built_surface_fresh(walk):
         assert again.volume_record(GRID) == {}
         state = again_surfaces.state(record.feature_id)
         assert state.built and state.stale == ()
+
+
+def test_a_moved_line_file_is_read_once_on_the_walk_site(qgis_app, tmp_path, monkeypatch):
+    """#219 on real data: a line whose file has moved is asked about once, not on every refresh."""
+    from pathlib import Path
+
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis import paraview_export
+    from nsgeo_qgis.paraview_export import ParaViewExport
+
+    link = tmp_path / "moved.DZT"
+
+    def edit(doc):
+        entry = next(e for e in doc["lines"] if e["placement"]["grid_id"] == GRID)
+        link.symlink_to(Path(entry["path"]))
+        entry["path"] = str(link)
+
+    session = open_walk_site(tmp_path, edit=edit)
+    keys = list(source_keys(session, GRID))
+    moved = next(k for k in keys if session.line_for_key(k).path == link)
+    other = next(k for k in keys if k != moved)
+    link.unlink()
+    reads: list[Path] = []
+    original = Line.load
+
+    def counting(self):
+        reads.append(self.path)
+        return original(self)
+
+    monkeypatch.setattr(Line, "load", counting)
+    logged: list[str] = []
+    monkeypatch.setattr(paraview_export, "_log", logged.append)
+    dock = Dock(session)
+    try:
+        export = ParaViewExport(session, dock)
+        rows = [(moved, _pick(moved, 30, 12.0)), (other, _pick(other, 30, 12.0))]
+        for _ in range(2):
+            got = export.pick_depths(GRID, rows)
+            assert got[0] is None and got[1] is not None
+        assert reads.count(link) == 1
+        assert len(logged) == 1 and moved in logged[0]
+    finally:
+        dock.dispose()

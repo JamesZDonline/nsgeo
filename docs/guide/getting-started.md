@@ -841,6 +841,10 @@ a surface. It is on whenever a site is open, in either scope of the Slices panel
 and it needs no prepared slice source. Exporting never changes what the Slices
 panel shows.
 
+On a line recorded with more than one channel, the 3-D work reads the first channel,
+whichever channel the Profile panel shows: the slices, surfaces, the 3D view and this
+export.
+
 1. Click **3D Analysis ▾**, then **Export for ParaView…**. The dialog opens on
    the Slices panel's grid.
    - **3-D resolution** is this grid's own **Cell** and **Depth step**, kept
