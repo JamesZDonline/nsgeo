@@ -2,9 +2,9 @@
 
 No step name appears here. `kind` picks the editor: float and int are line
 edits (so a REQUIRED field can be blank), time is a bounded number spinbox
-(`TimeSpinBox`), choice is a combo box, curve is a label pointing at the gain
-strip. Commit builds the step through the core,
-so the core's validation is the only validation.
+(`TimeSpinBox`), row is a bounded whole-number spinbox (`RowSpinBox`), choice
+is a combo box, curve is a label pointing at the gain strip. Commit builds the
+step through the core, so the core's validation is the only validation.
 
 `message` lives in its own outer layout, never as a row inside the
 `QFormLayout` that `clear()` tears down. `QFormLayout.removeRow()` genuinely
@@ -23,7 +23,15 @@ import math
 import re
 from typing import Any
 
-from nsgeo.processing import REQUIRED, ParamSpec, Step, build_step, get_step
+from nsgeo.processing import (
+    REQUIRED,
+    ParamSpec,
+    Step,
+    build_step,
+    get_step,
+    param_problem,
+    param_visible,
+)
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QValidator, QWheelEvent
 from qgis.PyQt.QtWidgets import (
@@ -32,6 +40,7 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -46,7 +55,69 @@ _PARTIAL_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d*)?([eE][+-]?\d*)?")
 UNBOUNDED_NS = 1e9
 
 
-class TimeSpinBox(QDoubleSpinBox):
+class _CommitRules:
+    """What `TimeSpinBox` and `RowSpinBox` share, so the wheel rule (a
+    recorded user preference) and the commit rules live once: the wheel
+    scrolls the panel unless the field has focus; an arrow or wheel step is a
+    finished edit (`editingFinished` does not follow one), announced on the
+    class's own signal named by `_step_signal`; a typed number past the range
+    is clamped to the nearest limit; and `touched` (R10, R12) says whether
+    the user changed the value since the form built this field, so an
+    untouched field reports the value it was built from. Qt interprets the
+    display text on Return and on focus-out whether or not anything was
+    typed, and reverts a cleared or partial entry without calling
+    `valueFromText` at all; none of those is an edit.
+
+    A plain mixin placed before the Qt spinbox in the bases, so `super()`
+    reaches the spinbox's own `wheelEvent`, `stepBy` and `valueFromText`."""
+
+    _step_signal = "stepped"
+    touched: bool
+
+    def _init_commit_rules(self) -> None:
+        self.touched = False
+        self.setKeyboardTracking(False)  # type: ignore[attr-defined]
+        # The wheel scrolls the panel unless the field is the one in use.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # type: ignore[attr-defined]
+
+    def _number(self, text: str) -> Any:
+        raise NotImplementedError
+
+    def edit_text(self, text: str) -> None:
+        """Set the text as if typed, and interpret it."""
+        self.lineEdit().setText(text)  # type: ignore[attr-defined]
+        self.interpretText()  # type: ignore[attr-defined]
+
+    def wheelEvent(self, event: QWheelEvent | None) -> None:
+        try:
+            if event is not None and not self.hasFocus():  # type: ignore[attr-defined]
+                event.ignore()  # let the panel scroll
+                return
+            super().wheelEvent(event)  # type: ignore[misc]
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"{type(self).__name__}.wheelEvent: {exc!r}")
+
+    def stepBy(self, steps: int) -> None:
+        try:
+            super().stepBy(steps)  # type: ignore[misc]  # interprets typed text first, if any
+            self.touched = True
+            getattr(self, self._step_signal).emit()
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"{type(self).__name__}.stepBy: {exc!r}")
+
+    def valueFromText(self, text: str) -> Any:
+        try:
+            if text.strip() == self.textFromValue(self.value()):  # type: ignore[attr-defined]
+                return self.value()  # type: ignore[attr-defined]  # the display, not an edit (R12)
+            value = self._number(text.strip())
+            self.touched = True
+            return min(max(value, self.minimum()), self.maximum())  # type: ignore[attr-defined]
+        except Exception as exc:
+            _log(f"{type(self).__name__}.valueFromText: {exc!r}")
+            return self.value()  # type: ignore[attr-defined]
+
+
+class TimeSpinBox(_CommitRules, QDoubleSpinBox):
     """A number field bounded to a range that still lets any number be typed.
 
     A stock `QDoubleSpinBox` refuses keystrokes that would leave the range
@@ -66,18 +137,8 @@ class TimeSpinBox(QDoubleSpinBox):
         super().__init__(parent)
         self.setDecimals(10)
         self.setRange(-UNBOUNDED_NS, UNBOUNDED_NS)
-        self.setKeyboardTracking(False)
-        # `touched` (R10, R12): the user changed the value since the form
-        # built this field -- `valueFromText` parsed text that differs from
-        # the display of the current value, or a step happened. An
-        # untouched field reports the value it was built from. Qt
-        # interprets the display text on Return and on focus-out whether or
-        # not anything was typed, and reverts a cleared or partial entry
-        # without calling `valueFromText` at all; none of those is an edit.
-        self.touched = False
+        self._init_commit_rules()
         self._exact_range: tuple[float, float] | None = None
-        # The wheel scrolls the panel unless the field is the one in use.
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_exact_range(self, low: float, high: float) -> None:
         """`setRange` rounds the limits to `decimals()`; the exact ones are
@@ -95,19 +156,8 @@ class TimeSpinBox(QDoubleSpinBox):
                 return high
         return value
 
-    def edit_text(self, text: str) -> None:
-        """Set the text as if typed, and interpret it."""
-        self.lineEdit().setText(text)
-        self.interpretText()
-
-    def wheelEvent(self, event: QWheelEvent | None) -> None:
-        try:
-            if event is not None and not self.hasFocus():
-                event.ignore()  # let the panel scroll
-                return
-            super().wheelEvent(event)
-        except Exception as exc:  # a Qt override: never let it escape
-            _log(f"TimeSpinBox.wheelEvent: {exc!r}")
+    def _number(self, text: str) -> float:
+        return float(text)
 
     def validate(self, text: str, pos: int) -> tuple[QValidator.State, str, int]:
         try:
@@ -127,31 +177,42 @@ class TimeSpinBox(QDoubleSpinBox):
             _log(f"TimeSpinBox.validate: {exc!r}")
             return QValidator.State.Invalid, text, pos
 
-    def stepBy(self, steps: int) -> None:
-        try:
-            super().stepBy(steps)  # interprets typed text first, if any
-            self.touched = True
-            self.stepped.emit()
-        except Exception as exc:  # a Qt override: never let it escape
-            _log(f"TimeSpinBox.stepBy: {exc!r}")
-
-    def valueFromText(self, text: str) -> float:
-        try:
-            if text.strip() == self.textFromValue(self.value()):
-                return self.value()  # the display, not an edit (R12)
-            value = float(text.strip())
-            self.touched = True
-            return min(max(value, self.minimum()), self.maximum())
-        except Exception as exc:
-            _log(f"TimeSpinBox.valueFromText: {exc!r}")
-            return self.value()
-
     def textFromValue(self, value: float) -> str:
         try:
             return f"{value:g}"
         except Exception as exc:
             _log(f"TimeSpinBox.textFromValue: {exc!r}")
             return str(value)
+
+
+class RowSpinBox(_CommitRules, QSpinBox):
+    """A whole-number row of a step's input record, with the commit and wheel
+    rules of `TimeSpinBox` (`_CommitRules`). A typed number past the range is
+    clamped to the nearest limit."""
+
+    row_stepped = pyqtSignal()
+    _step_signal = "row_stepped"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setRange(0, 2**31 - 1)
+        self._init_commit_rules()
+
+    def _number(self, text: str) -> int:
+        return int(text)
+
+    def validate(self, text: str, pos: int) -> tuple[QValidator.State, str, int]:
+        # Any run of digits can be typed; a number past the range is clamped
+        # when committed, not refused keystroke by keystroke.
+        try:
+            probe = text.strip()
+            if probe.isascii() and probe.isdigit():
+                return QValidator.State.Acceptable, text, pos
+            state = QValidator.State.Intermediate if probe == "" else QValidator.State.Invalid
+            return state, text, pos
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"RowSpinBox.validate: {exc!r}")
+            return QValidator.State.Invalid, text, pos
 
 
 class ParamForm(QWidget):
@@ -183,6 +244,7 @@ class ParamForm(QWidget):
         self._shown: dict[str, tuple[Any, Any]] = {}
         self._time_range: tuple[float, float] | None = None
         self._time_step = 1.0
+        self._row_range: tuple[int, int] | None = None
         self.step_name: str | None = None
         # A depth counter, not a bool (matching ProcessingDock._updating, for
         # the same reason): set_step() calls clear() before taking its own
@@ -219,10 +281,15 @@ class ParamForm(QWidget):
         params: dict[str, Any] | None = None,
         time_range: tuple[float, float] | None = None,
         time_step: float | None = None,
+        row_range: tuple[int, int] | None = None,
     ) -> None:
         """Show `name`'s editors. `time_range` bounds a time field and
-        `time_step` is its arrow step; neither means unbounded and 1 ns."""
+        `time_step` is its arrow step; neither means unbounded and 1 ns.
+        `row_range` is the first and last row a row field can take; none
+        means bounded only by the field's own minimum. A field tied to a
+        mode (`ParamSpec.when`) is shown only while the mode is that one."""
         self.clear()
+        self._row_range = row_range
         self._time_range = time_range
         self._time_step = time_step if time_step else 1.0
         self.step_name = name
@@ -236,8 +303,27 @@ class ParamForm(QWidget):
                 label = f"{spec.label} ({spec.unit})" if spec.unit else spec.label
                 editor.setToolTip(spec.help)
                 self._layout.addRow(label, editor)
+            self._apply_visibility()
         finally:
             self._updating -= 1
+
+    def _apply_visibility(self, *_: Any) -> None:
+        """Show each field whose `when` matches the mode combo, hide the rest,
+        label and editor together. Their values stay: `values()` reports every
+        field. `QFormLayout.setRowVisible` is Qt 6 only."""
+        try:
+            modes = self._modes()
+            for spec in self._specs:
+                editor = self.editors.get(spec.name)
+                if editor is None:
+                    continue
+                shown = param_visible(spec, modes)
+                label = self._layout.labelForField(editor)
+                if label is not None:
+                    label.setVisible(shown)
+                editor.setVisible(shown)
+        except Exception as exc:  # a Qt slot: never let it escape
+            _log(f"ParamForm._apply_visibility: {exc!r}")
 
     def _make_editor(self, spec: ParamSpec, value: Any) -> QWidget:
         if spec.kind == "choice":
@@ -246,6 +332,7 @@ class ParamForm(QWidget):
                 combo.addItem(choice, choice)
             if value is not REQUIRED:
                 combo.setCurrentIndex(max(0, combo.findData(value)))
+            combo.currentIndexChanged.connect(self._apply_visibility)
             combo.currentIndexChanged.connect(self._on_edited)
             combo.currentIndexChanged.connect(self.commit)
             return combo
@@ -254,6 +341,8 @@ class ParamForm(QWidget):
             return QLabel("edited in the profile viewer's gain strip")
         if spec.kind == "time":
             return self._make_time_editor(spec, value)
+        if spec.kind == "row":
+            return self._make_row_editor(spec, value)
         edit = QLineEdit()
         if value is REQUIRED:
             edit.setPlaceholderText("required")
@@ -264,6 +353,23 @@ class ParamForm(QWidget):
         edit.textChanged.connect(self._on_edited)
         edit.editingFinished.connect(self.commit)
         return edit
+
+    def _make_row_editor(self, spec: ParamSpec, value: Any) -> QWidget:
+        spin = RowSpinBox()
+        low = int(spec.min) if spec.min is not None else 0
+        high = spin.maximum()
+        if self._row_range is not None:
+            low, high = max(low, self._row_range[0]), self._row_range[1]
+        spin.setRange(low, max(low, high))
+        if value is not REQUIRED:
+            spin.setValue(int(value))
+            # The range may have clamped it; an untouched editor reports the
+            # value it was built from.
+            self._shown[spec.name] = (None, value)
+        spin.valueChanged.connect(self._on_edited)
+        spin.editingFinished.connect(self.commit)
+        spin.row_stepped.connect(self.commit)
+        return spin
 
     def _make_time_editor(self, spec: ParamSpec, value: Any) -> QWidget:
         spin = TimeSpinBox()
@@ -293,10 +399,25 @@ class ParamForm(QWidget):
             if index < 0:
                 raise ValueError(f"{text!r} is not one of this field's choices")
             editor.setCurrentIndex(index)
-        elif isinstance(editor, QDoubleSpinBox):
+        elif isinstance(editor, _CommitRules):
             editor.edit_text(text)
         elif isinstance(editor, QLineEdit):
             editor.setText(text)
+
+    def show_row(self, name: str, value: int) -> None:
+        """Show `value` in the row field `name` as if the form had been built
+        with it: no edit, no commit. For a value the panel itself wrote."""
+        editor = self.editors.get(name)
+        if not isinstance(editor, RowSpinBox):
+            _log(f"ParamForm.show_row: {name!r} is not a row field of {self.step_name!r}")
+            return
+        self._updating += 1
+        try:
+            editor.setValue(value)
+            editor.touched = False
+            self._shown[name] = (None, value)
+        finally:
+            self._updating -= 1
 
     def is_complete(self) -> bool:
         for spec in self._specs:
@@ -308,34 +429,63 @@ class ParamForm(QWidget):
         return True
 
     def values(self) -> dict[str, Any]:
+        """Every parameter's value, hidden ones included. A hidden field the
+        user cannot see (outside the mode) that fails to read, a cleared
+        box say, or one outside its bounds, falls back to the value it was built with, so it cannot
+        block a mode switch; a visible one raises as ever."""
+        modes = self._modes()
         out: dict[str, Any] = {}
         for spec in self._specs:
-            editor = self.editors[spec.name]
-            if spec.kind == "choice":
-                assert isinstance(editor, QComboBox)
-                out[spec.name] = editor.currentData()
-            elif spec.kind == "curve":
-                curve_value = self._curve_values.get(spec.name)
-                if curve_value is None:
-                    raise ValueError(f"{spec.label}: no control points yet")
-                out[spec.name] = curve_value
-            elif isinstance(editor, QDoubleSpinBox):
-                shown = self._shown.get(spec.name)
-                assert isinstance(editor, TimeSpinBox)
-                out[spec.name] = shown[1] if shown and not editor.touched else editor.exact_value()
+            try:
+                value = self._value_of(spec)
+                if param_visible(spec, modes) or param_problem(spec, value) is None:
+                    out[spec.name] = value
+                    continue
+            except ValueError:
+                if param_visible(spec, modes):
+                    raise
+            shown = self._shown.get(spec.name)
+            if shown is not None:
+                out[spec.name] = shown[1]
+            elif spec.default is not REQUIRED:
+                out[spec.name] = spec.default
             else:
-                assert isinstance(editor, QLineEdit)
-                text = editor.text().strip()
-                if not text:
-                    raise ValueError(f"{spec.label} is required")
-                shown = self._shown.get(spec.name)
-                # Unchanged text keeps the exact value it displays a
-                # rounding of: committing on focus-out must not move a
-                # dragged cutoff by a sample.
-                out[spec.name] = (
-                    shown[1] if shown and text == shown[0] else self._parse_number(spec, text)
-                )
+                raise ValueError(f"{spec.name} is required")
         return out
+
+    def _modes(self) -> dict[str, Any]:
+        """The value of every choice field, by name."""
+        modes: dict[str, Any] = {}
+        for spec in self._specs:
+            editor = self.editors.get(spec.name)
+            if spec.kind == "choice" and isinstance(editor, QComboBox):
+                modes[spec.name] = editor.currentData()
+        return modes
+
+    def _value_of(self, spec: ParamSpec) -> Any:
+        editor = self.editors[spec.name]
+        if spec.kind == "choice":
+            assert isinstance(editor, QComboBox)
+            return editor.currentData()
+        if spec.kind == "curve":
+            curve_value = self._curve_values.get(spec.name)
+            if curve_value is None:
+                raise ValueError(f"{spec.label}: no control points yet")
+            return curve_value
+        if isinstance(editor, TimeSpinBox):
+            shown = self._shown.get(spec.name)
+            return shown[1] if shown and not editor.touched else editor.exact_value()
+        if isinstance(editor, RowSpinBox):
+            shown = self._shown.get(spec.name)
+            return shown[1] if shown and not editor.touched else editor.value()
+        assert isinstance(editor, QLineEdit)
+        text = editor.text().strip()
+        if not text:
+            raise ValueError(f"{spec.label} is required")
+        shown = self._shown.get(spec.name)
+        # Unchanged text keeps the exact value it displays a rounding of:
+        # committing on focus-out must not move a dragged cutoff by a sample.
+        return shown[1] if shown and text == shown[0] else self._parse_number(spec, text)
 
     def _parse_number(self, spec: ParamSpec, text: str) -> int | float:
         # No comma-as-decimal-point guessing: "1,000" and "1,5" cannot be
@@ -343,7 +493,7 @@ class ParamForm(QWidget):
         # European decimal comma), and silently picking one reading is
         # exactly the kind of guess this form otherwise never makes. A
         # comma is reported as bad input, same as any other non-numeral.
-        if spec.kind == "int":
+        if spec.kind in ("int", "row"):
             try:
                 return int(text)
             except ValueError:

@@ -24,17 +24,31 @@ limit is taken from the stack with every enabled curve step switched off
 against a scale that holds still, instead of the scale chasing the curve
 (spec §3, call 1). A difference view is its own scale (call 4). The time
 cutoff is never bypassed in that measurement, so selecting the cutoff row
-shows more record without changing the brightness (call 11).
+shows more record without changing the brightness (call 11). A row handle's
+fallback input view (Time zero, below) is its own scale too: the record drawn
+is the record measured.
 
-The time cutoff: a step with a `time`-kind parameter (`time_param_name`)
-is drawn as a draggable line, and while its row is selected the image
-shows the stack with that step bypassed so there is something below the
-line to drag it over. The *cutoff row* is that selected row, but only when
-no preview is up, a working line is open and the step now at that row has
-a time parameter. It is resolved against the live stack at every render and
-every drag, never cached: a line switch or a stack edit can change what sits
-at the selected row, and a remembered "this is the cutoff" would then
-bypass, or write onto, the wrong step.
+The handle: a step with a `time`- or `row`-kind parameter that is visible in
+the step's current mode (`handle_spec`) is drawn as a draggable line. The
+*handle row* is the selected row, but only when no preview is up, a working
+line is open and the step now at that row has such a parameter. It is
+resolved against the live stack at every render and every drag, never cached:
+a line switch or a stack edit can change what sits at the selected row, and a
+remembered "this is the handle" would then bypass, or write onto, the wrong
+step.
+
+What the image shows while a handle row is selected depends on its kind. A
+`time` handle (the cutoff) shows the stack with that step bypassed, so there
+is something below the line to drag it over. A `row` handle (Time zero's first
+kept row) shows the same bypass, relabelled onto the line's clock
+(`relabel_onto`), so the processed look holds (spec §4.14 Q3), and leaves
+out the time cutoffs after Time zero too, so it runs to the record's full
+depth (§4.14 Q5); a cutoff before it stays, as part of what it receives. It
+falls back to what the step receives -- the step before it, or the source -- in two
+cases: a later step refuses the uncropped record (migration), or the bypass's
+first row is at another radar-clock time or dt than the input's (a later Time
+zero), where the line's row would mean something else. A shorter bypass is
+still drawn if one arises, but a cutoff no longer causes it.
 
 The window across lines: every line on a grid, along the same axis, is drawn
 against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
@@ -79,6 +93,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -87,10 +102,12 @@ from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     TIME_BASE_RADAR,
+    ParamSpec,
     Radargram,
     StepStack,
     build_step,
     first_break_ns,
+    param_visible,
     retime_ns,
 )
 from nsgeo.render import (
@@ -110,16 +127,20 @@ from nsgeo.velocity_fit import (
     radar_clock_note,
 )
 from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
-from qgis.core import Qgis
+from qgis.core import Qgis, QgsSettings
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QAction,
     QApplication,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -130,9 +151,35 @@ from nsgeo_qgis.render.qimage import RadargramImage, rgba_to_qimage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
-from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
+from nsgeo_qgis.ui.profile_view import AXIS_UNITS, MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.ui.view_transform import carry_time_window
 from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
+
+SLICE_BAND_KEY = "nsgeo/profile/sliceBand"
+LEFT_AXIS_KEY = "nsgeo/profile/leftAxis"
+RIGHT_AXIS_KEY = "nsgeo/profile/rightAxis"
+AXIS_DEPTH_GREYED_TIP = "Depth needs a velocity for this line"
+TRUE_SCALE_TIP = (
+    "True scale: a metre down is as long as a metre along the line, at the line's velocity"
+)
+TRUE_SCALE_GREYED_TIP = "True scale needs metres along the line and a velocity"
+TRUE_SCALE_FLAT_TIP = (
+    "True scale needs some distance along the line in view: this stretch was recorded "
+    "standing still"
+)
+SLICE_BAND_TIP = (
+    "Show or hide the slice's depth window on the profile. The window is kept while it's hidden."
+)
+SLICE_BAND_GREYED_TIP = (
+    "No slice depth window yet: the band appears once the Slices panel shows a slice."
+)
+
+
+def profile_settings() -> Any:
+    """The one door to the Profile panel's remembered choices (tests swap it)."""
+    return QgsSettings()
+
 
 STEPS_REFUSED_TEXT = "This line's steps can't run. See the Processing panel."
 PREVIEW_STEPS_REFUSED_TEXT = (
@@ -159,20 +206,30 @@ def _time_base_of_provenance(provenance_json: str) -> str:
     return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
-def time_param_name(step: Any) -> str | None:
-    """The name of a step's time-kind parameter, if it has one. Decided by
-    the schema's kind, never by the step's name, as `plugin.py`'s
+def handle_spec(step: Any) -> ParamSpec | None:
+    """The spec of a step's draggable parameter: the first of kind `time` or
+    `row` that is visible for the step's own params (spec §4.11). None when it
+    has none, as Time zero has none in `first_break` mode. Decided by the
+    schema's kind, never by the step's name, as `plugin.py`'s
     `_curve_param_name` does for the gain curve."""
+    params = step.params
     for spec in type(step).schema():
-        if spec.kind == "time":
-            return str(spec.name)
+        if spec.kind in ("time", "row") and param_visible(spec, params):
+            return spec
     return None
+
+
+def relabel_onto(rg: Radargram, zero_ns: float) -> Radargram:
+    """`rg` on the clock whose zero is `zero_ns`: the same data and rows, with
+    `t0_ns` and `zero_ns` moved so every sample keeps its radar-clock time
+    (spec §4.11). A no-op when the zero is already that."""
+    return rg.replace(t0_ns=rg.t0_ns + (rg.zero_ns - zero_ns), zero_ns=zero_ns)
 
 
 def curve_param_name(step: Any) -> str | None:
     """The name of a step's curve-kind parameter, if it has one. Decided by
     the schema's kind, never by the step's name; the same shape as
-    `time_param_name`."""
+    `handle_spec`."""
     for spec in type(step).schema():
         if spec.kind == "curve":
             return str(spec.name)
@@ -260,6 +317,47 @@ def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
     return f"header ε {line.header.epsr:g}, {line_label(line)}"
 
 
+class _FitButton(QToolButton):
+    """The Fit split button, holding the width of its widest action label.
+    The width is worked out again on a font or style change, which alter what
+    each label needs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._actions: tuple[Any, ...] = ()
+        self._busy = False
+
+    def set_actions(self, actions: tuple[Any, ...], default: Any) -> None:
+        self._actions = actions
+        self.setDefaultAction(default)
+        self._hold_widest()
+
+    def _hold_widest(self) -> None:
+        if not self._actions or self._busy:
+            return
+        self._busy = True
+        try:
+            current = self.defaultAction()
+            self.setMinimumWidth(0)
+            widest = 0
+            for action in self._actions:
+                self.setDefaultAction(action)
+                widest = max(widest, self.sizeHint().width())
+            self.setDefaultAction(current)
+            self.setMinimumWidth(widest)
+        finally:
+            self._busy = False
+
+    def event(self, e: Any) -> bool:
+        handled = super().event(e)
+        try:
+            if e.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+                self._hold_widest()
+        except Exception as exc:  # an override that raises is a hard crash
+            _log(f"fit button width: {exc!r}")
+        return handled
+
+
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
@@ -298,7 +396,13 @@ class ProfileDock(QgsDockWidget):
         self._working_key: str | None = None
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        self._axes_zero = 0.0  # the zero_ns of the drawing those axes were set for
+        # True when those axes are header-only (`_take_down_picture`): on the radar
+        # clock, not one the user zoomed on, so the clock rule skips them.
+        self._axes_from_header = False
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
+        # Whether a row handle's view drew the bypass (True) or the input (False).
+        self._row_view_is_bypass = False
         self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
         self._cube_zero_lookup: Callable[[str], float | None] | None = None
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
@@ -313,7 +417,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip: tuple[list[list[float]], Any, float | None] | None = None
         # The Processing panel's selected row, and the step object the
         # cutoff line was last read from. Neither says which step is the
-        # cutoff: see `_cutoff_row` and the module docstring.
+        # cutoff: see `_handle_row` and the module docstring.
         self._selected_row = -1
         self._cutoff_step: Any = None
         # A cut's section, from the Slices panel's cube (cut spec §4.3). While
@@ -368,6 +472,13 @@ class ProfileDock(QgsDockWidget):
         self.colormap_combo.addItems(colormap_names(unipolar=False))
         self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
         bar.addWidget(self.colormap_combo)
+        # A display setting, so it sits with the colormap, not with Fit and 1:1.
+        # The attribute keeps its old name; it is a checkbox now.
+        self.slice_band_button = QCheckBox("Show slice band")
+        remembered = profile_settings().value(SLICE_BAND_KEY, True)
+        # A value that is not a bool (or "true"/"false") means shown.
+        self.slice_band_button.setChecked(str(remembered).lower() != "false")
+        bar.addWidget(self.slice_band_button)
         # Finding 7 (M7 walkthrough re-review, third round): the preview
         # marker moved out of this row entirely -- see `_show_line`'s
         # `is_preview` parameter, which marks it in the window title
@@ -384,16 +495,41 @@ class ProfileDock(QgsDockWidget):
         # any of this: a plain `QLabel`, immediately before `fit_button`.
         self.difference_label = QLabel("")
         bar.addWidget(self.difference_label)
-        self.fit_button = QPushButton("Fit")
-        self.one_to_one_button = QPushButton("1:1")
+        self.fit_button = _FitButton()
+        self.fit_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.fit_menu = QMenu(self.fit_button)
+        self.fit_menu.setToolTipsVisible(True)
+        self.fit_all_action = self.fit_menu.addAction("Fit")
+        self.fit_all_action.setToolTip("The whole line across and the whole record down")
+        self.fit_width_action = self.fit_menu.addAction("Fit width")
+        self.fit_width_action.setToolTip("The whole line across; keeps the time zoom")
+        self.fit_height_action = self.fit_menu.addAction("Fit height")
+        self.fit_height_action.setToolTip("The whole record down; keeps the zoom along the line")
+        self.fit_button.setMenu(self.fit_menu)
+        # Not remembered between sessions: a new dock starts with Fit.
+        # The button's width follows its default action's text, so a pick would
+        # move the buttons after it. It holds the width of its widest state,
+        # recomputed on a font or style change (see `_FitButton`).
+        self.fit_button.set_actions(
+            (self.fit_height_action, self.fit_width_action, self.fit_all_action),
+            self.fit_all_action,
+        )
+        self.one_to_one_button = QToolButton()
+        self.one_to_one_button.setText("1:1")
         bar.addWidget(self.fit_button)
         bar.addWidget(self.one_to_one_button)
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)
-        bar.addStretch(1)
-        self.velocity_label = QLabel("")
-        bar.addWidget(self.velocity_label)
+        # Deferred: slices_dock imports grid_velocity_label from this module,
+        # so a module-level import of ElidedLabel would be circular.
+        from nsgeo_qgis.ui.slices_dock import ElidedLabel
+
+        self.velocity_label = ElidedLabel("")
+        self.velocity_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        bar.addWidget(self.velocity_label, 1)
         layout.addLayout(bar)
         # Parented to `body`, which this dock owns via setWidget() below --
         # not a top-level, parentless widget the way a naive test fixture
@@ -404,6 +540,12 @@ class ProfileDock(QgsDockWidget):
         viewer_row = QHBoxLayout()
         viewer_row.setSpacing(0)
         self.view = ProfileView(body)
+        self.axis_menu: QMenu | None = None
+        # A remembered unit that is not one of the three means the default.
+        self.view.set_axis_units(
+            self._remembered_axis_unit(LEFT_AXIS_KEY, "ns"),
+            self._remembered_axis_unit(RIGHT_AXIS_KEY, "m"),
+        )
         viewer_row.addWidget(self.view, 1)
         self.gain_strip = GainStrip(body)
         self.gain_strip.hide()
@@ -439,8 +581,12 @@ class ProfileDock(QgsDockWidget):
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
         self.colormap_combo.currentTextChanged.connect(self._display_changed)
-        self.fit_button.clicked.connect(self.view.fit)
-        self.one_to_one_button.clicked.connect(self.view.one_to_one)
+        self.one_to_one_button.clicked.connect(self.view.true_scale)
+        self.fit_all_action.triggered.connect(self.view.fit)
+        self.fit_width_action.triggered.connect(self.view.fit_width)
+        self.fit_height_action.triggered.connect(self.view.fit_height)
+        self.fit_menu.triggered.connect(self._on_fit_picked)
+        self.slice_band_button.toggled.connect(self._on_slice_band_toggled)
         self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.view.trace_hovered.connect(self._hovered)
         self.view.range_selected.connect(self._range_selected)
@@ -455,6 +601,9 @@ class ProfileDock(QgsDockWidget):
         self.save_fit_button.clicked.connect(self._save_velocity_fit)
         self.clear_velocity_button.clicked.connect(self._clear_velocity_points)
         self.view.view_changed.connect(self._sync_strip_mapping)
+        self.view.axis_menu_requested.connect(self._on_axis_menu_requested)
+        # True scale depends on the window (a flat stretch has no metres).
+        self.view.view_changed.connect(self._sync_true_scale_button)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
         self.gain_strip.reset_requested.connect(self.gain_reset_requested.emit)
@@ -471,6 +620,8 @@ class ProfileDock(QgsDockWidget):
         session.grids_changed.connect(self._on_geometry_changed)
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
+        self._sync_slice_band_button()
+        self._sync_true_scale_button()
 
     def set_cut_sections(self, sections: CutSections) -> None:
         """Where a cut's section comes from. Its `section_changed` redraws the cut on show."""
@@ -577,6 +728,7 @@ class ProfileDock(QgsDockWidget):
         t0_ns: float,
         dt_ns: float,
         distance: Any,
+        zero_ns: float = 0.0,
     ) -> None:
         """Set the view's axes for `key`, carrying the window over from
         whatever was showing. The only place the dock sets axes.
@@ -588,11 +740,24 @@ class ProfileDock(QgsDockWidget):
         into the new line's record. Rule 1 puts back the very same transform
         object, so a re-render of an unchanged line leaves anything holding
         it (and the zoom itself) untouched.
+
+        Between rules 1 and 2 sits the clock rule (spec §4.8, #163 item 2):
+        the same line, same traces, dt, ruler and direction, but a different
+        record start, length or `zero_ns` (a Time zero or cutoff edit, a step
+        toggle) keeps the time zoom through `carry_time_window`. `zero_ns` is
+        the zero of what is being drawn; the dock compares it with its own
+        `_axes_zero` (set at the end of every call), because `_shown_radargram`
+        is reassigned before this runs and cannot give the old zero. Header-only
+        axes (`_axes_from_header`, set by `_take_down_picture`) are on the radar
+        clock, not one the user zoomed on: when the previous axes were those,
+        the clock rule is skipped so rule 2 holds the window and the load that
+        follows does not move it.
         """
         view = self.view
         old = view.transform
         old_ruler = view.ruler
         old_key = self._axes_key
+        was_header = self._axes_from_header
         self._file_window()
         # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
         # against its own distance along the path (cut spec call 5).
@@ -607,10 +772,23 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and new is not None
             and key == old_key
+            and zero_ns == self._axes_zero
             and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
             == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
         ):
             view.transform = old
+        elif (
+            old is not None
+            and new is not None
+            and key == old_key
+            and not was_header
+            and not is_cut_key(key)
+            and (new.n_traces, new.dt_ns, new.bounds, new.mirrored)
+            == (old.n_traces, old.dt_ns, old.bounds, old.mirrored)
+        ):
+            view.transform = carry_time_window(old, new, self._axes_zero, zero_ns)
+            view.view_changed.emit()
+            view.update()
         elif ruler is not None and ruler.key in self._held:
             self._apply_held(self._held[ruler.key])
         elif (
@@ -626,6 +804,8 @@ class ProfileDock(QgsDockWidget):
         ):
             view.transform = old
         self._axes_key = key
+        self._axes_zero = zero_ns
+        self._axes_from_header = False
 
     def _file_window(self) -> None:
         """File the window the view is showing under its ruler's key, with
@@ -848,6 +1028,12 @@ class ProfileDock(QgsDockWidget):
         self._cutoff_step = None
         self._shown_radargram = None
         self.view.set_cutoff(None)
+        # Header axes are the radar clock, unless this same line's processed
+        # picture was up (rule 1 puts the same transform back, or the clock
+        # rule carries its window onto them): then the window is still the one the
+        # user zoomed on, and the render that follows must carry it again.
+        # Checked before the call, which resets the flag.
+        from_processed = self._axes_key == key and not self._axes_from_header
         self._set_axes_holding(
             key,
             line.n_traces,
@@ -856,7 +1042,9 @@ class ProfileDock(QgsDockWidget):
             line.header.dt_ns,
             self._safe_distance(line),
         )
+        self._axes_from_header = not from_processed  # also `_show_steps_refused`
         self.view.set_image(None)
+        self._sync_true_scale_button()
 
     def _show_steps_refused(self, key: str, *, is_preview: bool) -> None:
         """The line's samples are here but its steps cannot run: say so
@@ -966,6 +1154,7 @@ class ProfileDock(QgsDockWidget):
         depths transparent, so the view's hatch shows through them."""
         section = self._cut_shown
         if section is None:
+            self._sync_true_scale_button()
             return
         rgba = section_rgba8(
             section.values,
@@ -974,6 +1163,7 @@ class ProfileDock(QgsDockWidget):
             unipolar=section.source.unipolar,
         )
         self.view.set_image(rgba_to_qimage(rgba))
+        self._sync_true_scale_button()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -1125,6 +1315,8 @@ class ProfileDock(QgsDockWidget):
     def _clear_view_only(self) -> None:
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
+        self._axes_zero = 0.0
+        self._axes_from_header = False
         self._shown_radargram = None
         self.image = None
         self._set_cut_chrome(False)
@@ -1138,6 +1330,7 @@ class ProfileDock(QgsDockWidget):
         self._reset_box_state()
         self._update_velocity_fit()
         self.channel_combo.hide()
+        self._sync_true_scale_button()
 
     # ---- preview (M7, spec §3.3) ----------------------------------------
     def _on_preview_changed(self, key: str, trace: int) -> None:
@@ -1778,6 +1971,7 @@ class ProfileDock(QgsDockWidget):
         # and reaches `qFatal()` in the CI container.
         try:
             self._slice_band = (lo_ns, hi_ns)
+            self._sync_slice_band_button()
             self._push_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
@@ -1791,7 +1985,7 @@ class ProfileDock(QgsDockWidget):
 
         The band is in the cube's time; the cube's own zero for the line on
         screen (else the shown radargram's) moves it onto the axis drawn."""
-        if self._slice_band is None:
+        if self._slice_band is None or not self.slice_band_button.isChecked():
             return
         if self._key is not None and is_cut_key(self._key):
             # A cut's axis is the cube's own clock: the band is drawn as it is
@@ -1813,10 +2007,90 @@ class ProfileDock(QgsDockWidget):
         try:
             self._slice_band = None
             self.view.clear_slice_band()
+            self._sync_slice_band_button()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
 
+    def _sync_true_scale_button(self) -> None:
+        """Grey 1:1 where there is no velocity or no metres along the line."""
+        try:
+            ok = self.view.can_true_scale()
+            self.one_to_one_button.setEnabled(ok)
+            if ok:
+                tip = TRUE_SCALE_TIP
+            elif self.view.true_scale_window_is_flat():
+                tip = TRUE_SCALE_FLAT_TIP
+            else:
+                tip = TRUE_SCALE_GREYED_TIP
+            self.one_to_one_button.setToolTip(tip)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the 1:1 button: {exc}", Qgis.MessageLevel.Critical)
+
+    def _sync_slice_band_button(self) -> None:
+        """Grey the button while there is no window; the checked choice is kept."""
+        has_window = self._slice_band is not None
+        self.slice_band_button.setEnabled(has_window)
+        self.slice_band_button.setToolTip(SLICE_BAND_TIP if has_window else SLICE_BAND_GREYED_TIP)
+
+    def _remembered_axis_unit(self, key: str, default: str) -> str:
+        value = profile_settings().value(key, default)
+        return value if value in AXIS_UNITS else default
+
+    def _on_axis_menu_requested(self, side: str, pos: QPoint) -> None:
+        """Open the unit menu for one vertical axis. `popup`, not `exec`: a
+        modal loop would hang offscreen; the menu is kept for tests."""
+        try:
+            if self.axis_menu is not None:
+                self.axis_menu.hide()
+                self.axis_menu.deleteLater()
+            menu = QMenu(self.view)
+            menu.setToolTipsVisible(True)
+            current = self.view.axis_units[0 if side == "left" else 1]
+            for text, unit in (("Time (ns)", "ns"), ("Samples", "sample"), ("Depth (m)", "m")):
+                action = menu.addAction(text)
+                action.setData(unit)
+                action.setCheckable(True)
+                action.setChecked(unit == current)
+                if unit == "m" and not self.view.has_velocity:
+                    action.setEnabled(False)
+                    action.setToolTip(AXIS_DEPTH_GREYED_TIP)
+                action.triggered.connect(lambda _=False, u=unit: self._set_axis_unit(side, u))
+            self.axis_menu = menu
+            menu.popup(pos)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the axis menu: {exc}", Qgis.MessageLevel.Critical)
+
+    def _set_axis_unit(self, side: str, unit: str) -> None:
+        try:
+            left, right = self.view.axis_units
+            if side == "left":
+                left = unit
+            else:
+                right = unit
+            self.view.set_axis_units(left, right)
+            profile_settings().setValue(LEFT_AXIS_KEY if side == "left" else RIGHT_AXIS_KEY, unit)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not change the axis unit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_fit_picked(self, action: QAction) -> None:
+        """The Fit button repeats whichever fit was picked last."""
+        try:
+            self.fit_button.setDefaultAction(action)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not change the Fit button: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_slice_band_toggled(self, checked: bool) -> None:
+        try:
+            profile_settings().setValue(SLICE_BAND_KEY, bool(checked))
+            if checked:
+                self._push_slice_band()
+            else:
+                self.view.clear_slice_band()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not show or hide the slice band: {exc}", Qgis.MessageLevel.Critical)
+
     def current_radargram(self) -> Radargram | None:
+        self._row_view_is_bypass = False
         if self._key is None:
             return None
         # Finding 4 (M7 final review): while previewing, `self._key` is the
@@ -1863,8 +2137,47 @@ class ProfileDock(QgsDockWidget):
                 # detail, not something a message bar should say.
                 self._decline_difference("the differenced step no longer exists in this stack")
         try:
-            row = self._cutoff_row()
+            row = self._handle_row()
             if row >= 0:
+                spec = self._handle_spec_at(row)
+                if spec is not None and spec.kind == "row":
+                    # Every step but Time zero, on the line's clock (spec
+                    # §4.14 Q3), and the time cutoffs after it (Q5): the
+                    # processed look, to full depth. Falls back to what Time
+                    # zero receives (§4.11) where the bypass can't be drawn.
+                    cut_rows = [
+                        i
+                        for i, (step, enabled) in enumerate(stack.entries)
+                        if i > row
+                        and enabled
+                        and (cut := handle_spec(step)) is not None
+                        and cut.kind == "time"
+                    ]
+                    received = stack.source if row == 0 else stack.intermediate(row - 1)
+                    try:
+                        line_zero = stack.zero_ns()
+                    except ValueError:
+                        # This very step refuses (a sample past the record's
+                        # end): the input, on its own clock, is what the user
+                        # needs in order to fix the row.
+                        return received
+                    try:
+                        bypass = stack.result_bypassing(row, *cut_rows)
+                    except ValueError:
+                        # A later step refuses the uncropped record
+                        # (migrate_fk does): no error, the input view.
+                        return relabel_onto(received, line_zero)
+                    if not math.isclose(bypass.dt_ns, received.dt_ns, rel_tol=1e-6) or abs(
+                        (bypass.t0_ns + bypass.zero_ns) - (received.t0_ns + received.zero_ns)
+                    ) > 1e-6 * float(received.dt_ns):
+                        # The bypass's first row is at another radar-clock
+                        # time (a later Time zero crops the top): the line's
+                        # row would mean something else. A shorter bypass
+                        # is drawn if one arises (a cutoff no longer causes
+                        # it, Q5): snap_row clamps the drag to the drawn rows.
+                        return relabel_onto(received, line_zero)
+                    self._row_view_is_bypass = True
+                    return relabel_onto(bypass, line_zero)
                 return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
@@ -1923,7 +2236,13 @@ class ProfileDock(QgsDockWidget):
                 distance = self._safe_distance(line)
         self._shown_radargram = rg
         self._set_axes_holding(
-            self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
+            self._key or "",
+            rg.n_traces,
+            rg.n_samples,
+            rg.t0_ns,
+            rg.dt_ns,
+            distance,
+            zero_ns=rg.zero_ns,
         )
         reference = self._scale_reference(rg)
         self.image = (
@@ -1943,6 +2262,7 @@ class ProfileDock(QgsDockWidget):
         self._refresh_picks()
         self._push_slice_band()
         self._push_headroom()
+        self._sync_true_scale_button()
 
     def shown_zero_ns(self) -> float:
         """The radar-clock time the drawn radargram's axis calls 0 (0.0 when
@@ -1967,28 +2287,38 @@ class ProfileDock(QgsDockWidget):
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
-        for a difference view, else the displayed stack with every enabled
-        gain-curve step bypassed (just `result()` when there is none).
-        Never bypasses the time cutoff -- see the module docstring. Called
-        after `current_radargram`, so a declined difference has already
-        reset `_effective_difference_index`."""
+        for a difference view or a row handle's fallback input view (each is
+        its own scale), else the displayed stack with every enabled gain-curve step
+        bypassed, and the Time zero row too while its bypass is drawn (a row
+        handle's fallback input view is its own scale). Never bypasses the
+        time cutoff -- see the module docstring. Called after
+        `current_radargram`, so a declined difference has already reset
+        `_effective_difference_index`."""
         if self._effective_difference_index >= 0 or self._key is None:
             return shown
+        handle_row = self._handle_row()
+        if handle_row >= 0 and self._handle_spec_is_row(handle_row):
+            if not self._row_view_is_bypass:
+                return shown  # the fallback: the record Time zero receives
+        else:
+            handle_row = -1
         try:
             stack = self.session.stack_for(self._key, insert=self._preview_key is None)
-            rows = [
+            rows = {
                 i
                 for i, (step, enabled) in enumerate(stack.entries)
                 if enabled and curve_param_name(step) is not None
-            ]
+            }
+            if handle_row >= 0:
+                rows.add(handle_row)  # the bypassed Time zero (§4.14 Q3)
             return stack.result_bypassing(*rows)
         except ValueError as exc:
             _log(f"could not measure the display scale without the gain curves: {exc}")
             return shown
 
-    def _cutoff_row(self, row: int | None = None) -> int:
-        """`row` (default: the selected one) when it is the cutoff row, else
-        -1. Resolved against the live working stack on every call, never
+    def _handle_row(self, row: int | None = None) -> int:
+        """`row` (default: the selected one) when it is a handle row (a cutoff, or Time zero in
+        sample mode), else -1. Resolved against the live working stack on every call, never
         cached: see the module docstring."""
         row = self._selected_row if row is None else row
         if self._preview_key is not None or self._working_key is None or row < 0:
@@ -2002,19 +2332,49 @@ class ProfileDock(QgsDockWidget):
         if not self.session.is_open:
             return -1
         entries = self.session.stack_for(self._working_key, insert=False).entries
-        if row >= len(entries) or time_param_name(entries[row][0]) is None:
+        if row >= len(entries) or handle_spec(entries[row][0]) is None:
             return -1
         return row
 
+    def _handle_spec_at(self, row: int) -> ParamSpec | None:
+        """The handle parameter of the working stack's step at `row`, None
+        when `row` is no handle row or nothing is open."""
+        if self._working_key is None or not self.session.is_open:
+            return None
+        entries = self.session.stack_for(self._working_key, insert=False).entries
+        return handle_spec(entries[row][0]) if 0 <= row < len(entries) else None
+
+    def _handle_spec_is_row(self, row: int) -> bool:
+        """Whether the handle at `row` is a `row` kind: the profile then
+        draws the bypass, or the step's input (see `current_radargram`)."""
+        spec = self._handle_spec_at(row)
+        return spec is not None and spec.kind == "row"
+
     def _show_cutoff(self) -> None:
-        row = self._cutoff_row()
+        row = self._handle_row()
         if row < 0 or self._working_key is None:
             self._cutoff_step = None
             self.view.set_cutoff(None)
             return
         step = self.session.stack_for(self._working_key, insert=False).entries[row][0]
-        name = time_param_name(step)
-        assert name is not None
+        spec = self._handle_spec_at(row)
+        assert spec is not None
+        if spec.kind == "row":
+            # Time zero's first kept row, on the record `current_radargram`
+            # drew (the bypass, or its input in the fallback), on the line's clock.
+            shown = self._shown_radargram
+            if shown is None or self._effective_difference_index >= 0:
+                # A difference view draws another record, whose rows are not
+                # the step's: no line to drag there.
+                self._cutoff_step = None
+                self.view.set_cutoff(None)
+                return
+            self._cutoff_step = step
+            self.view.set_cutoff(
+                float(shown.t0_ns + int(step.params[str(spec.name)]) * shown.dt_ns), kind="start"
+            )
+            return
+        name = str(spec.name)
         self._cutoff_step = step
         self.view.set_cutoff(
             float(
@@ -2033,16 +2393,16 @@ class ProfileDock(QgsDockWidget):
         try:
             if row == self._selected_row:
                 return
-            was = self._cutoff_row() >= 0
+            was = self._handle_row() >= 0
             self._selected_row = row
-            if was or self._cutoff_row() >= 0:
+            if was or self._handle_row() >= 0:
                 self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not follow the selected step: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_cutoff_dragged(self, end_ns: float) -> None:
         try:
-            row = self._cutoff_row()
+            row = self._handle_row()
             key = self._working_key
             if row < 0 or key is None:
                 return
@@ -2052,9 +2412,13 @@ class ProfileDock(QgsDockWidget):
             # some other step must not write onto it.
             if step is not self._cutoff_step:
                 return
-            name = time_param_name(step)
-            if name is None:
+            spec = handle_spec(step)
+            if spec is not None and spec.kind == "row":
+                self._write_row_handle(key, row, step, spec, end_ns)
                 return
+            if spec is None or spec.kind != "time":
+                return
+            name = str(spec.name)
             shown, input_zero = self.shown_zero_ns(), self.step_input_zero_ns(row)
             drawn = float(retime_ns(float(step.params[name]), input_zero, shown))
             if end_ns == drawn:
@@ -2073,6 +2437,26 @@ class ProfileDock(QgsDockWidget):
             self.session.replace_step(key, row, new)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not move the time cutoff: {exc}", Qgis.MessageLevel.Critical)
+
+    def _write_row_handle(
+        self, key: str, row: int, step: Any, spec: ParamSpec, t_ns: float
+    ) -> None:
+        """A drag of Time zero's line released at `t_ns` on the shown clock:
+        the row it sits on, written when it is not the row already there."""
+        shown = self._shown_radargram
+        if shown is None or not shown.dt_ns:
+            return
+        name = str(spec.name)
+        value = round((t_ns - shown.t0_ns) / shown.dt_ns)
+        if value == step.params[name]:
+            return  # an unmoved handle writes nothing
+        try:
+            new = build_step(step.name, **{**step.params, name: int(value)})
+        except ValueError as exc:
+            self.error.emit(str(exc))
+            return
+        self._cutoff_step = new
+        self.session.replace_step(key, row, new)
 
     def _sync_strip_mapping(self) -> None:
         if self.view.transform is not None:
@@ -2206,14 +2590,18 @@ class ProfileDock(QgsDockWidget):
                 self.view.set_velocity(model)
                 self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
             except KeyError:
-                if is_cut_key(self._key):  # no velocity on the grid and no line to take one from
-                    self.view.set_velocity(None)
-                    self.velocity_label.setText("")
+                # No velocity on the grid and no line to take one from: the
+                # old depth axis must not stay on screen (#14).
+                self.view.set_velocity(None)
+                self.velocity_label.setText("")
             except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                self.view.set_velocity(None)
+                self.velocity_label.setText("")
                 _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
         # Every path, the early ones included, resets the strip: a line that
         # just went away must not leave the old read-out and buttons behind.
         self._update_velocity_fit()
+        self._sync_true_scale_button()
 
     def _configure_channels(self, n: int) -> None:
         self.channel_combo.blockSignals(True)

@@ -45,7 +45,7 @@ def _placeholder(spec: ParamSpec):
     """Any value acceptable to the constructor, so `params` can be compared."""
     if spec.kind in ("float", "time"):
         return _in_bounds(spec, 1.0)
-    if spec.kind == "int":
+    if spec.kind in ("int", "row"):
         return int(_in_bounds(spec, 1))
     if spec.kind == "choice":
         return spec.choices[0]
@@ -91,7 +91,7 @@ def test_defaults_respect_declared_bounds_and_choices(name):
             continue
         if s.kind == "choice":
             assert s.default in s.choices
-        if s.kind in ("float", "int"):
+        if s.kind in ("float", "int", "row"):
             if s.min is not None:
                 assert s.default >= s.min
             if s.max is not None:
@@ -195,7 +195,7 @@ _BOUNDED = [
     (name, spec)
     for name in available_steps()
     for spec in get_step(name).schema()
-    if spec.kind in ("float", "int") and (spec.min, spec.max) != (None, None)
+    if spec.kind in ("float", "int", "row") and (spec.min, spec.max) != (None, None)
 ]
 
 

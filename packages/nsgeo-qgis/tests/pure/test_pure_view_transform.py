@@ -4,7 +4,14 @@ import dataclasses
 
 import numpy as np
 import pytest
-from nsgeo_qgis.ui.view_transform import MIN_SAMPLE_SPAN, MIN_TRACE_SPAN, ViewTransform, nice_ticks
+from nsgeo_qgis.ui.view_transform import (
+    MIN_SAMPLE_SPAN,
+    MIN_TRACE_SPAN,
+    ViewTransform,
+    carry_time_window,
+    nice_ticks,
+    true_scale_window,
+)
 
 FIT = ViewTransform.fit(
     n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300
@@ -243,6 +250,19 @@ def test_snap_cutoff_clamps_into_the_record():
     assert t.snap_cutoff(1e6) == pytest.approx(t.t_end)
 
 
+def test_snap_row_lands_on_row_tops_inside_the_record():
+    t = ViewTransform.fit(10, 100, -2.0, 0.25, 696, 264)
+    assert t.snap_row(-2.1) == -2.0
+    assert t.snap_row(-1.6) == pytest.approx(-1.5)
+    assert t.snap_row(99.0) == pytest.approx(-2.0 + 99 * 0.25)
+
+
+def test_snap_row_clamps_to_the_first_and_last_row_not_the_end():
+    t = ViewTransform.fit(10, 100, -2.0, 0.25, 696, 264)
+    assert t.snap_row(-100.0) == -2.0
+    assert t.snap_row(1e6) == pytest.approx(-2.0 + 99 * 0.25)  # not t_end: one row stays
+
+
 MIR = ViewTransform.fit(
     n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300, mirrored=True
 )
@@ -320,12 +340,40 @@ def test_a_window_in_blank_space_has_an_empty_source():
     assert z.trace_at(400.0) is None and z.traces_between(0.0, 799.0) is None
 
 
-def test_one_to_one_keeps_the_screen_left_edge():
-    w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
-    plain = w.with_window(500.0, 700.0, 0.0, 20.0).one_to_one()
-    assert (plain.trace_lo, plain.trace_hi) == (500.0, 1300.0)
-    m = dataclasses.replace(w, mirrored=True).with_window(1000.0, 1200.0, 0.0, 20.0).one_to_one()
-    assert (m.trace_lo, m.trace_hi) == (400.0, 1200.0)
+def test_true_scale_sets_the_time_span_to_match_metres_across():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264).with_window(50.0, 100.0, 20.0, 60.0)
+    s = true_scale_window(t, 1 / 60, 20.0)  # 60 traces/m; 0.1 m/ns -> 20 ns per metre of depth
+    across = 696 / (50 / 60)
+    assert s.time_hi - s.time_lo == pytest.approx(264 / across * 20.0)
+    assert (s.time_lo + s.time_hi) / 2 == pytest.approx(40.0)
+    assert (s.trace_lo, s.trace_hi) == pytest.approx((50.0, 100.0))
+
+
+def test_true_scale_keeps_the_record_and_narrows_along_a_long_line():
+    t = ViewTransform.fit(1800, 512, 0.0, 0.2, 696, 264)  # 30 m at 60 traces/m, 102.4 ns
+    s = true_scale_window(t, 1 / 60, 20.0)
+    assert (s.time_lo, s.time_hi) == pytest.approx((0.0, 102.4))
+    assert s.trace_hi - s.trace_lo == pytest.approx(696 / (264 / (102.4 / 20.0)) * 60)
+    assert (s.trace_lo + s.trace_hi) / 2 == pytest.approx(900.0)
+
+
+def test_true_scale_on_a_mirrored_ruler_keeps_the_mirror():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264, bounds=(-20.0, 260.0), mirrored=True)
+    t = t.with_window(50.0, 100.0, 20.0, 60.0)
+    s = true_scale_window(t, 1 / 60, 20.0)
+    across = 696 / (50 / 60)
+    assert s.time_hi - s.time_lo == pytest.approx(264 / across * 20.0)
+    assert (s.time_lo + s.time_hi) / 2 == pytest.approx(40.0)
+    assert (s.trace_lo, s.trace_hi) == pytest.approx((50.0, 100.0))
+    assert s.mirrored and s.bounds == (-20.0, 260.0)
+
+
+def test_true_scale_at_the_clamps_hits_both_minimum_spans():
+    t = ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264).with_window(0.0, 4.0, 0.0, 0.8)
+    s = true_scale_window(t, 1 / 60, 20.0)  # asks for 0.506 ns: the minimum time span wins
+    assert s.time_hi - s.time_lo == pytest.approx(4 * 0.2)
+    s = true_scale_window(ViewTransform.fit(200, 512, 0.0, 0.2, 696, 264), 1 / 60, 20000.0)
+    assert s.trace_hi - s.trace_lo == pytest.approx(4.0)  # asks for 0.81 traces
 
 
 def test_resized_keeps_the_mirror_and_the_bounds():
@@ -341,8 +389,59 @@ def test_bounds_must_be_finite_and_ordered():
 
 def test_traces_between_agrees_with_trace_at_on_column_boundaries():
     w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
-    for t in (w.one_to_one(), dataclasses.replace(w, mirrored=True).one_to_one()):
+    for t in (w, dataclasses.replace(w, mirrored=True)):
         for px in (0, 10, 11, 799):
             c = t.trace_at(float(px))
             assert t.traces_between(float(px), float(px)) == (c, c)
     assert FIT.traces_between(0.0, FIT.x_of_trace(19)) == (0, 19)
+
+
+def _w():
+    return ViewTransform.fit(200, 128, 0.0, 0.25, 696, 264).with_window(50.0, 100.0, 4.0, 12.0)
+
+
+def test_fit_width_shows_every_trace_and_keeps_the_time_window():
+    t = _w().fit_width()
+    assert (t.trace_lo, t.trace_hi) == (0.0, 200.0)
+    assert (t.time_lo, t.time_hi) == pytest.approx((4.0, 12.0))
+
+
+def test_fit_height_shows_the_whole_record_and_keeps_the_trace_window():
+    t = _w().fit_height()
+    assert (t.trace_lo, t.trace_hi) == pytest.approx((50.0, 100.0))
+    assert (t.time_lo, t.time_hi) == pytest.approx((0.0, 32.0))
+
+
+def test_fit_width_on_a_mirrored_ruler_shows_the_ruler():
+    w = ViewTransform.fit(200, 128, 0.0, 0.25, 696, 264, bounds=(-20.0, 260.0), mirrored=True)
+    t = w.with_window(40.0, 90.0, 4.0, 12.0).fit_width()
+    assert (t.trace_lo, t.trace_hi) == (-20.0, 260.0) and t.mirrored
+    assert (t.time_lo, t.time_hi) == pytest.approx((4.0, 12.0))
+
+
+# ---- a time window carried across a clock change (spec §4.8) -------------------
+
+
+def _old():
+    return ViewTransform.fit(200, 512, -11.0, 0.2, 696, 264)  # -11 .. 91.4 ns, radar clock
+
+
+def test_a_whole_record_stays_whole():
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(_old(), new, 0.0, -0.6)
+    assert (c.time_lo, c.time_hi) == pytest.approx((0.0, 92.0))
+
+
+def test_the_top_stays_the_top():
+    old = _old().with_window(0.0, 200.0, -11.0, 4.0)
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(old, new, 0.0, -0.6)
+    assert (c.time_lo, c.time_hi) == pytest.approx((0.0, 15.0))
+
+
+def test_a_window_in_the_middle_keeps_its_radar_times():
+    old = _old().with_window(20.0, 120.0, 30.0, 45.0)
+    new = ViewTransform.fit(200, 460, 0.0, 0.2, 696, 264)
+    c = carry_time_window(old, new, 0.0, -0.6)
+    assert (c.time_lo - 0.6, c.time_hi - 0.6) == pytest.approx((30.0, 45.0))  # radar = zero + t
+    assert (c.trace_lo, c.trace_hi) == pytest.approx((20.0, 120.0))

@@ -12,18 +12,23 @@ from nsgeo.render import PercentileClip, colormap_names, to_index8
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.ui import profile_dock
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import (
+    LEFT_AXIS_KEY,
     PREVIEW_STEPS_REFUSED_TEXT,
+    SLICE_BAND_KEY,
     STEPS_REFUSED_TEXT,
     ProfileDock,
+    relabel_onto,
     velocity_source,
 )
 from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QStyle
+from qgis.PyQt.QtWidgets import QLabel, QMessageBox, QStyle
+from tests.real_data import CAMPUS_LINES, GPS_LINES
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -541,10 +546,10 @@ def test_switching_lines_clears_the_cursor_and_selection(opened):
 
 
 def test_fit_button_restores_the_full_extent_after_a_zoom(opened):
-    """I2: `fit_button.clicked` is wired straight to `ProfileView.fit`, but
-    nothing in the suite ever clicked it -- deleting the `connect()` call
-    survived. Zooms in first so `fit_button.click()` has something to
-    visibly undo.
+    """I2: a click on `fit_button` runs its default action (Fit, until another
+    is picked), which is wired to `ProfileView.fit`; nothing in the suite ever
+    clicked it -- deleting the `connect()` call survived. Zooms in first so
+    `fit_button.click()` has something to visibly undo.
     """
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
@@ -560,26 +565,65 @@ def test_fit_button_restores_the_full_extent_after_a_zoom(opened):
     assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
 
 
-def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
-    """I2: same gap as the fit button, for `one_to_one_button`. A line
-    narrower than the view (the `opened` fixture's 240 traces, in a
-    ~800px-wide image area) would make one-to-one indistinguishable from
-    fit -- `with_window` clamps the requested one-trace-per-pixel span
-    back down to `n_traces` either way (this is the real M5 behaviour: the
-    review noted "1:1" looks like a no-op on these lines). Opens a second,
-    much wider line so the two buttons' effects are actually distinguishable.
-    """
+def test_the_one_to_one_button_shows_true_scale(opened):
+    """The button gives a metre down the same length as a metre along. `GRID`'s
+    0.08 m/ns makes `ns_per_metre` 25."""
     session, dock, key, line = opened
-    p2 = synthetic_dzt(session.root / "raw", "FILE__WIDE.DZT", n_traces=2000)
-    wide = Line.open(p2, GridPlacement("A", "y", 0.5, 0.0, 1, "FILE__WIDE"))
-    session.add_lines([wide])
-    key2 = next(k for k in session.keys() if k != key)  # noqa: SIM118 -- SiteSession.keys(), not a dict
-    session.open_line(key2)
-    left = dock.view.transform.trace_lo
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
     dock.one_to_one_button.click()
     t = dock.view.transform
-    assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
-    assert t.trace_lo == pytest.approx(left)  # 1:1 holds the screen-left trace
+    lo, hi = t.trace_lo, t.trace_hi
+    m = dock.view.metres_at_trace_units
+    across = t.width / (abs(m(hi) - m(lo)) / (hi - lo) * (hi - lo))
+    assert t.time_hi - t.time_lo == pytest.approx(t.height / across * 25.0, rel=0.01)
+
+
+def test_true_scale_is_greyed_without_a_velocity(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.one_to_one_button.isEnabled()
+    monkeypatch.setattr(
+        session, "resolved_velocity", lambda k: (_ for _ in ()).throw(KeyError("none"))
+    )
+    dock._refresh_velocity()
+    assert not dock.one_to_one_button.isEnabled()
+
+
+def test_true_scale_is_greyed_with_no_line_and_after_the_view_is_cleared(bare, opened):
+    _, dock, _ = bare
+    assert not dock.one_to_one_button.isEnabled()
+    assert dock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_GREYED_TIP
+    session, odock, key, line = opened
+    assert odock.one_to_one_button.isEnabled()
+    session.close_site()
+    assert not odock.one_to_one_button.isEnabled()
+    assert odock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_GREYED_TIP
+
+
+def test_true_scale_greys_when_the_window_moves_onto_a_flat_run(opened, monkeypatch):
+    session, dock, key, line = opened
+    v = dock.view
+    assert dock.one_to_one_button.isEnabled()
+    n = line.n_traces
+    flat = np.r_[np.arange(n // 2, dtype=float), np.full(n - n // 2, n // 2 - 1.0)] / 60.0
+    v._distance = flat
+    v.transform = v.transform.with_window(
+        n * 0.6, n * 0.9, v.transform.time_lo, v.transform.time_hi
+    )
+    v.view_changed.emit()
+    assert not dock.one_to_one_button.isEnabled()
+    assert dock.one_to_one_button.toolTip() == profile_dock.TRUE_SCALE_FLAT_TIP
+    assert profile_dock.TRUE_SCALE_FLAT_TIP != profile_dock.TRUE_SCALE_GREYED_TIP
+
+
+def test_true_scale_is_greyed_on_a_line_with_no_metres(opened):
+    session, dock, key, line = opened
+    k2, _ = _add_line(
+        session, "U1", GridPlacement("A", "y", 0.0, 0.0, 1, "U1"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    assert not dock.one_to_one_button.isEnabled()
+    assert dock.view.metres_at_trace_units(10.0) is None
 
 
 def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):
@@ -601,6 +645,10 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     that: with the toolbar back to its pre-M7 widget set, nothing in it
     moves when a preview starts, at the 900px width the author actually
     uses.
+
+    Re-pinned for spec section 4.1: the velocity label may now elide at
+    900px (the Slice band button takes room), so it is the label's full
+    text that is asserted, not its width.
     """
     session = SiteSession()
     dock = ProfileDock(session)
@@ -637,11 +685,8 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     assert dock.width() == 900, f"the width constraint did not take: {dock.width()}"
     before_fit = dock.fit_button.x()
     before_one_to_one = dock.one_to_one_button.x()
-    velocity_text_width = dock.velocity_label.fontMetrics().horizontalAdvance(
-        dock.velocity_label.text()
-    )
-    assert velocity_text_width > 0  # sanity: really populated, like production
-    assert dock.velocity_label.width() >= velocity_text_width  # not squeezed, even before
+    velocity_text = dock.velocity_label.text()
+    assert velocity_text  # sanity: really populated, like production
     assert "PREVIEW" not in dock.windowTitle()
 
     session.set_preview(keys[1], 5)
@@ -649,7 +694,7 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
 
     assert dock.fit_button.x() == before_fit
     assert dock.one_to_one_button.x() == before_one_to_one
-    assert dock.velocity_label.width() >= velocity_text_width  # still not squeezed
+    assert dock.velocity_label.text() == velocity_text  # the full text is kept
     # The cue spec §3.3 requires is visible -- not merely "a method was
     # called" -- and it is the actual, un-elided line name: the whole
     # point of moving it out of the toolbar row.
@@ -659,20 +704,28 @@ def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     dock.deleteLater()
 
 
-def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
-    """Findings 2 and 5's fixed-width/eliding-label machinery is gone
-    entirely now (Finding 7) -- `minimumSizeHint().width()` should be
-    close to the ~658px Finding 5 already measured with `_ElidingLabel`
-    in place (measured here: 662px -- a plain, empty `QLabel("")` costs a
-    few px more than `_ElidingLabel`'s `Ignored` policy did, which is
-    expected and harmless), and nowhere near the ~1098px either
-    `setFixedWidth` version reached. The toolbar's widget set is now
-    IDENTICAL to what it was before any of this episode:
-    `difference_label` is back to a plain, unreserved `QLabel`, and there
-    is no preview label in the row at all any more."""
+def test_the_toolbar_minimum_width_holds_in_any_font(qgis_app):
+    """The row's minimum width, checked in ways that hold in any font (pixel
+    bounds measured on one machine failed on CI's QGIS 3.44, 723 against 684).
+    The velocity label is an `ElidedLabel` (`Ignored`) and asks for no width,
+    and `difference_label` is a plain `QLabel`: long texts in both raise the
+    minimum by no more than the Difference label's own growth. And the row
+    stays within 900px, the docked width the M7 walkthrough used."""
     session = SiteSession()
     dock = ProfileDock(session)
-    assert dock.minimumSizeHint().width() <= 700
+    dock.resize(900, 360)
+    dock.show()
+    QTest.qWait(50)
+    base = dock.minimumSizeHint().width()
+    label_before = dock.difference_label.sizeHint().width()
+    dock.difference_label.setText("Difference: " + "w" * 60)
+    dock.velocity_label.setText("Velocity " + "w" * 200)
+    QTest.qWait(50)
+    grown = dock.difference_label.sizeHint().width() - label_before
+    after = dock.minimumSizeHint().width()
+    assert after >= base + grown  # live: a stale cached reading fails here
+    assert after <= base + grown
+    assert base <= 900
     dock.hide()
     dock.deleteLater()
 
@@ -1597,7 +1650,7 @@ def test_closing_the_site_with_the_cutoff_selected_is_quiet_in_either_order(
     """`close_site` drops the site, then emits `line_opened("")`. The
     Processing panel answers that with `step_selected(-1)`, and when that
     reaches `set_selected_step` before this dock's own `_open` has dropped
-    the working line, `_cutoff_row` reads that line's stack from a site
+    the working line, `_handle_row` reads that line's stack from a site
     that is gone. Only plugin.py's construction order kept it quiet."""
     session, processing, dock, key, line = processing_first
     _cutoff_setup(session, key, line)
@@ -2342,3 +2395,846 @@ def test_the_velocity_fit_on_a_gps_line_measures_along_the_walked_distance(bare)
     # the middle really is 0.12 m a trace, so trace x wheel spacing would put the points elsewhere
     assert x_m[2] - x_m[0] != pytest.approx((140 - 60) * wheel)
     assert x_m[2] - x_m[0] == pytest.approx(80 * 0.12, abs=0.05)
+
+
+def test_the_slice_band_button_hides_and_shows_the_band_keeping_its_window(opened):
+    session, dock, key, line = opened
+    dock.set_slice_band(18.0, 22.0)
+    shown = dock.view._slice_band
+    assert shown is not None
+    dock.slice_band_button.setChecked(False)
+    assert dock.view._slice_band is None
+    assert dock._slice_band == (18.0, 22.0)  # the window is kept
+    dock.slice_band_button.setChecked(True)
+    assert dock.view._slice_band == pytest.approx(shown)
+
+
+def test_a_window_change_while_hidden_is_drawn_when_shown_again(opened):
+    session, dock, key, line = opened
+    dock.set_slice_band(18.0, 22.0)
+    shown = dock.view._slice_band
+    dock.slice_band_button.setChecked(False)
+    dock.set_slice_band(30.0, 34.0)
+    assert dock.view._slice_band is None
+    dock.slice_band_button.setChecked(True)
+    lo, hi = dock.view._slice_band
+    assert hi - lo == pytest.approx(4.0)
+    assert lo - shown[0] == pytest.approx(12.0)  # the new window, on the shown clock
+
+
+def test_the_slice_band_choice_survives_a_new_dock(opened):
+    session, dock, key, line = opened
+    dock.slice_band_button.setChecked(False)
+    other = ProfileDock(session)
+    try:
+        assert not other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+def test_the_slice_band_is_a_show_slice_band_checkbox_left_of_the_fit_group(opened):
+    from qgis.PyQt.QtWidgets import QCheckBox
+
+    session, dock, key, line = opened
+    dock.resize(1361, 448)
+    QTest.qWait(50)
+    box = dock.slice_band_button
+    assert isinstance(box, QCheckBox)
+    assert box.text() == "Show slice band"
+    assert box.x() < dock.fit_button.x()
+    assert box.x() < dock.one_to_one_button.x()
+
+
+def test_the_slice_band_button_is_greyed_until_there_is_a_window(opened):
+    session, dock, key, line = opened
+    assert not dock.slice_band_button.isEnabled()
+    dock.set_slice_band(18.0, 22.0)
+    assert dock.slice_band_button.isEnabled()
+    dock.slice_band_button.setChecked(False)
+    dock.clear_slice_band()
+    assert not dock.slice_band_button.isEnabled()
+    assert not dock.slice_band_button.isChecked()  # greying keeps the choice
+
+
+def test_a_remembered_false_comes_back_unchecked(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "false")  # an INI file after a restart
+    other = ProfileDock(session)
+    try:
+        assert not other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+def test_a_bad_remembered_band_choice_is_overwritten_by_the_next_choice(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "maybe")
+    other = ProfileDock(session)
+    try:
+        other.slice_band_button.setChecked(False)
+        assert profile_dock.profile_settings().value(SLICE_BAND_KEY) in (False, "false")
+    finally:
+        other.deleteLater()
+
+
+def test_a_bad_remembered_band_choice_falls_back_to_shown(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(SLICE_BAND_KEY, "maybe")
+    other = ProfileDock(session)
+    try:
+        assert other.slice_band_button.isChecked()
+    finally:
+        other.deleteLater()
+
+
+@pytest.fixture
+def plugin(fake_iface, answer_modal, tmp_path):
+    import nsgeo_qgis
+    from qgis.core import QgsProject, QgsSettings
+
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    session = plugin.session
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, -1, "FILE__001"))])
+    session.open_line(session.keys()[0])
+    yield plugin
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+
+
+def test_closing_the_slices_panel_leaves_the_band(plugin):
+    plugin.slices_dock.window_changed.emit(18.0, 22.0)
+    first = plugin.profile_dock.view._slice_band
+    plugin.slices_dock.close()
+    assert plugin.profile_dock.view._slice_band == pytest.approx(first)
+    plugin.slices_dock.window_changed.emit(19.0, 23.0)
+    band = plugin.profile_dock.view._slice_band
+    assert band is not None
+    assert band[1] - band[0] == pytest.approx(4.0)
+    assert band[0] - first[0] == pytest.approx(1.0)
+
+
+def _break_velocity(session, monkeypatch, exc):
+    def boom(k):
+        raise exc
+
+    monkeypatch.setattr(session, "resolved_velocity", boom)
+
+
+def test_a_failed_velocity_refresh_clears_the_depth_axis(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.view.depth_tick_labels()  # GRID's velocity is shown
+    _break_velocity(session, monkeypatch, RuntimeError("boom"))
+    dock._refresh_velocity()
+    assert dock.view.depth_tick_labels() == []
+    assert dock.velocity_label.text() == ""
+
+
+def test_a_missing_velocity_on_a_line_clears_the_depth_axis(opened, monkeypatch):
+    session, dock, key, line = opened
+    assert dock.view.depth_tick_labels()
+    _break_velocity(session, monkeypatch, KeyError("no velocity"))
+    dock._refresh_velocity()
+    assert dock.view.depth_tick_labels() == []
+    assert dock.velocity_label.text() == ""
+
+
+def test_the_fit_menu_shows_its_tooltips(opened):
+    session, dock, key, line = opened
+    assert dock.fit_menu.toolTipsVisible()
+
+
+def test_fit_width_and_fit_height_from_the_menu(opened):
+    session, dock, key, line = opened
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_width_action.trigger()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == pytest.approx((z.time_lo, z.time_hi))
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_height_action.trigger()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx((z.trace_lo, z.trace_hi))
+    assert (t.time_lo, t.time_hi) == pytest.approx((t.t0_ns, t.t_end))
+
+
+def test_the_fit_button_repeats_the_last_pick(opened):
+    session, dock, key, line = opened
+    dock.fit_width_action.trigger()
+    # QAction.trigger() on a menu action emits the menu's triggered signal.
+    assert dock.fit_button.text() == "Fit width"
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    z = dock.view.transform
+    dock.fit_button.click()
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == pytest.approx((z.time_lo, z.time_hi))
+
+
+def test_a_new_dock_starts_with_fit(opened):
+    session, dock, key, line = opened
+    dock.fit_height_action.trigger()
+    other = ProfileDock(session)
+    try:
+        assert other.fit_button.text() == "Fit"
+    finally:
+        other.deleteLater()
+
+
+def test_the_toolbar_fits_the_users_panel_in_the_worst_case(opened):
+    # 1361 px wide, a long Difference label and a velocity label naming its fits.
+    session, dock, key, line = opened
+    # The widest Fit button text ("Fit height") is picked first.
+    dock.fit_height_action.trigger()
+    dock.resize(1361, 448)
+    full = "v = 0.100 m/ns (Grid A, average of 6 fits)"
+    dock.difference_label.setText("Difference: Background removal (sliding)")
+    dock.velocity_label.setText(full)
+    QTest.qWait(50)
+    assert dock.widget().minimumSizeHint().width() <= 1361
+    for b in (dock.fit_button, dock.one_to_one_button, dock.slice_band_button):
+        assert b.geometry().right() < dock.widget().width()
+    # `ElidedLabel.text()` is always the full text, so ask the plain QLabel for
+    # what it paints: the whole text when there is room, else the tooltip.
+    painted = QLabel.text(dock.velocity_label)
+    assert painted == full or dock.velocity_label.toolTip() == full
+
+
+def test_picking_a_fit_does_not_move_the_buttons_after_it(opened):
+    session, dock, key, line = opened
+    dock.resize(1361, 448)
+    QTest.qWait(50)
+    # The band checkbox sits left of Fit now; the velocity label is what follows 1:1.
+    before = (dock.fit_button.width(), dock.one_to_one_button.x(), dock.velocity_label.x())
+    for action in (dock.fit_width_action, dock.fit_height_action, dock.fit_all_action):
+        action.trigger()
+        QTest.qWait(50)
+        assert (
+            dock.fit_button.width(),
+            dock.one_to_one_button.x(),
+            dock.velocity_label.x(),
+        ) == before
+
+
+def test_the_axis_menu_sets_a_unit_and_remembers_it(opened):
+    session, dock, key, line = opened
+    dock._on_axis_menu_requested("left", QPoint(0, 0))
+    act = next(a for a in dock.axis_menu.actions() if a.data() == "sample")
+    act.trigger()
+    assert dock.view.axis_units == ("sample", "m")
+    other = ProfileDock(session)
+    try:
+        assert other.view.axis_units == ("sample", "m")
+    finally:
+        other.deleteLater()
+    dock.axis_menu.hide()
+
+
+def test_the_axis_menu_names_its_three_units(opened):
+    session, dock, key, line = opened
+    dock._on_axis_menu_requested("right", QPoint(0, 0))
+    try:
+        assert [(a.text(), a.data()) for a in dock.axis_menu.actions()] == [
+            ("Time (ns)", "ns"),
+            ("Samples", "sample"),
+            ("Depth (m)", "m"),
+        ]
+        dock.axis_menu.actions()[0].trigger()
+        assert dock.view.axis_units == ("ns", "ns")
+    finally:
+        dock.axis_menu.hide()
+
+
+def test_depth_is_greyed_in_the_menu_without_a_velocity(opened, monkeypatch):
+    session, dock, key, line = opened
+    _break_velocity(session, monkeypatch, KeyError("no velocity"))
+    dock._refresh_velocity()
+    dock._on_axis_menu_requested("left", QPoint(0, 0))
+    try:
+        depth = next(a for a in dock.axis_menu.actions() if a.data() == "m")
+        assert dock.axis_menu.toolTipsVisible()
+        assert not depth.isEnabled()
+        assert depth.toolTip() == "Depth needs a velocity for this line"
+    finally:
+        dock.axis_menu.hide()
+
+
+def test_a_bad_remembered_unit_falls_back_and_is_overwritten(opened):
+    session, dock, key, line = opened
+    profile_dock.profile_settings().setValue(LEFT_AXIS_KEY, "feet")
+    other = ProfileDock(session)
+    try:
+        assert other.view.axis_units == ("ns", "m")
+        other._set_axis_unit("left", "sample")
+        assert profile_dock.profile_settings().value(LEFT_AXIS_KEY) == "sample"
+    finally:
+        other.deleteLater()
+
+
+# ---- a time zoom survives a clock change on the same line (#163 item 2, spec §4.8) ----
+
+
+def _radar_window(dock):
+    t = dock.view.transform
+    return (dock.shown_zero_ns() + t.time_lo, dock.shown_zero_ns() + t.time_hi)
+
+
+def _zoom_middle(dock):
+    t = dock.view.transform
+    mid = (t.time_lo + t.time_hi) / 2
+    dock.view.transform = t.with_window(t.trace_lo + 20, t.trace_hi - 20, mid - 5.0, mid + 5.0)
+
+
+def _two_time_zeros(session, dock, key, first, second):
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    session.append_step(key, build_step("time_zero", **first))
+    assert _radar_window(dock) == pytest.approx(before)
+    session.replace_step(key, 0, build_step("time_zero", **second))
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_time_zoom_survives_adding_time_zero_on_an_unruled_line(opened):
+    session, dock, key, line = opened
+    k2, l2 = _add_line(
+        session, "U1", GridPlacement("A", "y", 0.0, 0.0, 1, "U1"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    session.set_profiles(k2, l2.load())
+    _two_time_zeros(
+        session, dock, k2, dict(mode="sample", sample=20), dict(mode="sample", sample=26)
+    )
+
+
+def test_a_time_zoom_survives_adding_time_zero_on_a_ruled_line(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    _two_time_zeros(
+        session, dock, key, dict(mode="sample", sample=20), dict(mode="sample", sample=26)
+    )
+
+
+def test_a_zoom_at_the_top_stays_at_the_top(opened):
+    session, dock, key, line = opened
+    k2, l2 = _add_line(
+        session, "U2", GridPlacement("A", "y", 0.0, 0.0, 1, "U2"), traces_per_metre=0.0
+    )
+    session.open_line(k2)
+    session.set_profiles(k2, l2.load())
+    t = dock.view.transform
+    dock.view.transform = t.with_window(t.trace_lo, t.trace_hi, t.t0_ns, t.t0_ns + 10.0)
+    session.append_step(k2, build_step("time_zero", mode="sample", sample=20))
+    n = dock.view.transform
+    assert (n.time_lo, n.time_hi) == pytest.approx((n.t0_ns, n.t0_ns + 10.0))
+
+
+@needs_real_data
+def test_a_time_zoom_survives_time_zero_on_the_campus_line(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = next(p for p in CAMPUS_LINES if p.name == "FILE__007.DZT")
+    line = Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__007"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    _two_time_zeros(session, dock, key, dict(mode="first_break"), dict(mode="sample", sample=52))
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="needs the with-dzg lines in tests/data/local")
+def test_a_time_zoom_survives_time_zero_on_a_gps_line(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    try:
+        session.new_site(tmp_path)
+        session.add_grid(Grid("G", (500.0, 700.0), 0.0, 30.0, 29.98, "EPSG:32616", 0.5))
+        line = Line.open(GPS_LINES[0], GridPlacement("G", "y", 0.25, 0.0, 1, "l0"))
+        session.add_lines([line])
+        key = session.keys()[0]
+        session.open_line(key)
+        session.set_profiles(key, line.load())
+        _two_time_zeros(
+            session, dock, key, dict(mode="sample", sample=20), dict(mode="sample", sample=47)
+        )
+    finally:
+        dock.hide()
+        dock.deleteLater()
+
+
+def test_a_same_line_take_down_then_render_keeps_the_radar_window(opened):
+    """`_take_down_picture` can follow a render of the SAME line (a refused
+    steps path). The header axes keep the radar times through the clock rule;
+    the render after must not read them as a processed clock and move the
+    window by the line's zero."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=60))
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    dock._show_steps_refused(key, is_preview=False)
+    dock._render()
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_same_line_take_down_through_rule_1_does_not_set_the_header_flag(opened):
+    """The re-review's probe: a line with no steps, a zoom mid-record, a refused
+    steps path, then a Time zero appended. The take-down's axes went through
+    rule 1 on the same line's picture, so they are not header-only and the
+    render after must not move the radar window by the new zero."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    dock._show_steps_refused(key, is_preview=False)
+    session.append_step(key, build_step("time_zero", mode="sample", sample=20))
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_the_fit_button_keeps_its_widest_width_after_a_font_change(opened):
+    session, dock, key, line = opened
+    f = dock.fit_button.font()
+    f.setPointSizeF(f.pointSizeF() * 1.25)
+    dock.fit_button.setFont(f)
+    QTest.qWait(50)
+    xs = set()
+    for action in (dock.fit_all_action, dock.fit_width_action, dock.fit_height_action):
+        action.trigger()
+        QTest.qWait(50)
+        xs.add(dock.one_to_one_button.x())
+    assert len(xs) == 1
+
+
+def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened):
+    """The header-only axes `_take_down_picture` sets are on the radar clock,
+    not a clock the user zoomed on: the load that follows must not shift the
+    held window by the line's zero (spec §4.8; the module's hold promise)."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    kb, lb = _add_line(session, "B1", GridPlacement("A", "y", 0.5, 0.0, 1, "B1"), n_traces=240)
+    session.append_step(kb, build_step("time_zero", mode="sample", sample=60))
+    _zoom_middle(dock)
+    zoomed = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    session.open_line(kb)
+    assert dock._shown_radargram is None and dock.shown_zero_ns() == 0.0  # header-only
+    session.set_profiles(kb, lb.load())
+    assert dock.shown_zero_ns() != 0.0
+    first_visit = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    assert first_visit == pytest.approx(zoomed)
+    session.open_line(key)
+    session.open_line(kb)  # already loaded: no header step
+    assert (dock.view.transform.time_lo, dock.view.transform.time_hi) == pytest.approx(first_visit)
+
+
+# ---- Time zero's row: the bypass on the line's clock, else its input (#158, §4.14 Q3) ----
+
+
+def _stack_of(session, key, *entries):
+    session.set_profiles(key, session.line_for_key(key).load())
+    for name, params in entries:
+        session.append_step(key, build_step(name, **params))
+    return session.stack_for(key)
+
+
+def test_selecting_time_zero_in_sample_mode_draws_the_bypass_on_the_lines_clock(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)), ("dewow", {}))
+    src = stack.source
+    assert dock.image.rg.data.shape[0] == 492
+    dock.set_selected_step(0)
+    drawn = dock.image.rg
+    # §4.14 Q3: every step but Time zero, on the uncropped record
+    np.testing.assert_array_equal(drawn.data, stack.result_bypassing(0).data)
+    assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
+    assert dock.view.transform.t0_ns == pytest.approx(src.t0_ns + (src.zero_ns - stack.zero_ns()))
+    assert dock.view.transform.n_samples == src.data.shape[0]
+    dock.set_selected_step(-1)
+    assert dock.view.transform.n_samples == 492
+
+
+def test_first_break_mode_selected_draws_the_ordinary_result(opened):
+    """Review Focus 3: the guard for today's behaviour; it may pass first."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="first_break")))
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result().data)
+    assert dock._handle_row() == -1
+
+
+def test_a_time_zero_that_is_not_first_draws_the_bypass(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+    )
+    dock.set_selected_step(1)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result_bypassing(1).data)
+    assert dock.shown_zero_ns() == pytest.approx(stack.zero_ns())
+
+
+def test_selecting_time_zero_at_the_top_brings_the_cropped_rows_in(opened):
+    """A guard for Plan A's top-stays-top rule with the new view: it passes
+    without this task's relabel, which only the mid-record test below needs."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    t = dock.view.transform
+    dock.view.transform = t.with_window(t.trace_lo, t.trace_hi, t.time_lo, t.time_lo + 10.0)
+    before = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    dock.set_selected_step(0)
+    t = dock.view.transform
+    assert t.time_lo == pytest.approx(t.t0_ns)
+    assert t.time_hi - t.time_lo == pytest.approx(10.0)
+    dock.set_selected_step(-1)
+    t = dock.view.transform
+    assert (t.time_lo, t.time_hi) == pytest.approx(before)
+
+
+def test_selecting_time_zero_mid_record_holds_the_picture_still(opened):
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    _zoom_middle(dock)
+    before = _radar_window(dock)
+    labels = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    dock.set_selected_step(0)
+    assert _radar_window(dock) == pytest.approx(before)
+    # spec §4.11 "elsewhere, nothing moves": the relabel keeps the zero, so the
+    # tick labels do not shift either
+    t = dock.view.transform
+    assert (t.time_lo, t.time_hi) == pytest.approx(labels)
+    dock.set_selected_step(-1)
+    assert _radar_window(dock) == pytest.approx(before)
+
+
+def test_a_migrated_line_still_draws_time_zeros_input(opened):
+    """§4.11 Q6: the bypass runs `migrate_fk` on a record that starts far
+    from zero, which it refuses; the fallback then draws the input."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    assert stack.source.t0_ns < -2.5  # the bypass would hand migration this record
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+
+
+@needs_real_data
+def test_the_campus_line_with_time_zero_selected_starts_49_rows_above_the_line(bare):
+    """Spec §4.11's real numbers: FILE__007 seeded at 49 draws a record that
+    starts 49 rows (10.6 ns) above the line, on the line's clock."""
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    path = next(p for p in CAMPUS_LINES if p.name == "FILE__007.DZT")
+    line = Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__007"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=49))
+    n_kept = dock.view.transform.n_samples
+    dock.set_selected_step(0)
+    t = dock.view.transform
+    assert t.n_samples == n_kept + 49
+    assert t.t0_ns == pytest.approx(-11.086 - (-0.476), abs=0.01)
+    assert dock.shown_zero_ns() == pytest.approx(session.stack_for(key).zero_ns())
+
+
+def test_the_line_shows_only_in_sample_mode_while_selected(opened):
+    """Review Focus 3, and the line's place: Time zero's first kept row on the
+    bypass (the record without Time zero), on the line's clock."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    assert dock.view.cutoff_ns is None  # not selected
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)  # the line's own zero
+    assert dock.view._cutoff_kind == "start"
+    assert dock.view._cutoff_text(dock.view.transform) == "Time zero \u00b7 sample 20"
+    session.replace_step(key, 0, build_step("time_zero", mode="first_break"))
+    assert dock.view.cutoff_ns is None  # first_break mode: no line
+    session.replace_step(key, 0, build_step("time_zero", mode="sample", sample=30))
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)
+    assert dock.view._cutoff_text(dock.view.transform).endswith("sample 30")
+    dock.set_selected_step(-1)
+    assert dock.view.cutoff_ns is None
+
+
+def test_a_time_zero_that_is_not_first_draws_its_line_on_its_input_rows(opened):
+    """Review Focus 1: Dewow, Time zero, AGC. The rows are the step's rows."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+    )
+    dock.set_selected_step(1)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, stack.result_bypassing(1).data)
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view._cutoff_text(dock.view.transform).endswith("sample 20")
+
+
+def test_dragging_time_zeros_line_through_the_dock_writes_its_row(opened):
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    step = session.stack_for(key).entries[0][0]
+    dock.view.cutoff_dragged.emit(rg.t0_ns + 20 * rg.dt_ns)
+    assert session.stack_for(key).entries[0][0] is step  # unmoved: nothing written
+    dock.view.cutoff_dragged.emit(rg.t0_ns + 26 * rg.dt_ns)
+    assert session.stack_for(key).entries[0][0].params["sample"] == 26
+
+
+def test_a_drag_to_either_end_clamps_and_is_accepted(opened):
+    """Review Focus 5: row 0 and row n - 1 are both writable."""
+    session, dock, key, line = opened
+    _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    dock.set_selected_step(0)
+    n = dock._shown_radargram.n_samples
+    t = dock.view.transform
+    assert t.snap_row(-1e6) == pytest.approx(t.t0_ns)
+    dock.view.cutoff_dragged.emit(t.snap_row(-1e6))
+    assert session.stack_for(key).entries[0][0].params["sample"] == 0
+    assert dock.view.cutoff_ns is not None
+    t = dock.view.transform
+    dock.view.cutoff_dragged.emit(t.snap_row(1e6))
+    assert session.stack_for(key).entries[0][0].params["sample"] == n - 1
+    assert session.stack_for(key).result().data.shape[0] == 1
+
+
+def test_a_disabled_time_zero_draws_its_line_as_the_cutoff_does(opened):
+    """Review Focus 2. `_handle_row` ignores `enabled`: a disabled time cutoff
+    still shows its line, and so does a disabled Time zero. With the step
+    disabled, `zero_ns()` skips it, so the relabel is a no-op and the record
+    is on the source's own clock; the line sits at the step's row on it, and
+    a drag writes that row. Nothing is cropped, nor does the line claim it is."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
+    session.set_step_enabled(key, 0, False)
+    dock.set_selected_step(0)
+    src = stack.source
+    rg = dock._shown_radargram
+    assert rg.t0_ns == pytest.approx(src.t0_ns)  # no crop, no relabel
+    assert dock.view.cutoff_ns == pytest.approx(src.t0_ns + 20 * src.dt_ns)
+    dock.view.cutoff_dragged.emit(src.t0_ns + 26 * src.dt_ns)
+    assert session.stack_for(key).entries[0][0].params["sample"] == 26
+    assert session.stack_for(key).entries[0][1] is False
+
+
+def test_a_row_handles_fallback_input_view_is_its_own_scale(opened):
+    """The fallback view (a later step refuses the bypass) takes its display
+    limit from the drawn input, not the processed stack, whose scale can
+    differ by orders of magnitude."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+    assert dock.image.reference is dock.image.rg
+    assert dock.image.limit == _clip(dock)(stack.source.data)
+
+
+def test_a_time_zero_that_refuses_still_draws_its_input(opened):
+    """A sample past the record's end (a preset on a shorter record): the
+    input, unrelabelled, is what the user needs to fix the row. No error."""
+    session, dock, key, line = opened
+    stack = _stack_of(session, key, ("time_zero", dict(mode="sample", sample=600)))
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+
+
+def test_selecting_time_zero_keeps_the_processed_look(opened):
+    """§4.14 Q3: the bypass is drawn, on the ordinary view's display scale."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("gain_agc", {}),
+    )
+    ordinary = dock.image.limit
+    dock.set_selected_step(0)
+    expect = relabel_onto(stack.result_bypassing(0), stack.zero_ns())
+    np.testing.assert_array_equal(dock.image.rg.data, expect.data)
+    assert dock.image.limit == pytest.approx(ordinary, rel=0.05)
+
+
+def test_a_later_step_that_refuses_falls_back_to_the_input(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+    assert dock.view.cutoff_ns is not None
+
+
+def test_a_bypass_with_other_rows_falls_back(opened):
+    """A second Time zero crops the bypass, so its rows are not the input's:
+    the input is drawn and the line's row is the step's own `sample`."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("time_zero", dict(mode="sample", sample=10)),
+    )
+    assert stack.result_bypassing(0).data.shape[0] != stack.source.data.shape[0]
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, relabel_onto(stack.source, stack.zero_ns()).data)
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+
+
+def test_a_cutoff_after_time_zero_is_left_out_of_its_view(opened):
+    """§4.14 Q5: while Time zero's row is selected, the time cutoff after it is
+    left out too, so the picture runs to the record's full depth on the line's
+    clock. The scale still keeps the cutoff (the module rule)."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    end = src.t0_ns + 150 * src.dt_ns
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("time_cutoff", dict(end_ns=end)),
+    )
+    bypass = stack.result_bypassing(0, 2)
+    assert stack.result_bypassing(0).n_samples < bypass.n_samples
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, relabel_onto(bypass, stack.zero_ns()).data)
+    assert rg.n_samples == src.n_samples
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)  # row 20 reads 0 on the drawn clock
+    kept = _clip(dock)(stack.result_bypassing(0).data)  # the scale keeps the cutoff
+    assert kept != _clip(dock)(bypass.data)
+    assert dock.image.limit == kept
+
+
+def test_a_cutoff_before_time_zero_stays_in_its_view(opened):
+    """§4.14 Q5: a cutoff before Time zero is part of what Time zero receives."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    end = src.t0_ns + 150 * src.dt_ns
+    stack = _stack_of(
+        session,
+        key,
+        ("time_cutoff", dict(end_ns=end)),
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+    )
+    cropped = stack.intermediate(0)
+    assert cropped.n_samples < src.n_samples
+    dock.set_selected_step(1)
+    assert dock._shown_radargram.n_samples == cropped.n_samples
+
+
+def test_a_cutoff_and_migration_after_time_zero_still_fall_back(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("time_cutoff", dict(end_ns=src.t0_ns + 150 * src.dt_ns)),
+        ("migrate_fk", dict(velocity_m_ns=0.1)),
+    )
+    errors = []
+    dock.error.connect(errors.append)
+    dock.set_selected_step(0)
+    assert errors == []
+    np.testing.assert_array_equal(dock.image.rg.data, stack.source.data)
+    assert dock.view.cutoff_ns is not None
+
+
+def test_a_later_time_zero_that_only_moves_the_zero_still_draws_the_bypass(opened):
+    """Plan C final review Z1: a later Time zero at sample 0 crops nothing. It
+    sets the bypass's `t0_ns` to 0 and moves the same radar-clock time into
+    `zero_ns`, so the first row is where the input's is and the bypass is drawn.
+    A guard on `t0_ns` alone would fall back for no reason."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=0)),
+    )
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result_bypassing(0).data)
+
+
+def test_a_fallback_view_takes_its_scale_from_the_drawn_input(opened):
+    """The mismatch fallback (a second Time zero crops the top) is its own
+    scale: the limit is the input's, not the processed stack's."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+        ("time_zero", dict(mode="sample", sample=10)),
+    )
+    dock.set_selected_step(0)
+    assert dock.image.reference is dock.image.rg
+    assert dock.image.limit == _clip(dock)(stack.source.data)
+
+
+def test_a_bypass_view_measures_its_scale_with_the_gain_curve_and_time_zero_off(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("gain_curve", dict(points=[[0, 0], [50, 40]])),
+    )
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.reference.data, stack.result_bypassing(0, 2).data)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import numbers
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from typing import Any, ClassVar, Final, Protocol
@@ -129,10 +130,16 @@ class ParamSpec:
     bounds and a unit, choice is a combo box over `choices`, curve is the gain
     curve editor, time is a float two-way time in ns on the radargram's own
     axis (validated like float, but a front end may let the user drag it on
-    the profile instead of typing it). `default` is a value or REQUIRED.
+    the profile instead of typing it), row is an int row of the step's input
+    record counted from its first row (validated like int; a front end may let
+    the user drag it on the profile). `default` is a value or REQUIRED.
+
+    `when` ties a parameter to a mode: a front end shows it only while the
+    named sibling choice holds one of the listed values. The value is still
+    saved and validated whatever the mode.
     """
 
-    KINDS: ClassVar[tuple[str, ...]] = ("float", "int", "choice", "curve", "time")
+    KINDS: ClassVar[tuple[str, ...]] = ("float", "int", "choice", "curve", "time", "row")
 
     name: str
     kind: str
@@ -145,6 +152,9 @@ class ParamSpec:
     min_exclusive: bool = False
     choices: tuple[str, ...] = field(default=())
     help: str = ""
+    #: (name of a sibling choice parameter, the values of it under which this
+    #: parameter applies). None means every mode.
+    when: tuple[str, tuple[str, ...]] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in self.KINDS:
@@ -159,6 +169,22 @@ class ParamSpec:
             and self.default not in self.choices
         ):
             raise ValueError(f"param {self.name!r} default {self.default!r} is not in choices")
+        if self.when is not None:
+            when = self.when
+            if not (
+                isinstance(when, tuple)
+                and len(when) == 2
+                and isinstance(when[0], str)
+                and isinstance(when[1], tuple)
+                and when[1]
+                and all(isinstance(v, str) for v in when[1])
+            ):
+                raise ValueError(
+                    f"param {self.name!r}: when must be (the name of a sibling choice, "
+                    f"a non-empty tuple of its values), got {when!r}"
+                )
+            if when[0] == self.name:
+                raise ValueError(f"param {self.name!r}: when names the parameter itself")
 
     @property
     def required(self) -> bool:
@@ -236,8 +262,36 @@ def register(cls: type[Any]) -> type[Any]:
     problem = _display_problem(cls)
     if problem is not None:
         raise ValueError(f"step {cls.name!r}: {problem}")
+    problem = _when_problem(cls)
+    if problem is not None:
+        raise ValueError(f"step {cls.name!r}: {problem}")
     _REGISTRY[cls.name] = cls
     return cls
+
+
+def _when_problem(cls: type[Any]) -> str | None:
+    """What is wrong with a parameter's `when` in `cls.schema()`, or None.
+
+    Checked at registration so a typo in a mode name cannot leave a parameter
+    permanently hidden in every front end."""
+    specs = {s.name: s for s in cls.schema()}
+    for spec in specs.values():
+        if spec.when is None:
+            continue
+        sibling, values = spec.when
+        target = specs.get(sibling)
+        if target is None or target.kind != "choice":
+            return (
+                f"parameter {spec.name!r} is tied to {sibling!r}, "
+                "which is not a choice parameter of this step"
+            )
+        unknown = [v for v in values if v not in target.choices]
+        if unknown:
+            return (
+                f"parameter {spec.name!r} is tied to {sibling!r} values {unknown}, "
+                f"which are not among its choices {list(target.choices)}"
+            )
+    return None
 
 
 def _display_problem(cls: type[Any]) -> str | None:
@@ -337,7 +391,7 @@ def _problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
     if spec.kind == "choice":
         if not isinstance(value, str) or value not in spec.choices:
             return f"must be one of {list(spec.choices)}", None
-    elif spec.kind == "int":
+    elif spec.kind in ("int", "row"):
         if not isinstance(value, numbers.Integral) or isinstance(value, (bool, np.bool_)):
             return "must be a whole number", None
     elif spec.kind in ("float", "time"):
@@ -349,11 +403,20 @@ def _problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
         return _curve_problem(spec, value)
     else:
         return None
-    if spec.kind in ("int", "float", "time"):
+    if spec.kind in ("int", "row", "float", "time"):
         reason = _out_of_bounds(spec, value)
         if reason is not None:
             return reason, None
     return None
+
+
+def param_visible(spec: ParamSpec, params: Mapping[str, Any]) -> bool:
+    """Whether `spec` applies under `params`: it has no `when`, or the sibling
+    choice it names holds one of the listed values."""
+    if spec.when is None:
+        return True
+    name, values = spec.when
+    return params.get(name) in values
 
 
 def param_problem(spec: ParamSpec, value: Any) -> str | None:

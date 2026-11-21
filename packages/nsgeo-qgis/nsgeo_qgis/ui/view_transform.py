@@ -134,6 +134,12 @@ class ViewTransform:
         m = round((time_ns - self.t0_ns) / self.dt_ns)
         return self.t0_ns + min(max(m, 1), self.n_samples) * self.dt_ns
 
+    def snap_row(self, time_ns: float) -> float:
+        """Round a time to the nearest row top inside the record: where Time
+        zero's line can sit (row 0 to the last row, which keeps one sample)."""
+        m = round((time_ns - self.t0_ns) / self.dt_ns)
+        return self.t0_ns + min(max(m, 0), self.n_samples - 1) * self.dt_ns
+
     def _column_at(self, x: float) -> int:
         """The trace column holding local pixel `x`, unclamped. Floor of the
         trace coordinate, or ceil - 1 when mirrored: either way a pixel on a
@@ -210,6 +216,15 @@ class ViewTransform:
             )
         return replace(self, trace_lo=lo, trace_hi=lo + t_span, time_lo=tlo, time_hi=tlo + s_span)
 
+    def fit_width(self) -> ViewTransform:
+        """Every trace across (the whole ruler when there is one); the time window is kept."""
+        blo, bhi = self.trace_bounds
+        return self.with_window(blo, bhi, self.time_lo, self.time_hi)
+
+    def fit_height(self) -> ViewTransform:
+        """The whole record down; the trace window is kept."""
+        return self.with_window(self.trace_lo, self.trace_hi, self.t0_ns, self.t_end)
+
     def zoomed(self, factor: float, anchor_x: float, anchor_y: float) -> ViewTransform:
         """Scale both spans by 1/factor keeping the data point under the
         anchor pixel fixed. Clamped by with_window."""
@@ -239,20 +254,55 @@ class ViewTransform:
             self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
         )
 
-    def one_to_one(self) -> ViewTransform:
-        """One trace per pixel column, keeping the trace at the screen's left
-        edge where it is: `trace_lo` normally, `trace_hi` when mirrored."""
-        if self.mirrored:
-            return self.with_window(
-                self.trace_hi - self.width, self.trace_hi, self.time_lo, self.time_hi
-            )
-        return self.with_window(
-            self.trace_lo, self.trace_lo + self.width, self.time_lo, self.time_hi
-        )
-
     def resized(self, width: int, height: int) -> ViewTransform:
         # replace() carries mirrored and bounds along with the window.
         return replace(self, width=max(1, width), height=max(1, height))
+
+
+def carry_time_window(
+    old: ViewTransform, new: ViewTransform, old_zero: float, new_zero: float
+) -> ViewTransform:
+    """`new` with the time window `old` was showing, carried across a change of
+    clock or record on the same line (spec §4.8). The trace window is kept.
+
+    A whole-record window stays whole; one that began at the old top begins at
+    the new top with the same span; any other keeps its radar times, so it
+    moves by the zero change (`retime_ns`) and the tick labels shift while the
+    features stay where they were. Clamping is left to `with_window`.
+    """
+    half = old.dt_ns / 2
+    top = old.time_lo <= old.t0_ns + half
+    if top and old.time_hi >= old.t_end - half:
+        lo, hi = new.t0_ns, new.t_end
+    elif top:
+        lo = new.t0_ns
+        hi = lo + (old.time_hi - old.time_lo)
+    else:
+        shift = old_zero - new_zero
+        lo, hi = old.time_lo + shift, old.time_hi + shift
+    return new.with_window(old.trace_lo, old.trace_hi, lo, hi)
+
+
+def true_scale_window(
+    t: ViewTransform, metres_per_trace_unit: float, ns_per_metre: float
+) -> ViewTransform:
+    """The window in which a metre down is as long on screen as a metre along.
+
+    Keeps the window's trace span and sets the time span to match when the
+    whole record is deep enough to do so, centred on the window's middle time.
+    Otherwise (a long line) keeps the whole record and narrows the trace span
+    about the window's middle. `with_window` clamps at the minimum spans.
+    """
+    across = t.width / ((t.trace_hi - t.trace_lo) * metres_per_trace_unit)  # px per metre along
+    span = t.height / across * ns_per_metre  # ns that make px/m equal
+    record = t.n_samples * t.dt_ns
+    if span <= record:
+        mid = (t.time_lo + t.time_hi) / 2
+        return t.with_window(t.trace_lo, t.trace_hi, mid - span / 2, mid + span / 2)
+    down = t.height / (record / ns_per_metre)  # px per metre down, whole record
+    traces = t.width / down / metres_per_trace_unit
+    mid = (t.trace_lo + t.trace_hi) / 2
+    return t.with_window(mid - traces / 2, mid + traces / 2, t.t0_ns, t.t_end)
 
 
 def nice_ticks(vmin: float, vmax: float, target: int = 6) -> np.ndarray:

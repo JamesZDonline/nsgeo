@@ -91,10 +91,3 @@ def ruler_for(grid: Grid, axis: str, distances: Iterable[np.ndarray]) -> Ruler:
         lo = min(lo, float(np.min(d)) - h)
         hi = max(hi, float(np.max(d)) + h)
     return Ruler(grid.id, axis, lo, hi)
-
-
-def bounds_on(ruler: Ruler, distance: Any) -> tuple[float, float]:
-    """The ruler's two ends in this line's trace units, sorted ascending."""
-    a = float(trace_units_at(distance, ruler.lo_m))
-    b = float(trace_units_at(distance, ruler.hi_m))
-    return (min(a, b), max(a, b))

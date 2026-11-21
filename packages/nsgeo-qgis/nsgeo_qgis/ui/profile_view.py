@@ -1,6 +1,13 @@
 """The profile viewer: a QWidget that paints a cached radargram image
 through a ViewTransform, with axes, a cursor, a selection band, picks, a
-slice band and the draggable time-cutoff line.
+slice band and the draggable handle line (the time cutoff's end time, or
+the first row Time zero keeps).
+
+Each vertical axis shows its own unit (ns, samples or metres of depth;
+`set_axis_units`), and a press on either axis strip asks for the unit menu
+(`axis_menu_requested`) instead of starting any other gesture. While the
+pointer is over the image a read-out gives the position under it in those
+units (`readout_text`).
 
 Measured: drawing a sub-rectangle of the cached image costs about 3 ms per
 frame at any zoom, so pan and zoom never touch numpy.
@@ -45,7 +52,7 @@ from typing import Any
 import numpy as np
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis
-from qgis.PyQt.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor, QImage, QPainter, QPen
 from qgis.PyQt.QtWidgets import QApplication, QWidget
 
@@ -53,12 +60,11 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.ruler import (
     Ruler,
-    bounds_on,
     is_reversed,
     metres_at,
     trace_units_at,
 )
-from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
+from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks, true_scale_window
 
 # The axis captions ("ns" / "m") get a row of their own above the image,
 # CAPTION_ROW tall; a tick label is a 16-px rect centred on its tick, so the
@@ -66,7 +72,8 @@ from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
 # what keeps a "0" tick at the very top (an active `time_zero` step) off the
 # caption without hiding the label (issue #7).
 CAPTION_ROW = 14
-MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, CAPTION_ROW + 8, 28
+AXIS_UNITS = ("ns", "sample", "m")
+MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 56, CAPTION_ROW + 8, 28
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
 # Ruler space with no trace under it: a light hatch over the background, so it
@@ -119,26 +126,33 @@ class ProfileView(QWidget):
     # Declared for the Ctrl/Cmd shortcut, which asks for velocity mode to be switched on.
     velocity_mode_requested = pyqtSignal()
     view_changed = pyqtSignal()
-    # Emitted once, on the release that ends a drag of the cutoff line, with
-    # the snapped end time (ns). Always emitted, even for an unmoved line:
+    # Emitted once, on the release that ends a drag of the handle line, with
+    # the snapped value: the end time (ns) for a cutoff, the row top for a
+    # row handle. Always emitted, even for an unmoved line:
     # the no-op guard lives with the consumer.
     cutoff_dragged = pyqtSignal(float)
+    axis_menu_requested = pyqtSignal(str, QPoint)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._hover: tuple[float, float] | None = None  # pointer on the image, for the read-out
         self.setMinimumSize(240, 120)
         self.transform: ViewTransform | None = None
         self._image: QImage | None = None
         self._distance: np.ndarray | None = None
         self._ruler: Ruler | None = None
         self._velocity: VelocityModel | None = None
+        self._axis_units: tuple[str, str] = ("ns", "m")
         self._direction = 1
         self._cursor = -1
         self._selection = (-1, -1)
         self._picks: list[tuple[int, float]] = []
         self._slice_band: tuple[float, float] | None = None
         self._cutoff_ns: float | None = None
+        # "end": the time cutoff (dims below the line, snaps to a boundary).
+        # "start": Time zero's row handle (dims above, snaps to a row top).
+        self._cutoff_kind = "end"
         # The value the line had when a drag of it began; not None means a
         # drag is in progress. Kept so a drag whose release never arrives
         # (see `_handle_mouse_move`) can put the line back.
@@ -192,8 +206,11 @@ class ProfileView(QWidget):
         # both already reject `dt_ns <= 0`), but `set_axes` is a public entry
         # point with no caller between it and a header value, so it enforces
         # its own contract rather than trust every future caller to.
-        if not dt_ns > 0:
-            _log(f"set_axes: dt_ns must be positive, got {dt_ns}; axes left unchanged")
+        if not (math.isfinite(t0_ns) and math.isfinite(dt_ns) and dt_ns > 0):
+            _log(
+                f"set_axes: need finite t0_ns and positive finite dt_ns, got {t0_ns}, "
+                f"{dt_ns}; axes left unchanged"
+            )
             return
         # C1a: a `distance_along` of the wrong length reaches `_distance_ticks`
         # unvalidated and raises `ValueError: fp and xp are not of the same
@@ -217,9 +234,17 @@ class ProfileView(QWidget):
             ruler = None
         # A constant (or non-finite) distance axis has no spacing to place
         # traces by: its bounds are infinite and would not build a transform.
+        # The ruler's two ends in trace units, read through the metre helper
+        # pair (spec 3.1), so the pair is the only road between the two.
+        self._distance = distance_along
+        bounds = (math.nan, math.nan)
         if ruler is not None and distance_along is not None:
             with np.errstate(divide="ignore", invalid="ignore"):
-                lo, hi = bounds_on(ruler, distance_along)
+                ends = sorted(
+                    float(self.trace_units_at_metres(m)) for m in (ruler.lo_m, ruler.hi_m)
+                )
+            bounds = (ends[0], ends[1])
+            lo, hi = bounds
             if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
                 ruler = None
         if ruler is not None and distance_along is not None:
@@ -230,7 +255,7 @@ class ProfileView(QWidget):
                 dt_ns,
                 r.width(),
                 r.height(),
-                bounds=bounds_on(ruler, distance_along),
+                bounds=bounds,
                 mirrored=is_reversed(distance_along),
             )
         else:
@@ -238,7 +263,6 @@ class ProfileView(QWidget):
                 n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height()
             )
         self._ruler = ruler
-        self._distance = distance_along
         self._message = "loading…"
         self.view_changed.emit()
         self.update()
@@ -247,14 +271,29 @@ class ProfileView(QWidget):
     def ruler(self) -> Ruler | None:
         return self._ruler
 
+    def metres_at_trace_units(self, u: Any) -> Any:
+        """Metres along the line at the `ViewTransform` horizontal coordinate `u`
+        (a number or an array); None without a distance of at least 2 traces.
+        The one road from trace units to metres. The pair is where M17c swaps
+        traces for distance."""
+        if self._distance is None or len(self._distance) < 2:
+            return None
+        return metres_at(self._distance, u)
+
+    def trace_units_at_metres(self, m: Any) -> Any:
+        """The inverse of `metres_at_trace_units`; None likewise."""
+        if self._distance is None or len(self._distance) < 2:
+            return None
+        return trace_units_at(self._distance, m)
+
     def window_m(self) -> tuple[float, float] | None:
         """The window's two ends in metres along the grid, ascending; None
         without a ruler."""
         if self._ruler is None or self._distance is None or self.transform is None:
             return None
         t = self.transform
-        a = float(metres_at(self._distance, t.trace_lo))
-        b = float(metres_at(self._distance, t.trace_hi))
+        a = float(self.metres_at_trace_units(t.trace_lo))
+        b = float(self.metres_at_trace_units(t.trace_hi))
         return (min(a, b), max(a, b))
 
     def set_window_m(self, lo_m: float, hi_m: float, time_lo: float, time_hi: float) -> None:
@@ -262,8 +301,8 @@ class ProfileView(QWidget):
         `with_window` clamps it. Does nothing without a ruler."""
         if self._ruler is None or self._distance is None or self.transform is None:
             return
-        a = float(trace_units_at(self._distance, lo_m))
-        b = float(trace_units_at(self._distance, hi_m))
+        a = float(self.trace_units_at_metres(lo_m))
+        b = float(self.trace_units_at_metres(hi_m))
         self.transform = self.transform.with_window(min(a, b), max(a, b), time_lo, time_hi)
         self.view_changed.emit()
         self.update()
@@ -277,6 +316,23 @@ class ProfileView(QWidget):
         cut spec §4.3). None goes back to the "loading…" `set_axes` leaves."""
         self._message = "loading…" if text is None else text
         self.update()
+
+    def set_axis_units(self, left: str, right: str) -> None:
+        """Which unit each vertical axis shows: one of `AXIS_UNITS`. Raises
+        `ValueError` for anything else, leaving both sides as they were."""
+        for unit in (left, right):
+            if unit not in AXIS_UNITS:
+                raise ValueError(f"axis unit {unit!r} is not one of {AXIS_UNITS}")
+        self._axis_units = (left, right)
+        self.update()
+
+    @property
+    def axis_units(self) -> tuple[str, str]:
+        return self._axis_units
+
+    @property
+    def has_velocity(self) -> bool:
+        return self._velocity is not None
 
     def set_velocity(self, model: VelocityModel | None) -> None:
         self._velocity = model
@@ -324,17 +380,26 @@ class ProfileView(QWidget):
 
     @property
     def cutoff_ns(self) -> float | None:
-        """The end time drawn now, live during a drag; None when hidden."""
+        """The time of the line drawn now (the cutoff's end, or Time zero's row
+        top), live during a drag; None when hidden."""
         return self._cutoff_ns
 
-    def set_cutoff(self, end_ns: float | None) -> None:
+    def set_cutoff(self, end_ns: float | None, kind: str = "end") -> None:
         """Show the cutoff line at `end_ns`, or hide it with None.
+
+        `kind` is "end" (the time cutoff: dims below the line) or "start"
+        (Time zero's row handle: dims above it, snaps to a row top and is
+        tagged with its row).
 
         A drag in progress is abandoned (no emit): the caller has just
         said where the line is, and the release that follows must not
         overwrite that with a stale gesture.
         """
         self._cutoff_grab = None
+        if kind not in ("end", "start"):
+            _log(f"set_cutoff: unknown kind {kind!r}; line hidden instead")
+            kind, end_ns = "end", None
+        self._cutoff_kind = kind
         if end_ns is not None and not math.isfinite(end_ns):
             _log(f"set_cutoff: non-finite end time {end_ns}; line hidden instead")
             end_ns = None
@@ -386,6 +451,7 @@ class ProfileView(QWidget):
         self._saved_velocity_highlight = None
         self._slice_band = None
         self._cutoff_ns = None
+        self._cutoff_kind = "end"
         self._cutoff_grab = None
         self._cancel_velocity_box()
         self._message = "no line open"
@@ -418,12 +484,74 @@ class ProfileView(QWidget):
         self.view_changed.emit()
         self.update()
 
-    def one_to_one(self) -> None:
-        """One trace per pixel column, anchored at the current window's left."""
+    def fit_width(self) -> None:
+        """Every trace across; the time zoom is kept."""
         if self.transform is None:
             return
+        self.transform = self.transform.fit_width()
+        self.view_changed.emit()
+        self.update()
+
+    def fit_height(self) -> None:
+        """The whole record down; the zoom along the line is kept."""
+        if self.transform is None:
+            return
+        self.transform = self.transform.fit_height()
+        self.view_changed.emit()
+        self.update()
+
+    def _window_metres_per_trace_unit(self) -> float | None:
+        """Metres per trace unit across the current window, or None without a
+        transform or metres along the line. May be zero or non-finite where
+        the radar stood still across the window."""
         t = self.transform
-        self.transform = t.one_to_one()
+        if t is None:
+            return None
+        lo, hi = self.metres_at_trace_units(t.trace_lo), self.metres_at_trace_units(t.trace_hi)
+        if lo is None or hi is None:
+            return None
+        return abs(float(hi) - float(lo)) / (t.trace_hi - t.trace_lo)
+
+    def _true_scale_inputs(self) -> tuple[float, float] | None:
+        """(metres per trace unit across, ns per metre down) for the current
+        window, or None where a true scale cannot be worked out."""
+        t = self.transform
+        if t is None or self._velocity is None:
+            return None
+        per_unit = self._window_metres_per_trace_unit()
+        if per_unit is None or not (math.isfinite(per_unit) and per_unit > 0):
+            return None
+        h = t.dt_ns
+        tm = max((t.time_lo + t.time_hi) / 2, h)
+        z = self._velocity.depth_at
+        slope = (float(z(tm + h)) - float(z(tm - h))) / (2 * h)
+        if not (math.isfinite(slope) and slope > 0):
+            return None
+        return per_unit, 1.0 / slope
+
+    def true_scale_window_is_flat(self) -> bool:
+        """True where metres and a velocity are there but the window spans no
+        distance along the line (the radar stood still): the one missing input
+        that is neither of those two."""
+        t = self.transform
+        if t is None or self._velocity is None:
+            return False
+        per_unit = self._window_metres_per_trace_unit()
+        if per_unit is None:
+            return False
+        return not (math.isfinite(per_unit) and per_unit > 0)
+
+    def can_true_scale(self) -> bool:
+        """True with a transform, a velocity and metres along the line, and a
+        non-zero, finite metre span across the current window."""
+        return self._true_scale_inputs() is not None
+
+    def true_scale(self) -> None:
+        """A metre down as long as a metre along, at the line's velocity."""
+        inputs = self._true_scale_inputs()
+        if inputs is None or self.transform is None:
+            return
+        self.transform = true_scale_window(self.transform, *inputs)
         self.view_changed.emit()
         self.update()
 
@@ -530,10 +658,74 @@ class ProfileView(QWidget):
             self._paint_cursor(painter, r, t)
             painter.setClipping(False)
             self._paint_axes(painter, r, t)
+            self._paint_readout(painter, r)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring and C1 above
             _log(f"could not paint the profile view: {exc}")
         finally:
             painter.end()
+
+    def readout_text(self) -> str:
+        """What is under the pointer, in the axes' units; "" off the image, over
+        blank ruler space or while there is no image to point at. While a range
+        selection is being dragged it reads the selection's length instead."""
+        t = self.transform
+        if t is None or self._image is None:
+            return ""
+        if self._dragging and self._selection != (-1, -1):  # W5: the drag's own length,
+            # which goes on reading while the pointer is off the image (no hover)
+            a, b = self._selection
+            m_a = self.metres_at_trace_units(a + 0.5)
+            m_b = self.metres_at_trace_units(b + 0.5)
+            if m_a is None or m_b is None:
+                return f"{b - a + 1} traces selected (trace {a}\u2013{b})"
+            return f"{abs(float(m_b) - float(m_a)):.2f} m selected (trace {a}\u2013{b})"
+        if self._hover is None:
+            return ""
+        x, y = self._hover
+        if not (0 <= x < t.width and 0 <= y < t.height):  # stale: the view has been resized
+            return ""
+        i = t.trace_at(x)
+        if i is None:
+            return ""
+        s = t.sample_index_at(y)
+        time_ns = t.t0_ns + s * t.dt_ns
+        m = self.metres_at_trace_units(i + 0.5)
+        parts = [f"trace {i}" if m is None else f"{float(m):.2f} m along (trace {i})"]
+        shown: list[str] = []
+        for unit in self._axis_units:
+            if unit in shown:
+                continue
+            shown.append(unit)
+            if unit == "ns":
+                parts.append(f"{time_ns:.2f} ns")
+            elif unit == "sample":
+                parts.append(f"sample {s}")
+            elif self._velocity is not None and time_ns >= 0:
+                depth = float(self._velocity.depth_at(np.array(time_ns)))
+                parts.append(f"{depth:.2f} m deep")
+        return " \u00b7 ".join(parts)
+
+    def _paint_readout(self, p: QPainter, r: QRect) -> None:
+        text = self.readout_text()
+        if not text:
+            return
+        p.setPen(AXIS_COLOUR)
+        font = p.font()
+        font.setPointSize(9)
+        p.setFont(font)
+        p.drawText(
+            QRectF(r.left(), 0, r.width(), MARGIN_TOP),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            text,
+        )
+
+    def leaveEvent(self, event: Any) -> None:  # noqa: N802
+        try:
+            self._hover = None
+            self.update()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the read-out: {exc}", Qgis.MessageLevel.Warning)
+        super().leaveEvent(event)
 
     def _paint_cursor(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         if self._cursor < 0:
@@ -587,6 +779,19 @@ class ProfileView(QWidget):
             return None
         return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
 
+    def _cutoff_text(self, t: ViewTransform) -> str:
+        """The tag's text: the time cutoff's time (and depth), or a row
+        handle's row, with its time while it is being dragged."""
+        assert self._cutoff_ns is not None
+        if self._cutoff_kind != "start":
+            return cutoff_label(self._cutoff_ns, self._velocity)
+        k = round((self._cutoff_ns - t.t0_ns) / t.dt_ns) if t.dt_ns else 0
+        if self._cutoff_grab is not None:
+            # `or 0.0`: float residue on the relabelled clock must not print -0.00.
+            t_ns = round(self._cutoff_ns, 2) or 0.0
+            return f"sample {k} \u00b7 {t_ns:.2f} ns"
+        return f"Time zero \u00b7 sample {k}"
+
     def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:
         """The label's tag, or None when the line is hidden. Sized to the
         text plus padding, right-aligned. Factored out the same way
@@ -595,7 +800,7 @@ class ProfileView(QWidget):
         y = self._cutoff_y(t)
         if self._cutoff_ns is None or y is None:
             return None
-        text = cutoff_label(self._cutoff_ns, self._velocity)
+        text = self._cutoff_text(t)
         fm = self.fontMetrics()
         w = fm.horizontalAdvance(text) + 2 * CUTOFF_TAG_PAD_X
         h = fm.height() + 2 * CUTOFF_TAG_PAD_Y
@@ -612,7 +817,10 @@ class ProfileView(QWidget):
         if y is None or tag is None or self._cutoff_ns is None:
             return
         yy = r.top() + y
-        p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
+        if self._cutoff_kind == "start":
+            p.fillRect(QRectF(r.left(), r.top(), r.width(), max(0.0, yy - r.top())), CUTOFF_DIM)
+        else:
+            p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
         p.setPen(QPen(CUTOFF_COLOUR, 2))
         p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
         # White on a magenta tag: magenta text straight onto the radargram
@@ -622,7 +830,7 @@ class ProfileView(QWidget):
         p.drawText(
             tag,
             int(Qt.AlignmentFlag.AlignCenter),
-            cutoff_label(self._cutoff_ns, self._velocity),
+            self._cutoff_text(t),
         )
 
     def _near_cutoff(self, x: float, y: float) -> bool:
@@ -737,33 +945,36 @@ class ProfileView(QWidget):
         font = p.font()
         font.setPointSize(8)
         p.setFont(font)
-        # left: two-way time
+        # left and right: each in the unit chosen for it
+        left_unit, right_unit = self._axis_units
         p.drawLine(r.topLeft(), r.bottomLeft())
-        for tick, y in self._time_ticks(t):
+        for label, y in self._axis_ticks(left_unit, t):
             yy = r.top() + y
             p.drawLine(QPointF(r.left() - 4, yy), QPointF(r.left(), yy))
             p.drawText(
                 QRectF(0, yy - 8, r.left() - 6, 16),
                 int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                tick,
+                label,
             )
-        p.drawText(QRectF(0, 0, r.left() - 6, CAPTION_ROW), int(Qt.AlignmentFlag.AlignRight), "ns")
-        # right: depth
+        p.drawText(
+            QRectF(0, 0, r.left() - 6, CAPTION_ROW),
+            int(Qt.AlignmentFlag.AlignRight),
+            f"{left_unit} \u25be",
+        )
         p.drawLine(r.topRight(), r.bottomRight())
-        if self._velocity is not None:
-            for label, y in self._depth_ticks(t):
-                yy = r.top() + y
-                p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                p.drawText(
-                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    label,
-                )
+        for label, y in self._axis_ticks(right_unit, t):
+            yy = r.top() + y
+            p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
             p.drawText(
-                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_ROW),
-                int(Qt.AlignmentFlag.AlignLeft),
-                "m",
+                QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                label,
             )
+        p.drawText(
+            QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_ROW),
+            int(Qt.AlignmentFlag.AlignLeft),
+            f"{right_unit} \u25be",
+        )
         # bottom: distance along the line, or trace index
         p.drawLine(r.bottomLeft(), r.bottomRight())
         for label, x in self._distance_ticks(t):
@@ -789,6 +1000,38 @@ class ProfileView(QWidget):
             (f"{tick:g}", t.y_of_time(float(tick))) for tick in nice_ticks(t.time_lo, t.time_hi)
         ]
 
+    def _axis_ticks(self, unit: str, t: ViewTransform) -> list[tuple[str, float]]:
+        """Tick labels and pixel y-positions for a vertical axis in `unit`.
+        Depth is blank without a velocity."""
+        if unit == "sample":
+            return self._sample_ticks(t)
+        if unit == "m":
+            return self._depth_ticks(t) if self._velocity is not None else []
+        return self._time_ticks(t)
+
+    def _sample_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
+        """Whole sample numbers, each on its row's centre (row s spans
+        t0 + s*dt to t0 + (s+1)*dt)."""
+        s_lo = (t.time_lo - t.t0_ns) / t.dt_ns - 0.5
+        s_hi = (t.time_hi - t.t0_ns) / t.dt_ns - 0.5
+        return [
+            (str(int(s)), t.y_of_time(t.t0_ns + (float(s) + 0.5) * t.dt_ns))
+            for s in nice_ticks(s_lo, s_hi)
+            if 0 <= s <= t.n_samples - 1
+        ]
+
+    def axis_strip_at(self, x: float, y: float) -> str | None:
+        """ "left" or "right" for image-local (x, y) in the margin beside the
+        image, where a press picks that axis's unit; else None."""
+        t = self.transform
+        if t is None or not (-MARGIN_TOP <= y < t.height):
+            return None
+        if x < 0:
+            return "left"
+        if x >= t.width:
+            return "right"
+        return None
+
     def _distance_unit_label(self) -> str:
         return "m" if self._distance is not None else "trace"
 
@@ -802,7 +1045,11 @@ class ProfileView(QWidget):
 
     def _depth_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         assert self._velocity is not None
-        times = np.linspace(t.time_lo, t.time_hi, 512)
+        # No depth above time 0 on the shown clock.
+        lo = max(t.time_lo, 0.0)
+        if not t.time_hi > lo:
+            return []
+        times = np.linspace(lo, t.time_hi, 512)
         depths = self._velocity.depth_at(times)
         out = []
         for d in nice_ticks(float(depths[0]), float(depths[-1])):
@@ -831,12 +1078,11 @@ class ProfileView(QWidget):
         # reads two samples); the old interpolation gave no ticks either.
         if t.n_traces < 2:
             return []
-        d = self._distance
         # The window's ends in metres, read off the extrapolating map so the
         # ticks run on across blank space; each tick sits on its column centre.
-        m_lo, m_hi = (float(metres_at(d, v)) for v in (lo, hi))
+        m_lo, m_hi = (float(self.metres_at_trace_units(v)) for v in (lo, hi))
         return [
-            (f"{tick:g}", t.x_of_trace(float(trace_units_at(d, float(tick)))))
+            (f"{tick:g}", t.x_of_trace(float(self.trace_units_at_metres(float(tick)))))
             for tick in nice_ticks(min(m_lo, m_hi), max(m_lo, m_hi))
         ]
 
@@ -868,6 +1114,13 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = event_pos(event)
             return
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            side = self.axis_strip_at(x, y)
+            if side is not None:
+                # A press on an axis picks its unit and nothing else: no
+                # selection, pick, velocity gesture or cutoff grab starts.
+                self.axis_menu_requested.emit(side, self.mapToGlobal(event_pos(event).toPoint()))
+                return
         if event.button() == Qt.MouseButton.RightButton and self._velocity_mode:
             self._abandon_stale_cutoff_grab()
             # Nearest in SCREEN space: the points live in trace/ns, whose
@@ -969,6 +1222,11 @@ class ProfileView(QWidget):
         assert self.transform is not None  # only called from mouseMoveEvent's own guard
         pos = event_pos(event)
         x, y = self._local(event)
+        inside = 0 <= x < self.transform.width and 0 <= y < self.transform.height
+        before = self.readout_text()
+        self._hover = (x, y) if inside else None
+        if self.readout_text() != before:  # repaint just the strip that holds it
+            self.update(QRect(0, 0, self.width(), MARGIN_TOP))
         if self._pan_last is not None:
             # I3: `_pan_last` was only ever cleared by a *middle-button*
             # mouseReleaseEvent. A middle-press followed by an unrelated
@@ -1018,9 +1276,12 @@ class ProfileView(QWidget):
                 if abs(y - self._cutoff_press_y) <= DRAG_THRESHOLD_PX:
                     self._cutoff_ns = self._cutoff_grab
                 else:
-                    self._cutoff_ns = self.transform.snap_cutoff(
-                        self.transform.time_of_y(y + self._cutoff_offset)
+                    snap = (
+                        self.transform.snap_row
+                        if self._cutoff_kind == "start"
+                        else self.transform.snap_cutoff
                     )
+                    self._cutoff_ns = snap(self.transform.time_of_y(y + self._cutoff_offset))
                 self.update()
                 return
         if self._press is not None:
@@ -1106,6 +1367,7 @@ class ProfileView(QWidget):
                 self.cutoff_dragged.emit(self._cutoff_ns)
             return
         if self._press is not None and self.transform is not None:
+            was_dragging = self._dragging
             if self._dragging and self._selection != (-1, -1):
                 a, b = self._selection
                 self.range_selected.emit(a, b)
@@ -1145,6 +1407,8 @@ class ProfileView(QWidget):
                 self.selection_cleared.emit()
             self._press = None
             self._dragging = False
+            if was_dragging:  # the "... m selected" read-out must not outlive the drag
+                self.update(QRect(0, 0, self.width(), MARGIN_TOP))
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802
         if self.transform is None:

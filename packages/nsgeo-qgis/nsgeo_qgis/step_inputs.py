@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing import Radargram, StepStack
+from nsgeo.processing import Radargram, StepStack, first_break_row_or_none
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
@@ -24,6 +24,14 @@ def clock_unknown(stack: StepStack, row: int) -> bool:
     if stack.source is not None:
         return False
     return any(step.name == "time_zero" and on for step, on in stack.entries[:row])
+
+
+def _input_record(stack: StepStack, row: int) -> Radargram:
+    """What the step at `row` receives: the stack's state after the step above
+    it, or the source when it is first. The stack must have its source.
+    Raises ValueError when the steps above refuse."""
+    assert stack.source is not None
+    return stack.intermediate(row - 1) if row > 0 else stack.source
 
 
 def input_axis(session: SiteSession, key: str, row: int) -> tuple[float, float, int] | None:
@@ -40,7 +48,7 @@ def input_axis(session: SiteSession, key: str, row: int) -> tuple[float, float, 
     stack = session.stack_for(key)
     if stack.source is not None:
         try:
-            rg = stack.intermediate(row - 1) if row > 0 else stack.source
+            rg = _input_record(stack, row)
         except ValueError as exc:
             _log(
                 f"input_axis: stack does not evaluate cleanly ({exc}); "
@@ -52,6 +60,23 @@ def input_axis(session: SiteSession, key: str, row: int) -> tuple[float, float, 
         return None
     h = session.line_for_key(key).header
     return h.position_ns, h.dt_ns, h.n_samples
+
+
+def time_zero_seed(session: SiteSession, key: str, row: int, threshold: float) -> int | None:
+    """The first-break row of what the step at `row` receives (the stack's state
+    after the step above it, or the source when it is first), counted from that
+    record's first row. None when the samples have not loaded, the record has no
+    arrival, or the steps above it refuse. A Time zero set to this row crops
+    what its own first-break mode would."""
+    stack = session.stack_for(key)
+    if stack.source is None:
+        return None
+    try:
+        rg = _input_record(stack, row)
+    except ValueError as exc:
+        _log(f"time_zero_seed: the steps above row {row} do not evaluate ({exc})")
+        return None
+    return first_break_row_or_none(rg, threshold)
 
 
 def time_axis(session: SiteSession, key: str) -> tuple[float, float, int]:

@@ -108,7 +108,8 @@ class GainParametric:
                 unit="1/ns",
                 min=-1.0,
                 max=1.0,
-                help="Exponential rate; used when mode is 'exponential'.",
+                when=("mode", ("exponential",)),
+                help="Exponential rate.",
             ),
             ParamSpec(
                 name="exponent",
@@ -117,7 +118,8 @@ class GainParametric:
                 default=1.0,
                 min=-10.0,
                 max=10.0,
-                help="Used when mode is 'power'.",
+                when=("mode", ("power",)),
+                help="Power-law exponent.",
             ),
         )
 
