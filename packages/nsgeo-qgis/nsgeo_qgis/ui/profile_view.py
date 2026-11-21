@@ -666,10 +666,18 @@ class ProfileView(QWidget):
 
     def readout_text(self) -> str:
         """What is under the pointer, in the axes' units; "" off the image, over
-        blank ruler space or while there is no image to point at."""
+        blank ruler space or while there is no image to point at. While a range
+        selection is being dragged it reads the selection's length instead."""
         t = self.transform
         if t is None or self._hover is None or self._image is None:
             return ""
+        if self._dragging and self._selection != (-1, -1):  # W5: the drag's own length
+            a, b = self._selection
+            m_a = self.metres_at_trace_units(a + 0.5)
+            m_b = self.metres_at_trace_units(b + 0.5)
+            if m_a is None or m_b is None:
+                return f"{b - a + 1} traces selected (trace {a}\u2013{b})"
+            return f"{abs(float(m_b) - float(m_a)):.2f} m selected (trace {a}\u2013{b})"
         x, y = self._hover
         if not (0 <= x < t.width and 0 <= y < t.height):  # stale: the view has been resized
             return ""

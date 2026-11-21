@@ -2580,6 +2580,71 @@ def test_the_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatc
     assert v.readout_text().startswith("42.00 m along")
 
 
+def _drag_traces(v, a, b, *, release=True):
+    """Presses on trace `a`'s centre and moves to trace `b`'s; releases unless told not to."""
+    t, r = v.transform, v.image_rect()
+    y = int(r.top() + 30)
+    xa = round(r.left() + t.x_of_trace(a + 0.5))
+    xb = round(r.left() + t.x_of_trace(b + 0.5))
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xa, y))
+    _send_move_while_pressed(v, QPoint(xb, y))
+    if release:
+        QTest.mouseRelease(
+            v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xb, y)
+        )
+
+
+def test_the_readout_shows_the_selections_length_while_dragging(make_view):
+    # W5. Traces are 0-based, as in the pointer read-out ("trace 100").
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "1.00 m selected (trace 20\u201380)"
+
+
+def test_the_readout_returns_to_the_cursor_on_release(make_view):
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80)
+    assert " selected " not in v.readout_text()
+    assert v.readout_text().startswith("1.33 m along (trace 80)")
+
+
+def test_the_selection_readout_without_metres_counts_traces(make_view):
+    v = make_view()
+    v.resize(VIEW_W, 264 + MARGIN_TOP + 28)
+    v.show()
+    v.set_axes(200, 128, 0.0, 0.25)
+    v.set_image(QImage(200, 128, QImage.Format.Format_RGB32))
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "61 traces selected (trace 20\u201380)"
+
+
+def test_a_mirrored_line_reads_its_own_selected_metres(ruled):
+    v = ruled
+    _drag_traces(v, 20, 80, release=False)
+    assert v._selection == (20, 80)
+    assert v.readout_text() == "1.00 m selected (trace 20\u201380)"  # absolute, though D falls
+
+
+def test_the_selection_readout_takes_its_metres_from_the_helper_pair(make_view, monkeypatch):
+    v = _imaged(make_view)
+    monkeypatch.setattr(
+        ProfileView, "metres_at_trace_units", lambda self, u: np.asarray(2.0 * float(u))
+    )
+    _drag_traces(v, 20, 80, release=False)
+    assert v.readout_text() == "120.00 m selected (trace 20\u201380)"
+
+
+def test_a_selection_set_without_a_drag_leaves_the_readout_alone(make_view):
+    v = _imaged(make_view)
+    _hover_at(v, 100, 40)
+    before = v.readout_text()
+    v.set_selection(20, 80)
+    assert v.readout_text() == before
+    assert " selected " not in before
+
+
 def test_set_axes_refuses_a_non_finite_clock_and_changes_nothing(view):
     v, rg = view
     before = (v.transform, v._distance, v.ruler)
