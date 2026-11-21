@@ -131,6 +131,7 @@ from qgis.PyQt.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -469,6 +470,13 @@ class ProfileDock(QgsDockWidget):
         self.colormap_combo.addItems(colormap_names(unipolar=False))
         self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
         bar.addWidget(self.colormap_combo)
+        # A display setting, so it sits with the colormap, not with Fit and 1:1.
+        # The attribute keeps its old name; it is a checkbox now.
+        self.slice_band_button = QCheckBox("Show slice band")
+        remembered = profile_settings().value(SLICE_BAND_KEY, True)
+        # A value that is not a bool (or "true"/"false") means shown.
+        self.slice_band_button.setChecked(str(remembered).lower() != "false")
+        bar.addWidget(self.slice_band_button)
         # Finding 7 (M7 walkthrough re-review, third round): the preview
         # marker moved out of this row entirely -- see `_show_line`'s
         # `is_preview` parameter, which marks it in the window title
@@ -508,13 +516,6 @@ class ProfileDock(QgsDockWidget):
         self.one_to_one_button.setText("1:1")
         bar.addWidget(self.fit_button)
         bar.addWidget(self.one_to_one_button)
-        self.slice_band_button = QToolButton()
-        self.slice_band_button.setText("Slice band")
-        self.slice_band_button.setCheckable(True)
-        remembered = profile_settings().value(SLICE_BAND_KEY, True)
-        # A value that is not a bool (or "true"/"false") means shown.
-        self.slice_band_button.setChecked(str(remembered).lower() != "false")
-        bar.addWidget(self.slice_band_button)
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)

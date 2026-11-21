@@ -2432,6 +2432,19 @@ def test_the_slice_band_choice_survives_a_new_dock(opened):
         other.deleteLater()
 
 
+def test_the_slice_band_is_a_show_slice_band_checkbox_left_of_the_fit_group(opened):
+    from qgis.PyQt.QtWidgets import QCheckBox
+
+    session, dock, key, line = opened
+    dock.resize(1361, 448)
+    QTest.qWait(50)
+    box = dock.slice_band_button
+    assert isinstance(box, QCheckBox)
+    assert box.text() == "Show slice band"
+    assert box.x() < dock.fit_button.x()
+    assert box.x() < dock.one_to_one_button.x()
+
+
 def test_the_slice_band_button_is_greyed_until_there_is_a_window(opened):
     session, dock, key, line = opened
     assert not dock.slice_band_button.isEnabled()
