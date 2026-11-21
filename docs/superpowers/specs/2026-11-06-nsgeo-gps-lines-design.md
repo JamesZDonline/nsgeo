@@ -221,6 +221,15 @@ These are the user's, in the order they were made.
       settings); a single line leaves Spacing empty until typed and makes a grid one spacing wide;
       lines with no main direction get the smallest rectangle, and Fitted says so; the new grid is
       fitted from the ready rows only; a magnetometer grid is never listed.
+16. **A lift shows as one clean gap, and the gap rule is the user's to tune** (the user, 2026-11-21,
+    choosing from real profiles of `FILE__016`, the second survey's `FILE__049` and `FILE__028`
+    drawn three ways). Where the cart was lifted, the GPS moves 0.2–3.4 m while the wheel records
+    1–22 traces (§17). Those traces are radar in the air, so the profile **leaves them out**: one
+    hatched gap, not a comb of stray traces where the GPS put them, and not the traces bunched at
+    the gap's start (which would guess where they were recorded and move them on the map and in the
+    slices). They stay in the file and in processing; they are only not drawn. The user asked for
+    the threshold to be **a tunable parameter in Edit lines** ("what if we made it a tunable
+    parameter in edit lines"): a per-line **Gap over (m)**, automatic until typed.
 ---
 
 ## 4. Claude's calls
@@ -564,7 +573,8 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
   "It makes interpretation much harder when lines aren't consistent like that"); and destagger's
   Measure (#159) for GPS lines in a grid (§15; W8: destagger was prioritized because of the GPS
   lines' stagger). Shared rulers are exact for zigzag lines only with true distance, which is why
-  they travel together. With these M17c may need two plans (3–6 tasks each). Expect a fix round
+  they travel together. In two plans (§17): **Plan A**, true distance, with lifts as gaps and a per-line
+  Gap over in Edit lines (decision 16); **Plan B**, shared rulers and Measure for GPS lines. Expect a fix round
   after the walkthrough: the profile view is where walkthroughs have found the most (#67, the time
   cutoff, the gain strip).
 - **M17d — Outlines and the rest of the areas.** Grid outline with holes and its mask, which the
@@ -745,3 +755,50 @@ Made by Claude while planning M17b; each is open to veto at the walkthrough.
   in no grid (from M17a) use the spacing measured from their own tracks.
 - **Messages:** the dialog reports each Import as it happens (it can stay open for the hand-on), not
   only when it closes.
+
+---
+
+## 17. M17c's calls (2026-11-21, with Plan A)
+
+Made by Claude while planning M17c, after decision 16; each is open to veto at the walkthrough.
+Measured on both GPS surveys (120 lines, positions in local metres only).
+
+- **What the data shows.** A line's usual step between traces is about 1.7 cm (60 traces/m on the
+  wheel; GPS 1.02–1.03× the wheel). Between two fixes the traces are spread evenly (§5.3), so a lift
+  is a fix-to-fix stretch where few traces cover a long way: 0.15–1.5 m per trace. Wheel slips
+  (`FILE__011`) reach about 8 cm per trace. Where the wheel turned while the cart stood still, traces
+  sit 0.1 cm apart; true distance squeezes them to nothing, which is right.
+- **The gap rule** (core, `nsgeo.geometry.spacing`, one rule for the profile and migration):
+  - a line's **usual step** is the median of its trace-to-trace steps;
+  - a step is a **gap** when it is longer than the line's **Gap over** value: typed per line in Edit
+    lines (decision 16), or automatically **6×** the usual step (about 10 cm here). At 6× the two
+    surveys have 48 gap stretches on 19 of 120 lines, 16 of them at a DZX mark; slips stay under;
+  - a trace is **left out** (decision 16) when the steps on both sides of it are gaps. A single gap
+    step leaves both its traces drawn, each half a usual step wide into the gap.
+- **The profile** (Plan A):
+  - The horizontal map stays the one road through trace centres (`ruler.metres_at` /
+    `trace_units_at`, profile view spec §3.1), so picks, the cursor, the selection and the ticks
+    keep their trace-unit coordinates and follow for free. What changes is that screen x is linear
+    in **metres along the line**, not in trace index, whenever the line has a trace axis.
+  - Only **GPS lines** get a trace axis. Tape lines and cuts keep today's code path exactly, so they
+    look as before by construction, not by tolerance.
+  - Each trace's column runs halfway to its neighbours, but no more than half a usual step into a
+    gap; the rest of a gap is the profile's no-data hatch. Hovering a gap shows no trace and the
+    read-out says "(gap)"; a click there picks nothing.
+  - Zoom, pan and 1:1 work in metres along the line when there is a trace axis, so the point under
+    the pointer stays put and 1:1 is exact across uneven spacing.
+  - The velocity fit already places each trace at its own distance; only the drawn curve changes,
+    to be sampled evenly in metres so it stays smooth across a gap.
+- **Migration** (Plan A): a GPS line's record carries each trace's walked distance and its Gap
+  over. Migration re-samples it onto an even grid at the usual step, from the drawn traces only, with
+  nothing (zeros) inside gaps; migrates; and reads each trace back at its own distance. A tape line
+  migrates exactly as before. A Gap over change re-prepares what depends on it.
+- **Where Gap over lives:** an optional `gap_m` on `TrackPlacement`, saved only when typed. Schema
+  4 (GPS lines) is unreleased, so no new schema number.
+- **Not changed:** slices still bin every trace where the GPS put it, including left-out ones (C6).
+  Leaving lifted traces out of slices too is a possible follow-up for the walkthrough to judge.
+- **Plan B** (after Plan A's walkthrough): shared rulers for GPS lines in a grid (decision 8, C8),
+  with distance projected onto the grid axis the line runs within 20° of and kept monotonic, and
+  Measure (#159) for GPS lines in a grid. The profile draws a GPS line on a ruler at its projected
+  distance; the velocity fit and migration keep the walked distance.
+
