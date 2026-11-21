@@ -86,7 +86,31 @@ def test_a_lift_at_the_first_step_draws_trace_0_half_a_step_wide():
     usual = usual_step(d)
     lo, hi = ax.drawn()
     assert hi[0] - lo[0] == pytest.approx(usual)
-    assert hi[0] - d[0] == pytest.approx(usual / 2)
+    assert hi[0] - d[0] == pytest.approx(usual / 2)  # inward, into the gap
+    assert d[0] - lo[0] == pytest.approx(usual / 2)  # outward, capped likewise
+
+
+def test_an_end_step_that_is_not_a_gap_reaches_halfway_outward_uncapped():
+    d = np.concatenate([[0.0], 0.06 + np.arange(10) * 0.02])  # first step 3 usual, no gap
+    ax = TraceAxis.from_distance(d)
+    lo, hi = ax.drawn()
+    assert d[0] - lo[0] == pytest.approx(1.5 * 0.02)
+    assert hi[0] - d[0] == pytest.approx(1.5 * 0.02)
+
+
+def test_a_line_with_no_length_is_refused():
+    with pytest.raises(ValueError):
+        TraceAxis.from_distance([1.0, 1.0, 1.0])
+
+
+def test_the_axis_owns_read_only_copies():
+    src = np.arange(5) * 0.1
+    ax = TraceAxis(src)
+    src[2] = 99.0
+    assert ax.distance[2] == pytest.approx(0.2)
+    lo, hi = ax.drawn()
+    assert not lo.flags.writeable and not hi.flags.writeable
+    assert not ax.distance.flags.writeable
 
 
 def test_a_distance_that_turns_back_is_refused():

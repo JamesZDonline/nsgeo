@@ -41,6 +41,10 @@ class ViewTransform:
     axis: TraceAxis | None = None
 
     def __post_init__(self) -> None:
+        if self.axis is not None and self.axis.distance.size != self.n_traces:
+            raise ValueError(
+                f"ViewTransform axis has {self.axis.distance.size} traces, n_traces={self.n_traces}"
+            )
         # Checked before the axes: a bad bounds must always name itself.
         if self.bounds is not None and not (
             math.isfinite(self.bounds[0])
@@ -179,6 +183,7 @@ class ViewTransform:
         """The trace column holding local pixel `x`, unclamped. Floor of the
         trace coordinate, or ceil - 1 when mirrored: either way a pixel on a
         column boundary belongs to the column on its screen-right side."""
+        assert self.axis is None, "a trace axis has no linear columns; use trace_at_walk"
         t = self.trace_of_x(x)
         return math.ceil(t) - 1 if self.mirrored else math.floor(t)
 
@@ -335,24 +340,26 @@ class ViewTransform:
         ds = -dy_px / self.height * (self.time_hi - self.time_lo)
         return self.with_walk_window(wlo + dw, whi + dw, self.time_lo + ds, self.time_hi + ds)
 
-    def paint_spans(self) -> list[tuple[float, float, int, int]]:
-        """`(x0, x1, first, last)` for each visible run of equal columns, in
-        local pixels with `x0 < x1`, clipped to the window; `first`/`last` are
-        the run's traces that meet the window. A mirrored caller flips each
-        span's image. Gaps and left-out traces have no span. Axis only."""
+    def paint_spans(self) -> list[tuple[float, float, float, float]]:
+        """`(x0, x1, c0, c1)` for each visible run of equal columns: local
+        pixels `[x0, x1)` (`x0 < x1`, clipped to the window) and the fractional
+        source columns `[c0, c1)` in trace units (image columns at one column
+        per trace) that those pixels show; `c` is linear in `x` within a run.
+        Ascending in x. Unmirrored, `c0` is at `x0`; mirrored, the source runs
+        the other way (`c1` at `x0`), so the caller flips each span's image.
+        Gaps and left-out traces have no span. Axis only."""
         assert self.axis is not None
         wlo, whi = self._walk_window()
-        out: list[tuple[float, float, int, int]] = []
-        lo, hi = self.axis.drawn()
+        out: list[tuple[float, float, float, float]] = []
         for first, last, r_lo, r_hi in self.axis.runs():
-            if r_hi <= wlo or r_lo >= whi:
+            lo, hi = max(r_lo, wlo), min(r_hi, whi)
+            if hi <= lo:
                 continue
-            a, b = sorted((self.x_of_walk(max(r_lo, wlo)), self.x_of_walk(min(r_hi, whi))))
+            a, b = sorted((self.x_of_walk(lo), self.x_of_walk(hi)))
             if not b > a:
                 continue
-            f = first + int(np.searchsorted(hi[first : last + 1], wlo, side="right"))
-            e = first + int(np.searchsorted(lo[first : last + 1], whi, side="left")) - 1
-            out.append((a, b, f, e))
+            per_m = (last - first + 1) / (r_hi - r_lo)
+            out.append((a, b, first + (lo - r_lo) * per_m, first + (hi - r_lo) * per_m))
         return sorted(out)
 
     def resized(self, width: int, height: int) -> ViewTransform:
@@ -413,6 +420,8 @@ def _true_scale_walk(t: ViewTransform, ns_per_metre: float) -> ViewTransform:
     own, and the long-line branch narrows about the middle metre."""
     assert t.axis is not None
     wlo, whi = t._walk_window()
+    if whi <= wlo:  # a stationary patch: no metres across to match
+        return t
     across = t.width / (whi - wlo)  # px per metre along
     span = t.height / across * ns_per_metre
     record = t.n_samples * t.dt_ns

@@ -36,16 +36,19 @@ class TraceAxis:
         return cls(np.array(distance, dtype=float), gap_m)
 
     def __post_init__(self) -> None:
-        d = np.asarray(self.distance, dtype=float)
+        d = np.array(self.distance, dtype=float)  # a copy: never the caller's array
         if d.ndim != 1 or d.size < 2:
             raise ValueError("a trace axis needs a distance for at least 2 traces")
         if not np.all(np.isfinite(d)):
             raise ValueError("a trace axis needs finite distances")
         check_gap_m(self.gap_m)
+        if d[-1] == d[0]:
+            raise ValueError("a trace axis needs a line with some length")
         steps = np.diff(d)
         sign = 1.0 if d[-1] >= d[0] else -1.0
         if np.any(steps * sign < 0):
             raise ValueError("a trace axis needs a distance that never turns back")
+        d.flags.writeable = False
         object.__setattr__(self, "distance", d)
         w = d * sign
         usual = usual_step(d)
@@ -59,10 +62,12 @@ class TraceAxis:
         left[0] = right[0]
         lo, hi = w - left, w + right
         lo[out] = hi[out] = w[out]
+        lo.flags.writeable = hi.flags.writeable = False
         object.__setattr__(self, "_lo", lo)
         object.__setattr__(self, "_hi", hi)
         shown = hi > lo
         object.__setattr__(self, "_shown", np.flatnonzero(shown))
+        self._shown.flags.writeable = False
         object.__setattr__(self, "_runs", self._group(lo, hi, shown, usual))
 
     @staticmethod
@@ -105,6 +110,9 @@ class TraceAxis:
             u = trace_units_at(self.distance, w * self.sign)
         if np.all(np.isfinite(u)):
             return u
+        # Asymmetric on purpose: `walk_at` stays flat past a zero end step (the
+        # ruler's own extrapolation), but its inverse cannot, so it carries on
+        # at the usual step; only positions past the end land here.
         usual = usual_step(self.distance) or 1.0
         n = self.distance.size
         w0 = self.sign * self.distance[0]

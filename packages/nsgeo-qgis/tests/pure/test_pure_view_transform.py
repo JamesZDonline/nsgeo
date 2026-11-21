@@ -486,7 +486,6 @@ def test_x_is_linear_in_metres_along_the_line():
 
 def test_hover_in_a_gap_finds_no_trace():
     vt, ax = _axis_vt(_UNEVEN)
-    mid = (_UNEVEN[14] + _UNEVEN[15]) / 2  # the first step is not a gap; use the real one
     gaps = np.flatnonzero(np.diff(_UNEVEN) > 6 * 0.02 * 1.01)
     assert gaps.size
     g = gaps[0]
@@ -498,7 +497,6 @@ def test_hover_in_a_gap_finds_no_trace():
 
 
 def test_zoom_keeps_the_metre_under_the_pointer():
-    vt, ax = _axis_vt(_UNEVEN)
     for mirrored in (False, True):
         vt, ax = _axis_vt(_UNEVEN, mirrored=mirrored)
         before = float(ax.walk_at(vt.trace_of_x(300.0)))
@@ -521,13 +519,47 @@ def test_a_window_edge_inside_a_gap_survives_zoom_and_pan():
     g = int(np.flatnonzero(np.diff(_UNEVEN) > 0.12)[0])
     mid = (_UNEVEN[g] + _UNEVEN[g + 1]) / 2
     centre = float(ax.units_at_walk(mid))
-    t = vt.with_window(centre - 6, centre + 20, vt.time_lo, vt.time_hi)
-    for out in (t.zoomed(1.5, 200.0, 10.0), t.zoomed(0.8, 600.0, 10.0), t.fit_width()):
+    t = vt.with_window(centre, centre + 12, vt.time_lo, vt.time_hi)
+    assert t.trace_lo == pytest.approx(centre)
+    assert t.trace_at(0.0) is None  # the left edge really is inside the gap
+    for out in (
+        t.zoomed(1.5, 200.0, 10.0),
+        t.zoomed(0.8, 600.0, 10.0),
+        t.fit_width(),
+        true_scale_window(t, 0.02, 20.0),
+    ):
         assert out.trace_hi > out.trace_lo
     p = t.panned(1.0, 0.0)
-    span = float(ax.walk_at(t.trace_hi) - ax.walk_at(t.trace_lo))
+    span = _wspan(ax, t)
     moved = float(ax.walk_at(t.trace_lo) - ax.walk_at(p.trace_lo))
     assert moved == pytest.approx(span / 800, abs=1e-9)
+
+
+def test_true_scale_in_a_stationary_patch_leaves_the_window_alone():
+    d = np.concatenate([np.arange(5) * 0.02, np.full(20, 0.08), 0.08 + np.arange(1, 6) * 0.02])
+    vt, _ = _axis_vt(d)
+    t = vt.with_window(8.0, 12.0, vt.time_lo, vt.time_hi)
+    assert true_scale_window(t, 0.02, 20.0) is t
+
+
+def test_an_axis_must_match_the_trace_count():
+    ax = TraceAxis.from_distance(np.arange(10) * 0.1)
+    with pytest.raises(ValueError):
+        ViewTransform.fit(12, 512, 0.0, 0.2, 800, 300, axis=ax)
+
+
+def test_traces_between_with_an_axis():
+    vt, ax = _axis_vt(_UNEVEN)
+    g = int(np.flatnonzero(np.diff(_UNEVEN) > 0.12)[0])
+    xg = vt.x_of_trace(float(ax.units_at_walk((_UNEVEN[g] + _UNEVEN[g + 1]) / 2)))
+    xa, xb = vt.x_of_trace(g + 0.5), vt.x_of_trace(g + 1.5)
+    assert vt.traces_between(xa - 1, xb + 1) == (g, g + 1)
+    assert vt.traces_between(xg - 0.2, xg + 0.2) is None
+    assert vt.traces_between(0.0, 800.0) == (0, len(_UNEVEN) - 1)
+    m, _ = _axis_vt(_UNEVEN, mirrored=True)
+    n = len(_UNEVEN)
+    assert m.traces_between(m.x_of_trace(n - 1.5), m.x_of_trace(n - 0.5)) == (n - 2, n - 1)
+    assert m.traces_between(m.x_of_trace(g + 1.5) - 1, m.x_of_trace(g + 0.5) + 1) == (g, g + 1)
 
 
 def test_true_scale_is_exact_on_an_uneven_axis():
@@ -559,19 +591,45 @@ def test_paint_spans_cover_the_drawn_traces_and_skip_gaps():
     assert all(not (x0 < gx < x1) for x0, x1, _, _ in spans)
     assert all(x0 < x1 for x0, x1, _, _ in spans)
     lo, hi = ax.drawn()
-    px_per_m = vt.width / float(ax.walk_at(vt.trace_hi) - ax.walk_at(vt.trace_lo))
+    px_per_m = vt.width / _wspan(ax, vt)
     assert sum(x1 - x0 for x0, x1, _, _ in spans) == pytest.approx(
         float((hi - lo).sum()) * px_per_m, abs=1.0
     )
+    assert spans[0][2] == pytest.approx(0.0) and spans[-1][3] == pytest.approx(len(_UNEVEN))
+
+
+def test_paint_spans_give_the_fractional_columns_a_clipped_window_shows():
+    d = np.arange(30) * 0.02
+    ax = TraceAxis.from_distance(d)
+    vt = ViewTransform.fit(30, 512, 0.0, 0.2, 800, 300, axis=ax)
+    # walk [0.196, 0.59): trace 10 spans walk [0.19, 0.21), so 70 % of it shows
+    w = vt.with_walk_window(0.196, 0.59, vt.time_lo, vt.time_hi)
+    ((x0, x1, c0, c1),) = w.paint_spans()
+    assert (x0, x1) == pytest.approx((0.0, 800.0))
+    assert c0 == pytest.approx(10.3)
+    assert c1 == pytest.approx(w.trace_hi, abs=0.02)
+    assert c1 - c0 == pytest.approx((x1 - x0) / 800 * (w.trace_hi - w.trace_lo), rel=1e-6)
+
+
+def test_paint_spans_columns_stay_linear_in_x_across_runs():
+    vt, ax = _axis_vt(_UNEVEN)
+    w = vt.zoomed(4.0, 300.0, 100.0)
+    spans = [sp for sp in w.paint_spans() if sp[3] - sp[2] > 1.5]  # runs of several traces
+    assert spans
+    for x0, x1, c0, c1 in spans:
+        for f in (0.0, 0.5, 1.0):
+            assert w.trace_of_x(x0 + f * (x1 - x0)) == pytest.approx(c0 + f * (c1 - c0), abs=1e-6)
 
 
 def test_a_mirrored_axis_puts_the_last_trace_on_the_left():
     vt, _ = _axis_vt(_UNEVEN, mirrored=True)
-    assert vt.x_of_trace(len(_UNEVEN) - 0.5) < vt.x_of_trace(0.5)
-    assert vt.trace_at(5.0) == len(_UNEVEN) - 1
+    n = len(_UNEVEN)
+    assert vt.x_of_trace(n - 0.5) < vt.x_of_trace(0.5)
+    assert vt.trace_at(5.0) == n - 1
     spans = vt.paint_spans()
-    assert spans[0][0] < spans[-1][0]
     assert all(x0 < x1 for x0, x1, _, _ in spans)
+    assert spans[0][0] == pytest.approx(0.0) and spans[0][3] == pytest.approx(n)
+    assert spans[-1][1] == pytest.approx(800.0) and spans[-1][2] == pytest.approx(0.0)
 
 
 def test_repeated_distances_give_finite_transforms():
