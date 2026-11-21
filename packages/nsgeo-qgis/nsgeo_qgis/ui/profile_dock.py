@@ -1143,7 +1143,7 @@ class ProfileDock(QgsDockWidget):
         """Put the cursor on the column of cut `key` nearest `distance_m` along it: at once when
         that cut's section is on screen, else when `_show_cut` next shows it. The working line
         changing or closing drops the target; a preview never does."""
-        # Connected across docks in `plugin.py`: guarded like `set_slice_band` in the view.
+        # Connected across docks in `plugin.py`: guarded like `set_slice_band` below.
         try:
             self._cut_aim = (key, float(distance_m))
             if (
