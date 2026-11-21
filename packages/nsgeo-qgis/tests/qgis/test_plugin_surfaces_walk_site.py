@@ -5,9 +5,13 @@ Its Grid1 Slices cell is the float tail 0.05000000000000002 (#204)."""
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
+from nsgeo.model.survey import Line
 from nsgeo.slices import SurfaceSettings
+from nsgeo_qgis import paraview_export
+from nsgeo_qgis.paraview_export import ParaViewExport
 from nsgeo_qgis.session import Pick
 from nsgeo_qgis.ui.site_scope import source_keys
 from plugin_testing import Dock, needs_walk_site, open_walk_site, reopened
@@ -40,7 +44,6 @@ def _pick(key: str, trace: int, time_ns: float) -> Pick:
 def walk(qgis_app, tmp_path):
     """`(session, dock, export, layers, surfaces)` on a copy of the walkthrough site."""
     from nsgeo_qgis.layers import SiteLayers
-    from nsgeo_qgis.paraview_export import ParaViewExport
     from nsgeo_qgis.surfaces import Surfaces
     from qgis.core import QgsProject
 
@@ -94,16 +97,10 @@ def test_the_walk_site_keeps_a_built_surface_fresh(walk):
 
 def test_a_moved_line_file_is_read_once_on_the_walk_site(qgis_app, tmp_path, monkeypatch):
     """#219 on real data: a line whose file has moved is asked about once, not on every refresh."""
-    from pathlib import Path
-
-    from nsgeo.model.survey import Line
-    from nsgeo_qgis import paraview_export
-    from nsgeo_qgis.paraview_export import ParaViewExport
-
     link = tmp_path / "moved.DZT"
 
     def edit(doc):
-        entry = next(e for e in doc["lines"] if e["placement"]["grid_id"] == GRID)
+        entry = next(e for e in doc["lines"] if (e.get("placement") or {}).get("grid_id") == GRID)
         link.symlink_to(Path(entry["path"]))
         entry["path"] = str(link)
 

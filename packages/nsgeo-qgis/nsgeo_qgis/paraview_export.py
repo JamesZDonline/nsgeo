@@ -514,13 +514,18 @@ class ParaViewExport:
             raise ValueError("the lines share no time range, so there is nothing to export")
         return t0, t1
 
+    @staticmethod
+    def _zero_memo(key: str, steps: Sequence[dict[str, Any]]) -> tuple[str, str]:
+        return (key, json.dumps(list(steps), sort_keys=True, default=str))
+
     def _zero_of(self, key: str, steps: Sequence[dict[str, Any]]) -> float:
         """Where the preset puts time zero on one line: one read of one file, kept, and a
         failed read kept too. It reads the line's first channel, the one the volume is made
         from, whichever channel the Profile panel shows (#218)."""
-        memo = (key, json.dumps(list(steps), sort_keys=True, default=str))
+        memo = self._zero_memo(key, steps)
         if memo in self._zero_failures:
-            raise self._zero_failures[memo]
+            # no old traceback: each re-raise would otherwise keep that call's frames alive
+            raise self._zero_failures[memo].with_traceback(None)
         if memo not in self._zero_probes:
             try:
                 stack = StepStack.from_dicts([dict(s) for s in steps])
@@ -534,7 +539,7 @@ class ParaViewExport:
 
     def _zero_or_none(self, key: str, steps: Sequence[dict[str, Any]]) -> float | None:
         """`_zero_of`, or None when it cannot be read, said once per line and preset."""
-        memo = (key, json.dumps(list(steps), sort_keys=True, default=str))
+        memo = self._zero_memo(key, steps)
         known = memo in self._zero_failures
         try:
             return self._zero_of(key, steps)

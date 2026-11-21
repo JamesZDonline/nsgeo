@@ -1238,10 +1238,32 @@ def test_a_line_whose_zero_cannot_be_read_is_read_and_logged_once(synth_site, mo
         {"step": "dewow", "params": {}, "enabled": False},
     ]
     export.pick_depths(GRID.id, rows)
-    assert line0_reads() == 2 and len(logged) == 2
+    assert line0_reads() == 2 and len(logged) == 2 and keys[0] in logged[1]
     # a new 3-D view tries the line again
     ParaViewExport(session, dock).pick_depths(GRID.id, rows)
-    assert line0_reads() == 3
+    assert line0_reads() == 3 and len(logged) == 3 and keys[0] in logged[2]
+
+
+def test_a_kept_zero_failure_does_not_grow_its_traceback(synth_site):
+    """#219: a re-raise must not pile each refresh's call stack onto the kept exception."""
+    session, _dock, export = synth_site
+    keys = session.keys()
+    rows = [(keys[0], _pick(keys[0], 5, 10.0))]
+    session.line_for_key(keys[0]).path.unlink()
+    steps = list(session.site.presets["p"])
+    export.pick_depths(GRID.id, rows)
+    memo = export._zero_memo(keys[0], steps)
+
+    def depth():
+        n, tb = 0, export._zero_failures[memo].__traceback__
+        while tb is not None:
+            n, tb = n + 1, tb.tb_next
+        return n
+
+    export.pick_depths(GRID.id, rows)
+    after_second = depth()
+    export.pick_depths(GRID.id, rows)
+    assert depth() == after_second
 
 
 def test_on_a_two_channel_line_the_3d_work_reads_channel_0(qgis_app, tmp_path):
@@ -1276,8 +1298,8 @@ def test_on_a_two_channel_line_the_3d_work_reads_channel_0(qgis_app, tmp_path):
         export = ParaViewExport(session, dock)
         key0 = session.keys()[0]
         session.open_line(key0)
-        session.set_profiles(key0, session.line_for_key(key0).load())
         profiles = session.line_for_key(key0).load()
+        session.set_profiles(key0, profiles)
 
         def zero_of_channel(i):
             stack = StepStack.from_dicts([dict(s) for s in STEPS_ZERO])
@@ -1294,6 +1316,7 @@ def test_on_a_two_channel_line_the_3d_work_reads_channel_0(qgis_app, tmp_path):
         # the record range of a fresh export, with the panel not prepared, is the engine's
         source = export.source_choice(GRID.id, export.defaults(GRID.id))
         fresh = ParaViewExport(session, dock)
+        assert fresh._panel_engine(source) is None  # the fallback path, not the engine's bounds
         unprepared = fresh._record_range(source)
         dock2 = Dock(session)
         try:
