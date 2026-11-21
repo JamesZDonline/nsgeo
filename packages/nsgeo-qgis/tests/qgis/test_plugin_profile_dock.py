@@ -2827,7 +2827,7 @@ def test_a_held_zoom_does_not_move_when_an_unloaded_lines_samples_arrive(opened)
     assert (dock.view.transform.time_lo, dock.view.transform.time_hi) == pytest.approx(first_visit)
 
 
-# ---- Time zero's row draws what the step receives, on the line's clock (#158, spec §4.11) ----
+# ---- Time zero's row: the bypass on the line's clock, else its input (#158, §4.14 Q3) ----
 
 
 def _stack_of(session, key, *entries):
@@ -2910,8 +2910,8 @@ def test_selecting_time_zero_mid_record_holds_the_picture_still(opened):
 
 
 def test_a_migrated_line_still_draws_time_zeros_input(opened):
-    """§4.11 Q6: the bypass would hand `migrate_fk` a record that starts far
-    from zero, which it refuses; the input view never runs it."""
+    """§4.11 Q6: the bypass runs `migrate_fk` on a record that starts far
+    from zero, which it refuses; the fallback then draws the input."""
     session, dock, key, line = opened
     stack = _stack_of(
         session,
@@ -3112,3 +3112,58 @@ def test_a_bypass_with_other_rows_falls_back(opened):
     rg = dock._shown_radargram
     np.testing.assert_array_equal(rg.data, relabel_onto(stack.source, stack.zero_ns()).data)
     assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+
+
+def test_a_cutoff_after_time_zero_still_draws_the_bypass(opened):
+    """§4.14 Q3: a time cutoff after Time zero cuts the bypass's bottom, which
+    is no reason to fall back: the shorter bypass is drawn, on the line's clock."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    src = session.stack_for(key).source
+    end = src.t0_ns + 150 * src.dt_ns
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("time_cutoff", dict(end_ns=end)),
+    )
+    bypass = stack.result_bypassing(0)
+    assert bypass.n_samples < src.n_samples
+    dock.set_selected_step(0)
+    rg = dock._shown_radargram
+    np.testing.assert_array_equal(rg.data, relabel_onto(bypass, stack.zero_ns()).data)
+    assert rg.n_samples < src.n_samples
+    assert rg.t0_ns + rg.zero_ns == pytest.approx(bypass.t0_ns + bypass.zero_ns)
+    assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    ref = stack.result_bypassing(0)  # no gain curve: the reference is the bypass itself
+    assert dock.image.limit == _clip(dock)(ref.data)
+
+
+def test_a_fallback_view_takes_its_scale_from_the_drawn_input(opened):
+    """The mismatch fallback (a second Time zero crops the top) is its own
+    scale: the limit is the input's, not the processed stack's."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("gain_agc", {}),
+        ("time_zero", dict(mode="sample", sample=10)),
+    )
+    dock.set_selected_step(0)
+    assert dock.image.reference is dock.image.rg
+    assert dock.image.limit == _clip(dock)(stack.source.data)
+
+
+def test_a_bypass_view_measures_its_scale_with_the_gain_curve_and_time_zero_off(opened):
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("gain_curve", dict(points=[[0, 0], [50, 40]])),
+    )
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.reference.data, stack.result_bypassing(0, 2).data)

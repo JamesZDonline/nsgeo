@@ -123,7 +123,7 @@ def test_selecting_time_zero_before_a_migration_declines_the_difference_and_draw
 ):
     """§4.13: the difference is declined once (one error), the button is off,
     and the input is drawn; migration, which the bypass would feed a record
-    that starts far from zero, never runs."""
+    that starts far from zero, refuses, so the fallback draws the input."""
     plugin, s, key = plugin
     pd, prd = plugin.processing_dock, plugin.profile_dock
     s.append_step(key, build_step("time_zero", mode="sample", sample=40))

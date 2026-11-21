@@ -25,8 +25,8 @@ against a scale that holds still, instead of the scale chasing the curve
 (spec §3, call 1). A difference view is its own scale (call 4). The time
 cutoff is never bypassed in that measurement, so selecting the cutoff row
 shows more record without changing the brightness (call 11). A row handle's
-input view (Time zero, below) is its own scale too: the record drawn is the
-record measured.
+fallback input view (Time zero, below) is its own scale too: the record drawn
+is the record measured.
 
 The handle: a step with a `time`- or `row`-kind parameter that is visible in
 the step's current mode (`handle_spec`) is drawn as a draggable line. The
@@ -40,10 +40,13 @@ step.
 What the image shows while a handle row is selected depends on its kind. A
 `time` handle (the cutoff) shows the stack with that step bypassed, so there
 is something below the line to drag it over. A `row` handle (Time zero's first
-kept row) shows what the step receives -- the step before it, or the source --
-relabelled onto the line's clock (`relabel_onto`), because nothing after Time
-zero runs and the bypass would hand a later step (migration) a record it
-refuses.
+kept row) shows the same bypass, relabelled onto the line's clock
+(`relabel_onto`), so the processed look holds (spec §4.14 Q3). It falls back
+to what the step receives -- the step before it, or the source -- in two
+cases: a later step refuses the uncropped record (migration), or the bypass's
+first row is at another radar-clock time or dt than the input's (a later Time
+zero), where the line's row would mean something else. A shorter bypass (a
+cutoff cut its bottom) is drawn.
 
 The window across lines: every line on a grid, along the same axis, is drawn
 against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
@@ -88,6 +91,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -2083,6 +2087,7 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not show or hide the slice band: {exc}", Qgis.MessageLevel.Critical)
 
     def current_radargram(self) -> Radargram | None:
+        self._row_view_is_bypass = False
         if self._key is None:
             return None
         # Finding 4 (M7 final review): while previewing, `self._key` is the
@@ -2137,7 +2142,6 @@ class ProfileDock(QgsDockWidget):
                     # §4.14 Q3): the processed look. Falls back to what Time
                     # zero receives (§4.11) where the bypass can't be drawn.
                     received = stack.source if row == 0 else stack.intermediate(row - 1)
-                    self._row_view_is_bypass = False
                     try:
                         line_zero = stack.zero_ns()
                     except ValueError:
@@ -2151,8 +2155,14 @@ class ProfileDock(QgsDockWidget):
                         # A later step refuses the uncropped record
                         # (migrate_fk does): no error, the input view.
                         return relabel_onto(received, line_zero)
-                    if (bypass.n_samples, bypass.t0_ns) != (received.n_samples, received.t0_ns):
-                        # Other rows: the line's row would mean something else.
+                    if not math.isclose(bypass.dt_ns, received.dt_ns, rel_tol=1e-6) or abs(
+                        (bypass.t0_ns + bypass.zero_ns) - (received.t0_ns + received.zero_ns)
+                    ) > 1e-6 * float(received.dt_ns):
+                        # The bypass's first row is at another radar-clock
+                        # time (a later Time zero crops the top): the line's
+                        # row would mean something else. A shorter bypass
+                        # (a cutoff cut its bottom) is drawn: snap_row clamps
+                        # the drag to the drawn rows.
                         return relabel_onto(received, line_zero)
                     self._row_view_is_bypass = True
                     return relabel_onto(bypass, line_zero)
@@ -2273,19 +2283,21 @@ class ProfileDock(QgsDockWidget):
         `_effective_difference_index`."""
         if self._effective_difference_index >= 0 or self._key is None:
             return shown
-        handle_row = self._handle_row() if self._shows_row_handle() else -1
-        if handle_row >= 0 and not self._row_view_is_bypass:
-            return shown  # the fallback: the record Time zero receives
+        handle_row = self._handle_row()
+        if handle_row >= 0 and self._handle_spec_is_row(handle_row):
+            if not self._row_view_is_bypass:
+                return shown  # the fallback: the record Time zero receives
+        else:
+            handle_row = -1
         try:
             stack = self.session.stack_for(self._key, insert=self._preview_key is None)
-            rows = [
+            rows = {
                 i
                 for i, (step, enabled) in enumerate(stack.entries)
                 if enabled and curve_param_name(step) is not None
-            ]
+            }
             if handle_row >= 0:
-                rows.append(handle_row)  # the bypassed Time zero (§4.14 Q3)
-                rows.sort()
+                rows.add(handle_row)  # the bypassed Time zero (§4.14 Q3)
             return stack.result_bypassing(*rows)
         except ValueError as exc:
             _log(f"could not measure the display scale without the gain curves: {exc}")
@@ -2319,11 +2331,10 @@ class ProfileDock(QgsDockWidget):
         entries = self.session.stack_for(self._working_key, insert=False).entries
         return handle_spec(entries[row][0]) if 0 <= row < len(entries) else None
 
-    def _shows_row_handle(self) -> bool:
-        """Whether the selected row is a step whose handle is a `row`: the
-        profile then draws that step's input (see `current_radargram`)."""
-        row = self._handle_row()
-        spec = self._handle_spec_at(row) if row >= 0 else None
+    def _handle_spec_is_row(self, row: int) -> bool:
+        """Whether the handle at `row` is a `row` kind: the profile then
+        draws the bypass, or the step's input (see `current_radargram`)."""
+        spec = self._handle_spec_at(row)
         return spec is not None and spec.kind == "row"
 
     def _show_cutoff(self) -> None:
@@ -2336,8 +2347,8 @@ class ProfileDock(QgsDockWidget):
         spec = self._handle_spec_at(row)
         assert spec is not None
         if spec.kind == "row":
-            # Time zero's first kept row, on the record it receives, relabelled
-            # onto the line's clock: the very record `current_radargram` draws.
+            # Time zero's first kept row, on the record `current_radargram`
+            # drew (the bypass, or its input in the fallback), on the line's clock.
             shown = self._shown_radargram
             if shown is None or self._effective_difference_index >= 0:
                 # A difference view draws another record, whose rows are not
