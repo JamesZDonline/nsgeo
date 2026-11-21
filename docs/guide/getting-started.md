@@ -146,10 +146,11 @@ any other QGIS panel.
   shows true scale, a metre down as long as a metre along the line, at the
   line's velocity; it is greyed out where the line has no velocity or no
   distance along it. The **Show slice band** checkbox, next to the colormap,
-  hides or shows the depth window of the slice on the profile. Click an axis beside the profile to show it in ns, samples or
-  metres of depth. The read-out above the profile gives the position under the
-  pointer in those units. The arrow under the distance axis shows which way the
-  line was walked. The mouse wheel zooms, and dragging with the middle button pans.
+  hides or shows the depth window of the slice on the profile. Click an axis
+  beside the profile to show it in ns, samples or metres of depth. The read-out
+  above the profile gives the position under the pointer in those units. The
+  arrow under the distance axis shows which way the line was walked. The mouse
+  wheel zooms, and dragging with the middle button pans.
 - **nsgeo Processing** (right) holds the processing steps for the open line:
   **Add step**, **Remove**, **↑** and **↓**, **Difference**, **Apply to grid…** and
   **Presets**.

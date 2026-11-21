@@ -2617,14 +2617,15 @@ def test_picking_a_fit_does_not_move_the_buttons_after_it(opened):
     session, dock, key, line = opened
     dock.resize(1361, 448)
     QTest.qWait(50)
-    before = (dock.fit_button.width(), dock.one_to_one_button.x(), dock.slice_band_button.x())
+    # The band checkbox sits left of Fit now; the velocity label is what follows 1:1.
+    before = (dock.fit_button.width(), dock.one_to_one_button.x(), dock.velocity_label.x())
     for action in (dock.fit_width_action, dock.fit_height_action, dock.fit_all_action):
         action.trigger()
         QTest.qWait(50)
         assert (
             dock.fit_button.width(),
             dock.one_to_one_button.x(),
-            dock.slice_band_button.x(),
+            dock.velocity_label.x(),
         ) == before
 
 
