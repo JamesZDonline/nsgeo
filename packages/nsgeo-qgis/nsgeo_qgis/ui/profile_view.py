@@ -669,15 +669,18 @@ class ProfileView(QWidget):
         blank ruler space or while there is no image to point at. While a range
         selection is being dragged it reads the selection's length instead."""
         t = self.transform
-        if t is None or self._hover is None or self._image is None:
+        if t is None or self._image is None:
             return ""
-        if self._dragging and self._selection != (-1, -1):  # W5: the drag's own length
+        if self._dragging and self._selection != (-1, -1):  # W5: the drag's own length,
+            # which goes on reading while the pointer is off the image (no hover)
             a, b = self._selection
             m_a = self.metres_at_trace_units(a + 0.5)
             m_b = self.metres_at_trace_units(b + 0.5)
             if m_a is None or m_b is None:
                 return f"{b - a + 1} traces selected (trace {a}\u2013{b})"
             return f"{abs(float(m_b) - float(m_a)):.2f} m selected (trace {a}\u2013{b})"
+        if self._hover is None:
+            return ""
         x, y = self._hover
         if not (0 <= x < t.width and 0 <= y < t.height):  # stale: the view has been resized
             return ""
@@ -1364,6 +1367,7 @@ class ProfileView(QWidget):
                 self.cutoff_dragged.emit(self._cutoff_ns)
             return
         if self._press is not None and self.transform is not None:
+            was_dragging = self._dragging
             if self._dragging and self._selection != (-1, -1):
                 a, b = self._selection
                 self.range_selected.emit(a, b)
@@ -1403,6 +1407,8 @@ class ProfileView(QWidget):
                 self.selection_cleared.emit()
             self._press = None
             self._dragging = False
+            if was_dragging:  # the "... m selected" read-out must not outlive the drag
+                self.update(QRect(0, 0, self.width(), MARGIN_TOP))
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802
         if self.transform is None:

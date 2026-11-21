@@ -2965,7 +2965,7 @@ def test_the_campus_line_with_time_zero_selected_starts_49_rows_above_the_line(b
 
 def test_the_line_shows_only_in_sample_mode_while_selected(opened):
     """Review Focus 3, and the line's place: Time zero's first kept row on the
-    record it receives, relabelled onto the line's clock."""
+    bypass (the record without Time zero), on the line's clock."""
     session, dock, key, line = opened
     _stack_of(session, key, ("time_zero", dict(mode="sample", sample=20)))
     assert dock.view.cutoff_ns is None  # not selected
@@ -3150,8 +3150,25 @@ def test_a_cutoff_after_time_zero_still_draws_the_bypass(opened):
     assert rg.n_samples < src.n_samples
     assert rg.t0_ns + rg.zero_ns == pytest.approx(bypass.t0_ns + bypass.zero_ns)
     assert dock.view.cutoff_ns == pytest.approx(rg.t0_ns + 20 * rg.dt_ns)
+    assert dock.view.cutoff_ns == pytest.approx(0.0, abs=1e-9)  # row 20 reads 0 on the drawn clock
     ref = stack.result_bypassing(0)  # no gain curve: the reference is the bypass itself
     assert dock.image.limit == _clip(dock)(ref.data)
+
+
+def test_a_later_time_zero_that_only_moves_the_zero_still_falls_back(opened):
+    """Plan C final review Z1: a later Time zero at sample 0 keeps the bypass's
+    first row on the radar clock but changes its zero (`zero_ns`): the guard must
+    look at the zero term too, or the drawn rows' line would mean something else."""
+    session, dock, key, line = opened
+    stack = _stack_of(
+        session,
+        key,
+        ("time_zero", dict(mode="sample", sample=20)),
+        ("dewow", {}),
+        ("time_zero", dict(mode="sample", sample=0)),
+    )
+    dock.set_selected_step(0)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result_bypassing(0).data)
 
 
 def test_a_fallback_view_takes_its_scale_from_the_drawn_input(opened):

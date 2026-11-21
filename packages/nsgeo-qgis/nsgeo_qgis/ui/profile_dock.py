@@ -2278,7 +2278,8 @@ class ProfileDock(QgsDockWidget):
         """The radargram the display limit is taken from: `shown` itself
         for a difference view or a row handle's fallback input view (each is
         its own scale), else the displayed stack with every enabled gain-curve step
-        bypassed (just `result()` when there is none). Never bypasses the
+        bypassed, and the Time zero row too while its bypass is drawn (a row
+        handle's fallback input view is its own scale). Never bypasses the
         time cutoff -- see the module docstring. Called after
         `current_radargram`, so a declined difference has already reset
         `_effective_difference_index`."""

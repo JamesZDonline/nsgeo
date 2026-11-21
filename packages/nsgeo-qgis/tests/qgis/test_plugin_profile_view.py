@@ -2602,6 +2602,47 @@ def test_the_readout_shows_the_selections_length_while_dragging(make_view):
     assert v.readout_text() == "1.00 m selected (trace 20\u201380)"
 
 
+def test_the_selection_length_stays_while_the_drag_leaves_the_image(make_view):
+    """Plan C final review I1: the pointer past the image edge (or up in the top
+    strip) clears the hover, but the drag goes on, so its length still reads."""
+    v = _imaged(make_view)
+    t, r = v.transform, v.image_rect()
+    y = int(r.top() + 30)
+    xa = round(r.left() + t.x_of_trace(20 + 0.5))
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xa, y))
+    out = QPoint(int(r.right()) + 15, y)
+    _send_move_while_pressed(v, out)
+    assert v._hover is None
+    a, b = v._selection
+    assert a == 20 and b > 20
+    assert v.readout_text().endswith(f"m selected (trace {a}\u2013{b})")
+    assert v.readout_text() != ""
+    xin = round(r.left() + t.x_of_trace(77 + 0.5))
+    _send_move_while_pressed(v, QPoint(xin, y))
+    _send_move_while_pressed(v, QPoint(xin, int(r.top()) - 5))  # up into the top strip
+    assert v._hover is None
+    a, b = v._selection
+    assert v.readout_text().endswith(f"m selected (trace {a}\u2013{b})")
+    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, out)
+    assert v.readout_text() == ""
+
+
+def test_releasing_a_drag_repaints_the_readout_strip(make_view, monkeypatch):
+    """Plan C final review M1: nothing echoes a selection back for an identical
+    range, so the release itself must repaint the strip the length was drawn in."""
+    v = _imaged(make_view)
+    _drag_traces(v, 20, 80, release=False)
+    seen = []
+    real = ProfileView.update
+    monkeypatch.setattr(ProfileView, "update", lambda self, *a: (seen.append(a), real(self, *a))[1])
+    t, r = v.transform, v.image_rect()
+    xb = round(r.left() + t.x_of_trace(80 + 0.5))
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(xb, int(r.top() + 30))
+    )
+    assert any(a and a[0] == QRect(0, 0, v.width(), MARGIN_TOP) for a in seen)
+
+
 def test_the_readout_returns_to_the_cursor_on_release(make_view):
     v = _imaged(make_view)
     _drag_traces(v, 20, 80)
