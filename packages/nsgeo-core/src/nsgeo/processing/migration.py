@@ -22,10 +22,12 @@ worse than the precedent.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
 
+from nsgeo.geometry.spacing import resample_even, sample_back, usual_step
 from nsgeo.processing._util import refuse_non_finite
 from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 from nsgeo.velocity import C_M_PER_NS
@@ -231,6 +233,19 @@ def migrate_fk(
     return np.real(np.fft.ifft2(unsorted))[:n_samples, pad : pad + n_traces]
 
 
+def _needs_resample(trace_x_m: np.ndarray | None) -> bool:
+    """True for a trace axis with a usable usual step whose steps are not even."""
+    if trace_x_m is None:
+        return False
+    steps = np.abs(np.diff(np.asarray(trace_x_m, dtype=float)))
+    if not steps.size:
+        return False
+    usual = usual_step(trace_x_m)
+    if not (math.isfinite(usual) and usual > 0):
+        return False
+    return bool(np.ptp(steps) > 1e-9 * usual)
+
+
 @register
 class MigrateFk:
     """Stolt f-k migration as a processing step.
@@ -287,14 +302,20 @@ class MigrateFk:
         )
 
     def apply(self, rg: Radargram) -> Radargram:
-        migrated = migrate_fk(
-            rg.data,
-            dt_ns=rg.dt_ns,
-            dx_m=rg.dx_m,
-            velocity_m_ns=self.velocity_m_ns,
-            t0_ns=rg.t0_ns,
-            max_dip_deg=self.max_dip_deg,
-        )
+        kwargs: dict[str, Any] = {
+            "dt_ns": rg.dt_ns,
+            "velocity_m_ns": self.velocity_m_ns,
+            "t0_ns": rg.t0_ns,
+            "max_dip_deg": self.max_dip_deg,
+        }
+        if _needs_resample(rg.trace_x_m):
+            # A GPS line at its true spacing: onto an even grid at the usual
+            # step (nothing in gaps), migrate, read each trace back.
+            even, x0, step = resample_even(rg.data, rg.trace_x_m, rg.gap_m)  # type: ignore[arg-type]
+            migrated = migrate_fk(even, dx_m=step, **kwargs)
+            migrated = sample_back(migrated, x0, step, rg.trace_x_m)  # type: ignore[arg-type]
+        else:
+            migrated = migrate_fk(rg.data, dx_m=rg.dx_m, **kwargs)
         # replace(), not a new Radargram: dx_m and anything else the record
         # carries has to survive the step.
         return rg.replace(data=migrated)

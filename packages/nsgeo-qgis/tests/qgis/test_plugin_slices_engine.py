@@ -2147,3 +2147,40 @@ def test_this_grids_status_counts_the_cached_north_up_plans(sourced):
         # The cache is process-wide and status_text() reads it: a ~25 MB plan left
         # behind would change every later test's status string.
         clear_north_up_plans()
+
+
+def test_slices_build_a_gps_lines_record_with_its_walked_distance(qgis_app, tmp_path, monkeypatch):
+    from nsgeo_qgis import session as session_module
+    from plugin_testing import CRS, LAT0, LON0, M_PER_DEG, open_gps, synthetic_gps_dzt
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 15.0, CRS, 0.5))
+    path = synthetic_gps_dzt(
+        tmp_path / "raw",
+        "FILE__001.DZT",
+        [(t, LAT0 + t * 0.1 / M_PER_DEG, LON0, 4) for t in (5, 55)],
+        n_traces=60,
+        traces_per_metre=10.0,
+    )
+    session.add_lines([open_gps(path, grid_id="A")])
+    session.site.presets["p"] = list(PRESET)
+    key = session.keys()[0]
+    calls = []
+    real = session_module.source_radargram
+
+    def spy(line, profile):
+        calls.append(line)
+        return real(line, profile)
+
+    monkeypatch.setattr(session_module, "source_radargram", spy)
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=lambda msg: None)
+    try:
+        engine.set_source(
+            SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=(key,))
+        )
+        assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    finally:
+        engine.dispose()
+    assert calls == [session.line_for_key(key)]

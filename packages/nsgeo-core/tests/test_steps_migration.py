@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from nsgeo.geometry.spacing import usual_step
 from nsgeo.io.dzt import read_header, read_samples
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.migration import migrate_fk
@@ -581,3 +582,74 @@ def test_a_real_diffraction_collapses_at_its_measured_velocity(name, apex_trace,
     assert focus >= 2 * before
     assert focus > slow
     assert focus > fast
+
+
+def _uneven_axis(n_even_steps=300):
+    """Steps alternating 0.015 / 0.025 m, one 0.6 m gap 1 m before the apex."""
+    steps = np.tile([0.015, 0.025], n_even_steps // 2)
+    x = np.concatenate([[0.0], np.cumsum(steps)])
+    gap_at = int(np.searchsorted(x, 1.0))
+    x[gap_at:] += 0.6
+    return x
+
+
+def test_an_even_trace_axis_migrates_exactly_as_dx():
+    n = 120
+    data = _diffraction(256, n, DT_NS, 0.02, V, 60, 20.0)
+    a = build_step("migrate_fk", velocity_m_ns=V).apply(
+        Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02)
+    )
+    b = build_step("migrate_fk", velocity_m_ns=V).apply(
+        Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02, trace_x_m=np.arange(n) * 0.02)
+    )
+    np.testing.assert_allclose(a.data, b.data, atol=1e-9 * np.abs(a.data).max())
+
+
+def test_an_uneven_line_focuses_a_diffraction_where_an_even_one_does():
+    x = _uneven_axis()
+    usual = usual_step(x)
+    apex_x = 2.0
+    times = np.arange(256) * DT_NS
+    data = np.zeros((256, x.size))
+    for i, xi in enumerate(x):
+        t = np.sqrt(20.0**2 + (2 * (xi - apex_x) / V) ** 2)
+        if t <= times[-1]:
+            arg = (np.pi * FC_GHZ * (times - t)) ** 2
+            data[:, i] = (20.0 / t) ** 1.5 * (1 - 2 * arg) * np.exp(-arg)
+    rg = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=usual, trace_x_m=x)
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(rg).data
+    peak_col = int(np.argmax(np.abs(out).max(axis=0)))
+    assert abs(x[peak_col] - apex_x) <= usual
+    # The same diffractor on an evenly sampled line at the usual step.
+    n_even = 300
+    even = _diffraction(256, n_even, DT_NS, usual, V, apex_x / usual, 20.0)
+    ref = migrate_fk(even, dt_ns=DT_NS, dx_m=usual, velocity_m_ns=V)
+    assert np.abs(out).max() >= 0.8 * np.abs(ref).max()
+
+
+def test_migration_keeps_the_trace_axis():
+    x = _uneven_axis(60)
+    rg = Radargram(
+        data=np.random.default_rng(1).normal(size=(64, x.size)),
+        dt_ns=DT_NS,
+        t0_ns=0.0,
+        dx_m=0.02,
+        trace_x_m=x,
+        gap_m=0.5,
+    )
+    result = build_step("migrate_fk", velocity_m_ns=V).apply(rg)
+    assert result.trace_x_m is rg.trace_x_m
+    assert result.gap_m == rg.gap_m
+
+
+def test_a_trace_axis_of_the_wrong_length_is_refused():
+    with pytest.raises(ValueError, match="one distance per trace"):
+        Radargram(data=np.zeros((8, 5)), dt_ns=DT_NS, t0_ns=0.0, trace_x_m=np.arange(4.0))
+
+
+def test_a_constant_distance_migrates_as_without_a_trace_axis():
+    data = _diffraction(128, 40, DT_NS, 0.02, V, 20, 15.0)
+    plain = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=0.02)
+    same = plain.replace(trace_x_m=np.full(40, 3.0))
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    np.testing.assert_array_equal(step.apply(plain).data, step.apply(same).data)

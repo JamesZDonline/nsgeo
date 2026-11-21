@@ -118,6 +118,17 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
 COLOUR_SCOPES = ("grid", "site")
 
 
+def source_radargram(line: Line, profile: Profile) -> Radargram:
+    """The record a stack runs on. A GPS line carries its walked distance and
+    Gap over, so migration runs at its true spacing; a tape line is as before."""
+    placement = line.placement
+    if isinstance(placement, TrackPlacement):
+        return Radargram.from_profile(
+            profile, trace_x_m=line.distance_along(), gap_m=placement.gap_m
+        )
+    return Radargram.from_profile(profile)
+
+
 def _check_colour_scope(scope: str) -> None:
     if scope not in COLOUR_SCOPES:
         raise ValueError(f"unknown slice scope {scope!r}; expected one of {COLOUR_SCOPES}")
@@ -910,6 +921,13 @@ class SiteSession(QObject):
         for key, _, new in applied:
             line = self._lines_by_key[key]
             self._replace_line(key, dataclasses.replace(line, placement=new))
+        # A GPS line's source carries its walked distance, so a changed
+        # placement (a destagger) re-attaches it; a tape line's is untouched.
+        for key, _, new in applied:
+            stack = site.stacks.get(key)
+            if isinstance(new, TrackPlacement) and stack is not None:
+                self._attach_source(key, stack)
+                self.stack_changed.emit(key)
         # A line that changed grid joins the new grid at the end of the survey
         # order, the way an imported line does, and leaves the old grid's
         # remembered slice lines.
@@ -1254,7 +1272,11 @@ class SiteSession(QObject):
             # still current.
             stack.source = None
             return
-        stack.source = Radargram.from_profile(profiles[self._channel.get(key, 0)])
+        profile = profiles[self._channel.get(key, 0)]
+        line = self._lines_by_key.get(key)  # a cut has no line: its record is as before
+        stack.source = (
+            source_radargram(line, profile) if line is not None else Radargram.from_profile(profile)
+        )
 
     def _touch_stack(self, key: str) -> None:
         self._set_dirty(True)

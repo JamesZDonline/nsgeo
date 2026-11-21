@@ -200,3 +200,29 @@ def test_a_gps_line_is_not_moved_into_a_grid_in_another_crs_and_the_reason_is_na
         (IN_A, f"its new grid 'C' is in {other}, the line in {CRS}")
     ]
     assert s.line_for_key(IN_A).placement == before
+
+
+def test_a_gps_lines_source_carries_its_walked_distance_and_gap_over(site):
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    s.set_profiles(TAPE, s.line_for_key(TAPE).load())
+    line = s.line_for_key(IN_A)
+    source = s.stack_for(IN_A).source
+    np.testing.assert_array_equal(source.trace_x_m, line.distance_along())
+    assert source.gap_m == line.placement.gap_m
+    assert s.stack_for(TAPE).source.trace_x_m is None
+
+
+def test_a_destagger_edit_reattaches_a_gps_lines_source(site):
+    s = site
+    s.set_profiles(IN_A, s.line_for_key(IN_A).load())
+    s.set_profiles(TAPE, s.line_for_key(TAPE).load())
+    before = s.stack_for(IN_A).source.trace_x_m.copy()
+    tape_source = s.stack_for(TAPE).source
+    spy = Spy(s.stack_changed)
+    s.edit_lines([TrackEdit(IN_A, s.line_for_key(IN_A).placement, travel_shift=0.2)])
+    after = s.stack_for(IN_A).source.trace_x_m
+    np.testing.assert_allclose(after - before, 0.2)
+    np.testing.assert_array_equal(after, s.line_for_key(IN_A).distance_along())
+    assert spy.calls == [(IN_A,)]
+    assert s.stack_for(TAPE).source is tape_source

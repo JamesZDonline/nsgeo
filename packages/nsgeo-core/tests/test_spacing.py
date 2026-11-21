@@ -6,7 +6,14 @@ import math
 
 import numpy as np
 import pytest
-from nsgeo.geometry.spacing import gap_steps, gap_threshold, left_out, usual_step
+from nsgeo.geometry.spacing import (
+    gap_steps,
+    gap_threshold,
+    left_out,
+    resample_even,
+    sample_back,
+    usual_step,
+)
 from nsgeo.geometry.track import TrackFix, TrackPlacement
 
 
@@ -98,3 +105,61 @@ def test_gap_over_must_be_finite_and_positive(v):
 def test_the_placement_keeps_a_typed_gap_over():
     assert _placement().gap_m is None
     assert _placement(gap_m=0.25).gap_m == 0.25
+
+
+def _with_gap():
+    """1.0 m of 0.02 m steps, a 1.0 m gap, 1.0 m more; and a lift (two gap steps)."""
+    left = np.arange(0.0, 1.0001, 0.02)
+    right = left + 2.0
+    return np.concatenate([left, right])
+
+
+def test_nothing_is_invented_inside_a_gap():
+    x = _with_gap()
+    data = np.ones((4, x.size))
+    even, x0, step = resample_even(data, x)
+    cols = x0 + np.arange(even.shape[1]) * step
+    edge_l, edge_r = 1.0, 2.0
+    far = (np.abs(cols - edge_l) >= step - 1e-9) & (np.abs(cols - edge_r) >= step - 1e-9)
+    inside = (cols > edge_l) & (cols < edge_r) & far
+    assert inside.sum() > 40
+    assert not even[:, inside].any()
+    near = (cols > edge_l) & (cols < edge_r) & ~far
+    assert (even[:, near] > 0).all()
+
+
+def test_left_out_traces_do_not_feed_the_resample():
+    x = _with_gap()
+    x = np.insert(x, 51, 1.5)  # a lift in the middle of the gap: gaps on both sides
+    data = np.ones((3, x.size))
+    data[:, 51] = 1e6
+    assert left_out(x)[51]
+    even, _, _ = resample_even(data, x)
+    assert even.max() <= 1.0
+
+
+def test_sample_back_returns_each_trace_at_its_own_distance():
+    x = _with_gap()
+    x = np.insert(x, 51, 1.5)  # a left-out trace as well
+    x = np.insert(x, 10, x[10])  # and a repeated distance: the cart stood still
+    rows = np.array([[1.0], [3.0]])
+    data = rows + 0.7 * x[None, :]
+    even, x0, step = resample_even(data, x)
+    back = sample_back(even, x0, step, x)
+    drawn = ~left_out(x)
+    np.testing.assert_allclose(back[:, drawn], data[:, drawn], atol=1e-9)
+    assert np.isfinite(back).all()
+
+
+def test_a_falling_distance_resamples_like_its_reverse():
+    x = _with_gap()
+    data = np.random.default_rng(0).normal(size=(3, x.size))
+    a, a0, astep = resample_even(data, x)
+    b, b0, bstep = resample_even(data[:, ::-1], x[::-1])
+    np.testing.assert_allclose(a, b, atol=1e-12)
+    assert (a0, astep) == (b0, bstep)
+
+
+def test_a_line_with_no_usual_step_cannot_be_resampled():
+    with pytest.raises(ValueError):
+        resample_even(np.ones((2, 5)), np.full(5, 3.0))

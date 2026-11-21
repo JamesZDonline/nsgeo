@@ -40,10 +40,20 @@ class Radargram:
     zero_ns: float = 0.0
     #: True once a Time zero step has set the clock.
     zero_set: bool = False
+    #: Metres along the line of each trace, for a GPS line whose traces are not
+    #: evenly spaced (M17c). None for a tape line: it keeps `dx_m` alone.
+    trace_x_m: np.ndarray | None = None
+    #: The line's typed Gap over (m); None is automatic. Read with `trace_x_m`.
+    gap_m: float | None = None
 
     def __post_init__(self) -> None:
         if np.asarray(self.data).ndim != 2:
             raise ValueError(f"radargram data must be 2-D, got shape {self.data.shape}")
+        if self.trace_x_m is not None and np.asarray(self.trace_x_m).shape != (self.data.shape[1],):
+            raise ValueError(
+                f"trace_x_m needs one distance per trace: {np.asarray(self.trace_x_m).size} "
+                f"for {self.data.shape[1]} traces"
+            )
         if not self.dt_ns > 0:
             raise ValueError(f"dt_ns must be positive, got {self.dt_ns}")
 
@@ -71,7 +81,9 @@ class Radargram:
         return _dc_replace(self, **changes)
 
     @classmethod
-    def from_profile(cls, profile: Any) -> Radargram:
+    def from_profile(
+        cls, profile: Any, *, trace_x_m: np.ndarray | None = None, gap_m: float | None = None
+    ) -> Radargram:
         """Build from a model.Profile without importing it, keeping
         processing independent of the data model.
 
@@ -88,6 +100,8 @@ class Radargram:
             dt_ns=profile.header.dt_ns,
             t0_ns=profile.header.position_ns,
             dx_m=(1.0 / tpm) if tpm > 0 else None,
+            trace_x_m=trace_x_m,
+            gap_m=gap_m,
         )
 
 

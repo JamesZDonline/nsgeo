@@ -159,6 +159,7 @@ from nsgeo.slices import (
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis import session as session_module
 from nsgeo_qgis.fill_jobs import FillJob
 from nsgeo_qgis.line_edit import same_placement
 from nsgeo_qgis.log import log as _log
@@ -960,7 +961,7 @@ class SliceEngine(QObject):
                     return None
                 try:
                     profiles = line.load()
-                    radargram = Radargram.from_profile(profiles[0])
+                    radargram = session_module.source_radargram(line, profiles[0])
                     # The raw record's, never `result`'s: see `median_first_break`.
                     first_break = _raw_first_break(radargram)
                     stack = self._build_stack(steps, transform)

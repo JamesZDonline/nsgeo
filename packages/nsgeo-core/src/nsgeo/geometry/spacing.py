@@ -68,3 +68,59 @@ def left_out(distance: np.ndarray, gap_m: float | None = None) -> np.ndarray:
         gaps = gap_steps(distance, gap_m)
         out[1:-1] = gaps[:-1] & gaps[1:]
     return out
+
+
+def resample_even(
+    data: np.ndarray, x_m: np.ndarray, gap_m: float | None = None
+) -> tuple[np.ndarray, float, float]:
+    """Put a GPS line's drawn traces on an even grid, for migration.
+
+    Returns `(even, x0, step)`: columns at `x0 + k * step`, `step` the usual
+    step, from the first drawn trace to the one past the last. Each column is
+    linearly interpolated from the two nearest drawn traces; left-out traces
+    never feed it. A column at least one usual step from the nearest drawn
+    trace, inside a gap, is 0: nothing is invented there. A falling distance
+    gives the same columns as its reverse. `ValueError` when the line has no
+    usual step or fewer than 2 drawn traces.
+    """
+    d = np.asarray(data, dtype=float)
+    x = np.asarray(x_m, dtype=float)
+    step = usual_step(x)
+    if not (math.isfinite(step) and step > 0):
+        raise ValueError("a line with no usual step cannot be put on an even grid")
+    threshold = gap_threshold(x, gap_m)
+    drawn = np.flatnonzero(~left_out(x, gap_m))
+    order = drawn[np.argsort(x[drawn], kind="stable")]
+    xs = x[order]
+    if xs.size < 2:
+        raise ValueError("fewer than 2 drawn traces cannot be put on an even grid")
+    ds = d[:, order]
+    x0 = float(xs[0])
+    n = max(int(math.ceil((xs[-1] - x0) / step - 1e-9)) + 1, 2)
+    g = x0 + np.arange(n) * step
+    hi = np.clip(np.searchsorted(xs, g, side="right"), 1, xs.size - 1)
+    xl, xr = xs[hi - 1], xs[hi]
+    span = xr - xl
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(span > 0, (g - xl) / np.where(span > 0, span, 1.0), 0.0)
+    # Past the last trace the column carries on the last pair's slope (one
+    # column at most), unless that pair straddles a gap: then it holds the end trace.
+    beyond = (g > xs[-1]) & (span <= threshold)
+    w = np.where(beyond, w, np.clip(w, 0.0, 1.0))
+    even = ds[:, hi - 1] * (1.0 - w) + ds[:, hi] * w
+    nearest = np.minimum(np.abs(g - xl), np.abs(g - xr))
+    empty = (span > threshold) & (nearest >= step * (1.0 - 1e-9))
+    even[:, empty] = 0.0
+    return even, x0, step
+
+
+def sample_back(even: np.ndarray, x0: float, step: float, x_m: np.ndarray) -> np.ndarray:
+    """Each trace's column of an even grid, linearly interpolated at its own distance."""
+    e = np.asarray(even, dtype=float)
+    pos = (np.asarray(x_m, dtype=float) - x0) / step
+    n = e.shape[1]
+    if n < 2:
+        return e[:, np.zeros(pos.size, dtype=int)]
+    lo = np.clip(np.floor(pos), 0, n - 2).astype(int)
+    w = np.clip(pos - lo, 0.0, 1.0)
+    return e[:, lo] * (1.0 - w) + e[:, lo + 1] * w
