@@ -72,7 +72,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-20.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-21.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -113,6 +113,7 @@ release's notes list everything in it.
 | M17b | Add data and GPS grids, M17's second plan: one Add data ▾ ▸ GPR… dialog with a Grid / GPS switch; GPS lines go into an existing grid or a new one fitted around their tracks, holding every trace and previewed on the map; files GPS cannot place are handed on to Grid mode with their direction and first line guessed; GPS lines in Edit lines, Move to grid and Fit to these tracks; a site with only GPS lines hides them when you zoom out ([#222], [#233]) | next release |
 | | A 3D Analysis ▾ drop-down on the toolbar, after Cut, holds Surface from picks…, 3D view and Export for ParaView…; ParaView… leaves the Slices panel ([#227]) | next release |
 | | Whole site never stuck, never frozen: a fine cell no longer freezes QGIS while its fill and colour stretch are worked out, in Whole site or This grid; the work happens in the background with its progress, a Cancel that puts the picture's settings back, and the last picture kept until the new one lands (Whole site at 0.02 m on ten grids: 197 s frozen before, now the picture in about 93 s with QGIS responsive). Also: a stuck site wait names what holds it, the stretch's memory peak is lower, Export is greyed while an export runs, and the site engine's review follow-ups ([#193], [#166], [#75], [#157], [#235]) | next release |
+| | The profile: a Show slice band checkbox; Fit becomes a button with Fit width and Fit height, and 1:1 shows true scale; each vertical axis shows ns, samples or m, chosen by clicking it; a cursor read-out that gives a selection's length while you drag it; a time zoom stays put when Time zero changes; and Time zero set by dragging its line on the profile, which shows the processed record to full depth while you do ([#131], [#5], [#11], [#14], [#158], [#163], [#238]) | next release |
 
 ### In progress
 
@@ -122,13 +123,6 @@ release's notes list everything in it.
   is **Add data ▾ ▸ Magnetometer…**, and a site with mag saves as schema 5. Awaiting its
   walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
-- **The profile: axes, zoom and time zero by eye** ([#131], [#5], [#11],
-  [#14], [#158], and the last part of [#163]). A button that hides the slice
-  band; Fit becomes a button with Fit width and Fit height, and 1:1 shows
-  true scale; each vertical axis shows ns, samples or m, with a cursor
-  read-out; a time zoom stays put when Time zero changes; and Time zero set
-  by dragging its line on the profile. Built and reviewed in two plans;
-  walkthrough next.
 - **3-D: the follow-ups** ([#204], [#203], [#219], [#218], [#228]). Surfaces
   stay fresh after an untouched ParaView export and after a reopen without
   Save site; the 3-D view reads a line it can't read only once, and reads
@@ -320,6 +314,7 @@ Grouped by area. The order within a group is not a priority.
 [#231]: https://github.com/JamesZDonline/nsgeo/issues/231
 [#233]: https://github.com/JamesZDonline/nsgeo/pull/233
 [#235]: https://github.com/JamesZDonline/nsgeo/pull/235
+[#238]: https://github.com/JamesZDonline/nsgeo/pull/238
 [#236]: https://github.com/JamesZDonline/nsgeo/issues/236
 [#232]: https://github.com/JamesZDonline/nsgeo/issues/232
 [#237]: https://github.com/JamesZDonline/nsgeo/issues/237
