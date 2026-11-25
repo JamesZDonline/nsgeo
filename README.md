@@ -135,6 +135,12 @@ release's notes list everything in it.
   the velocity fit and migration follow. GPS lines in a grid share the
   grid's ruler, so reversed lines are mirrored like tape lines, and
   destagger's Measure works on them. Planning, probably in two plans.
+- **M21: radar formats beyond GSSI**, in four plans. Open Sensors & Software
+  `.DT1`, MALÅ `.rd3`/`.rd7` and RadExplorer SEG-Y lines the way a DZT opens:
+  imported onto a grid, drawn, processed and sliced, with one shared header
+  and a reader per format, so each new format is one module. **M21a:** the
+  shared header and DT1; **M21b:** MALÅ; **M21c:** SEG-Y; **M21d:** their
+  GPS logs, for GPS placement. Designed; M21a is next to plan.
 
 ### Next, in order
 
