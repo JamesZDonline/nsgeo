@@ -311,3 +311,24 @@ arrays; uneven trace spacing.
 
 File and test names; where the shared companion lookup lives; whether `nsgeo.io.dzt`'s own
 `read_header` stays public; the wording of each import note.
+
+## 13. M21a's calls (2026-11-24, with its plan)
+
+- **Two more base fields.** `RadarHeader` also carries `notes: tuple[str, ...]` (facts a reader
+  wants the user told at import, such as a DT1 with no time zero in its header) and
+  `not_a_profile: str` (empty for a profile; otherwise why the file is not one, such as C8's CMP
+  sounding). The import shows the notes on the file's row, and a non-empty `not_a_profile` makes
+  the row unticked and not placeable. Every reader fills both, so no format needs special handling
+  in the plugin.
+- **GPS mode keeps its DZT-only file filter until M21d**, revising §6. Offering DT1 in a picker
+  that then refuses every DT1 would be a trap. A non-DZT file that reaches GPS mode anyway
+  (through "All files") is refused with "no GPS log read for this format yet", not
+  "no DZG beside it".
+- **DT1 sample width comes from the file size.** `(size / NUMBER OF TRACES − 128) /
+  NUMBER OF PTS/TRC` must be 2 or 4, and trace-header value 5 (bytes per point) must agree with it
+  when it is non-zero. Both sample files are 2. pulseEKKO also writes 4-byte DT1s.
+- **DT1 spacing is cross-checked cheaply**, from the first and last trace headers only, so
+  `read_header` stays a stat and three small reads. A mismatch of more than 1 % adds a note, and
+  the line is placed at the header's step.
+- **Feet are converted:** `POSITION UNITS` of `ft` gives `1 / (step × 0.3048)` traces per metre.
+  Any other unit gives 0, which the import already treats as time-triggered.
