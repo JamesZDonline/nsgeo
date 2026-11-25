@@ -141,7 +141,8 @@ release's notes list everything in it.
   imported onto a grid, drawn, processed and sliced, with one shared header
   and a reader per format, so each new format is one module. **M21a:** the
   shared header and DT1; **M21b:** MALÅ; **M21c:** SEG-Y; **M21d:** their
-  GPS logs, for GPS placement. Designed; M21a is next to plan.
+  GPS logs, for GPS placement. **M21a** is built: DT1 lines import onto a
+  grid, draw, process and reopen like DZT lines. Awaiting its walkthrough.
 
 ### Next, in order
 
