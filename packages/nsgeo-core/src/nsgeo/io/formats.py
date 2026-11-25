@@ -18,7 +18,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from nsgeo.io import dt1, dzt
+from nsgeo.io import dt1, dzt, mala
 from nsgeo.io.header import RadarFileError, RadarHeader, companion
 
 __all__ = [
@@ -46,6 +46,10 @@ class RadarFormat:
     read_header: Callable[[Path], RadarHeader]
     trace_count: Callable[[Path, RadarHeader], int]
     read_samples: Callable[[Path, RadarHeader], np.ndarray]
+    #: Extensions that hold the same traces, best first (spec §14). When one
+    #: stem in one folder is chosen in more than one, the import ticks only
+    #: the best. Empty for a format with one file per line.
+    prefer: tuple[str, ...] = ()
 
 
 _H = TypeVar("_H", bound=RadarHeader)
@@ -79,13 +83,30 @@ def _dt1_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
     return dt1.read_samples(path, _checked(DT1_NAME, dt1.Dt1Header, header, path))
 
 
+def _mala_trace_count(path: Path, header: RadarHeader) -> int:
+    return mala.trace_count(path, _checked(MALA_NAME, mala.MalaHeader, header, path))
+
+
+def _mala_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
+    return mala.read_samples(path, _checked(MALA_NAME, mala.MalaHeader, header, path))
+
+
 DZT_NAME = dzt.DztHeader.format_name
 DT1_NAME = dt1.Dt1Header.format_name
+MALA_NAME = mala.MalaHeader.format_name
 
 #: In the order the import's file picker lists them.
 FORMATS: tuple[RadarFormat, ...] = (
     RadarFormat(DZT_NAME, (".dzt",), dzt.read_header, _dzt_trace_count, _dzt_read_samples),
     RadarFormat(DT1_NAME, (".dt1",), dt1.read_header, _dt1_trace_count, _dt1_read_samples),
+    RadarFormat(
+        MALA_NAME,
+        (".rd3", ".rd7"),
+        mala.read_header,
+        _mala_trace_count,
+        _mala_read_samples,
+        prefer=(".rd7", ".rd3"),
+    ),
 )
 
 

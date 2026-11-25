@@ -22,6 +22,7 @@ from nsgeo.io.formats import (
     trace_count,
 )
 from nsgeo.io.header import RadarFileError, RadarHeader, companion
+from nsgeo.io.mala import MalaError, MalaHeader
 
 __all__ = [
     "Dt1Error",
@@ -35,6 +36,8 @@ __all__ = [
     "DzxInfo",
     "DzxMark",
     "FORMATS",
+    "MalaError",
+    "MalaHeader",
     "RTK_FIXED",
     "RadarFileError",
     "RadarFormat",

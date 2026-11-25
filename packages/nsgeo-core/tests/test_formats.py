@@ -133,3 +133,15 @@ def test_a_note_may_not_hold_the_imports_own_separator():
         _OtherHeader(**fields, notes=("one; two",), not_a_profile="")
     with pytest.raises(ValueError, match="may not contain '; '"):
         _OtherHeader(**fields, notes=(), not_a_profile="one; two")
+
+
+def test_only_mala_prefers_one_of_its_files_over_another():
+    prefer = {fmt.name: fmt.prefer for fmt in formats.FORMATS}
+    assert prefer == {
+        "GSSI DZT": (),
+        "Sensors & Software DT1": (),
+        "MALÅ": (".rd7", ".rd3"),
+    }
+    for fmt in formats.FORMATS:
+        assert set(fmt.prefer) <= set(fmt.extensions)
+    assert formats.supported_extensions() == (".dzt", ".dt1", ".rd3", ".rd7")

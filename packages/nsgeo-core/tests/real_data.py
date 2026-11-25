@@ -52,6 +52,17 @@ DT1_B = radar_files(DATA / "dt1-b", ".dt1")
 """A second Sensors & Software survey for M21: yyline3 (a merge of two lines,
 500 samples) with its .HD, and a CMP.DT1 kept without its .HD on purpose."""
 
+MALA = radar_files(DATA / "mala", ".rd7")
+"""A MALÅ survey for M21b: eight lines DAT_0320-DAT_0330 (GX450 HDR, 1511 samples),
+each as .rd7 and .rd3 with one .rad (and .cor, .mrk, .srd, which nothing reads yet)."""
+
+MALA_RD3 = radar_files(DATA / "mala", ".rd3")
+"""The same eight MALÅ lines' .rd3 files."""
+
+MALA_EDGE = DATA / "mala-edge"
+"""Copies of two MALÅ lines for edge cases: DAT_0328.rd7 without its .rad, and
+DAT_0327 (.rd3 and .rd7) with its .rad spelled .RAD."""
+
 
 HAND_FIT_SITES = (
     sorted((DATA / "hand-fits").glob("*.nsgeo.json")) if (DATA / "hand-fits").is_dir() else []

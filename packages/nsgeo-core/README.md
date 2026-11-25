@@ -19,7 +19,7 @@ between minor releases.
 
 ### `nsgeo.io`
 
-Radar readers (GSSI DZT and Sensors & Software DT1, through one shared header), and the DZX and DZG readers.
+Radar readers (GSSI DZT, Sensors & Software DT1 and MALÅ, through one shared header), and the DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
@@ -34,9 +34,11 @@ Radar readers (GSSI DZT and Sensors & Software DT1, through one shared header), 
 | `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
 | `FORMATS` | The registered radar formats, in the order the import lists them. |
+| `MalaError` | Raised when a MALÅ line or its .rad is missing, malformed or unsupported (multichannel files included). |
+| `MalaHeader` | A MALÅ line's header: a `RadarHeader` with the trace count, sample width, trigger and distance interval from its .rad. |
 | `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
 | `RadarFileError` | Raised when a radar file is malformed, unsupported, or missing a companion file. |
-| `RadarFormat` | One registered format: its name, extensions and three readers. |
+| `RadarFormat` | One registered format: its name, extensions, three readers, and which of its files to prefer when a line has two. |
 | `RadarHeader` | The header every radar format shares: sample axis, time zero, spacing, dielectric, antenna, import notes. |
 | `UnsupportedFormat` | Raised for a file whose extension no registered format reads. |
 | `companion` | The file beside a radar file with its stem and a given suffix, in the spelling on disk. |
