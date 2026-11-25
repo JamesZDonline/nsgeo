@@ -117,3 +117,19 @@ def test_a_line_opens_and_loads_through_the_dispatcher(tmp_path):
     assert isinstance(line.header, DztHeader) and line.n_traces == 6
     (profile,) = line.load()
     np.testing.assert_array_equal(profile.data, dzt.read_samples(Path(p))[0])
+
+
+def test_a_note_may_not_hold_the_imports_own_separator():
+    fields = dict(
+        n_samples=1,
+        n_channels=1,
+        range_ns=1.0,
+        position_ns=0.0,
+        traces_per_metre=1.0,
+        epsr=9.0,
+        antenna="",
+    )
+    with pytest.raises(ValueError, match="may not contain '; '"):
+        _OtherHeader(**fields, notes=("one; two",), not_a_profile="")
+    with pytest.raises(ValueError, match="may not contain '; '"):
+        _OtherHeader(**fields, notes=(), not_a_profile="one; two")

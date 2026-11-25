@@ -1151,12 +1151,12 @@ class SurveyDock(QgsDockWidget):
             parts.append(lost)
         if n_lines == 1:
             parts.append(
-                "The DZT file on disk is not touched, and picks on this line "
+                "The radar file on disk is not touched, and picks on this line "
                 "stay in the picks layer."
             )
         elif n_lines:
             parts.append(
-                "The DZT files on disk are not touched, and picks on these lines "
+                "The radar files on disk are not touched, and picks on these lines "
                 "stay in the picks layer."
             )
         if grid_cuts_text:

@@ -16,13 +16,37 @@ from typing import TypeVar
 
 import numpy as np
 from nsgeo.geometry import GridPlacement
-from nsgeo.io import DztError, DzxError, DzxInfo, read_dzx, read_header, trace_count
+from nsgeo.io import (
+    FORMATS,
+    DzxError,
+    DzxInfo,
+    RadarFileError,
+    read_dzx,
+    read_header,
+    trace_count,
+)
 from nsgeo.model import Line
 
 from nsgeo_qgis.line_edit import SCALE_NOTE, fit_scale, span_m
 
 _TRAILING = re.compile(r"(\d+)\s*$")
 _T = TypeVar("_T")
+
+
+def radar_file_filter() -> str:
+    """The Add files… picker's filter: every registered format at once, then
+    each on its own in registry order, then all files. Each extension is
+    offered in lower and upper case, for filesystems whose filter matching is
+    case-sensitive."""
+
+    def globs(extensions: Sequence[str]) -> str:
+        return " ".join(f"*{e} *{e.upper()}" for e in extensions)
+
+    every = [e for fmt in FORMATS for e in fmt.extensions]
+    parts = [f"All radar files ({globs(every)})"]
+    parts += [f"{fmt.name} ({globs(fmt.extensions)})" for fmt in FORMATS]
+    parts.append("All files (*)")
+    return ";;".join(parts)
 
 
 def trailing_number(stem: str) -> int | None:
@@ -75,10 +99,13 @@ class ImportRow:
     #: Non-empty: offset and direction are a guess (the hand-on from GPS) the
     #: user has not changed since; the text says how it was made.
     guess: str = ""
+    #: Non-empty: the header says the file is not a profile (a CMP sounding,
+    #: say), and why; the row cannot be placed or ticked.
+    not_a_profile: str = ""
 
     @property
     def placeable(self) -> bool:
-        return self.traces_per_metre > 0 and self.n_traces is not None
+        return self.traces_per_metre > 0 and self.n_traces is not None and not self.not_a_profile
 
 
 def _read_sidecar(path: Path) -> tuple[DzxInfo | None, str]:
@@ -114,12 +141,19 @@ def plan_import(paths: Sequence[str | Path], options: ImportOptions) -> list[Imp
     for path in sort_files(paths):
         sidecar, note = _read_sidecar(path)
         n: int | None
+        not_a_profile = ""
         try:
             header = read_header(path)
             n = trace_count(path, header)
             spm = float(header.traces_per_metre)
-            note = "; ".join(filter(None, [note, _dielectric_note(float(header.epsr))]))
-        except (DztError, OSError) as exc:
+            not_a_profile = header.not_a_profile
+            note = "; ".join(
+                filter(
+                    None,
+                    [note, _dielectric_note(float(header.epsr)), *header.notes, not_a_profile],
+                )
+            )
+        except (RadarFileError, OSError) as exc:
             # A single unreadable/non-DZT file must not take the whole batch
             # down with it -- same principle as the traces_per_metre=0 case
             # below, just triggered by a bad header instead of a bad rate.
@@ -137,8 +171,9 @@ def plan_import(paths: Sequence[str | Path], options: ImportOptions) -> list[Imp
                 length_m=n / spm if n is not None and spm > 0 else None,
                 traces_per_metre=spm,
                 sidecar=sidecar,
-                include=spm > 0,
+                include=spm > 0 and not not_a_profile,
                 note=note,
+                not_a_profile=not_a_profile,
             )
         )
     recompute_offsets(rows, options)
@@ -183,9 +218,11 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
     for row in rows:
         if not row.placeable:
             row.include = False
-            if row.n_traces is not None:
+            if row.n_traces is not None and row.traces_per_metre <= 0:
                 # A real header, but a non-positive acquisition rate: this
-                # really is a time-triggered survey. When the header itself
+                # really is a time-triggered survey. (A file that is not a
+                # profile, with a positive rate, is not: plan_import's own
+                # note says what it is.) When the header itself
                 # never read (n_traces is None), nothing is known about the
                 # acquisition mode -- plan_import's own "cannot read header"
                 # note already says why, and asserting time-triggering here

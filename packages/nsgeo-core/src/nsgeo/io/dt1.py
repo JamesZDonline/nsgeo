@@ -154,7 +154,7 @@ def read_header(path: str | Path) -> Dt1Header:
     dt_ns = window_ns / n_samples
     if timezero is None:
         position_ns = 0.0
-        notes.append("no time zero in its .HD; set one with a Time zero step")
+        notes.append("no time zero in its .HD: set one with a Time zero step")
     else:
         position_ns = -timezero * dt_ns
 
@@ -166,12 +166,12 @@ def read_header(path: str | Path) -> Dt1Header:
             actual = abs(float(last[1]) - float(first[1])) / (n_traces - 1)
             if abs(actual - step) > _STEP_TOLERANCE * step:
                 notes.append(
-                    f"trace positions step {actual:.4g} {units}, not the .HD's {step:g}; "
+                    f"trace positions step {actual:.4g} {units}, not the .HD's {step:g}: "
                     f"placed at the .HD's step"
                 )
     else:
         traces_per_metre = 0.0
-        notes.append(f"position units {units!r} are not metres or feet; place it by hand")
+        notes.append(f"position units {units!r} are not metres or feet: place it by hand")
 
     upper = mode.upper()
     return Dt1Header(

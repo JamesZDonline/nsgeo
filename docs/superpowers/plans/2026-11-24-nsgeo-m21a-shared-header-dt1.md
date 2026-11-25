@@ -39,9 +39,9 @@
   - `{k}-byte samples are not read; DT1 samples are 2 or 4 bytes`
   - `its trace headers say {a}-byte samples but the file size says {b}`
 - **DT1 notes** (`RadarHeader.notes`):
-  - `no time zero in its .HD; set one with a Time zero step`
-  - `trace positions step {actual:g} {units}, not the .HD's {step:g}; placed at the .HD's step`
-  - `position units {units!r} are not metres or feet; place it by hand` (with `traces_per_metre` 0)
+  - `no time zero in its .HD: set one with a Time zero step`
+  - `trace positions step {actual:g} {units}, not the .HD's {step:g}: placed at the .HD's step`
+  - `position units {units!r} are not metres or feet: place it by hand` (with `traces_per_metre` 0)
 - **`not_a_profile` for a CMP/WARR file:** `a CMP/WARR velocity sounding, not a profile`. The row is unticked and cannot be ticked, with this as its note.
 - **Add step dialog's facts line:** `From this file's header: {format} · antenna {antenna or '?'} · sample interval …` (everything after `antenna` unchanged), with `{format}` the header's `format_name`, e.g. `GSSI DZT`, `Sensors & Software DT1`.
 - **Survey panel's remove confirmation:** `The DZT file on disk is not touched, …` and `The DZT files on disk are not touched, …` become `The radar file on disk …` and `The radar files on disk …`.

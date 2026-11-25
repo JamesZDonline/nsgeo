@@ -74,6 +74,21 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, n_samples: int = 
     return path
 
 
+def synthetic_dt1(folder: Path, name: str, n_traces: int = 60, n_samples: int = 500, **kw) -> Path:
+    """A small synthetic Sensors & Software DT1 (and its .HD) with a visible pattern.
+
+    `kw` goes to the core's `tests.dt1_data.write_dt1` (step, window_ns,
+    timezero_point, survey_mode, ...)."""
+    from tests.dt1_data import write_dt1
+
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
+    data = (rng.normal(size=(n_samples, n_traces)) * 3000).clip(-32768, 32767).astype(np.int16)
+    data[40:44, :] = 20_000  # a flat band, as synthetic_dzt has
+    kw.setdefault("window_ns", 100.0)  # 0.2 ns a sample at the default 500 samples
+    return write_dt1(folder / name, data, **kw)
+
+
 def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None) -> Any:
     """Set line `key`'s velocity from its stored fit `fit_id`, with a
     one-member record of it: what the strip's Apply to line does after Save

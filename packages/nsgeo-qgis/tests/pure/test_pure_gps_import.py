@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement
 from nsgeo_qgis.gps_import import (
+    NO_GPS_FORMAT,
     OUTSIDE,
     count_with_gps,
     first_fixed_lonlat,
@@ -15,7 +16,7 @@ from nsgeo_qgis.gps_import import (
     shifted_lines,
     with_grid,
 )
-from plugin_testing import synthetic_dzt, synthetic_gps_dzt
+from plugin_testing import synthetic_dt1, synthetic_dzt, synthetic_gps_dzt
 from tests.dzg_data import local_xy, write_dzg
 
 LAT0, LON0 = 45.2, 10.5
@@ -441,3 +442,21 @@ def test_a_neighbour_under_a_metre_long_gives_no_guess():
     short = np.column_stack([np.full(3, 0.25), np.linspace(0.0, 0.5, 3)])
     placed = {NAMES[0]: short, NAMES[2]: _along_y(1.25)}
     assert guess_tape_rows(NAMES[:3], placed, G0) == {}
+
+
+# ---- M21a: formats whose GPS log is not read yet (spec C10, §13) -------------
+
+
+def test_a_dt1_is_refused_for_its_format_even_with_a_dzg_named_beside_it(tmp_path):
+    p = synthetic_dt1(tmp_path, "LINE01.DT1", n_traces=200)
+    write_dzg(p.with_suffix(".DZG"), [fix(25), fix(75), fix(125)])
+    (row,) = plan([p])
+    assert row.line is None and row.refusal == NO_GPS_FORMAT
+    assert row.n_traces == 200 and row.n_fixes == 0  # the DZG was never read
+
+
+def test_an_unreadable_dt1_is_refused_not_raised(tmp_path):
+    p = synthetic_dt1(tmp_path, "LINE01.DT1")
+    p.with_suffix(".HD").unlink()
+    (row,) = plan([p])
+    assert row.line is None and row.refusal == "could not read it: no LINE01.HD beside it"

@@ -61,6 +61,7 @@ from nsgeo_qgis.lookup import (
     ImportOptions,
     ImportRow,
     plan_import,
+    radar_file_filter,
     recompute_offsets,
     rows_to_lines,
 )
@@ -510,9 +511,7 @@ class GridImportPage(QWidget):
 
     # ---- rows -----------------------------------------------------------------
     def _choose_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select DZT files", "", "GSSI DZT (*.DZT *.dzt);;All files (*)"
-        )
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select radar files", "", radar_file_filter())
         if paths:
             self.add_files([Path(p) for p in paths])
 

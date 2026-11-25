@@ -36,10 +36,16 @@ class RadarHeader:
     traces_per_metre: float
     epsr: float
     antenna: str
-    #: Facts the reader wants the user told at import, one sentence each.
+    #: Facts the reader wants the user told at import, one sentence each,
+    #: none containing "; " (the import joins a row's notes with it).
     notes: tuple[str, ...]
     #: "" for a profile; otherwise why the file is not one (e.g. a CMP sounding).
     not_a_profile: str
+
+    def __post_init__(self) -> None:
+        for text in (*self.notes, self.not_a_profile):
+            if "; " in text:
+                raise ValueError(f"a header note may not contain '; ': {text!r}")
 
     @property
     def dt_ns(self) -> float:

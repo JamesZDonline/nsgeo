@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from nsgeo.geometry.fit import fit_grid_from_corners
 from nsgeo.geometry.grid import Grid
+from nsgeo.io import Dt1Header
 from nsgeo_qgis.lookup import (
     CORNER_ROLES,
     ImportOptions,
@@ -14,6 +15,7 @@ from nsgeo_qgis.lookup import (
     identity_curve,
     nearest_trace,
     plan_import,
+    radar_file_filter,
     recompute_offsets,
     roles_from_ring,
     rotate_roles,
@@ -22,7 +24,7 @@ from nsgeo_qgis.lookup import (
     trailing_number,
     utm_epsg,
 )
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dt1, synthetic_dzt
 
 OPTS = ImportOptions(grid_id="A", axis="y", spacing=0.5, grid_size_along=11.0)
 
@@ -604,3 +606,63 @@ def test_a_big_stretch_or_squeeze_is_named_in_the_fitted_note(tmp_path):
     off = dataclasses.replace(options, fit_to_grid=False)
     recompute_offsets(rows, off)
     assert all("stretches" not in r.note and "compresses" not in r.note for r in rows)
+
+
+# ---- M21a: every registered format ------------------------------------------
+
+
+def test_the_file_filter_lists_every_registered_format():
+    assert radar_file_filter() == (
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1);;GSSI DZT (*.dzt *.DZT);;"
+        "Sensors & Software DT1 (*.dt1 *.DT1);;All files (*)"
+    )
+
+
+def test_plan_import_reads_a_dt1_beside_a_dzt_and_explains_the_rest(tmp_path):
+    dzt = synthetic_dzt(tmp_path, "FILE__001.DZT")
+    dt1 = synthetic_dt1(tmp_path, "LINE02.DT1", n_traces=44)
+    cmp_ = synthetic_dt1(tmp_path, "CMP03.DT1", survey_mode="CMP/WARR")
+    lost = synthetic_dt1(tmp_path, "LINE04.DT1")
+    lost.with_suffix(".HD").unlink()
+    other = tmp_path / "notes05.xyz"
+    other.write_bytes(b"")
+    rows = {r.path.name: r for r in plan_import([dzt, dt1, cmp_, lost, other], OPTS)}
+
+    assert rows["FILE__001.DZT"].include and rows["FILE__001.DZT"].placeable
+    line = rows["LINE02.DT1"]
+    assert line.include and line.placeable and line.n_traces == 44
+    assert line.traces_per_metre == pytest.approx(4.0) and line.length_m == pytest.approx(11.0)
+    assert "header ε 0 is outside" in line.note  # a DT1's .HD has no dielectric
+
+    sounding = rows["CMP03.DT1"]
+    assert not sounding.include and not sounding.placeable
+    assert sounding.not_a_profile == "a CMP/WARR velocity sounding, not a profile"
+    assert "a CMP/WARR velocity sounding, not a profile" in sounding.note
+    assert "time-triggered" not in sounding.note
+
+    assert not rows["LINE04.DT1"].include
+    assert "cannot read header: no LINE04.HD beside it" in rows["LINE04.DT1"].note
+    assert not rows["notes05.xyz"].include
+    assert rows["notes05.xyz"].note.endswith(
+        "cannot read header: nsgeo does not read .xyz files; it reads .dzt, .dt1"
+    )
+    assert [ln.path.name for ln in rows_to_lines(list(rows.values()), OPTS)] == [
+        "FILE__001.DZT",
+        "LINE02.DT1",
+    ]
+
+
+def test_a_readers_notes_reach_the_row_once_however_often_it_is_replanned(tmp_path):
+    p = synthetic_dt1(tmp_path, "LINE01.DT1", timezero_point=None)
+    rows = plan_import([p], OPTS)
+    recompute_offsets(rows, OPTS)
+    recompute_offsets(rows, OPTS)
+    note = rows[0].note
+    assert note.count("no time zero in its .HD: set one with a Time zero step") == 1
+    assert "header ε 0 is outside" in note and rows[0].include
+
+
+def test_rows_to_lines_gives_a_dt1_line_its_own_header(tmp_path):
+    p = synthetic_dt1(tmp_path, "LINE01.DT1")
+    (line,) = rows_to_lines(plan_import([p], OPTS), OPTS)
+    assert isinstance(line.header, Dt1Header) and line.n_traces == 60

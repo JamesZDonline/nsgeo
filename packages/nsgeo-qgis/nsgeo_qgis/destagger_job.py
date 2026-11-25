@@ -28,7 +28,7 @@ from nsgeo.destagger import (
     one_way_result,
 )
 from nsgeo.geometry import GridPlacement
-from nsgeo.io import DztError, RadarHeader, read_samples
+from nsgeo.io import RadarFileError, RadarHeader, read_samples
 
 #: Names listed per group in the summary before "and {n} more" (P12).
 MAX_NAMES = 6
@@ -73,7 +73,7 @@ class MeasureJob:
                 self.prepared[line.key] = envelope_bins(
                     samples, line.header.dt_ns, line.header.position_ns
                 )
-            except (OSError, DztError, ValueError) as exc:
+            except (OSError, RadarFileError, ValueError) as exc:
                 self.unreadable[line.key] = str(exc)
             self.progress = (i + 1, len(todo))
         measured = [

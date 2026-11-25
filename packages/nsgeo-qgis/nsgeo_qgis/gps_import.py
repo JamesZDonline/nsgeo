@@ -31,7 +31,8 @@ from nsgeo.io import (
     RTK_FIXED,
     DzgError,
     DzgLog,
-    DztError,
+    DztHeader,
+    RadarFileError,
     dzg_for,
     read_dzg,
     read_header,
@@ -40,6 +41,9 @@ from nsgeo.io import (
 from nsgeo.model import Line
 
 NO_DZG = "no DZG beside it"
+#: A radar format nsgeo reads, but whose GPS log it does not read yet (spec
+#: M21 C10, until M21d). Said before any DZG is looked for.
+NO_GPS_FORMAT = "no GPS log read for this format yet"
 ALREADY_IN_SITE = "already in the site"
 OUTSIDE = "outside {gid}"
 #: A stretch outside the grid shorter than this is not worth a line (metres).
@@ -122,8 +126,10 @@ def _plan_one(
     try:
         header = read_header(path)
         n_traces = trace_count(path, header)
-    except (DztError, OSError) as exc:
+    except (RadarFileError, OSError) as exc:
         return _refused(path, f"could not read it: {exc}")
+    if not isinstance(header, DztHeader):
+        return _refused(path, NO_GPS_FORMAT, n_traces)
     dzg = dzg_for(path)
     if dzg is None:
         return _refused(path, NO_DZG, n_traces)

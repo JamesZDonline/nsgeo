@@ -898,7 +898,7 @@ def test_removing_a_grid_from_the_menu_takes_no_for_an_answer(dock, answer_modal
 # ---- #31: remove many lines at once, and a grid that still has lines ------
 # Reported from the M7 walkthrough: removing a 40-line grid took 40
 # separate confirmations. Whatever goes, the one confirmation has to say
-# exactly what, and that the DZT files themselves are left alone.
+# exactly what, and that the radar files themselves are left alone.
 
 KEYS = [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
 
@@ -1029,7 +1029,7 @@ def test_removing_a_grid_names_its_lines_and_takes_them_with_it(dock, answer_mod
     assert len(yes) == 1
     text = yes[0][0][2]
     assert "grid A and its 3 lines" in text
-    assert "DZT files" in text and "not touched" in text
+    assert "radar files" in text and "not touched" in text
     assert "until you choose Save site" in text
     assert session.site.grids == []
     assert session.keys() == []
@@ -1192,7 +1192,7 @@ def test_removing_one_line_says_so_in_the_singular(dock, answer_modal):
     dock.remove_line_action(KEYS[0])
     text = yes[0][0][2]
     assert text.startswith(f"Remove {KEYS[0]} from the site?")
-    assert "The DZT file on disk is not touched" in text and "picks on this line" in text
+    assert "The radar file on disk is not touched" in text and "picks on this line" in text
 
 
 def test_a_shift_click_ranges_from_a_line_opened_elsewhere(dock):
@@ -2155,7 +2155,7 @@ def test_removal_text_names_what_goes_with_one_line(dock):
         "Also removed: its processing steps, its velocity override and its 2 saved velocity fits."
         in text
     )
-    assert text.index("Also removed") < text.index("The DZT file on disk")
+    assert text.index("Also removed") < text.index("The radar file on disk")
     session.remove_step(key, 0)  # a stack with no step is nothing to lose
     session.set_line_velocity(key, None)
     assert "Also removed: its 2 saved velocity fits." in dock._removal_text([], [key])

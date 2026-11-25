@@ -11,17 +11,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.io import DztHeader
+from nsgeo.io import RadarHeader
 from nsgeo.processing import Radargram, Step, nyquist_mhz, step_title
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
 
 from nsgeo_qgis.ui.param_form import ParamForm
 
 
-def header_facts(header: DztHeader) -> str:
+def header_facts(header: RadarHeader) -> str:
     nyquist = nyquist_mhz(header.dt_ns)
     return (
-        f"From this file's header: antenna {header.antenna or '?'} · sample interval "
+        f"From this file's header: {header.format_name} · antenna {header.antenna or '?'} · "
+        f"sample interval "
         f"{header.dt_ns:.4f} ns · Nyquist {nyquist:.0f} MHz · {header.n_samples} samples"
     )
 
@@ -30,7 +31,7 @@ class AddStepDialog(QDialog):
     def __init__(
         self,
         step_name: str,
-        header: DztHeader | None = None,
+        header: RadarHeader | None = None,
         radargram: Radargram | None = None,
         params: dict[str, Any] | None = None,
         parent: QWidget | None = None,

@@ -86,7 +86,7 @@ def test_other_units_are_not_placed_and_are_noted(tmp_path, units):
     h = read_header(p)
     shown = repr(units or "")
     assert h.traces_per_metre == 0.0
-    assert h.notes == (f"position units {shown} are not metres or feet; place it by hand",)
+    assert h.notes == (f"position units {shown} are not metres or feet: place it by hand",)
 
 
 def test_a_zero_step_is_time_triggered_with_no_note(tmp_path):
@@ -99,7 +99,7 @@ def test_no_time_zero_reads_from_zero_with_a_note(tmp_path):
     p = write_dt1(tmp_path / "L.DT1", _zeros(), timezero_point=None)
     h = read_header(p)
     assert h.position_ns == 0.0 and h.timezero_point is None
-    assert h.notes == ("no time zero in its .HD; set one with a Time zero step",)
+    assert h.notes == ("no time zero in its .HD: set one with a Time zero step",)
 
 
 def test_trace_positions_that_disagree_with_the_step_add_a_note(tmp_path):
@@ -107,7 +107,7 @@ def test_trace_positions_that_disagree_with_the_step_add_a_note(tmp_path):
     p = write_dt1(tmp_path / "L.DT1", _zeros(), step=0.25, positions=positions)
     h = read_header(p)
     assert h.traces_per_metre == pytest.approx(4.0)
-    assert h.notes == ("trace positions step 0.5 m, not the .HD's 0.25; placed at the .HD's step",)
+    assert h.notes == ("trace positions step 0.5 m, not the .HD's 0.25: placed at the .HD's step",)
 
 
 def test_reversed_positions_at_the_step_add_no_note(tmp_path):

@@ -2712,8 +2712,9 @@ class NsgeoPlugin:
         try:
             self.session.open_site(Path(path))
         except Exception as exc:  # noqa: BLE001 -- see new_site() above; a
-            # malformed survey file or an unreadable/corrupt referenced DZT
-            # can raise ProjectError, DztError, or a plain OSError, none of
+            # malformed survey file or an unreadable/corrupt referenced radar
+            # file can raise ProjectError, RadarFileError (a DZT's, or a DT1
+            # missing its .HD), or a plain OSError, none of
             # which install a session (open_site() only installs after
             # load_site() fully succeeds).
             self.message(f"could not open {path}: {exc}", Qgis.MessageLevel.Critical)

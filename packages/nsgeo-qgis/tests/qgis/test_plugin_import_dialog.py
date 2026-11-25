@@ -21,7 +21,7 @@ from nsgeo_qgis.ui.import_dialog import (
 )
 from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dt1, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
 from tests.real_data import GRID2_LINES
@@ -342,6 +342,40 @@ def test_add_files_button_adds_the_chosen_files(session, tmp_path, answer_modal)
     d._choose_files()
     assert d.table.rowCount() == 2
     assert len(calls) == 1
+
+
+def test_add_files_offers_every_radar_format_and_imports_a_dzt_beside_a_dt1(
+    session, tmp_path, answer_modal
+):
+    files = [
+        synthetic_dzt(tmp_path / "raw", "FILE__001.DZT"),
+        synthetic_dt1(tmp_path / "raw", "LINE02.DT1", n_traces=40),
+    ]
+    calls = answer_modal(QFileDialog, "getOpenFileNames", ([str(p) for p in files], ""))
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d._choose_files()
+    (args, _kwargs) = calls[0]
+    assert args[1] == "Select radar files"
+    assert args[3] == (
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1);;GSSI DZT (*.dzt *.DZT);;"
+        "Sensors & Software DT1 (*.dt1 *.DT1);;All files (*)"
+    )
+    assert [r.include for r in d.rows] == [True, True]
+    d_dlg.accept()
+    assert d.imported_keys == ["raw/FILE__001.DZT", "raw/LINE02.DT1"]
+    assert session.line_for_key("raw/LINE02.DT1").n_traces == 40
+
+
+def test_a_cmp_sounding_is_listed_but_cannot_be_ticked(session, tmp_path):
+    p = synthetic_dt1(tmp_path / "raw", "CMP01.DT1", survey_mode="CMP/WARR")
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d.add_files([p])
+    item = d.table.item(0, COL_INCLUDE)
+    assert item.checkState() == Qt.CheckState.Unchecked
+    assert not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+    assert "a CMP/WARR velocity sounding, not a profile" in d.table.item(0, COL_NOTE).text()
 
 
 # ---- plugin wiring -----------------------------------------------------------
