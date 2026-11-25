@@ -34,7 +34,9 @@ local/
 ├── sunnyside.nsgeo.json            optional saved project for the line-edit tests
 ├── with-dzg/                       the sixty GPS-recorded lines for M17 (.DZT + .DZG + .DZX); GPS survey Grid 1
 ├── grid2/                          GPS survey Grid 2, sixty lines for #159 (links to the raw files)
-└── mag-data/                       magnetometer examples for M19 (no tests read them yet)
+├── mag-data/                       magnetometer examples for M19 (no tests read them yet)
+├── dt1-a/                          a Sensors & Software survey for M21: five lines and a CMP (.DT1 + .HD)
+└── dt1-b/                          a second one: one merged line (.DT1 + .HD), and a CMP.DT1 left without its .HD
 ```
 
 The tests pick a survey by its folder, through the named lists in

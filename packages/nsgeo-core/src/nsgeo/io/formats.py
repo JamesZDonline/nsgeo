@@ -18,7 +18,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from nsgeo.io import dzt
+from nsgeo.io import dt1, dzt
 from nsgeo.io.header import RadarFileError, RadarHeader, companion
 
 __all__ = [
@@ -71,10 +71,21 @@ def _dzt_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
     return dzt.read_samples(path, _checked(DZT_NAME, dzt.DztHeader, header, path))
 
 
-DZT_NAME = dzt.DztHeader.format_name
+def _dt1_trace_count(path: Path, header: RadarHeader) -> int:
+    return dt1.trace_count(path, _checked(DT1_NAME, dt1.Dt1Header, header, path))
 
+
+def _dt1_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
+    return dt1.read_samples(path, _checked(DT1_NAME, dt1.Dt1Header, header, path))
+
+
+DZT_NAME = dzt.DztHeader.format_name
+DT1_NAME = dt1.Dt1Header.format_name
+
+#: In the order the import's file picker lists them.
 FORMATS: tuple[RadarFormat, ...] = (
     RadarFormat(DZT_NAME, (".dzt",), dzt.read_header, _dzt_trace_count, _dzt_read_samples),
+    RadarFormat(DT1_NAME, (".dt1",), dt1.read_header, _dt1_trace_count, _dt1_read_samples),
 )
 
 

@@ -53,6 +53,9 @@ Seven lines from two surveys (pulseEKKO PRO, 100 MHz, 2012 and 2014), plus one C
   2 the samples per trace, 3 the topography, 6 the time window, 7 the stack count.
 - **Time zero is trustworthy.** `TIMEZERO AT POINT` is a sample index, and it matches the measured
   first break to within a sample: 131.46 against 131 on `LINE00`, 64.89 against 65 on `yyline3`.
+  *(Checked on every line while building M21a: the direct wave's envelope peak follows it by
+  0.5–3.5 samples on all six profiles. A 30 % threshold on the envelope's rise is not a steady
+  mark: on one line, whose wave rises slowly, it falls 6.5 samples early.)*
   The sample interval is `TOTAL TIME WINDOW / NUMBER OF PTS/TRC` (400 / 1000 = 0.4 ns).
 - **Spacing is even.** Every per-trace position step is exactly `STEP SIZE USED` (0.25 m), and the
   position runs from `STARTING POSITION` to `FINAL POSITION`.

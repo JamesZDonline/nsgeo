@@ -33,6 +33,8 @@
   - `no {stem}.HD beside it`
   - `its .HD has no {key}` (for `NUMBER OF TRACES`, `NUMBER OF PTS/TRC`, `TOTAL TIME WINDOW`)
   - `its .HD gives {key} as {value!r}, which is not a number`
+  - `its .HD gives {key} as {value!r}, which is not a whole number above 0` (trace and sample counts) and `… which is not a number above 0` (the time window)
+  - `cannot read {hd.name}: {exc}` and `cannot read it: {exc}` (an `OSError` on the `.HD` or the `.DT1`)
   - `{size} bytes do not divide into the {n} traces its .HD gives: refusing to guess which is right`
   - `{k}-byte samples are not read; DT1 samples are 2 or 4 bytes`
   - `its trace headers say {a}-byte samples but the file size says {b}`
@@ -238,11 +240,10 @@ def test_dt1_a_lines_read_with_their_counts_and_spacing():
             assert h.traces_per_metre == pytest.approx(4.0) and h.notes == () and h.not_a_profile == ""
 
 @pytest.mark.skipif(not DT1_A, reason="no dt1-a survey in tests/data/local")
-def test_dt1_a_time_zero_is_at_the_first_break():
+def test_dt1_a_time_zero_is_just_before_the_direct_wave():   # every LINE, parametrized
     p = A["LINE00"]; h = read_header(p)
     env = np.abs(read_samples(p, h)[0].astype(float)).mean(axis=1)
-    first_break = int(np.argmax(env > 0.3 * env.max()))
-    assert abs(first_break - (-h.position_ns / h.dt_ns)) <= 2      # measured: 131 against 131.46
+    assert 0 <= int(np.argmax(env)) - (-h.position_ns / h.dt_ns) <= 4   # measured 0.5-3.5
 
 @pytest.mark.skipif(not DT1_A, reason="no dt1-a survey in tests/data/local")
 def test_dt1_a_cmp_is_a_sounding():
@@ -250,7 +251,7 @@ def test_dt1_a_cmp_is_a_sounding():
 
 @pytest.mark.skipif(not DT1_B, reason="no dt1-b survey in tests/data/local")
 def test_dt1_b_reads_its_merged_line_and_refuses_the_cmp_with_no_hd(): ...
-    # yyline3: 391 traces of 500 samples, time zero within 2 samples of its first break;
+    # yyline3: 391 traces of 500 samples, the direct wave's peak 0-4 samples after time zero;
     # CMP.DT1 raises Dt1Error matching "no CMP.HD beside it"
 ```
 

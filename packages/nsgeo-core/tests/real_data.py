@@ -21,11 +21,16 @@ from nsgeo.processing.base import Radargram
 DATA = Path(__file__).parent / "data" / "local"
 
 
-def dzt_files(folder: Path) -> list[Path]:
-    """The DZT files directly inside `folder`, sorted; [] when it is missing."""
+def radar_files(folder: Path, suffix: str) -> list[Path]:
+    """Files directly in `folder` with `suffix` in any case, sorted; [] when it is missing."""
     if not folder.is_dir():
         return []
-    return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".dzt")
+    return sorted(p for p in folder.iterdir() if p.suffix.lower() == suffix.lower())
+
+
+def dzt_files(folder: Path) -> list[Path]:
+    """The DZT files directly inside `folder`, sorted; [] when it is missing."""
+    return radar_files(folder, ".dzt")
 
 
 CAMPUS_LINES = dzt_files(DATA)
@@ -38,6 +43,14 @@ GRID2_LINES = dzt_files(DATA / "grid2")
 """The sixty lines of the second GPS survey, Grid 2 (29.96 m), links to the raw files.
 
 Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey."""
+
+DT1_A = radar_files(DATA / "dt1-a", ".dt1")
+"""A Sensors & Software survey for M21: LINE00-LINE04 (pulseEKKO PRO, 100 MHz,
+1000 samples) and a CMP sounding, each .DT1 with its .HD."""
+
+DT1_B = radar_files(DATA / "dt1-b", ".dt1")
+"""A second Sensors & Software survey for M21: yyline3 (a merge of two lines,
+500 samples) with its .HD, and a CMP.DT1 kept without its .HD on purpose."""
 
 
 HAND_FIT_SITES = (

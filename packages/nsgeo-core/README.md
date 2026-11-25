@@ -19,10 +19,12 @@ between minor releases.
 
 ### `nsgeo.io`
 
-Radar readers (GSSI DZT, through one shared header), and the DZX and DZG readers.
+Radar readers (GSSI DZT and Sensors & Software DT1, through one shared header), and the DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
+| `Dt1Error` | Raised when a Sensors & Software DT1 line or its .HD is missing, malformed or unsupported. |
+| `Dt1Header` | A DT1 line's header: a `RadarHeader` with the trace count, sample width, step, units and survey mode from its .HD. |
 | `DzgError` | Raised when a DZG's trace numbers cannot be trusted. |
 | `DzgFix` | One GPS fix: its DZT trace, time, position, quality, satellites, HDOP, altitude and geoid separation. |
 | `DzgLog` | The fixes of a DZG in file order, with counts of dropped and unpaired sentences. |
