@@ -143,6 +143,8 @@ release's notes list everything in it.
   shared header and DT1; **M21b:** MALÅ; **M21c:** SEG-Y; **M21d:** their
   GPS logs, for GPS placement. **M21a** is built: DT1 lines import onto a
   grid, draw, process and reopen like DZT lines. Awaiting its walkthrough.
+  **M21b** is built: MALÅ lines import the same way, and of a line chosen as
+  both `.rd3` and `.rd7` only the `.rd7` is ticked. Awaiting its walkthrough.
 
 ### Next, in order
 
