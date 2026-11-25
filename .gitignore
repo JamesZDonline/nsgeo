@@ -21,8 +21,15 @@ packages/nsgeo-core/tests/data/local/*
 *.[rR][dD]7
 *.[rR][aA][dD]
 *.[cC][oO][rR]
+*.[mM][rR][kK]
+*.[sS][rR][dD]
 # Sensors & Software
 *.[dD][tT]1
+*.[hH][dD]
+*.[gG][pP][sS]
+# SEG-Y (RadExplorer's carries per-trace GPS)
+*.[sS][gG][yY]
+*.[sS][eE][gG][yY]
 # Utsi / Groundvue and other .gpr-writing systems
 *.[gG][pP][rR]
 
