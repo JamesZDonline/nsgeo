@@ -21,7 +21,13 @@ from nsgeo_qgis.ui.import_dialog import (
 )
 from nsgeo_qgis.ui.preset_box import PRESET_GONE
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dt1, synthetic_dzt
+from plugin_testing import (
+    REAL_DZT,
+    needs_real_data,
+    synthetic_dt1,
+    synthetic_dzt,
+    synthetic_mala_pair,
+)
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
 from tests.real_data import GRID2_LINES
@@ -358,13 +364,46 @@ def test_add_files_offers_every_radar_format_and_imports_a_dzt_beside_a_dt1(
     (args, _kwargs) = calls[0]
     assert args[1] == "Select radar files"
     assert args[3] == (
-        "All radar files (*.dzt *.DZT *.dt1 *.DT1);;GSSI DZT (*.dzt *.DZT);;"
-        "Sensors & Software DT1 (*.dt1 *.DT1);;All files (*)"
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7);;"
+        "GSSI DZT (*.dzt *.DZT);;Sensors & Software DT1 (*.dt1 *.DT1);;"
+        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;All files (*)"
     )
     assert [r.include for r in d.rows] == [True, True]
     d_dlg.accept()
     assert d.imported_keys == ["raw/FILE__001.DZT", "raw/LINE02.DT1"]
     assert session.line_for_key("raw/LINE02.DT1").n_traces == 40
+
+
+def test_a_mala_pair_beside_a_dzt_and_a_dt1_imports_only_its_rd7(session, tmp_path, answer_modal):
+    raw = tmp_path / "raw"
+    rd7, rd3 = synthetic_mala_pair(raw, "DAT_0003", n_traces=20)
+    files = [
+        synthetic_dzt(raw, "FILE__001.DZT"),
+        synthetic_dt1(raw, "LINE02.DT1", n_traces=40),
+        rd3,
+        rd7,
+    ]
+    answer_modal(QFileDialog, "getOpenFileNames", ([str(p) for p in files], ""))
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d._choose_files()
+    assert d.table.rowCount() == 4
+    included = {r.path.name: r.include for r in d.rows}
+    assert included == {
+        "FILE__001.DZT": True,
+        "LINE02.DT1": True,
+        "DAT_0003.rd3": False,
+        "DAT_0003.rd7": True,
+    }
+    lesser = [r.path.name for r in d.rows].index("DAT_0003.rd3")
+    item = d.table.item(lesser, COL_INCLUDE)
+    assert item.flags() & Qt.ItemFlag.ItemIsUserCheckable  # can still be ticked by hand
+    assert "the same traces as DAT_0003.rd7, which is also chosen: left unticked" in (
+        d.table.item(lesser, COL_NOTE).text()
+    )
+    d_dlg.accept()
+    assert sorted(d.imported_keys) == ["raw/DAT_0003.rd7", "raw/FILE__001.DZT", "raw/LINE02.DT1"]
+    assert session.line_for_key("raw/DAT_0003.rd7").n_traces == 20
 
 
 def test_a_cmp_sounding_is_listed_but_cannot_be_ticked(session, tmp_path):

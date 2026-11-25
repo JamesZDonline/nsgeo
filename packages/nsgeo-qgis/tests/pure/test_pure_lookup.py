@@ -24,7 +24,14 @@ from nsgeo_qgis.lookup import (
     trailing_number,
     utm_epsg,
 )
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dt1, synthetic_dzt
+from plugin_testing import (
+    REAL_DZT,
+    needs_real_data,
+    synthetic_dt1,
+    synthetic_dzt,
+    synthetic_mala,
+    synthetic_mala_pair,
+)
 
 OPTS = ImportOptions(grid_id="A", axis="y", spacing=0.5, grid_size_along=11.0)
 
@@ -613,8 +620,9 @@ def test_a_big_stretch_or_squeeze_is_named_in_the_fitted_note(tmp_path):
 
 def test_the_file_filter_lists_every_registered_format():
     assert radar_file_filter() == (
-        "All radar files (*.dzt *.DZT *.dt1 *.DT1);;GSSI DZT (*.dzt *.DZT);;"
-        "Sensors & Software DT1 (*.dt1 *.DT1);;All files (*)"
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7);;"
+        "GSSI DZT (*.dzt *.DZT);;Sensors & Software DT1 (*.dt1 *.DT1);;"
+        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;All files (*)"
     )
 
 
@@ -644,7 +652,7 @@ def test_plan_import_reads_a_dt1_beside_a_dzt_and_explains_the_rest(tmp_path):
     assert "cannot read header: no LINE04.HD beside it" in rows["LINE04.DT1"].note
     assert not rows["notes05.xyz"].include
     assert rows["notes05.xyz"].note.endswith(
-        "cannot read header: nsgeo does not read .xyz files; it reads .dzt, .dt1"
+        "cannot read header: nsgeo does not read .xyz files; it reads .dzt, .dt1, .rd3, .rd7"
     )
     assert [ln.path.name for ln in rows_to_lines(list(rows.values()), OPTS)] == [
         "FILE__001.DZT",
@@ -666,3 +674,59 @@ def test_rows_to_lines_gives_a_dt1_line_its_own_header(tmp_path):
     p = synthetic_dt1(tmp_path, "LINE01.DT1")
     (line,) = rows_to_lines(plan_import([p], OPTS), OPTS)
     assert isinstance(line.header, Dt1Header) and line.n_traces == 60
+
+
+# ---- M21b: MALÅ, and the .rd7 of a pair preferred ---------------------------
+
+MALA_TIME_ZERO = "time zero is not read from a MALÅ .rad: set one with a Time zero step"
+LESSER = "the same traces as DAT_0001.rd7, which is also chosen: left unticked"
+
+
+def test_of_a_chosen_pair_only_the_rd7_is_ticked(tmp_path):
+    rd7, rd3 = synthetic_mala_pair(tmp_path, "DAT_0001")
+    rows = {r.path.name: r for r in plan_import([rd3, rd7], OPTS)}
+    best, lesser = rows["DAT_0001.rd7"], rows["DAT_0001.rd3"]
+    assert best.include and best.placeable and LESSER not in best.note
+    assert not lesser.include and lesser.placeable and LESSER in lesser.note
+    for row in (best, lesser):
+        assert MALA_TIME_ZERO in row.note and "header ε 0 is outside" in row.note
+    assert [ln.path.name for ln in rows_to_lines(list(rows.values()), OPTS)] == ["DAT_0001.rd7"]
+
+
+def test_a_replan_neither_reticks_the_lesser_file_nor_repeats_its_note(tmp_path):
+    rd7, rd3 = synthetic_mala_pair(tmp_path, "DAT_0001")
+    rows = plan_import([rd7, rd3], OPTS)
+    recompute_offsets(rows, OPTS)
+    recompute_offsets(rows, OPTS)
+    lesser = next(r for r in rows if r.path == rd3)
+    assert not lesser.include and lesser.note.count(LESSER) == 1
+    lesser.include = True  # ticked by hand: kept, and imported
+    recompute_offsets(rows, OPTS)
+    assert lesser.include
+    assert sorted(ln.path.name for ln in rows_to_lines(rows, OPTS)) == [
+        "DAT_0001.rd3",
+        "DAT_0001.rd7",
+    ]
+
+
+def test_the_same_stem_in_two_folders_is_two_lines(tmp_path):
+    a = synthetic_mala(tmp_path / "survey-1", "DAT_0001.rd3")
+    b = synthetic_mala(tmp_path / "survey-2", "DAT_0001.rd7")
+    rows = plan_import([a, b], OPTS)
+    assert all(r.include for r in rows)
+    assert all("which is also chosen" not in r.note for r in rows)
+
+
+def test_a_preferred_file_that_does_not_read_leaves_the_other_ticked(tmp_path):
+    rd7, rd3 = synthetic_mala_pair(tmp_path, "DAT_0001")
+    rd7.write_bytes(rd7.read_bytes()[:-4])
+    rows = {r.path.suffix: r for r in plan_import([rd7, rd3], OPTS)}
+    assert rows[".rd3"].include and "which is also chosen" not in rows[".rd3"].note
+    assert not rows[".rd7"].include
+    assert "cannot read header: " in rows[".rd7"].note and "refusing to guess" in rows[".rd7"].note
+
+
+def test_a_lone_rd3_is_ticked(tmp_path):
+    (row,) = plan_import([synthetic_mala(tmp_path, "DAT_0002.rd3")], OPTS)
+    assert row.include and row.placeable and MALA_TIME_ZERO in row.note
+    assert row.traces_per_metre == pytest.approx(2.0)  # the writer's 0.5 m interval

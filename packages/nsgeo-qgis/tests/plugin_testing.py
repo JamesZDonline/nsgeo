@@ -89,6 +89,39 @@ def synthetic_dt1(folder: Path, name: str, n_traces: int = 60, n_samples: int = 
     return write_dt1(folder / name, data, **kw)
 
 
+def synthetic_mala(folder: Path, name: str, n_traces: int = 60, n_samples: int = 500, **kw) -> Path:
+    """A small synthetic MALÅ .rd3 or .rd7 (and its .rad) with a visible pattern.
+
+    `kw` goes to the core's `tests.mala_data.write_mala` (frequency, interval,
+    distance_flag, ...)."""
+    from tests.mala_data import write_mala
+
+    folder.mkdir(parents=True, exist_ok=True)
+    data = _mala_pattern(name, n_samples, n_traces)
+    if Path(name).suffix.lower() == ".rd3":
+        data = data >> 16
+    kw.setdefault("frequency", 5000.0)  # 0.2 ns a sample
+    return write_mala(folder / name, data, **kw)
+
+
+def synthetic_mala_pair(
+    folder: Path, stem: str, n_traces: int = 60, n_samples: int = 500, **kw
+) -> tuple[Path, Path]:
+    """A synthetic MALÅ line written as both files: (`.rd7`, `.rd3`), one `.rad`."""
+    from tests.mala_data import write_mala_pair
+
+    folder.mkdir(parents=True, exist_ok=True)
+    kw.setdefault("frequency", 5000.0)
+    return write_mala_pair(folder / stem, _mala_pattern(stem, n_samples, n_traces), **kw)
+
+
+def _mala_pattern(name: str, n_samples: int, n_traces: int) -> np.ndarray:
+    rng = np.random.default_rng(zlib.crc32(Path(name).stem.encode()))
+    data = (rng.normal(size=(n_samples, n_traces)) * 3000).clip(-32768, 32767)
+    data[40:44, :] = 20_000  # a flat band, as synthetic_dzt has
+    return data.astype(np.int32) << 16
+
+
 def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None) -> Any:
     """Set line `key`'s velocity from its stored fit `fit_id`, with a
     one-member record of it: what the strip's Apply to line does after Save

@@ -16,7 +16,7 @@ from nsgeo_qgis.gps_import import (
     shifted_lines,
     with_grid,
 )
-from plugin_testing import synthetic_dt1, synthetic_dzt, synthetic_gps_dzt
+from plugin_testing import synthetic_dt1, synthetic_dzt, synthetic_gps_dzt, synthetic_mala
 from tests.dzg_data import local_xy, write_dzg
 
 LAT0, LON0 = 45.2, 10.5
@@ -460,3 +460,12 @@ def test_an_unreadable_dt1_is_refused_not_raised(tmp_path):
     p.with_suffix(".HD").unlink()
     (row,) = plan([p])
     assert row.line is None and row.refusal == "could not read it: no LINE01.HD beside it"
+
+
+def test_a_mala_line_is_refused_whatever_lies_beside_it(tmp_path):
+    p = synthetic_mala(tmp_path, "DAT_0001.rd7", n_traces=200)
+    p.with_suffix(".cor").write_text("1\t2024-01-01\t00:00:00\t0\tN\t0\tE\t0\tM\t1\n")
+    write_dzg(p.with_suffix(".DZG"), [fix(25), fix(75), fix(125)])
+    (row,) = plan([p])
+    assert row.line is None and row.refusal == NO_GPS_FORMAT
+    assert row.n_traces == 200 and row.n_fixes == 0

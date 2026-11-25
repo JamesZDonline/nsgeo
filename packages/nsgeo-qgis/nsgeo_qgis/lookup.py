@@ -21,6 +21,8 @@ from nsgeo.io import (
     DzxError,
     DzxInfo,
     RadarFileError,
+    UnsupportedFormat,
+    format_for,
     read_dzx,
     read_header,
     trace_count,
@@ -176,8 +178,40 @@ def plan_import(paths: Sequence[str | Path], options: ImportOptions) -> list[Imp
                 not_a_profile=not_a_profile,
             )
         )
+    _prefer(rows)
     recompute_offsets(rows, options)
     return rows
+
+
+def _prefer(rows: list[ImportRow]) -> None:
+    """Of one line chosen as more than one file, tick only the best (spec §14).
+
+    A format whose `prefer` is non-empty writes a line as several files that
+    hold the same traces (MALÅ's .rd7 and .rd3). Rows are grouped by folder
+    and stem, never stem alone: MALÅ numbers files DAT_0001, DAT_0002, ... in
+    every survey. The best extension whose file read is kept, and every
+    other row of its group that read is unticked with a note. It can still be
+    ticked by hand: recompute_offsets never re-ticks a placeable row. A row
+    that did not read already says why and is left alone, so a preferred
+    file that cannot be read never unticks the other."""
+    groups: dict[tuple[str, Path, str], list[ImportRow]] = {}
+    for row in rows:
+        try:
+            fmt = format_for(row.path)
+        except UnsupportedFormat:
+            continue
+        if fmt.prefer and row.path.suffix.lower() in fmt.prefer and row.n_traces is not None:
+            groups.setdefault((fmt.name, row.path.parent, row.path.stem), []).append(row)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        prefer = format_for(group[0].path).prefer
+        best = min(group, key=lambda r: prefer.index(r.path.suffix.lower()))
+        for row in group:
+            if row is not best:
+                row.include = False
+                same = f"the same traces as {best.path.name}, which is also chosen"
+                row.note = "; ".join(filter(None, [row.note, f"{same}: left unticked"]))
 
 
 def _merge_note(note: str, marker: str, text: str | None) -> str:
