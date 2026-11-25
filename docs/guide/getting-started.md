@@ -217,7 +217,7 @@ into it, and the site appears in **nsgeo Survey** under the folder's name.
 Now copy your radar files into the site folder. A subfolder is fine. Keep each
 DZT's DZX file beside it, so its marks are read too. Keep each DT1's HD file
 beside it as well: the HD is the DT1's header, and nsgeo cannot read a DT1
-without it. Keeping the radar files inside the site folder lets the whole site move as one folder (see
+without it. The same goes for a MALÅ line's RAD file, beside its RD3 or RD7. Keeping the radar files inside the site folder lets the whole site move as one folder (see
 [Where your data lives](#4-where-your-data-lives)).
 
 ### Step 2: Place a grid
@@ -332,10 +332,14 @@ log beside them, a note beside the switch says how many.
    wheel read long or short; it greys out **Start along**, because a fitted line starts
    on the grid's edge. It is off by default, so lines run long or short on
    purpose stay as recorded.
-3. Click **Add files…** and choose the radar files: GSSI DZT files, or
-   Sensors & Software DT1 files (each with its HD beside it). The file list
-   shows both kinds at once, or one kind at a time. Each file gets a row, with
-   nsgeo's guess at its offset and direction.
+3. Click **Add files…** and choose the radar files: GSSI DZT files,
+   Sensors & Software DT1 files (each with its HD beside it), or MALÅ RD3 or
+   RD7 files (each with its RAD beside it). The file list shows every kind at
+   once, or one kind at a time. Each file gets a row, with nsgeo's guess at its
+   offset and direction. A MALÅ instrument records each line twice, as an RD3
+   and an RD7 holding the same traces; the RD7 keeps more detail. If you choose
+   both, only the RD7 is ticked, and the RD3's row says why. Either one imports
+   on its own.
 4. Correct the table where the field day did not go to plan. Untick the box at
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
    **Offset (m)** or **Dir**. Use **↑** and **↓** to fix the order. Leaving out
@@ -344,7 +348,10 @@ log beside them, a note beside the switch says how many.
    outside 1–81, which no soil has. Such a line still imports, but its depths
    need a grid or line velocity. A DT1's header has no dielectric at all, so
    every DT1 row says so. The column also passes on anything else the file's
-   header says, such as a DT1 with no time zero in it. A CMP sounding (a DT1
+   header says, such as a DT1 with no time zero in it. A MALÅ line always
+   comes in without a time zero, because its header does not give one that
+   matches the data: add a **Time zero** step before anything that measures
+   depth. A CMP sounding (a DT1
    whose header calls it CMP or WARR) is listed but cannot be ticked: it
    measures velocity at one place, so it is not a line to place.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
@@ -437,7 +444,7 @@ again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
    with the same name. GPS placement reads GSSI DZG logs only for now: a DT1
-   added here is refused with **no GPS log read for this format yet**; place it
+   or MALÅ file added here is refused with **no GPS log read for this format yet**; place it
    by Grid instead. A row shows the number of traces, how many fixes were RTK
    fixed, and how long the track runs without one (**Without RTK**).
 2. If the site has no coordinate system yet, nsgeo picks one from where the

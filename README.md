@@ -4,7 +4,7 @@ Near-surface geophysics: survey processing, analysis, and visualisation.
 
 nsgeo processes GPR surveys inside QGIS, so each profile is seen and worked on in
 its map context. It is built as an independent core library with a thin QGIS
-plugin on top. Today it reads GSSI DZT and Sensors & Software DT1 files. The core
+plugin on top. Today it reads GSSI DZT, Sensors & Software DT1 and MALÅ `.rd3`/`.rd7` files. The core
 is laid out so that more radar formats, and other instruments such as
 magnetometry, conductivity and resistivity, can be added later without touching
 the plugin.
@@ -379,7 +379,7 @@ Real `.DZT` and `.DZG` files are **never committed**. DZT headers can carry GPS,
 and DZG files contain per-trace coordinates; publishing archaeological site
 locations is not reversible. The same holds for every other instrument's files
 (Sensors & Software `.DT1`, `.HD` and `.GPS`; MALÅ `.rd3`, `.rd7`, `.rad`,
-`.cor` and `.mrk`; SEG-Y), which the `.gitignore` excludes by extension anywhere
+`.cor`, `.mrk` and `.srd`; SEG-Y), which the `.gitignore` excludes by extension anywhere
 in the tree. Local development data goes in
 `packages/nsgeo-core/tests/data/local/`, which is gitignored. Committed fixtures
 are synthetic, or truncated and coordinate-scrubbed after inspection.
