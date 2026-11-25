@@ -106,7 +106,7 @@ stay exactly where they are.
 | **Open site…** | Opens an existing site by its `survey.nsgeo.json` file. |
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
-| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: DZT files placed by a grid's tapes (see [Step 3](#step-3-import-dzt-files)), or placed along their RTK GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
+| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: GPR files placed by a grid's tapes (see [Step 3](#step-3-import-radar-files)), or placed along their RTK GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
@@ -214,9 +214,10 @@ processing, a pick and slices.
 Click **New site…** and choose the empty folder. nsgeo writes `survey.nsgeo.json`
 into it, and the site appears in **nsgeo Survey** under the folder's name.
 
-Now copy your DZT files into the site folder. A subfolder is fine. Keep each
-file's DZX file beside it, so its marks are read too. Keeping the DZT files inside
-the site folder lets the whole site move as one folder (see
+Now copy your radar files into the site folder. A subfolder is fine. Keep each
+DZT's DZX file beside it, so its marks are read too. Keep each DT1's HD file
+beside it as well: the HD is the DT1's header, and nsgeo cannot read a DT1
+without it. Keeping the radar files inside the site folder lets the whole site move as one folder (see
 [Where your data lives](#4-where-your-data-lives)).
 
 ### Step 2: Place a grid
@@ -309,7 +310,7 @@ site folder's name. The group goes in at the top of the Layers panel, above any
 imagery already open, with picks over marks over lines over grid outlines. If
 you move the group, it stays where you put it.
 
-### Step 3: Import DZT files
+### Step 3: Import radar files
 
 Click **Add data ▾**, then **GPR…** (or right-click the grid, then **Add GPR
 data…**), and leave **Place lines by** on **Grid**. The toolbar button opens on
@@ -331,7 +332,9 @@ log beside them, a note beside the switch says how many.
    wheel read long or short; it greys out **Start along**, because a fitted line starts
    on the grid's edge. It is off by default, so lines run long or short on
    purpose stay as recorded.
-3. Click **Add files…** and choose the DZT files. Each file gets a row, with
+3. Click **Add files…** and choose the radar files: GSSI DZT files, or
+   Sensors & Software DT1 files (each with its HD beside it). The file list
+   shows both kinds at once, or one kind at a time. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
@@ -339,7 +342,11 @@ log beside them, a note beside the switch says how many.
    a redone line moves the later files up into its place, unless you have edited
    them by hand. The **Note** column flags a file whose header dielectric is
    outside 1–81, which no soil has. Such a line still imports, but its depths
-   need a grid or line velocity.
+   need a grid or line velocity. A DT1's header has no dielectric at all, so
+   every DT1 row says so. The column also passes on anything else the file's
+   header says, such as a DT1 with no time zero in it. A CMP sounding (a DT1
+   whose header calls it CMP or WARR) is listed but cannot be ticked: it
+   measures velocity at one place, so it is not a line to place.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
    Survey**. They are drawn as thin dashed lines in the grid's colour, and are
    hidden when you zoom out far enough that they would run together (beyond
@@ -429,7 +436,9 @@ their own. Switching keeps the files you have added, so you do not add them
 again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
-   with the same name. A row shows the number of traces, how many fixes were RTK
+   with the same name. GPS placement reads GSSI DZG logs only for now: a DT1
+   added here is refused with **no GPS log read for this format yet**; place it
+   by Grid instead. A row shows the number of traces, how many fixes were RTK
    fixed, and how long the track runs without one (**Without RTK**).
 2. If the site has no coordinate system yet, nsgeo picks one from where the
    first line lies, and the dialog says which. Every later import goes into that
