@@ -21,7 +21,7 @@ import numpy as np
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.io.dzg import RTK_FIXED, DzgLog
-from nsgeo.io.dzt import DztHeader
+from nsgeo.io.header import RadarHeader
 
 ToXY = Callable[[np.ndarray, np.ndarray], "tuple[np.ndarray, np.ndarray]"]
 """(lon, lat) in degrees -> (x, y) in metres."""
@@ -136,7 +136,7 @@ class TrackPlacement:
 
     # -- the run-on past each end ------------------------------------------------
 
-    def _end_step(self, header: DztHeader, a: TrackFix, b: TrackFix) -> float:
+    def _end_step(self, header: RadarHeader, a: TrackFix, b: TrackFix) -> float:
         """Metres per trace beyond the end anchor `a`, whose neighbour anchor is `b`."""
         spm = header.traces_per_metre
         if spm > 0:
@@ -158,7 +158,7 @@ class TrackPlacement:
         assert best is not None
         return np.array([best.x - end.x, best.y - end.y]) / best_d
 
-    def _ends(self, header: DztHeader) -> tuple[tuple[TrackFix, np.ndarray, float], ...]:
+    def _ends(self, header: RadarHeader) -> tuple[tuple[TrackFix, np.ndarray, float], ...]:
         a = self.anchors()
         first_dir = self._heading(a[0], list(a[1:]))
         last_dir = self._heading(a[-1], list(reversed(a[:-1])))
@@ -167,7 +167,7 @@ class TrackPlacement:
             (a[-1], last_dir, self._end_step(header, a[-1], a[-2])),
         )
 
-    def positions(self, n_traces: int, header: DztHeader) -> np.ndarray:
+    def positions(self, n_traces: int, header: RadarHeader) -> np.ndarray:
         """(n_traces, 2) unshifted: on the anchor segments between anchors, and on
         straight runs at the heading beyond the first and last."""
         a = self.anchors()
@@ -187,7 +187,7 @@ class TrackPlacement:
             pos[after] = np.array([last.x, last.y]) - fwd[:, None] * last_dir
         return pos
 
-    def end_runs(self, n_traces: int, header: DztHeader) -> tuple[float, float]:
+    def end_runs(self, n_traces: int, header: RadarHeader) -> tuple[float, float]:
         """Metres placed before the first anchor and after the last."""
         (first, _, first_step), (last, _, last_step) = self._ends(header)
         start = max(first.trace, 0) * first_step
@@ -196,19 +196,19 @@ class TrackPlacement:
 
     # -- the Placement protocol --------------------------------------------------
 
-    def _path(self, n_traces: int, header: DztHeader) -> tuple[np.ndarray, np.ndarray]:
+    def _path(self, n_traces: int, header: RadarHeader) -> tuple[np.ndarray, np.ndarray]:
         pos = self.positions(n_traces, header)
         if n_traces == 0:
             return pos, np.zeros(0)
         steps = np.hypot(*np.diff(pos, axis=0).T) if n_traces > 1 else np.zeros(0)
         return pos, np.concatenate([[0.0], np.cumsum(steps)])
 
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
+    def distance_along(self, n_traces: int, header: RadarHeader) -> np.ndarray:
         """(n_traces,) metres walked: the cumulative path length plus travel_shift."""
         return self._path(n_traces, header)[1] + self.travel_shift
 
     def trace_coords(
-        self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
+        self, n_traces: int, header: RadarHeader, frames: Mapping[str, Grid]
     ) -> np.ndarray:
         """(n_traces, 2) in the placement's CRS. `frames` is not needed."""
         pos, c = self._path(n_traces, header)

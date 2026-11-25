@@ -12,8 +12,11 @@ import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
+
+from nsgeo.io.header import RadarFileError, RadarHeader
 
 MINHEADSIZE = 1024
 
@@ -38,29 +41,24 @@ _CENTRES = {8: 1 << 7, 16: 1 << 15, 32: 0}
 TRACE_HEADER_SAMPLES = 2
 
 
-class DztError(Exception):
+class DztError(RadarFileError):
     """Raised when a DZT file is malformed or uses an unsupported variant."""
 
 
 @dataclass(frozen=True)
-class DztHeader:
+class DztHeader(RadarHeader):
+    """A DZT header: the shared fields (`RadarHeader`) plus what this reader needs.
+
+    `notes` is always empty and `not_a_profile` always "": nothing in a DZT
+    header calls for either yet."""
+
+    format_name: ClassVar[str] = "GSSI DZT"
+
     tag: int
-    n_samples: int
     bits: int
-    n_channels: int
     data_offset: int
     samples_per_second: float
-    traces_per_metre: float
-    range_ns: float
-    position_ns: float
-    epsr: float
-    antenna: str
     zero: int
-
-    @property
-    def dt_ns(self) -> float:
-        """Sample interval in nanoseconds."""
-        return self.range_ns / self.n_samples
 
     @property
     def bytes_per_sample(self) -> int:
@@ -137,6 +135,8 @@ def parse_header(raw: bytes) -> DztHeader:
         position_ns=position,
         epsr=epsr,
         antenna=antenna,
+        notes=(),
+        not_a_profile="",
         zero=zero,
     )
 

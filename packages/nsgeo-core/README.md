@@ -19,7 +19,7 @@ between minor releases.
 
 ### `nsgeo.io`
 
-DZT, DZX and DZG readers.
+Radar readers (GSSI DZT, through one shared header), and the DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
@@ -27,18 +27,26 @@ DZT, DZX and DZG readers.
 | `DzgFix` | One GPS fix: its DZT trace, time, position, quality, satellites, HDOP, altitude and geoid separation. |
 | `DzgLog` | The fixes of a DZG in file order, with counts of dropped and unpaired sentences. |
 | `DztError` | Raised when a DZT file is malformed or unsupported. |
-| `DztHeader` | The parsed DZT header. |
+| `DztHeader` | The parsed DZT header: a `RadarHeader` with the DZT reader's own fields. |
 | `DzxError` | Raised when a DZX sidecar exists but cannot be parsed. |
 | `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
+| `FORMATS` | The registered radar formats, in the order the import lists them. |
 | `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
+| `RadarFileError` | Raised when a radar file is malformed, unsupported, or missing a companion file. |
+| `RadarFormat` | One registered format: its name, extensions and three readers. |
+| `RadarHeader` | The header every radar format shares: sample axis, time zero, spacing, dielectric, antenna, import notes. |
+| `UnsupportedFormat` | Raised for a file whose extension no registered format reads. |
+| `companion` | The file beside a radar file with its stem and a given suffix, in the spelling on disk. |
 | `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
+| `format_for` | The registered format that reads a path, by its extension in any case. |
 | `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
-| `read_header` | Read only the header, cheaply. |
-| `read_samples` | Read all samples as (channels, samples, traces). |
+| `read_header` | Read only the header, cheaply, of any registered format, picked by the extension. |
+| `read_samples` | Read all samples of any registered format as (channels, samples, traces). |
 | `sidecar_for` | The DZX beside a DZT, or the path itself if it is one; None when there is none. |
-| `trace_count` | Number of traces, from the file size. |
+| `supported_extensions` | Every registered extension, lower case with the dot. |
+| `trace_count` | Number of traces of any registered format, checked against the file size. |
 
 ### `nsgeo.model`
 

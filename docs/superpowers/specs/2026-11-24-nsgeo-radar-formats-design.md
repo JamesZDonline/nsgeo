@@ -134,10 +134,13 @@ they will go.
   keeps `tag`, `bits`, `zero`, `data_offset`, `samples_per_second`). Why subclass, not wrap:
   - Every `line.header.epsr`-style read keeps working unchanged.
   - `Placement`, `GridPlacement`, `TrackPlacement`, `MeasureLine`, `destagger_job` and
-    `add_step_dialog.header_facts` annotate `DztHeader`, and the unmerged M19 branch changes
-    `placement.py`. Those annotations stay true for DZT lines and harmless for the rest, so M21a
-    does not have to touch them and M19 does not have to change to merge. A sweep after both
-    retypes them as `RadarHeader`.
+    `add_step_dialog.header_facts` annotated `DztHeader`. *(Corrected 2026-11-24, building
+    M21a: this said the annotations could stay, "true for DZT lines and harmless for the rest".
+    They are not harmless: once `Line.header` is a `RadarHeader`, mypy rejects passing it where a
+    `DztHeader` is declared, and a cast or ignore would hide the hole the registry's type check
+    closes. M21a retypes them all as `RadarHeader`. They read only the shared fields. The cost is
+    a small conflict on those signature lines in `placement.py` for whichever of M21a and M19
+    merges second.)*
   - Python 3.9 is supported, so `kw_only` dataclasses are not available. The base therefore has
     no defaulted fields, so subclasses can add required ones. The format's name is a `ClassVar`
     on each subclass, not a field.
@@ -276,8 +279,8 @@ Each plan is 3–5 tasks and has its own walkthrough.
 
 **Other work in flight** (measured 2026-11-24 against main at `f8374ed4`). M17c changes none of
 M21a's files. M19 (unmerged) changes `placement.py` (+29), `model/survey.py` (+36) and two lines
-of `import_dialog.py`. M21a touches `survey.py`'s imports and annotations, not its body, and does
-not touch `placement.py` (C1), so whichever merges second has a small rebase. Nothing has to merge
+of `import_dialog.py`. M21a touches `survey.py`'s imports and annotations, not its body, and only
+the header annotations in `placement.py` (C1), so whichever merges second has a small rebase. Nothing has to merge
 before M21a starts.
 
 ## 9. Testing
@@ -298,7 +301,6 @@ before M21a starts.
 
 - **A pulseEKKO `.GPS` reader**, when a file arrives (M21d covers `.cor` and RadExplorer).
 - **Marks** per format (C11).
-- **Retyping** the `DztHeader` annotations (C1) as `RadarHeader`, once M19 has merged.
 - **More formats:** the `.gpr` files once their instrument is known; ReflexW, IDS `.dt`, Impulse
   Radar and Utsi when files arrive; other SEG-Y flavours (C9).
 

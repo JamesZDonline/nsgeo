@@ -45,7 +45,7 @@ from nsgeo.destagger.profiles import (
     time_window,
 )
 from nsgeo.geometry import GridPlacement
-from nsgeo.io.dzt import DztHeader
+from nsgeo.io.header import RadarHeader
 
 __all__ = [
     "AxisResult",
@@ -87,7 +87,7 @@ class MeasureLine:
     key: str
     bins: EnvelopeBins
     placement: GridPlacement  # as the table shows it now; travel_shift is ignored (C1)
-    header: DztHeader  # positions: replace(placement, travel_shift=0.0).distance_along(...)
+    header: RadarHeader  # positions: replace(placement, travel_shift=0.0).distance_along(...)
 
 
 @dataclass(frozen=True)

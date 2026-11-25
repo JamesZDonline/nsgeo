@@ -18,7 +18,8 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.geometry.track import TrackPlacement
-from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.io.formats import read_header, read_samples, trace_count
+from nsgeo.io.header import RadarHeader
 from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
@@ -38,7 +39,7 @@ class Profile:
     concern, done with `np.testing`."""
 
     data: np.ndarray
-    header: DztHeader
+    header: RadarHeader
 
     @property
     def n_samples(self) -> int:
@@ -80,7 +81,7 @@ class Line:
     concern, done field by field."""
 
     path: Path
-    header: DztHeader
+    header: RadarHeader
     placement: Placement
     n_traces: int
     velocity: VelocityModel | None = None

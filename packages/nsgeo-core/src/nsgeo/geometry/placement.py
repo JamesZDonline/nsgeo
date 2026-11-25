@@ -15,19 +15,19 @@ from typing import Protocol
 import numpy as np
 
 from nsgeo.geometry.grid import Grid
-from nsgeo.io.dzt import DztHeader
+from nsgeo.io.header import RadarHeader
 
 
 class Placement(Protocol):
     """How traces are positioned. Consumers use only these two methods and
     never learn which implementation they received."""
 
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
+    def distance_along(self, n_traces: int, header: RadarHeader) -> np.ndarray:
         """(n_traces,) metres along the line."""
         ...
 
     def trace_coords(
-        self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
+        self, n_traces: int, header: RadarHeader, frames: Mapping[str, Grid]
     ) -> np.ndarray:
         """(n_traces, 2) world coordinates."""
         ...
@@ -42,7 +42,7 @@ class GridPlacement:
     ("line 12") and is never used for geometry.
 
     `scale` is grid metres per metre the wheel recorded: 1.0 places the line
-    as recorded, 0.95 compresses it toward its start. The DZT header is left
+    as recorded, 0.95 compresses it toward its start. The file's header is left
     as recorded, so the correction is reversible (#3; placement corrections
     plan, call 1). `travel_shift` is metres, moving every trace forward along
     the line's own direction of travel. It is stored apart from `start_along`
@@ -69,7 +69,7 @@ class GridPlacement:
         if not math.isfinite(self.travel_shift):
             raise ValueError(f"travel_shift must be finite, got {self.travel_shift!r}")
 
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
+    def distance_along(self, n_traces: int, header: RadarHeader) -> np.ndarray:
         spm = header.traces_per_metre
         if not spm > 0:
             raise ValueError(
@@ -81,7 +81,7 @@ class GridPlacement:
         return self.start_along + self.direction * (self.scale * recorded + self.travel_shift)
 
     def trace_coords(
-        self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
+        self, n_traces: int, header: RadarHeader, frames: Mapping[str, Grid]
     ) -> np.ndarray:
         if self.grid_id not in frames:
             raise KeyError(f"no grid frame named {self.grid_id!r}")

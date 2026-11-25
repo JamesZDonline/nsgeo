@@ -28,7 +28,7 @@ from nsgeo.destagger import (
     one_way_result,
 )
 from nsgeo.geometry import GridPlacement
-from nsgeo.io import DztError, DztHeader, read_samples
+from nsgeo.io import DztError, RadarHeader, read_samples
 
 #: Names listed per group in the summary before "and {n} more" (P12).
 MAX_NAMES = 6
@@ -39,7 +39,7 @@ class JobLine:
     key: str
     label: str
     path: Path
-    header: DztHeader
+    header: RadarHeader
     placement: GridPlacement  # LineEdit.placed(frames) at press time
 
 
