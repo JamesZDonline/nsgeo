@@ -80,8 +80,13 @@ Eight lines from a GX450 HDR survey (an archived public dataset), each with `.ra
 - **No per-trace header.** `.rd3` is `SAMPLES` little-endian `int16` per trace, `.rd7` the same
   traces as `int32`. They hold identical traces at two resolutions (`.rd3` ±1.3e3, `.rd7` ±9e7);
   the sample interval is `1000 / FREQUENCY` ns (0.1953 ns), and `SAMPLES ×` that is `TIMEWINDOW`.
+  *(Measured 2026-11-25, planning M21b: every `.rd3` sample is exactly its `.rd7` sample shifted
+  right 16 bits, on all eight lines. The `.rd3` is the `.rd7`'s top half, not a rescaling.
+  `LAST TRACE` is the trace count, not a last index: both files of every line hold exactly that
+  many traces.)*
 - **`SIGNAL POSITION` is not time zero.** It is 102.73 on every line, but the measured first break
   is at sample 36–47 (7–9 ns). 102.73 matches neither as samples (20 ns) nor as ns.
+  *(The direct wave's envelope peak is at sample 43–58, 8.4–11.3 ns, measured 2026-11-25.)*
 - **Spacing:** `DISTANCE FLAG:1` with `DISTANCE INTERVAL` 0.496 m; `STOP POSITION / LAST TRACE`
   agrees.
 - **`.cor` is a GPS log:** tab-separated, one row per fix, about every other trace: trace number,
@@ -337,3 +342,32 @@ File and test names; where the shared companion lookup lives; whether `nsgeo.io.
   the line is placed at the header's step.
 - **Feet are converted:** `POSITION UNITS` of `ft` gives `1 / (step × 0.3048)` traces per metre.
   Any other unit gives 0, which the import already treats as time-triggered.
+
+## 14. M21b's calls (2026-11-25, with its plan)
+
+- **An `.rd3` reads as its samples shifted left 16 bits**, revising C5's "no scaling" for this one
+  case. §2's measurement shows the `.rd3` is the `.rd7` with its low 16 bits dropped, so the
+  shift puts both files of a line on one amplitude scale, and an `.rd3` line and an `.rd7` line on
+  one grid slice together without a 65,536× stripe. The values fit `int32` (32,767 × 65,536 <
+  2³¹). An `.rd3` with no `.rd7` (older RAMAC systems write only `.rd3`) loses nothing: every
+  amplitude is multiplied by the same constant.
+- **The time axis comes from `SAMPLES` and `FREQUENCY`.** `range_ns = SAMPLES × 1000 / FREQUENCY`.
+  `TIMEWINDOW`, when present, must agree to within 1 %, or the file is refused: a wrong time axis
+  would be silent everywhere downstream.
+- **Spacing:** `DISTANCE FLAG` 1 and `DISTANCE INTERVAL` above 0 give `1 / DISTANCE INTERVAL`.
+  `(STOP POSITION − START POSITION) / (LAST TRACE − 1)` is cross-checked, and more than 1 % apart
+  adds a note, as DT1's positions do. Distance-triggered with no interval gives 0 with a note. Any
+  other trigger gives 0, which the import already calls time-triggered.
+- **C4 is a registry field, not MALÅ code in the plugin.** `RadarFormat.prefer` lists extensions
+  that hold the same traces, best first (MALÅ: `.rd7`, `.rd3`). When one stem in one folder is
+  chosen in more than one of them, the import leaves all but the best unticked with a note, and
+  any of them can be ticked by hand. A preferred file that cannot be read does not untick the
+  other.
+- **Multichannel (C13) is detected two ways, neither verified against a real file**, since none is
+  in hand: a `.rad` with a `CHANNELS` or `NUMBER OF CH` key above 1, or a stem ending `_A<n>` with
+  another `_A<m>` of the same stem and extension beside it. The second is checked before the
+  `.rad` is looked for, because a multichannel set may have one `.rad` for all its channels. A
+  lone `…_A1.rd3` with its own single-channel `.rad` reads as one channel.
+- **Antenna** is `ANTENNAS` with MALÅ's trailing `=<n>` code removed (`GX450 HDR (v.1)`).
+  `epsr` is 0: the `.rad` has none, and the import's dielectric note asks for a velocity.
+- **GPS mode stays DZT-only**, and the `.cor`, `.mrk` and `.srd` are not read (C10, C11).
