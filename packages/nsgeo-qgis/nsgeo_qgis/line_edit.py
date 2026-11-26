@@ -33,6 +33,19 @@ REMOVED = "was removed from the site while the table was open"
 CHANGED_ELSEWHERE = "changed elsewhere while the table was open"
 
 
+def traverse_key(mag_key: str, row: int) -> str:
+    """The key of a magnetometer file's traverse: its file's key, then the 1-based row."""
+    return f"{mag_key}#{row + 1}"
+
+
+def traverse_row(key: str) -> int:
+    """The row `traverse_key` made `key` from. `ValueError` for any other key."""
+    head, sep, tail = key.rpartition("#")
+    if not sep or not head or not tail.isdecimal() or int(tail) < 1:
+        raise ValueError(f"{key!r} is not a traverse key")
+    return int(tail) - 1
+
+
 def length_along(grid: Grid, axis: str) -> float:
     """How far a line on `axis` can run: `size_y` for y lines, else `size_x`."""
     return grid.size_y if axis == "y" else grid.size_x
@@ -347,5 +360,7 @@ __all__ = [
     "same_placement",
     "span_m",
     "start_at_inset",
+    "traverse_key",
+    "traverse_row",
     "width_across",
 ]

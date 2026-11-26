@@ -644,6 +644,8 @@ class SurveyDock(QgsDockWidget):
             elif kind == "grid" and self._is_mag_grid(self.grid_id_of(item)):
                 gid = self.grid_id_of(item) or ""
                 menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
+                edit_lines = menu.addAction("Edit lines…", lambda: self._request_edit(gid, []))
+                edit_lines.setEnabled(self.session.mag_file_on(gid) is not None)
                 menu.addAction(
                     "Add magnetometer data…", lambda: self.mag_import_requested.emit(gid)
                 )
@@ -651,6 +653,9 @@ class SurveyDock(QgsDockWidget):
                 menu.addAction("Remove grid", lambda: self.remove_grid_action(gid))
             elif kind == "magfile":
                 mag_key = self.mag_key_of(item) or ""
+                # Worked out here, inside the guard, not when the action fires.
+                file_grid = self.session.mag_for_key(mag_key).grid_id
+                menu.addAction("Edit lines…", lambda: self._request_edit(file_grid, []))
                 menu.addAction(
                     "Remove file from site", lambda: self.remove_mag_file_action(mag_key)
                 )

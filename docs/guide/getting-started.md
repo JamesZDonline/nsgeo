@@ -1030,8 +1030,17 @@ grid and **Whole site** maps every magnetometer grid that holds a file. Choose
 the **Cell** size, the **Interpolation**, and the **Colours** and **Palette**.
 Clicking a magnetometer grid in **nsgeo Survey** shows it in the panel too.
 
-Exporting the magnetometer map, and destaggering magnetometer traverses, are
-not built yet.
+To destagger or stretch the traverses, right-click the grid (or its file) and
+choose **Edit lines…**. Each row is one traverse. Type a **Destagger** (m) or a
+**Scale**, or select rows and use the **Set** buttons, then click **OK**. A
+destagger moves a traverse along the way it was walked, so the traverses walked
+one way and the other move opposite ways: if features on neighbouring traverses
+are offset, try a quarter of a metre, one sign or the other. Only Scale and
+Destagger can be changed here, and Measure is not available for magnetometer
+grids yet. The map redraws with the new values.
+
+Exporting the magnetometer map, and Measure on a magnetometer grid, are not
+built yet.
 
 ---
 

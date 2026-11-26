@@ -1712,15 +1712,34 @@ def test_a_mag_grid_menu_offers_mag_data_not_gpr(mag_dock, answer_modal, message
     dock.mag_import_requested.connect(asked.append)
     grids = _mag_items(dock)
     menu = _right_click(dock, grids["M2"])
-    assert _texts(menu) == ["Edit grid…", "Add magnetometer data…", "Remove grid"]
+    assert _texts(menu) == ["Edit grid…", "Edit lines…", "Add magnetometer data…", "Remove grid"]
     assert menu.actions()[-2].isSeparator()
     _action(menu, "Add magnetometer data…").trigger()
     assert asked == ["M2"]
-    # The file row's one action.
+    # The file row's actions.
     menu = _right_click(dock, grids["M1"].child(0))
-    assert _texts(menu) == ["Remove file from site"]
+    assert _texts(menu) == ["Edit lines…", "Remove file from site"]
     # A GPR grid still offers GPR data.
     assert "Add GPR data…" in _texts(_right_click(dock, grids["G1"]))
+    assert message_log == []
+
+
+def test_a_mag_grid_and_its_file_offer_edit_lines(mag_dock, answer_modal, message_log):
+    session, dock = mag_dock
+    answer_modal(QMenu, "exec", None)
+    asked = []
+    dock.edit_lines_requested.connect(lambda gid, keys: asked.append((gid, keys)))
+    grids = _mag_items(dock)
+    menu = _right_click(dock, grids["M1"])
+    assert _texts(menu) == ["Edit grid…", "Edit lines…", "Add magnetometer data…", "Remove grid"]
+    assert _action(menu, "Edit lines…").isEnabled()
+    _action(menu, "Edit lines…").trigger()
+    assert asked == [("M1", [])]
+    menu = _right_click(dock, grids["M1"].child(0))
+    _action(menu, "Edit lines…").trigger()
+    assert asked[-1] == ("M1", [])
+    # Nothing to edit on the empty M2.
+    assert not _action(_right_click(dock, grids["M2"]), "Edit lines…").isEnabled()
     assert message_log == []
 
 

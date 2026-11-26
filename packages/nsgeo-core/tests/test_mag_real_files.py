@@ -158,3 +158,48 @@ def test_real_missing_blocks_are_blank_on_the_map():
         for cell, blank in ((0.125, 96), (0.25, 24), (0.5, 6)):
             _, out = grid_map(mag, grid, cell, FINISH)
             assert int(np.isnan(out).sum()) == blank, (name, cell)
+
+
+def _median_neighbour_lag(shift):
+    """The median |lag| (m), over neighbouring traverse pairs of example1, that best lines
+    the two up: both placed along positions are put on a 0.0625 m axis and correlated."""
+    import dataclasses
+
+    (path,) = [p for p in MAG_FILES if p.name == "example1.dat"]
+    grid = Grid("M", (0.0, 0.0), 0.0, 30.0, 30.0, CRS, 0.5, instrument="mag")
+    mag = MagFile.open(path, "M", MagSetup())
+    mag = dataclasses.replace(mag, shifts=(shift,) * mag.n_rows)
+    readings = mag.readings()
+    per_metre = mag.setup.readings_per_metre
+    along, series = [], []
+    for t in mag.traverses(grid):
+        pos = t.placement.along(mag.n_readings, per_metre)
+        row = t.walked(readings[t.row])
+        order = np.argsort(pos)
+        along.append(pos[order])
+        series.append(row[order])
+    step = 0.0625
+    axis = np.arange(0.0, 30.0, step)
+    lags = np.arange(-int(1.0 / step), int(1.0 / step) + 1)
+    found = []
+    for a, b in zip(range(len(series) - 1), range(1, len(series))):
+        x = np.interp(axis, along[a], np.nan_to_num(series[a]))
+        y = np.interp(axis, along[b], np.nan_to_num(series[b]))
+        x, y = x - x.mean(), y - y.mean()
+        best = max(
+            lags,
+            key=lambda k: np.corrcoef(
+                x[max(0, k) : len(x) + min(0, k)], y[max(0, -k) : len(y) - max(0, k)]
+            )[0, 1],
+        )
+        found.append(abs(best) * step)
+    return float(np.median(found))
+
+
+def test_a_quarter_metre_destagger_lines_up_real_neighbours():
+    unshifted = _median_neighbour_lag(0.0)
+    plus = _median_neighbour_lag(0.25)
+    minus = _median_neighbour_lag(-0.25)
+    print(f"example1 median |lag|: 0 -> {unshifted}, +0.25 -> {plus}, -0.25 -> {minus}")
+    assert unshifted >= 0.375
+    assert min(plus, minus) <= 0.125

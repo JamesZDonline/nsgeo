@@ -51,6 +51,7 @@ from nsgeo_qgis.line_edit import (
     length_along,
     same_placement,
     span_m,
+    traverse_row,
     width_across,
 )
 from nsgeo_qgis.scene3d_plan import scene_stretch
@@ -565,6 +566,48 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.mag_changed.emit()
         return old
+
+    def edit_traverses(self, grid_id: str, edits: Sequence[LineEdit]) -> EditOutcome:
+        """Write each edit's scale and destagger into `grid_id`'s file, one
+        correction per traverse, as one change (mag plan B, Q6). A traverse is
+        skipped, and named, when the grid no longer holds that file
+        (`REMOVED`) or the traverse is no longer the one the table saw
+        (`CHANGED_ELSEWHERE`). The file is swapped once, through
+        `set_mag_file`, and only when something changed. `KeyError` for an
+        unknown grid."""
+        self._require_site()
+        grid = self.grid(grid_id)
+        mag = self.mag_file_on(grid_id)
+        keys = [e.key for e in edits]
+        if len(set(keys)) != len(keys):
+            raise ValueError("a traverse may be edited only once per change")
+        skipped: list[Skipped] = []
+        scales = list(mag.scales) if mag is not None else []
+        shifts = list(mag.shifts) if mag is not None else []
+        now = mag.traverses(grid) if mag is not None else ()
+        prefix = self.mag_key(mag) + "#" if mag is not None else None
+        changed: list[str] = []
+        for edit in edits:
+            label = edit.seen.label or edit.key
+            try:
+                row = traverse_row(edit.key)
+            except ValueError:
+                row = -1
+            if mag is None or prefix is None or not edit.key.startswith(prefix):
+                skipped.append(Skipped(edit.key, label, REMOVED))
+                continue
+            if not 0 <= row < len(now) or not same_placement(now[row].placement, edit.seen):
+                skipped.append(Skipped(edit.key, label, CHANGED_ELSEWHERE))
+                continue
+            placed = edit.placed(self._require_site().frames)
+            if not edit.changes(self._require_site().frames):
+                continue
+            scales[row] = placed.scale
+            shifts[row] = placed.travel_shift
+            changed.append(edit.key)
+        if changed and mag is not None:
+            self.set_mag_file(dataclasses.replace(mag, scales=tuple(scales), shifts=tuple(shifts)))
+        return EditOutcome(changed=tuple(changed), skipped=tuple(skipped))
 
     def remove_mag_file(self, key: str) -> None:
         site = self._require_site()

@@ -70,6 +70,7 @@ from nsgeo_qgis.line_edit import (
     placement_note,
     same_placement,
     span_m,
+    traverse_key,
     width_across,
 )
 from nsgeo_qgis.refine import Refiner
@@ -123,6 +124,16 @@ MEASURE_TIP = (
     "Destagger box gets the grid's value and each selected row its line's value. "
     "Nothing changes until OK."
 )
+MAG_SCALE_TIP = (
+    "Grid metres per metre walked. 1 leaves the traverse as recorded; type a stretch "
+    "when the walk was shorter or longer than the grid."
+)
+MAG_DESTAGGER_TIP = (
+    DESTAGGER_TIP + " On a magnetometer grid each traverse moves along the way it was "
+    "walked, so outbound and return traverses move opposite ways."
+)
+# A magnetometer row can change only these two cells.
+MAG_EDITABLE = {COL_SCALE, COL_DESTAGGER}
 GPS_TIP = "A GPS line is placed by its track: Offset, Dir, Start and Scale do not apply."
 GPS_SKIP = "Left {n} GPS line(s) alone: {what} applies to tape lines only."
 # The cells a GPS row cannot change: the track places it, not a tape.
@@ -207,15 +218,33 @@ class EditLinesDialog(QDialog):
         self._per_metre: dict[str, float] = {}
         self._picks: dict[str, int] = {}
         self._grid_ids: list[str] = []
+        # A magnetometer grid lists its file's traverses, not lines (mag plan B, Q2-Q4).
+        self._mag = False
         # Measure (#159): created before the first _refresh, which reads `busy`.
         self._measurer = Refiner(self)
         self._bins: dict[str, EnvelopeBins] = {}
         self._run: _MeasureRun | None = None
         self._progress = QTimer(self)
         self._progress.timeout.connect(self._show_progress)
+        with contextlib.suppress(KeyError):  # the grid is gone: an empty table, _refresh says why
+            self._mag = session.grid(grid_id).instrument == "mag" if session.site else False
+        self._editable = MAG_EDITABLE if self._mag else EDITABLE
         try:
-            self._grid_ids = [g.id for g in session.gpr_grids()] if session.site else []
-            for key in session.keys_on_grid(grid_id):
+            if self._mag:
+                self._grid_ids = [grid_id]
+                mag = session.mag_file_on(grid_id)
+                if mag is not None:
+                    mag_key = session.mag_key(mag)
+                    for t in mag.traverses(session.grid(grid_id)):
+                        key = traverse_key(mag_key, t.row)
+                        self._order.append(key)
+                        self._edits[key] = LineEdit(key, seen=t.placement)
+                        self._traces[key] = mag.n_readings
+                        self._per_metre[key] = mag.setup.readings_per_metre
+                        self._picks[key] = 0
+            else:
+                self._grid_ids = [g.id for g in session.gpr_grids()] if session.site else []
+            for key in [] if self._mag else session.keys_on_grid(grid_id):
                 line = session.line_for_key(key)
                 self._order.append(key)
                 if isinstance(line.placement, TrackPlacement):
@@ -230,7 +259,9 @@ class EditLinesDialog(QDialog):
         except (KeyError, ProjectError):
             pass  # an empty table; _refresh says why
 
-        self.setWindowTitle(f"Edit lines · {grid_id}")
+        self.setWindowTitle(
+            f"Edit lines · {grid_id} · magnetometer" if self._mag else f"Edit lines · {grid_id}"
+        )
         # The bulk panel grew by two rows, so open taller and let the table take
         # the extra height (placement corrections plan, Ruling C1), but never
         # taller than 90% of the screen, so OK and Cancel clear a taskbar.
@@ -255,12 +286,14 @@ class EditLinesDialog(QDialog):
 
         self.table = QTableWidget(len(self._order), len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
-        self.table.horizontalHeaderItem(COL_SCALE).setToolTip(SCALE_TIP)
-        self.table.horizontalHeaderItem(COL_DESTAGGER).setToolTip(DESTAGGER_TIP)
+        scale_tip = MAG_SCALE_TIP if self._mag else SCALE_TIP
+        destagger_tip = MAG_DESTAGGER_TIP if self._mag else DESTAGGER_TIP
+        self.table.horizontalHeaderItem(COL_SCALE).setToolTip(scale_tip)
+        self.table.horizontalHeaderItem(COL_DESTAGGER).setToolTip(destagger_tip)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
-        for r in range(len(self._order)):
+        for r in range(0 if self._mag else len(self._order)):
             combo = _PopupFocusCombo(self._focus_table)
             combo.addItems(self._grid_ids)
             combo.currentTextChanged.connect(lambda text, r=r: self._on_grid_picked(r, text))
@@ -282,7 +315,8 @@ class EditLinesDialog(QDialog):
         self.set_start_button.clicked.connect(lambda: self.set_start(self.start_spin.value()))
         self.snap_button = QPushButton("Snap to grid edge")
         self.snap_button.clicked.connect(self.snap_to_edge)
-        start_row.addWidget(QLabel("Start (m)"))
+        start_label = QLabel("Start (m)")
+        start_row.addWidget(start_label)
         start_row.addWidget(self.start_spin)
         start_row.addWidget(self.set_start_button)
         start_row.addWidget(self.snap_button)
@@ -300,7 +334,7 @@ class EditLinesDialog(QDialog):
         self.fit_button.clicked.connect(self.fit_to_edges)
         scale_label = QLabel("Scale")
         for w in (scale_label, self.scale_spin):
-            w.setToolTip(SCALE_TIP)
+            w.setToolTip(scale_tip)
         self.fit_button.setToolTip(SCALE_TIP)
         scale_row.addWidget(scale_label)
         scale_row.addWidget(self.scale_spin)
@@ -320,7 +354,7 @@ class EditLinesDialog(QDialog):
         )
         destagger_label = QLabel("Destagger (m)")
         for w in (destagger_label, self.destagger_spin):
-            w.setToolTip(DESTAGGER_TIP)
+            w.setToolTip(destagger_tip)
         destagger_row.addWidget(destagger_label)
         destagger_row.addWidget(self.destagger_spin)
         destagger_row.addWidget(self.set_destagger_button)
@@ -337,7 +371,8 @@ class EditLinesDialog(QDialog):
         self.offset_spin.setValue(0.5)
         self.shift_button = QPushButton("Shift")
         self.shift_button.clicked.connect(lambda: self.shift_offset(self.offset_spin.value()))
-        offset_row.addWidget(QLabel("Shift offsets by (m)"))
+        offset_label = QLabel("Shift offsets by (m)")
+        offset_row.addWidget(offset_label)
         offset_row.addWidget(self.offset_spin)
         offset_row.addWidget(self.shift_button)
         offset_row.addStretch(1)
@@ -350,12 +385,34 @@ class EditLinesDialog(QDialog):
         self.move_button = QPushButton("Move")
         self.move_button.clicked.connect(lambda: self.move_to(self.grid_combo.currentText()))
         other_row.addWidget(self.flip_button)
-        other_row.addWidget(QLabel("Move to grid"))
+        move_label = QLabel("Move to grid")
+        other_row.addWidget(move_label)
         other_row.addWidget(self.grid_combo)
         other_row.addWidget(self.move_button)
         other_row.addStretch(1)
         bulk.addLayout(other_row)
         layout.addWidget(self.bulk)
+        if self._mag:
+            # Only Scale and Destagger apply to a traverse (Q4). Measure is M19b; Fit is left
+            # out because a return traverse's start sits at the far end.
+            for w in (
+                self.up_button,
+                self.down_button,
+                start_label,
+                self.start_spin,
+                self.set_start_button,
+                self.snap_button,
+                offset_label,
+                self.offset_spin,
+                self.shift_button,
+                self.fit_button,
+                self.measure_button,
+                self.flip_button,
+                move_label,
+                self.grid_combo,
+                self.move_button,
+            ):
+                w.hide()
 
         self.status = QLabel("")
         self.status.setWordWrap(True)  # a long summary wraps, not widens the dialog
@@ -465,7 +522,8 @@ class EditLinesDialog(QDialog):
     def _update_panel(self) -> None:
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
-        self.bulk.setTitle(f"Change the {len(sel)} selected line{'s' if len(sel) != 1 else ''}")
+        noun = "traverse" if self._mag else "line"
+        self.bulk.setTitle(f"Change the {len(sel)} selected {noun}{'s' if len(sel) != 1 else ''}")
         # P8: Stop stays reachable with nothing selected while a measure runs.
         self.bulk.setEnabled(bool(sel) or self._measurer.busy)
         self.measure_button.setText("Stop" if self._measurer.busy else "Measure")
@@ -776,6 +834,8 @@ class EditLinesDialog(QDialog):
             self._say(note)
         elif n == 0:
             self._say("")
+        elif self._mag:
+            self._say(f"{n} traverse{'s' if n != 1 else ''} changed")
         else:
             self._say(
                 f"{n} line{'s' if n != 1 else ''} changed · "
@@ -868,18 +928,22 @@ class EditLinesDialog(QDialog):
                         COL_TRACES: str(self._traces[key]),
                         COL_LENGTH: f"{length:.2f}" if length > 0 else "",
                         COL_PICKS: str(self._picks[key]),
-                        COL_NOTE: gone_note or placement_note(p, frames[p.grid_id]),
+                        COL_NOTE: gone_note or self._note(p, frames[p.grid_id]),
                     }
+                    if self._mag:
+                        values[COL_GRID] = p.grid_id
                 is_gps = isinstance(p, TrackPlacement)
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
-                    if col not in EDITABLE or (is_gps and col in GPS_BLANK):
+                    if col not in self._editable or (is_gps and col in GPS_BLANK):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if is_gps and col in GPS_BLANK:
                         item.setToolTip(GPS_TIP)
                     if differs.get(col):
                         item.setBackground(CHANGED)
                     self.table.setItem(r, col, item)
+                if self._mag:
+                    continue
                 combo = self._combos[r]
                 combo.blockSignals(True)
                 combo.setCurrentText(edit.grid_id if gone else p.grid_id)
@@ -890,6 +954,17 @@ class EditLinesDialog(QDialog):
             self.table.resizeColumnsToContents()
         finally:
             self._updating = False
+
+    def _note(self, p: GridPlacement, grid: Grid) -> str:
+        """The Note cell. A traverse starts half a reading inside its edge by
+        construction, so only its scale is judged."""
+        if not self._mag:
+            return placement_note(p, grid)
+        length = length_along(grid, p.axis)
+        at_edge = dataclasses.replace(
+            p, offset=0.0, start_along=0.0 if p.direction == 1 else length
+        )
+        return placement_note(at_edge, grid)
 
     def _focus_table(self, _index: int = 0) -> None:
         """After a grid is picked, focus goes back to the table (#176)."""
@@ -931,7 +1006,7 @@ class EditLinesDialog(QDialog):
         if self._updating:
             return
         r, c = item.row(), item.column()
-        if not 0 <= r < len(self._order) or c not in EDITABLE:
+        if not 0 <= r < len(self._order) or c not in self._editable:
             return
         key = self._order[r]
         text = item.text().strip()
@@ -1029,6 +1104,10 @@ class EditLinesDialog(QDialog):
         try:
             frames = self._frames()
             edits: list[Any] = [e for e in self._edits.values() if self._changes(e, frames)]
+            if self._mag:
+                self.outcome = self.session.edit_traverses(self.grid_id, edits)
+                super().accept()
+                return
             self.outcome = self.session.edit_lines(edits, grid_id=self.grid_id, order=self.keys())
         except (KeyError, ValueError, ProjectError) as exc:
             self._say(str(exc))
