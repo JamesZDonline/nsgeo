@@ -229,14 +229,16 @@ class LineEdit:
 @dataclass(frozen=True)
 class TrackEdit:
     """A GPS line's requested change against the placement the table `seen`.
-    `None` means unchanged. Only the grid, label and destagger can change; the
-    track never moves (spec C3)."""
+    `None` means unchanged. Only the grid, label, destagger and (for a line
+    placed without RTK) smoothing can change; the fixes never move (spec C3,
+    radar formats spec §16)."""
 
     key: str
     seen: TrackPlacement
     label: str | None = None
     grid_id: str | None = None
     travel_shift: float | None = None
+    smooth_m: float | None = None
 
     def placed(self, frames: Mapping[str, Grid]) -> TrackPlacement:
         """`seen` with the set fields applied. `KeyError` for a grid that is
@@ -249,6 +251,7 @@ class TrackEdit:
             grid_id=p.grid_id if self.grid_id is None else self.grid_id,
             label=p.label if self.label is None else self.label,
             travel_shift=p.travel_shift if self.travel_shift is None else self.travel_shift,
+            smooth_m=p.smooth_m if self.smooth_m is None else self.smooth_m,
         )
 
     def moved_to(self, grid_id: str, frames: Mapping[str, Grid]) -> TrackEdit:
@@ -262,6 +265,7 @@ class TrackEdit:
             p.grid_id == self.seen.grid_id
             and p.label == self.seen.label
             and abs(p.travel_shift - self.seen.travel_shift) <= SAME_M
+            and abs(p.smooth_m - self.seen.smooth_m) <= SAME_M
         )
 
 

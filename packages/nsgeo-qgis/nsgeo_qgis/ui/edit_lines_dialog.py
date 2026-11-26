@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.destagger import EnvelopeBins
-from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
+from nsgeo.geometry import ANCHOR_ALL, Grid, GridPlacement, TrackPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -83,13 +83,14 @@ from nsgeo_qgis.ui.wheel_guard import guard_wheel
     COL_START,
     COL_SCALE,
     COL_DESTAGGER,
+    COL_SMOOTH,
     COL_GRID,
     COL_ALONG,
     COL_TRACES,
     COL_LENGTH,
     COL_PICKS,
     COL_NOTE,
-) = range(12)
+) = range(13)
 HEADERS = [
     "Label",
     "Offset (m)",
@@ -97,6 +98,7 @@ HEADERS = [
     "Start (m)",
     "Scale",
     "Destagger (m)",
+    "Smooth (m)",
     "Grid",
     "Along",
     "Traces",
@@ -105,7 +107,7 @@ HEADERS = [
     "Note",
 ]
 # Grid is a combo box in its cell, not an editable item.
-EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_SCALE, COL_DESTAGGER}
+EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_SCALE, COL_DESTAGGER, COL_SMOOTH}
 SCALE_TIP = (
     "Grid metres per metre the wheel recorded. Fit to grid edges sets it so the "
     "line's first and last traces sit on the grid's two edges. 1 leaves the line "
@@ -124,6 +126,11 @@ MEASURE_TIP = (
     "Nothing changes until OK."
 )
 GPS_TIP = "A GPS line is placed by its track: Offset, Dir, Start and Scale do not apply."
+SMOOTH_TIP = (
+    "Lines placed without RTK only: averages each GPS fix with those within half this "
+    "distance along the track. 0 places them as recorded."
+)
+SMOOTH_NA_TIP = "Smoothing is for GPS lines placed without RTK."
 GPS_SKIP = "Left {n} GPS line(s) alone: {what} applies to tape lines only."
 # The cells a GPS row cannot change: the track places it, not a tape.
 GPS_BLANK = (COL_OFFSET, COL_DIR, COL_START, COL_SCALE)
@@ -257,6 +264,7 @@ class EditLinesDialog(QDialog):
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.horizontalHeaderItem(COL_SCALE).setToolTip(SCALE_TIP)
         self.table.horizontalHeaderItem(COL_DESTAGGER).setToolTip(DESTAGGER_TIP)
+        self.table.horizontalHeaderItem(COL_SMOOTH).setToolTip(SMOOTH_TIP)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
@@ -830,12 +838,14 @@ class EditLinesDialog(QDialog):
                     differs = {
                         COL_LABEL: p.label != seen.label,
                         COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
+                        COL_SMOOTH: abs(p.smooth_m - seen.smooth_m) > SAME_M,
                         COL_GRID: gone or p.grid_id != seen.grid_id,
                     }
                     values = {
                         COL_LABEL: p.label or Path(key).stem,
                         **dict.fromkeys(GPS_BLANK, "—"),
                         COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_SMOOTH: f"{p.smooth_m:.1f}" if p.anchor_on == ANCHOR_ALL else "—",
                         COL_GRID: edit.grid_id if gone else p.grid_id,
                         COL_ALONG: "GPS",
                         COL_TRACES: str(self._traces[key]),
@@ -863,6 +873,7 @@ class EditLinesDialog(QDialog):
                         COL_START: f"{p.start_along:.2f}",
                         COL_SCALE: f"{p.scale:.4f}",
                         COL_DESTAGGER: f"{p.travel_shift:.2f}",
+                        COL_SMOOTH: "—",
                         COL_GRID: edit.grid_id if gone else p.grid_id,
                         COL_ALONG: p.axis,
                         COL_TRACES: str(self._traces[key]),
@@ -871,10 +882,17 @@ class EditLinesDialog(QDialog):
                         COL_NOTE: gone_note or placement_note(p, frames[p.grid_id]),
                     }
                 is_gps = isinstance(p, TrackPlacement)
+                smoothable = isinstance(p, TrackPlacement) and p.anchor_on == ANCHOR_ALL
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
-                    if col not in EDITABLE or (is_gps and col in GPS_BLANK):
+                    if (
+                        col not in EDITABLE
+                        or (is_gps and col in GPS_BLANK)
+                        or (col == COL_SMOOTH and not smoothable)
+                    ):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if col == COL_SMOOTH and not smoothable:
+                        item.setToolTip(SMOOTH_NA_TIP)
                     if is_gps and col in GPS_BLANK:
                         item.setToolTip(GPS_TIP)
                     if differs.get(col):
@@ -941,6 +959,20 @@ class EditLinesDialog(QDialog):
             note = None
             if isinstance(edit, TrackEdit) and c in GPS_BLANK:
                 self._refresh()  # back to "—": a TrackEdit takes only Label, Destagger, Grid
+                return
+            if c == COL_SMOOTH:
+                if not (isinstance(edit, TrackEdit) and edit.seen.anchor_on == ANCHOR_ALL):
+                    self._refresh()  # back to "—": smoothing is for lines without RTK
+                    return
+                try:
+                    smooth = float(text.replace(",", "."))
+                    if not math.isfinite(smooth) or smooth < 0:
+                        raise ValueError(text)
+                except ValueError:
+                    self._refresh(f"{item.text()!r} is not a smoothing of 0 m or more; unchanged")
+                    return
+                self._edits[key] = dataclasses.replace(edit, smooth_m=smooth)
+                self._refresh()
                 return
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
