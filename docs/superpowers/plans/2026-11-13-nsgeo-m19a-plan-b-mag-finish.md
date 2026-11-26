@@ -51,6 +51,12 @@
   - If a project layer already reads the chosen file, Export asks once.
   - On yes, that layer is removed before the file is written, because Windows refuses to overwrite a file a layer holds open, and the new layer takes its place.
   - On no, nothing is written.
+- **Q13 — Missing readings are never filled** (the author's ruling after Plan A's walkthrough, 2026-11-26).
+  - Plan A's map fills a missing run from its neighbours like any other empty cell. With the default kriging at 0.75 spacings (0.375 m), a 1.5 m run on one traverse keeps only its middle 0.75 m, one 0.125 m cell wide. On example4 and example6 that is 12 cells per grid, too small to see (walkthrough check M1).
+  - The rule: a cell is left blank (NaN) when its centre lies in a missing reading's **footprint**, a rectangle centred on the reading, half a traverse spacing either side across and half a reading interval (times the traverse's scale) either side along, half-open `[-h, +h)` on both axes. The mask is applied **after** `finish_slice`, so neither the fill nor the smoothing can reach into it. Normal gaps between good traverses are filled as before.
+  - The footprint uses the traverse's placement (shift and scale included), so a typed destagger or stretch from Task 1 moves the blank with its traverse.
+  - It holds for every interpolation method, None included, and reaches Whole site through each grid's map, unchanged by `mosaic`.
+  - Measured on the real files with the inferred layout and default finish: example4 and example6 each go from 12 blank cells to **96 at 0.125 m** (24 at 0.25 m, 6 at 0.5 m), 1.5 m² in total at every cell size, two 1.5 × 0.5 m blocks. example3's blank far side stops being filled about 0.375 m in along its edge.
 
 ## Global Constraints
 
@@ -110,12 +116,18 @@ These are as in Plan A: the same virtualenvs, `.venv-tools`, and real data linke
 3. **A setup that no longer fits.** For example a doubled spacing: Apply asks, and No changes nothing. Pinned by Task 2, `test_a_setup_that_does_not_fit_asks_and_no_changes_nothing`.
 4. **Exporting over a file a layer already shows.** It asks; yes swaps the layer and writes; no writes nothing. Pinned by Task 3, `test_exporting_over_a_shown_file_asks_then_replaces_the_layer`.
 5. **A GPR export on a site with mag.** It lands above the mag map, not under it. Pinned by Task 3, `test_an_export_lands_above_the_mag_layer`.
+6. **Missing readings stay blank whatever the finish** (Q13). Kriging, minimum curvature, a long max distance and smoothing all leave the footprint NaN, and good traverses beside it are still filled. Pinned by Task 0, `test_missing_readings_stay_blank_under_every_finish`.
 
 ---
 
 ## Pre-flight (coordinator, before Task 1)
 
-- [ ] Fold Plan A's walkthrough results into this plan (Q1), and land Plan A fixes first.
+- [x] Fold Plan A's walkthrough results into this plan (Q1). **Done 2026-11-26.** The walkthrough Artifact (https://claude.ai/artifact/5QakUkLfsbvqD1LtCjTEMX) holds 18 pass, 0 fail, 1 skip (O1). What came of it:
+  - **M1, example6's gap not visible:** not a bug. Both example4's and example6's gaps were filled down to 0.125 m slivers. The author ruled missing readings stay unfilled: **Q13, Task 0**.
+  - **V3 and G6, too many panels, and Survey sections per instrument:** a design discussion, filed as #244. Not in this plan.
+  - **G4, the post-import messages are easy to miss;** **G5, grey out Import on an empty list rather than say "Add a file to import."** Both are fine for now in the author's words. File them as Plan A follow-ups after the merge (Task 4).
+  - **P3:** the GPR export landing under the mag map "isn't a big deal"; Task 3 fixes it anyway (Q11).
+- [ ] Land Plan A fixes first: Task 0.
 - [x] Take in main. **Done 2026-11-20** at the author's request, before Plan A's walkthrough: main 0255dbd (M16, M17a, M17b, sessions A–E) merged into `nsgeo-m19-mag`. What changed for this plan:
   - **Schema:** main now holds versions 3 (velocity records) and 4 (GPS lines), so `MAG_SCHEMA_VERSION` is **5**. The writer writes the highest feature the site holds (mag, then GPS, then a velocity record, then cuts).
   - **Add data:** the toolbar's Import mag… is gone. The magnetometer import is **Add data ▾ ▸ Magnetometer…** (`Plugin.act_add_mag`, `_add_mag_from_toolbar`), beside GPR…; its dialog is titled "Add magnetometer data"; the Survey panel's mag grid item reads **Add magnetometer data…**. Main's GPR import is `AddDataDialog` with a Grid page (`GridImportPage`) and a GPS page; neither lists a mag grid.
@@ -124,6 +136,43 @@ These are as in Plan A: the same virtualenvs, `.venv-tools`, and real data linke
 - [ ] Re-read Task 1 against main's Edit lines before dispatching it: M17b added GPS rows (`TrackEdit`, tape-only cells read-only) and session D added bulk actions, so the widget names and the rows' kinds in Task 1 may have moved. Rule on any drift in the ledger.
 - [ ] Update the roadmap's M19a entry to "Plan B building", committing straight to main.
 - [ ] Record the baselines (four commands) in a new ledger `.superpowers/sdd/2026-11-13-nsgeo-m19a-plan-b-mag-finish/`. Check that the `mag-data/` link and the other real-data links are still in place.
+
+---
+
+### Task 0: Leave missing readings unfilled (a Plan A fix; Q13)
+
+**Files:**
+- Modify: `packages/nsgeo-core/src/nsgeo/mag/file.py` (`MagFile.missing_footprints`)
+- Modify: `packages/nsgeo-core/src/nsgeo/mag/map.py` (`missing_mask`, used by `grid_map`)
+- Modify: `packages/nsgeo-core/tests/test_mag_map.py`, `packages/nsgeo-core/tests/test_mag_real_files.py`
+- Modify: `docs/guide/getting-started.md`, Step 10, the magnetometer section, one sentence
+
+**Interfaces:**
+
+```python
+# nsgeo/mag/file.py
+def missing_footprints(self, grid: Grid) -> np.ndarray:
+    """(k, 4) grid-local boxes (x0, y0, x1, y1), one per missing reading, half-open,
+    centred on the reading: half a spacing across, half a reading interval x scale along."""
+
+# nsgeo/mag/map.py
+def missing_mask(frame: CubeFrame, boxes: np.ndarray, cell: float) -> np.ndarray:
+    """bool (ny, nx): True where a cell's centre lies in any box."""
+```
+
+`grid_map` sets `finished[missing_mask(...)] = np.nan` after `finish_slice` and before it returns. Mark cells box by box over each box's cell range, not by testing every cell against every box: example3 has 7273 missing readings.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `test_mag_map.py`, synthetic file from `mag_data.write_grad601` (a 60 × 240 grid, 1.5 m of missing readings on one interior traverse):
+    - `test_a_missing_run_is_blank_across_its_traverse_footprint`: at 0.125 m the blank is exactly the 12 × 4 cells of the footprint (1.5 m × 0.5 m) under the default finish.
+    - `test_missing_readings_stay_blank_under_every_finish`: none, IDW, kriging and minimum curvature, max distance 3 spacings, smoothing 1 m in X and Y. The footprint is NaN every time, and the cells of the traverses either side are finite.
+    - `test_a_destaggered_traverse_carries_its_blank_with_it`: a shift of +0.25 m on that traverse moves the blank 0.25 m along it.
+    - `test_a_file_with_nothing_missing_maps_as_before`: identical output to Plan A's `grid_map` for a file without missing runs.
+  - `test_mag_real_files.py`: `test_real_missing_blocks_are_blank_on_the_map`. With the inferred layout and the default finish (kriging, 0.375 m, search 1.0 m), example4 and example6 have exactly 96 NaN cells at 0.125 m, 24 at 0.25 m, 6 at 0.5 m.
+- [ ] **Step 2: Run them and watch them fail.**
+- [ ] **Step 3: Implement** `missing_footprints`, then `missing_mask`, then the line in `grid_map`. Add one sentence to the guide's Mag panel section: `"Readings the instrument did not log are left blank: interpolation never fills them."`
+- [ ] **Step 4: Run** the core + pure tier and `test_plugin_mag_dock.py` and `test_plugin_session_mag.py` unchanged, lint and types. All green; the real-data test ran.
+- [ ] **Step 5: Commit and push.** `fix(mag): leave missing readings blank; interpolation never fills them (M19a)`.
 
 ---
 
@@ -346,6 +395,7 @@ def export_map(self) -> MagMosaic | None: ...   # the shown scope at the panel's
 - [ ] Run the full QGIS tier, then a whole-branch review (opus) over Plan A and Plan B together, then a fix wave if needed.
 - [ ] Deploy: refresh the `ns_geo_mag` profile, or make `ns_geo_mag_b` if the stacked branch was used (Q1).
 - [ ] Publish a walkthrough Artifact with a `db` capability for results. It covers:
+  - missing readings left blank on example3, example4 and example6, at two cell sizes and with a long max distance (Q13);
   - a typed destagger on example1 to example6, judged against TerraSurveyor's destaggered plots;
   - which sign the real-data test found (Q5);
   - a typed stretch;
@@ -358,4 +408,5 @@ def export_map(self) -> MagMosaic | None: ...   # the shown scope at the panel's
 - [ ] After the merge: retire both plans' ledgers into committed decision records before removing the worktree. File the Plan A follow-ups recorded in its ledger:
   - the GPR boundary-split hazard at fine cells on rotated grids;
   - the order-dependent `test_the_feature_list_follows_the_layer_list_not_its_signal`;
-  - moving the Mag panel's work off the GUI thread, if the walkthrough asks for it.
+  - moving the Mag panel's work off the GUI thread, if the walkthrough asks for it;
+  - from Plan A's walkthrough: the post-import messages are easy to miss (G4), and Import could be greyed out on an empty list (G5).
