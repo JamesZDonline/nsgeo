@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from nsgeo.slices import SurfaceSettings
 from nsgeo_qgis.surface_plan import (
     INPUTS,
@@ -22,11 +23,13 @@ from nsgeo_qgis.surface_plan import (
     name_refusal,
     outlier_line,
     rebuild_refusal,
+    remembered_cell,
     remembered_end,
     remembered_step,
     remove_refusal,
     selection_refusal,
     stale_text,
+    time_base_of_provenance,
 )
 
 
@@ -395,3 +398,44 @@ def test_a_cut_pick_is_on_the_clock_when_it_has_a_distance_and_the_presets_base(
     none_r = _pick(distance_m=None, stack_json='{"time_base": "radar"}')
     assert [cut_pick_on_clock(p, zero) for p in (z, r, none, none_r)] == [True, False, False, False]
     assert [cut_pick_on_clock(p, []) for p in (z, r, none, none_r)] == [False, True, False, False]
+
+
+@pytest.mark.parametrize(
+    "cell, floor, want",
+    [
+        (0.05000000000000002, 0.0, 0.05),  # the M16 walkthrough site's Grid1 panel cell
+        (0.15 - 0.1, 0.0, 0.05),
+        (0.1234, 0.0, 0.123),
+        (0.25, 0.0, 0.25),
+        (0.0504, 0.051, 0.051),  # rounding down would pass the floor: round up
+        (0.0506, 0.051, 0.051),
+        (0.051, 0.051000000000000004, 0.051),  # a floor's own float tail is no reason to move
+        (0.0004, 0.0, 0.001),  # never below the dialog's minimum
+    ],
+)
+def test_remembered_cell(cell, floor, want):
+    assert remembered_cell(cell, floor) == want
+
+
+@pytest.mark.parametrize("cell", [0.05000000000000002, 0.1234, 0.0504, 0.0004, 1.0])
+def test_remembered_cell_is_its_own_fixed_point(cell):
+    once = remembered_cell(cell, 0.051)
+    assert remembered_cell(once, 0.051) == once
+
+
+@pytest.mark.parametrize(
+    "text, want",
+    [
+        ('{"time_base": "time_zero"}', "time_zero"),
+        ('{"time_base": "radar"}', "radar"),
+        ('{"time_base": ""}', "radar"),  # the case the two readers disagreed on
+        ('{"time_base": 3}', "radar"),
+        ("{}", "radar"),
+        ("[]", "radar"),
+        ("not json", "radar"),
+        ("", "radar"),
+        (None, "radar"),
+    ],
+)
+def test_time_base_of_provenance(text, want):
+    assert time_base_of_provenance(text) == want

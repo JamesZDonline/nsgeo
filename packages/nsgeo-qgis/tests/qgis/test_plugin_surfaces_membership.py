@@ -272,10 +272,43 @@ def test_picks_on_a_cut_that_is_gone_cannot_be_placed(site):
     cut["time_ns"] = 10.0
     assert layers.layers["picks"].dataProvider().addFeatures([cut])[0]
     on_cut = max(_fids(layers))
+    before = _feature_ids(layers)
     found = surfaces.check([*fids, on_cut])
     assert found.refusal == (
         "1 of these picks is on a cut that has been deleted, so it cannot be placed."
     )
+    with pytest.raises(ValueError, match="1 of these picks is on a cut that has been deleted"):
+        surfaces.create("Cut", [*fids, on_cut])
+    # the refusal leaves nothing behind: no record, and no pick naming a feature
+    assert surfaces.records() == []
+    assert _feature_ids(layers) == before
+    assert all(name is None for name in _feature_ids(layers).values())
+
+
+def test_line_and_cut_picks_on_one_grid_make_one_selection(site):
+    session, layers, surfaces, _ = site
+    cut_key = session.add_cut("A", [(0.5, 0.5), (0.5, 11.5)])
+    fids = _bowl_picks(layers, 4)
+    before = set(_fids(layers))
+    for distance in (3.0, 8.0):
+        layers.write_pick(
+            Pick(
+                line_key=cut_key,
+                trace=1,
+                time_ns=10.0,
+                distance_m=distance,
+                depth_m=None,
+                velocity_m_ns=None,
+                stack_json="",
+                note="",
+                created="2026-11-13T00:00:00+00:00",
+            )
+        )
+    cut_fids = sorted(set(_fids(layers)) - before)
+    assert len(cut_fids) == 2
+    found = surfaces.check([*fids, *cut_fids])
+    assert found.refusal == ""
+    assert found.grid_id == "A"
 
 
 def test_a_pick_with_no_line_or_no_position_is_refused_plainly(site):

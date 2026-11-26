@@ -92,7 +92,6 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import math
 from collections.abc import Callable
 from typing import Any
@@ -101,7 +100,6 @@ import numpy as np
 from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
-    TIME_BASE_RADAR,
     ParamSpec,
     Radargram,
     StepStack,
@@ -150,6 +148,7 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.render.qimage import RadargramImage, rgba_to_qimage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import METHOD_LABELS
+from nsgeo_qgis.surface_plan import time_base_of_provenance
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import AXIS_UNITS, MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
@@ -194,16 +193,6 @@ NO_DISTANCE_CALIBRATION = (
     "This line has no distance calibration (no traces per metre, as with time-triggered "
     "collection), so a hyperbola cannot be fitted."
 )
-
-
-def _time_base_of_provenance(provenance_json: str) -> str:
-    """The clock a cut's provenance JSON names; "radar" when it names none (a
-    pick from before the clock was recorded) or cannot be read."""
-    try:
-        base = json.loads(provenance_json).get("time_base")
-    except (ValueError, AttributeError):
-        return TIME_BASE_RADAR
-    return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
 def handle_spec(step: Any) -> ParamSpec | None:
@@ -429,6 +418,9 @@ class ProfileDock(QgsDockWidget):
         #: `_apply_cut_title` alone.
         self._cut_title: str | None = None
         self._cut_other_clock = 0
+        #: (cut key, distance) a Surfaces outlier click asked the cursor to go to, kept until that
+        #: cut's section is shown, or another key is.
+        self._cut_aim: tuple[str, float] | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -909,6 +901,10 @@ class ProfileDock(QgsDockWidget):
         if was_diff:
             self.difference_cleared.emit()
         self._working_key = key or None
+        if self._cut_aim is not None and self._cut_aim[0] != key:
+            # Another line (or none) became the working one. A preview coming and going
+            # does not come through here, so it leaves the target alone.
+            self._cut_aim = None
         # Finding 2 (M7 final review): remove_line() resets ONLY the
         # dropped key's own current/preview fields (see its own docstring)
         # -- if the CURRENT line is removed while a DIFFERENT line is
@@ -1140,6 +1136,40 @@ class ProfileDock(QgsDockWidget):
         self._draw_cut()
         self._refresh_velocity()
         self._refresh_picks()
+        if not is_preview:
+            self._apply_cut_aim(key)
+
+    def aim_at_cut_distance(self, key: str, distance_m: float) -> None:
+        """Put the cursor on the column of cut `key` nearest `distance_m` along it: at once when
+        that cut's section is on screen, else when `_show_cut` next shows it. The working line
+        changing or closing drops the target; a preview never does."""
+        # Connected across docks in `plugin.py`: guarded like `set_slice_band` below.
+        try:
+            self._cut_aim = (key, float(distance_m))
+            if (
+                self.shown_cut_section(key) is not None
+                and key == self._working_key
+                and self._preview_key is None
+            ):
+                self._apply_cut_aim(key)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not aim at the cut distance: {exc}", Qgis.MessageLevel.Critical)
+
+    def _apply_cut_aim(self, key: str) -> None:
+        """Move the cursor to the pending target when it is for `key`, then drop it. With no
+        column to be found yet, the target is kept for the next show."""
+        aim = self._cut_aim
+        if aim is None or aim[0] != key:
+            return
+        sections = self._cut_sections
+        # The same rule as the pick markers and the map link, so cursor and marker agree.
+        column = None if sections is None else sections.column_at(key, aim[1])
+        if column is None:
+            return
+        self._cut_aim = None
+        self.session.set_trace(key, column)
+        # A trace already at `column` emits nothing; a re-prepare may have cleared the cursor.
+        self.view.set_cursor(column)
 
     def _apply_cut_title(self) -> None:
         """The one place a cut's window title is set: the text built for the
@@ -1246,13 +1276,13 @@ class ProfileDock(QgsDockWidget):
         shown = self.shown_cut_section(key)
         if sections is None or shown is None:
             return [], 0
-        base = _time_base_of_provenance(shown.provenance_json)
+        base = time_base_of_provenance(shown.provenance_json)
         points: list[tuple[int, float]] = []
         other = 0
         for pick in self.session.picks_for(key):
             if pick.distance_m is None:
                 continue
-            if _time_base_of_provenance(pick.stack_json) != base:
+            if time_base_of_provenance(pick.stack_json) != base:
                 other += 1
                 continue
             column = sections.column_at(key, pick.distance_m)
@@ -1289,6 +1319,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        self._cut_aim = None
         self._shown_radargram = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which

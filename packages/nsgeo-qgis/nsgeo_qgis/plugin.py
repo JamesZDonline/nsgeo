@@ -510,6 +510,7 @@ class NsgeoPlugin:
         self.surfaces_dock.new_requested.connect(self.new_surface)
         self.surfaces_dock.build_requested.connect(self.build_surfaces)
         self.surfaces_dock.select_picks_requested.connect(self._select_picks)
+        self.surfaces_dock.cut_pick_requested.connect(self.profile_dock.aim_at_cut_distance)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.surfaces_dock)
         self._want_tabify_surfaces = not QgsSettings().value(
             _SURFACES_TABIFIED_KEY, False, type=bool

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import math
+import shutil
 import threading
 import time
 import types
 import zlib
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from tests.real_data import CAMPUS_LINES
+
+if TYPE_CHECKING:
+    from nsgeo_qgis.session import SiteSession
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
 LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
@@ -521,6 +526,75 @@ SUNNYSIDE = LOCAL_DATA / "sunnyside.nsgeo.json"
 needs_sunnyside = pytest.mark.skipif(
     not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
 )
+
+#: The M16 walkthrough site: a hand-fitted survey whose Grid1 has 40 lines and a float-tail
+#: Slices cell. Opening a copy migrates it in memory; the original is never written.
+WALK_SITE = LOCAL_DATA / "hand-fits" / "site-2.nsgeo.json"
+
+
+def _walk_site_ready() -> bool:
+    if not WALK_SITE.exists():
+        return False
+    try:
+        doc = json.loads(WALK_SITE.read_text())
+        first = next(
+            line["path"]
+            for line in doc["lines"]
+            if (line.get("placement") or {}).get("grid_id") == "Grid1"
+        )
+        return Path(first).exists()
+    except (OSError, ValueError, KeyError, StopIteration):
+        return False
+
+
+needs_walk_site = pytest.mark.skipif(
+    not _walk_site_ready(), reason="no M16 walkthrough site in tests/data/local"
+)
+
+
+def open_walk_site(tmp_path: Path, *, edit: Callable[[dict], None] | None = None) -> SiteSession:
+    """A `SiteSession` on a copy of the walkthrough site, in `tmp_path / "walk site"`.
+    `edit(doc)` may change the copy's json first."""
+    from nsgeo_qgis.session import SiteSession
+
+    folder = Path(tmp_path) / "walk site"
+    folder.mkdir()
+    copy = folder / "survey.nsgeo.json"
+    shutil.copyfile(WALK_SITE, copy)
+    if edit is not None:
+        doc = json.loads(copy.read_text())
+        edit(doc)
+        copy.write_text(json.dumps(doc))
+    session = SiteSession()
+    session.open_site(copy)
+    return session
+
+
+@contextlib.contextmanager
+def reopened(session: Any, layers: Any) -> Any:
+    """Reopen the saved site in a new session, as after quitting without Save site. Yields
+    `(again, dock2, export2, reopened)`; `export2.surfaces` is `reopened`, as the plugin does."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from nsgeo_qgis.surfaces import Surfaces
+    from qgis.core import QgsProject
+
+    layers.detach()
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=QgsProject.instance())
+    dock2 = None
+    try:
+        again.open_site(session.json_path)
+        dock2 = Dock(again)
+        export2 = ParaViewExport(again, dock2)
+        surfaces2 = Surfaces(again, layers2, export_for=lambda: export2)
+        export2.surfaces = surfaces2
+        yield again, dock2, export2, surfaces2
+    finally:
+        layers2.detach()
+        if dock2 is not None:
+            dock2.dispose()
 
 
 # ---- the export dialog and the background export task -------------------------------

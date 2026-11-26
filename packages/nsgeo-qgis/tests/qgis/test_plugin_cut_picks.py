@@ -17,6 +17,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.cut_sections import CutSection
 from nsgeo_qgis.map_link import CUT_GONE_TEXT
 from nsgeo_qgis.session import Pick
+from nsgeo_qgis.surface_plan import cut_pick_base
 from qgis.core import (
     NULL,
     QgsCoordinateReferenceSystem,
@@ -463,3 +464,113 @@ def test_a_line_stack_change_never_rezeroes_cut_picks(opened):
     assert (rows[key]["time_ns"], rows[key]["zero_ns"]) == before
     assert rows[line_key]["zero_ns"] == pytest.approx(session.line_zero(line_key))
     assert rows[line_key]["zero_ns"] != 0.0
+
+
+def test_the_profile_panel_reads_a_time_base_with_the_shared_reader(opened):
+    from nsgeo_qgis.ui import profile_dock
+
+    plugin, key = opened
+    session = plugin.session
+    profile = plugin.profile_dock
+    assert "_time_base_of_provenance" not in vars(profile_dock)
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    _use_preset(plugin, "radar")
+    session.open_line(session.keys()[0])
+    session.open_line(key)
+    section = plugin.cut_sections.section(key, build_cube=True)
+    assert json.loads(section.provenance_json)["time_base"] == "radar"
+    # An empty `time_base` reads as "radar" (as in `cut_pick_base`), so on a radar cube it is
+    # drawn, not counted as on another clock.
+    session.add_cut_pick(key, 5, 1.0, T, json.dumps({"time_base": ""}))
+    assert cut_pick_base(session.picks_for(key)[-1]) == "radar"
+    assert len(profile.view._picks) == 1
+    assert "picks on another clock" not in profile.windowTitle()
+
+
+def _nearest_column(plugin, key, distance_m):
+    section = plugin.cut_sections.section(key, build_cube=True)
+    return int(np.argmin(np.abs(section.columns.distance_m - distance_m)))
+
+
+def test_aiming_at_a_cut_distance_moves_the_cursor_at_once_when_the_section_is_shown(opened):
+    plugin, key = opened
+    session = plugin.session
+    want = _nearest_column(plugin, key, 2.6)
+    assert session.current_trace != want
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)
+    assert session.current_trace == want
+    assert plugin.profile_dock.view._cursor == want
+
+
+def test_aiming_again_redraws_a_cursor_a_re_prepare_cleared(opened):
+    plugin, key = opened
+    want = _nearest_column(plugin, key, 2.6)
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)
+    assert plugin.profile_dock.view._cursor == want
+    plugin.profile_dock.view.set_cursor(-1)  # what a re-prepare's clear does to the view
+    plugin.profile_dock.aim_at_cut_distance(key, 2.6)  # the session's trace is already `want`
+    assert plugin.profile_dock.view._cursor == want
+
+
+def test_a_cut_pick_requested_by_the_surfaces_panel_aims_the_profile(opened):
+    plugin, key = opened
+    session = plugin.session
+    session.open_line(session.keys()[0])
+    plugin.surfaces_dock.cut_pick_requested.emit(key, 1.1)  # the cut is not on screen yet
+    session.open_line(key)
+    assert session.current_trace == _nearest_column(plugin, key, 1.1)
+
+
+def test_a_target_waits_for_its_cuts_section_and_is_used_once(opened):
+    plugin, key = opened
+    session = plugin.session
+    other = session.keys()[0]
+    session.open_line(other)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    assert session.current_trace != _nearest_column(plugin, key, 3.2)  # nothing moved yet
+    session.open_line(key)
+    want = _nearest_column(plugin, key, 3.2)
+    assert session.current_trace == want
+    session.set_trace(key, 0)
+    plugin.cut_sections.section_changed.emit(key)  # the section is shown again
+    assert session.current_trace == 0  # the target is spent
+
+
+def test_opening_another_line_first_drops_the_target(opened):
+    plugin, key = opened
+    session = plugin.session
+    first, second = session.keys()[:2]
+    session.open_line(first)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    session.open_line(second)
+    session.open_line(key)
+    assert session.current_trace == -1
+
+
+def test_a_preview_of_another_key_keeps_the_target(opened):
+    plugin, key = opened
+    session = plugin.session
+    first, second = session.keys()[:2]
+    session.open_line(first)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    session.set_preview(second, 0)
+    session.set_preview(None)
+    session.open_line(key)
+    assert session.current_trace == _nearest_column(plugin, key, 3.2)
+
+
+def test_closing_the_line_or_the_site_drops_the_target(opened):
+    plugin, key = opened
+    session = plugin.session
+    other = session.add_cut("B", [(1.0, 4.0), (4.0, 4.0)])
+    session.open_line(other)
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    session.remove_cut(other)  # the working line closes
+    session.open_line(key)
+    assert session.current_trace == -1
+    session.open_line(session.keys()[0])
+    plugin.profile_dock.aim_at_cut_distance(key, 3.2)
+    plugin.profile_dock._clear()  # what the site closing runs
+    session.open_line(key)
+    assert session.current_trace == -1

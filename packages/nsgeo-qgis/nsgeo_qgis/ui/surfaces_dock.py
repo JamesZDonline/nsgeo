@@ -81,6 +81,9 @@ class SurfacesDock(QgsDockWidget):
     build_requested = pyqtSignal(list)
     #: Select these picks-layer fids on the map.
     select_picks_requested = pyqtSignal(list)
+    #: A cut pick's outlier was clicked: the cut's key and the pick's distance along it, so the
+    #: plugin can put the profile's cursor there.
+    cut_pick_requested = pyqtSignal(str, float)
     #: Something the user must be told (a refused change); the plugin shows it.
     problem = pyqtSignal(str)
     #: Something done that the user should know of (picks moved out of other surfaces).
@@ -526,8 +529,11 @@ class SurfacesDock(QgsDockWidget):
             self.session.open_line(key)
             self.session.set_trace(key, pick.pick.trace)
         elif key in set(self.session.cut_keys()):
-            # A cut pick's column is its record of the section, not a trace of the cut.
+            # A cut pick's column is its record of the section, not a trace of the cut; its
+            # distance is what places the cursor, once the section is shown.
             self.session.open_line(key)
+            if pick.pick.distance_m is not None:
+                self.cut_pick_requested.emit(key, float(pick.pick.distance_m))
 
     def _pick_of(self, feature_id: str, outlier: dict[str, Any]) -> Any:
         """The member the outlier names: its line and trace (an older build has the distance)."""

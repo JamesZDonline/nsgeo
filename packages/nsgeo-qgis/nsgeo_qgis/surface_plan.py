@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import time_base_of
+from nsgeo.processing import TIME_BASE_RADAR, time_base_of
 from nsgeo.slices import SurfaceSettings
 
 KIND_SURFACE = "surface"
@@ -125,8 +125,8 @@ def selection_refusal(
     minimum: int = MIN_PICKS,
 ) -> str:
     """Why the selected picks cannot make (or join) a surface, or "". Checked
-    in order: none selected, unsaved, unreadable, not on a grid's line, two grids,
-    too few or in a straight line. `minimum` is 3 for a new surface and 1 for
+    in order: none selected, unsaved, unreadable, on a deleted cut, not on a grid's
+    line, two grids, too few or in a straight line. `minimum` is 3 for a new surface and 1 for
     picks added to one."""
     if n <= 0:
         return (
@@ -250,14 +250,20 @@ WHY_OTHER_CLOCK = "they were made on a cut on another clock"
 WHY_NO_CUT = "their cut has been deleted"
 
 
-def cut_pick_base(pick: Any) -> str:
-    """The time base a cut pick was made on, from the section's provenance in its `stack_json`
-    (`"time_zero"` or `"radar"`); `"radar"` when that is empty, unreadable or names none."""
+def time_base_of_provenance(text: str | None) -> str:
+    """The clock a provenance JSON names (`"time_zero"` or `"radar"`); `"radar"` when the text is
+    empty, unreadable, not an object, or names no non-empty `time_base` (a pick from before the
+    clock was recorded). The one reader the Profile panel and the surface build share."""
     try:
-        base = json.loads(pick.stack_json or "")["time_base"]
-    except (ValueError, KeyError, TypeError):
-        return "radar"
-    return base if isinstance(base, str) and base else "radar"
+        base = json.loads(text or "")["time_base"]
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return TIME_BASE_RADAR
+    return base if isinstance(base, str) and base else TIME_BASE_RADAR
+
+
+def cut_pick_base(pick: Any) -> str:
+    """The time base a cut pick was made on, from the section's provenance in its `stack_json`."""
+    return time_base_of_provenance(pick.stack_json)
 
 
 def cut_pick_on_clock(pick: Any, steps: Iterable[Mapping[str, Any]]) -> bool:
@@ -313,6 +319,17 @@ def remembered_step(dz_ns: float) -> float:
     decimals (R11), unless that rounds it to nothing."""
     rounded = round(dz_ns, 4)
     return rounded if rounded > 0.0 else dz_ns
+
+
+def remembered_cell(cell: float, floor: float) -> float:
+    """The 3-D cell a build uses and remembers: as the export dialog shows it, to three
+    decimals (#204), so a float tail such as 0.05000000000000002 lands on 0.05. When that rounds
+    below `floor` (the grid's smallest safe cell) it rounds up instead; never below the
+    dialog's minimum, 0.001."""
+    rounded = round(cell, 3)
+    if rounded < floor - 1e-9:
+        rounded = round(math.ceil(cell * 1000 - 1e-6) / 1000, 3)
+    return max(rounded, 0.001)
 
 
 def remembered_end(t1_ns: float | None) -> float | None:

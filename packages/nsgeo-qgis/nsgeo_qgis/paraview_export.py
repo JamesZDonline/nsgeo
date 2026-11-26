@@ -29,7 +29,7 @@ import re
 import shutil
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,7 +91,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
-from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids
+from nsgeo_qgis.surface_plan import cut_pick_on_clock, feature_ids, remembered_cell
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -275,13 +275,17 @@ def place_picks(
 
 class ParaViewExport:
     """Writes a grid's ParaView folder. `dock` is the Slices dock (read only). `surfaces` (a
-    `Surfaces`) puts the grid's built surfaces in features.vtp; without it that file is empty."""
+    `Surfaces`) puts the grid's built surfaces in features.vtp (without it that file is empty).
+    It is also the fallback for a grid whose 3-D record is empty (#203)."""
 
     def __init__(self, session: Any, dock: Any, surfaces: Any = None) -> None:
         self.session = session
         self.dock = dock
         self.surfaces = surfaces
         self._zero_probes: dict[tuple[str, str], float] = {}
+        # A line whose zero could not be read is not read again for the life of this object
+        # (the 3-D view refreshes often); a new export object tries again (#219).
+        self._zero_failures: dict[tuple[str, str], Exception] = {}
         # picks_for scans every pick of the site, so a grid's count is read once for as long
         # as this object lives (the dialog's lifetime).
         self._pick_counts: dict[str, int] = {}
@@ -291,8 +295,15 @@ class ParaViewExport:
         self.skipped_surfaces: list[str] = []
 
     # ---- settings ----------------------------------------------------------
+    def cell_floor(self, grid_id: str) -> float:
+        """The grid's smallest safe 3-D cell."""
+        grid = self.session.grid(grid_id)
+        return smallest_safe_cell(grid.size_x, grid.size_y)
+
     def defaults(self, grid_id: str) -> VolumeChoice:
-        """The grid's 3-D choice: its record, with the Slices panel's values filling gaps."""
+        """The grid's 3-D choice: its record; else the newest built surface's saved choice (#203);
+        else the Slices panel's values, filling gaps.
+        The cell is as the dialog shows it, to three decimals (#204)."""
         grid = self.session.grid(grid_id)
         resolution = self.session.slice_resolution(grid_id)
         cell = resolution.get("cell")
@@ -306,13 +317,18 @@ class ParaViewExport:
                 raise ValueError(f"grid {grid_id!r} has no lines to export")
             dz = float(self.session.line_for_key(keys[0]).header.dt_ns)
         t1 = resolution.get("t1_ns")
-        return volume_choice(
-            self.session.volume_record(grid_id),
+        record = self.session.volume_record(grid_id)
+        if not record and self.surfaces is not None:
+            # A reopen without Save site: the newest built surface's choice (#203).
+            record = self.surfaces.built_choice(grid_id) or {}
+        choice = volume_choice(
+            record,
             cell_default=float(cell),
             dz_default=float(dz),
             transform_default=transform_value(self.dock.transform_combo.value()),
             t1_default=t1 if isinstance(t1, float) and t1 > 0.0 else None,
         )
+        return replace(choice, cell=remembered_cell(choice.cell, self.cell_floor(grid_id)))
 
     def _source(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
         preset = default_preset(self.session, grid_id)
@@ -499,15 +515,39 @@ class ParaViewExport:
             raise ValueError("the lines share no time range, so there is nothing to export")
         return t0, t1
 
+    @staticmethod
+    def _zero_memo(key: str, steps: Sequence[dict[str, Any]]) -> tuple[str, str]:
+        return (key, json.dumps(list(steps), sort_keys=True, default=str))
+
     def _zero_of(self, key: str, steps: Sequence[dict[str, Any]]) -> float:
-        """Where the preset puts time zero on one line: one read of one file, kept."""
-        memo = (key, json.dumps(list(steps), sort_keys=True, default=str))
+        """Where the preset puts time zero on one line: one read of one file, kept, and a
+        failure kept too. It reads the line's first channel, the one the volume is made
+        from, whichever channel the Profile panel shows (#218)."""
+        memo = self._zero_memo(key, steps)
+        if memo in self._zero_failures:
+            # no old traceback: each re-raise would otherwise keep that call's frames alive
+            raise self._zero_failures[memo].with_traceback(None)
         if memo not in self._zero_probes:
-            stack = StepStack.from_dicts([dict(s) for s in steps])
-            profiles = self.session.line_for_key(key).load()
-            stack.source = Radargram.from_profile(profiles[self.session.channel(key)])
-            self._zero_probes[memo] = float(stack.zero_ns())
+            try:
+                stack = StepStack.from_dicts([dict(s) for s in steps])
+                profiles = self.session.line_for_key(key).load()
+                stack.source = Radargram.from_profile(profiles[0])
+                self._zero_probes[memo] = float(stack.zero_ns())
+            except Exception as exc:
+                self._zero_failures[memo] = exc
+                raise
         return self._zero_probes[memo]
+
+    def _zero_or_none(self, key: str, steps: Sequence[dict[str, Any]]) -> float | None:
+        """`_zero_of`, or None when it cannot be read, said once per line and preset."""
+        memo = self._zero_memo(key, steps)
+        known = memo in self._zero_failures
+        try:
+            return self._zero_of(key, steps)
+        except Exception as exc:
+            if not known:
+                _log(f"3-D view: no time zero for line {key}, its picks are left out: {exc}")
+            return None
 
     def pick_depths(self, grid_id: str, rows: Sequence[tuple[str, Any]]) -> list[float | None]:
         """Each `(line_key, pick)`'s true depth in metres, as `place_picks` gives it, or None
@@ -536,13 +576,7 @@ class ParaViewExport:
             target = 0.0
             if on_zero:
                 if key not in zeros:
-                    try:
-                        zeros[key] = self._zero_of(key, steps)
-                    except Exception as exc:
-                        _log(
-                            f"3-D view: no time zero for line {key}, its picks are left out: {exc}"
-                        )
-                        zeros[key] = None
+                    zeros[key] = self._zero_or_none(key, steps)
                 zero = zeros[key]
                 if zero is None:
                     continue

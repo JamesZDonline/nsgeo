@@ -21,9 +21,17 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export
 from nsgeo_qgis.paraview_export import ParaViewExportCancelled, place_picks
 from nsgeo_qgis.session import Pick
-from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS, WHY_NO_CUT, WHY_OTHER_CLOCK, input_hash
+from nsgeo_qgis.surface_plan import (
+    INPUTS,
+    STALE_REASONS,
+    WHY_NO_CUT,
+    WHY_NO_DEPTH,
+    WHY_OTHER_CLOCK,
+    input_hash,
+)
 from nsgeo_qgis.surfaces import Surfaces
 from plugin_testing import STEPS_RADAR, STEPS_ZERO, synthetic_dzt
+from plugin_testing import reopened as _reopened
 
 GRID = "Grid A"
 #: Four picks on the two lines: (line index, trace, two-way time in ns).
@@ -532,6 +540,34 @@ def test_building_then_exporting_at_the_dialogs_defaults_keeps_surfaces_fresh(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("cell", [0.15 - 0.1, 0.1234, 0.05000000000000002])
+@pytest.mark.parametrize("where", ["panel", "record"])
+def test_an_untouched_export_keeps_a_surface_fresh_at_any_cell(built_site, cell, where):
+    """#204: the dialog's Cell box has 3 decimals, so an untouched export writes back the
+    rounded cell. The build must have used that same cell."""
+    from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
+
+    session, _, export, _, surfaces = built_site
+    if where == "panel":
+        session.remember_slice_resolution(GRID, cell=cell)
+    else:
+        session.remember_volume(GRID, cell=cell)
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    built = surfaces.state(record.feature_id).report["resolution"]["cell"]
+    assert built == round(cell, 3)
+    dialog = ParaViewExportDialog(
+        [GRID], GRID, export.defaults, export.summary, "", hints_for=export.panel_values
+    )
+    try:
+        choice = dialog.choice()
+    finally:
+        dialog.deleteLater()
+    session.remember_volume(GRID, **choice.to_record())  # as `export_paraview` does
+    assert session.volume_record(GRID)["cell"] == built
+    assert surfaces.state(record.feature_id).stale == ()
+
+
 def test_one_too_small_surface_never_blocks_its_grids_rebuild(built_site):
     session, _, _, layers, surfaces = built_site
     ok, _ = _surface(built_site, "Ok")
@@ -619,15 +655,9 @@ def test_picks_re_measured_from_their_lines_time_zero_keep_the_surface_fresh(bui
 def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
     """Walkthrough A1. A build remembers the grid's 3-D choice in the site, which only Save
     site writes, while the surface is on disk at once. After quitting without Save site the
-    grid falls back to the Slices panel's cell, depth step and depth end, the ones the surface
-    was built at, so it must not read stale. (The synthetic header's depth step has more than
+    grid takes its choice from the newest built surface (#203), so it must not read stale. (The
+    synthetic header's depth step has more than
     four decimals, which the build rounds as the export dialog does.)"""
-    from nsgeo_qgis.layers import SiteLayers
-    from nsgeo_qgis.paraview_export import ParaViewExport
-    from nsgeo_qgis.session import SiteSession
-    from plugin_testing import Dock
-    from qgis.core import QgsProject
-
     session, _, export, layers, surfaces = built_site
     record, _ = _surface(built_site)
     assert round(export.defaults(GRID).dz_ns, 4) != export.defaults(GRID).dz_ns
@@ -638,22 +668,104 @@ def test_reopening_without_save_site_keeps_built_surfaces_fresh(built_site):
     surfaces.build([record.feature_id], progress=_noop)
     assert session.volume_record(GRID).get("t1_ns") == round(end - 1.0, 1)
     assert surfaces.state(record.feature_id).stale == ()
-    layers.detach()
-    again = SiteSession()
-    layers2 = SiteLayers(again, project=QgsProject.instance())
-    dock2 = None
-    try:
-        again.open_site(session.json_path)
+    with _reopened(session, layers) as (again, _dock2, _export2, reopened):
         assert again.volume_record(GRID) == {}  # the build's record was never saved
-        dock2 = Dock(again)
-        export2 = ParaViewExport(again, dock2)
-        reopened = Surfaces(again, layers2, export_for=lambda: export2)
         state = reopened.state(record.feature_id)
         assert state.built and state.stale == ()
-    finally:
-        layers2.detach()
-        if dock2 is not None:
-            dock2.dispose()
+        # A surface from before #203 has no choice: the Slices panel's values still serve.
+        path = reopened._json_path(reopened._record(record.feature_id))
+        doc = json.loads(path.read_text())
+        del doc["choice"]
+        path.write_text(json.dumps(doc))
+        reopened.forget_built_choices()
+        assert reopened.built_choice(GRID) is None
+        state = reopened.state(record.feature_id)
+        assert state.built and state.stale == ()
+
+
+def test_defaults_rounds_the_remembered_cell_itself(built_site):
+    """#204: `defaults()` shows the cell as the dialog does, with no build to round it."""
+    session, _, export, _, _ = built_site
+    session.remember_slice_resolution(GRID, cell=0.15 - 0.1)
+    assert export.defaults(GRID).cell == 0.05
+
+
+@pytest.mark.parametrize("what", ["transform", "volume", "cell"])
+def test_a_reopen_without_save_site_keeps_the_built_choice(built_site, what):
+    """#203: after a reopen without Save site the grid's record is empty, so the 3-D choice
+    falls back to the newest built surface's, not the Slices panel's."""
+    session, dock, export, layers, surfaces = built_site
+    record, _ = _surface(built_site)
+    fid = record.feature_id
+    export.surfaces = surfaces
+    session.save(allow_absolute=True)
+    if what == "transform":
+        dock.transform_combo = types.SimpleNamespace(value=lambda: "amp_abs")
+    elif what == "volume":
+        session.remember_volume(GRID, period_ns=2 * export.defaults(GRID).settings.period_ns)
+    else:
+        session.remember_slice_resolution(GRID, cell=0.2)
+    surfaces.build([fid], progress=_noop)
+    first = surfaces.state(fid).report["choice"]
+    with _reopened(session, layers) as (again, dock2, _export2, reopened):
+        assert again.volume_record(GRID) == {}
+        state = reopened.state(fid)
+        assert state.built and state.stale == ()
+        if what == "transform":
+            dock2.transform_combo = types.SimpleNamespace(value=lambda: "amp_envelope")
+        elif what == "cell":
+            again.remember_slice_resolution(GRID, cell=0.3)
+        state = reopened.state(fid)
+        assert state.built and state.stale == ()
+        reopened.build([fid], progress=_noop)
+        assert reopened.state(fid).report["choice"] == first
+        assert again.volume_record(GRID) == first
+
+
+def test_the_kept_choice_is_dropped_when_a_site_closes_or_opens(built_site):
+    """#203: the memo never carries one site's answer to another."""
+    session, _, export, layers, surfaces = built_site
+    export.surfaces = surfaces
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    assert surfaces.built_choice(GRID) is not None
+    assert surfaces._built_choices
+    session.site_closed.emit()
+    assert surfaces._built_choices == {}
+    surfaces.built_choice(GRID)
+    assert surfaces._built_choices
+    session.site_opened.emit()
+    assert surfaces._built_choices == {}
+
+
+def test_the_newest_built_surface_is_the_fallback(built_site, monkeypatch):
+    """#203: the newest built surface's choice serves an empty record. Both builds carry one
+    `built_utc`, so the json's modification time alone decides which is newer; a json without
+    a choice is skipped; a deleted surface leaves the next, then the panel."""
+    monkeypatch.setattr("nsgeo_qgis.surfaces.now_iso", lambda: "2026-11-20T12:00:00Z")
+    session, _, export, layers, surfaces = built_site
+    export.surfaces = surfaces
+    session.save(allow_absolute=True)
+    a, _ = _surface(built_site, "A")
+    b, _ = _surface(built_site, "B")
+    panel_cell = export.defaults(GRID).cell
+    session.remember_volume(GRID, cell=0.2)
+    surfaces.build([a.feature_id], progress=_noop)
+    session.remember_volume(GRID, cell=0.25)
+    surfaces.build([b.feature_id], progress=_noop)
+    with _reopened(session, layers) as (again, _dock2, export2, reopened):
+        assert again.volume_record(GRID) == {}
+        assert export2.defaults(GRID).cell == 0.25
+        assert reopened.state(a.feature_id).stale == ("resolution",)
+        assert reopened.state(b.feature_id).stale == ()
+        path = reopened._json_path(reopened._record(b.feature_id))
+        doc = json.loads(path.read_text())
+        del doc["choice"]  # a build from before this change
+        path.write_text(json.dumps(doc))
+        reopened.forget_built_choices()
+        assert export2.defaults(GRID).cell == 0.2
+        reopened.delete(a.feature_id)  # its features_changed clears the memo
+        assert export2.defaults(GRID).cell == panel_cell
 
 
 def test_a_changed_depth_step_marks_the_surface_stale(built_site):
@@ -765,6 +877,21 @@ def test_a_cut_pick_on_another_clock_is_reported_not_placed(built_site):
     (made,) = surfaces.build([record.feature_id], progress=_noop)
     assert made.report["fit"]["picks"] == 4
     assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_OTHER_CLOCK}]
+
+
+def test_a_cut_pick_with_no_distance_is_reported_as_having_no_depth(built_site):
+    session, _, _, layers, surfaces = built_site
+    session.site.presets["p"] = list(STEPS_ZERO)
+    cut_key = _cut_along_line_0(session)
+    line_fids = _write(layers, session, PICKS)
+    cut_fids = _write_cut_picks(layers, cut_key, [(3.0, 10.4), (8.0, 11.0)])
+    record = surfaces.create("Mixed", [*line_fids, *cut_fids], SurfaceSettings(strength=0.0))
+    # a hand edit empties one distance
+    layer = layers.layers["picks"]
+    index = layer.fields().indexOf("distance_m")
+    assert layer.dataProvider().changeAttributeValues({cut_fids[0]: {index: None}})
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    assert made.report["skipped"] == [{"line_key": cut_key, "why": WHY_NO_DEPTH}]
 
 
 def test_a_deleted_cut_marks_its_surfaces_stale_and_is_reported(built_site):
