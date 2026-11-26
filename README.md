@@ -114,6 +114,7 @@ release's notes list everything in it.
 | | A 3D Analysis ▾ drop-down on the toolbar, after Cut, holds Surface from picks…, 3D view and Export for ParaView…; ParaView… leaves the Slices panel ([#227]) | next release |
 | | Whole site never stuck, never frozen: a fine cell no longer freezes QGIS while its fill and colour stretch are worked out, in Whole site or This grid; the work happens in the background with its progress, a Cancel that puts the picture's settings back, and the last picture kept until the new one lands (Whole site at 0.02 m on ten grids: 197 s frozen before, now the picture in about 93 s with QGIS responsive). Also: a stuck site wait names what holds it, the stretch's memory peak is lower, Export is greyed while an export runs, and the site engine's review follow-ups ([#193], [#166], [#75], [#157], [#235]) | next release |
 | | The profile: a Show slice band checkbox; Fit becomes a button with Fit width and Fit height, and 1:1 shows true scale; each vertical axis shows ns, samples or m, chosen by clicking it; a cursor read-out that gives a selection's length while you drag it; a time zoom stays put when Time zero changes; and Time zero set by dragging its line on the profile, which shows the processed record to full depth while you do ([#131], [#5], [#11], [#14], [#158], [#163], [#238]) | next release |
+| | Move the colour ramp's stops and watch the slice recolour: with my own colours on, Ramp… in the Slices panel keeps QGIS's Select Color Ramp open and live on the slice, its title giving the amplitudes at each end; Fewer stops cuts a ramp such as Turbo's 253 stops down to a handful to drag ([#183]) | next release |
 
 ### In progress
 
@@ -200,11 +201,10 @@ Grouped by area. The order within a group is not a priority.
   one cube, such as migration at each line's own velocity ([#178]); whole site
   at fine cells, the follow-ups: averaged previews ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
-  ([#167]); move the colour ramp's stops and watch the slice recolour as you
-  drag ([#183]); choose a
-  grid's preset straight from the Whole site grid list ([#199]); the fine-cell
-  follow-ups from making the fill background work: a cut's section and the
-  ParaView export still build their fills in the foreground, the ordinary
+  ([#167]); choose a grid's preset straight from the Whole site grid list
+  ([#199]); the fine-cell follow-ups from making the fill background work: a
+  cut's section and the ParaView export still build their fills in the
+  foreground, the ordinary
   slider tick at 0.02 m (about 0.6 s on Whole site), the old picture following
   the slider while a new fill works, and the colour stretch's remaining memory
   ([#236]).
