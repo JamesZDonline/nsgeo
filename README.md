@@ -146,6 +146,8 @@ release's notes list everything in it.
   grid, draw, process and reopen like DZT lines. Awaiting its walkthrough.
   **M21b** is built: MALÅ lines import the same way, and of a line chosen as
   both `.rd3` and `.rd7` only the `.rd7` is ticked. Awaiting its walkthrough.
+  **M21c** is built: RadExplorer SEG-Y lines import the same way, read as
+  recorded with the export's static shift undone. Awaiting its walkthrough.
 
 ### Next, in order
 
