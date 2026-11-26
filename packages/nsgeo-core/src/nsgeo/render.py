@@ -26,6 +26,7 @@ __all__ = [
     "colormap_names",
     "decimate_columns",
     "display_range",
+    "fitted_stops",
     "gradient_stops",
     "row_envelope",
     "sample_stride",
