@@ -91,7 +91,14 @@ Eight lines from a GX450 HDR survey (an archived public dataset), each with `.ra
   agrees.
 - **`.cor` is a GPS log:** tab-separated, one row per fix, about every other trace: trace number,
   date, UTC time, latitude and hemisphere, longitude and hemisphere, altitude and unit, quality.
-  It plays the part a `.DZG` plays for GSSI.
+  It plays the part a `.DZG` plays for GSSI. *Measured 2026-11-25:* ten columns on every row of
+  all eight; latitude and longitude in **decimal degrees** (not NMEA ddmm); about one fix a
+  second, every 3–5 traces; trace numbers rise and **count from 1** (the last row of three lines
+  names trace `LAST TRACE` itself), where a DZG counts from 0. **Quality is 1 (GPS) or 2 (DGPS)
+  on every fix: none is RTK.** The fixes scatter about 1.4–2.4 m (median distance from the
+  midpoint of the fixes five either side). Along the track thinned to fixes at least 5 m apart,
+  five lines run 7–11 % longer by GPS than by the wheel, and DAT_0320, 0321 and 0323 run 28–49 %
+  longer. The lines wind: they are not a parallel grid.
 - **`.mrk` holds marks** (`trace, ?, ?, label` rows after a version line). **`.srd`** is a text
   table of time, wheel position and trace number.
 - MALÅ also writes multichannel files as `DAT_0001_A1.rd3`, `_A2`, ...; none are in hand.
@@ -141,6 +148,14 @@ their file names; the local copies are renamed so, because the names carry the s
   puts the first break at −0.4 to +2.0 ns (+2.8 in the 9,766-ps line). Read as `+delay`, the
   first break would be about 24 ns after time zero.
 - **No antenna is named** anywhere in the file.
+- **The geographic fields** (item 4), read little-endian as degrees × 10^6, longitude then latitude
+  (*measured 2026-11-25*): the documented order is the only one that gives a latitude within
+  ±90°. Every trace has a position, none is 0, and there is no quality, time or altitude. A
+  position repeats over runs of traces; the change points are 100–1,006 a line, most one trace
+  apart, so the receiver updates at about the trace rate, quantised to 10^-6 degrees (about
+  0.1 m). They scatter about 0.3–0.7 m. **On every line the GPS track is 2.0–2.4× longer than
+  the wheel's along-line coordinate** (LINE12: 176 m end to end against 83 m), whatever the
+  line's heading, so it is not an east-west scale error. Which of the two is right is not known.
 - `.sgy.vm` files are RadExplorer display settings (a colour scheme, a font). Not read.
 
 ### Not yet identified
@@ -442,3 +457,52 @@ File and test names; where the shared companion lookup lives; whether `nsgeo.io.
   stays a stat.
 - **Antenna** is empty and `epsr` 0: the file names neither. The facts line shows `antenna ?`.
 - **GPS mode stays DZT-only** (C10).
+
+## 16. M21d's calls (2026-11-25, with its plan)
+
+- **Lines without RTK are placed on their raw fixes, with an option to smooth** (the author's
+  call, 2026-11-25), revising M17a's RTK-only rule for these lines. Neither new source has an RTK
+  fix (§2), so without this nothing in hand would place.
+  - `TrackPlacement` gains `anchor_on` (`"rtk"`, the default, or `"all"`) and `smooth_m`
+    (0, the default, is as recorded). `"all"` anchors on every fix with a position.
+  - `track_from_log` chooses: at least two RTK-fixed positions anchor on those, as now; fewer
+    anchor on all. A line with any two RTK fixes behaves exactly as before.
+  - **This reaches DZT lines too.** A DZT whose log never reached two RTK fixes was refused
+    (`no RTK-fixed position`, `only one RTK-fixed position`) and is now placed on its fixes, with
+    the same note as any other format. A GSSI log without RTK is the same situation as a MALÅ
+    one, and treating them differently by format would be arbitrary. The M17 tests that pin
+    those two refusals change, and only those.
+  - `smooth_m` replaces each anchor's position with the mean of the anchors within
+    `smooth_m / 2` of it along the anchors' own path, the window shrinking at the ends. It
+    applies to `"all"` tracks only: an RTK track is already centimetric, and smoothing it would
+    cut corners. 0 is off.
+  - The GPS import has one smoothing setting for every line it places without RTK, and the Edit
+    lines dialog changes it per line afterwards. The raw fixes are always kept, so smoothing can be
+    changed or undone.
+  - **Schema:** both fields are written only when not the default. A site with any line that has
+    them saves as a new version, `TRACK_ANCHOR_SCHEMA_VERSION`, so an older build refuses it
+    rather than failing to place the line. M19 (unmerged) also adds version 5; whichever merges
+    second chains its constant from the other's.
+- **A note on each row placed without RTK**, naming how many fixes, and the smoothing when it is
+  on. The import's RTK columns stay as they are (`0 of 283` fixes, no bridge).
+- **GPS length against the wheel.** Whenever the line has a wheel spacing, the import compares
+  the wheel's length with the GPS track thinned to fixes at least 5 m apart. More than 20 % apart
+  adds a note naming both, on any format. On the data in hand that flags all 18 SEG-Y lines
+  (2.0–2.4×) and three of the eight MALÅ lines (1.28–1.49×). nsgeo does not pick one: GPS
+  placement uses the GPS, and grid placement uses the wheel.
+- **Each format names its GPS source through the registry** (C10): `RadarFormat.read_gps(path,
+  header, n_traces) -> DzgLog`, or `None` for a format with none (DT1, until a `.GPS` arrives).
+  A line with no log raises `NoGpsLog(RadarFileError)` with its own reason: `no DZG beside it`,
+  `no DAT_0001.cor beside it`, or `its traces carry no GPS positions`. C10 assumed a companion
+  file; SEG-Y's fixes are inside the data file, which this signature allows.
+- **MALÅ `.cor` into a `DzgLog`:** one fix per row, trace number minus 1, quality as given, the
+  altitude kept, no geoid. Trace numbers must rise and lie in 1–`LAST TRACE`, or the log is refused,
+  as a DZG's are.
+- **SEG-Y geographic fields into a `DzgLog`:** one fix at the first trace of each run of equal
+  positions (repeats would otherwise bunch traces up and then jump), only when the trace's flag
+  is 1, quality `QUALITY_UNKNOWN` (−1, a new constant beside `RTK_FIXED`), no time or altitude.
+- **GPS mode reads every format with a GPS source**, revising §13: its picker lists them from the
+  registry, and a MALÅ pair chosen in GPS mode keeps only the `.rd7`, by the same `prefer` rule as
+  Grid mode. DT1 still gets `no GPS log read for this format yet`.
+- **Privacy:** no real coordinate in any committed file. Real-data tests assert counts, quality
+  values, trace numbers, scatter and length ratios only.
