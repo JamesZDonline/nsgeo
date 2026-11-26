@@ -69,7 +69,7 @@
   - `cannot read it: {exc}`
 - **SEG-Y notes** (`RadarHeader.notes`, with no `"; "` in any):
   - `its traces carry a static shift of up to {max:g} ns: read as recorded, without it`. This note goes on every line with a non-zero static.
-  - `its trace coordinates jump at {n} traces, the largest {m:.3g} m at trace {i}: placed at an even {step:.4g} m`, where `i` is the number of the trace after the largest jump.
+  - `its trace coordinates jump at {n} traces, the largest {m:.3g} m at trace {i}: placed at an even {step:.4g} m`, where `i` is the number of the trace after the largest jump. With one jump it reads `jump at 1 trace`.
   - `its trace coordinates are in arc seconds, not metres along the line: place it by hand`
 - **Facts line:** `From this file's header: SEG-Y · antenna ? · sample interval 0.4060 ns · …`. It comes from M21a's `header_facts`, unchanged.
 - **GPS mode:** unchanged. A SEG-Y file that reaches it through *All files* gets M21a's `no GPS log read for this format yet`.

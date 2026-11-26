@@ -620,9 +620,10 @@ def test_a_big_stretch_or_squeeze_is_named_in_the_fitted_note(tmp_path):
 
 def test_the_file_filter_lists_every_registered_format():
     assert radar_file_filter() == (
-        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7);;"
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7 "
+        "*.sgy *.SGY *.segy *.SEGY);;"
         "GSSI DZT (*.dzt *.DZT);;Sensors & Software DT1 (*.dt1 *.DT1);;"
-        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;All files (*)"
+        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;SEG-Y (*.sgy *.SGY *.segy *.SEGY);;All files (*)"
     )
 
 
@@ -652,7 +653,8 @@ def test_plan_import_reads_a_dt1_beside_a_dzt_and_explains_the_rest(tmp_path):
     assert "cannot read header: no LINE04.HD beside it" in rows["LINE04.DT1"].note
     assert not rows["notes05.xyz"].include
     assert rows["notes05.xyz"].note.endswith(
-        "cannot read header: nsgeo does not read .xyz files; it reads .dzt, .dt1, .rd3, .rd7"
+        "cannot read header: nsgeo does not read .xyz files; "
+        "it reads .dzt, .dt1, .rd3, .rd7, .sgy, .segy"
     )
     assert [ln.path.name for ln in rows_to_lines(list(rows.values()), OPTS)] == [
         "FILE__001.DZT",

@@ -37,12 +37,13 @@ local/
 ├── mag-data/                       magnetometer examples for M19 (no tests read them yet)
 ├── mala/                           a MALÅ survey for M21b: eight lines (.rd3 + .rd7 + .rad, and .cor/.mrk/.srd)
 ├── mala-edge/                      copies of two of them: one .rd7 without its .rad, one pair with an upper-case .RAD
+├── segy/                           a RadExplorer SEG-Y survey for M21c: eighteen lines renamed LINE01–LINE18 (.sgy + .sgy.vm)
 ├── dt1-a/                          a Sensors & Software survey for M21: five lines and a CMP (.DT1 + .HD)
 └── dt1-b/                          a second one: one merged line (.DT1 + .HD), and a CMP.DT1 left without its .HD
 ```
 
 The tests pick a survey by its folder, through the named lists in
-`packages/nsgeo-core/tests/real_data.py` (`CAMPUS_LINES`, `GPS_LINES`, `GRID2_LINES`, `DT1_A`, `MALA` and the rest; the
+`packages/nsgeo-core/tests/real_data.py` (`CAMPUS_LINES`, `GPS_LINES`, `GRID2_LINES`, `DT1_A`, `MALA`, `SEGY` and the rest; the
 plugin tests' `REAL_DZT` is `CAMPUS_LINES`). Each list reads only its own
 folder, never `local/` recursively, because the surveys reuse file names:
 `with-dzg/FILE__001.DZT` is a different line from `FILE__001.DZT` (#141).

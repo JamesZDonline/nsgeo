@@ -364,9 +364,10 @@ def test_add_files_offers_every_radar_format_and_imports_a_dzt_beside_a_dt1(
     (args, _kwargs) = calls[0]
     assert args[1] == "Select radar files"
     assert args[3] == (
-        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7);;"
+        "All radar files (*.dzt *.DZT *.dt1 *.DT1 *.rd3 *.RD3 *.rd7 *.RD7 "
+        "*.sgy *.SGY *.segy *.SEGY);;"
         "GSSI DZT (*.dzt *.DZT);;Sensors & Software DT1 (*.dt1 *.DT1);;"
-        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;All files (*)"
+        "MALÅ (*.rd3 *.RD3 *.rd7 *.RD7);;SEG-Y (*.sgy *.SGY *.segy *.SEGY);;All files (*)"
     )
     assert [r.include for r in d.rows] == [True, True]
     d_dlg.accept()

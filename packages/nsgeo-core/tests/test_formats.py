@@ -141,7 +141,8 @@ def test_only_mala_prefers_one_of_its_files_over_another():
         "GSSI DZT": (),
         "Sensors & Software DT1": (),
         "MALÅ": (".rd7", ".rd3"),
+        "SEG-Y": (),
     }
     for fmt in formats.FORMATS:
         assert set(fmt.prefer) <= set(fmt.extensions)
-    assert formats.supported_extensions() == (".dzt", ".dt1", ".rd3", ".rd7")
+    assert formats.supported_extensions() == (".dzt", ".dt1", ".rd3", ".rd7", ".sgy", ".segy")

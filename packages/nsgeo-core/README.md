@@ -19,7 +19,7 @@ between minor releases.
 
 ### `nsgeo.io`
 
-Radar readers (GSSI DZT, Sensors & Software DT1 and MALÅ, through one shared header), and the DZX and DZG readers.
+Radar readers (GSSI DZT, Sensors & Software DT1, MALÅ and SEG-Y from RadExplorer, through one shared header), and the DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
@@ -40,13 +40,15 @@ Radar readers (GSSI DZT, Sensors & Software DT1 and MALÅ, through one shared he
 | `RadarFileError` | Raised when a radar file is malformed, unsupported, or missing a companion file. |
 | `RadarFormat` | One registered format: its name, extensions, three readers, and which of its files to prefer when a line has two. |
 | `RadarHeader` | The header every radar format shares: sample axis, time zero, spacing, dielectric, antenna, import notes. |
+| `SegyError` | Raised when a SEG-Y file is malformed, or of a kind not read yet (any not from RadExplorer). |
+| `SegyHeader` | A SEG-Y line's header: a `RadarHeader` with the trace count, stored sample count, delay, largest static, trace step and jumps. |
 | `UnsupportedFormat` | Raised for a file whose extension no registered format reads. |
 | `companion` | The file beside a radar file with its stem and a given suffix, in the spelling on disk. |
 | `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
 | `format_for` | The registered format that reads a path, by its extension in any case. |
 | `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
-| `read_header` | Read only the header, cheaply, of any registered format, picked by the extension. |
+| `read_header` | Read the header of any registered format, picked by the extension: cheaply, except a static-shifted SEG-Y, which is read whole. |
 | `read_samples` | Read all samples of any registered format as (channels, samples, traces). |
 | `sidecar_for` | The DZX beside a DZT, or the path itself if it is one; None when there is none. |
 | `supported_extensions` | Every registered extension, lower case with the dot. |

@@ -63,6 +63,13 @@ MALA_EDGE = DATA / "mala-edge"
 """Copies of two MALÅ lines for edge cases: DAT_0328.rd7 without its .rad, and
 DAT_0327 (.rd3 and .rd7) with its .rad spelled .RAD."""
 
+SEGY_DIR = DATA / "segy"
+SEGY = radar_files(SEGY_DIR, ".sgy")
+"""A RadExplorer SEG-Y survey for M21c: eighteen lines renamed LINE01-LINE18 in
+the order of their original names (which carry the site), each with the
+RadExplorer display settings beside it as LINE01.sgy.vm and so on. Static-shifted
+exports: 344 recorded samples a trace in LINE01-07, 424 in LINE08-18."""
+
 
 HAND_FIT_SITES = (
     sorted((DATA / "hand-fits").glob("*.nsgeo.json")) if (DATA / "hand-fits").is_dir() else []

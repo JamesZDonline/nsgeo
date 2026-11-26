@@ -18,7 +18,7 @@ from typing import TypeVar
 
 import numpy as np
 
-from nsgeo.io import dt1, dzt, mala
+from nsgeo.io import dt1, dzt, mala, segy
 from nsgeo.io.header import RadarFileError, RadarHeader, companion
 
 __all__ = [
@@ -91,9 +91,18 @@ def _mala_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
     return mala.read_samples(path, _checked(MALA_NAME, mala.MalaHeader, header, path))
 
 
+def _segy_trace_count(path: Path, header: RadarHeader) -> int:
+    return segy.trace_count(path, _checked(SEGY_NAME, segy.SegyHeader, header, path))
+
+
+def _segy_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
+    return segy.read_samples(path, _checked(SEGY_NAME, segy.SegyHeader, header, path))
+
+
 DZT_NAME = dzt.DztHeader.format_name
 DT1_NAME = dt1.Dt1Header.format_name
 MALA_NAME = mala.MalaHeader.format_name
+SEGY_NAME = segy.SegyHeader.format_name
 
 #: In the order the import's file picker lists them.
 FORMATS: tuple[RadarFormat, ...] = (
@@ -106,6 +115,9 @@ FORMATS: tuple[RadarFormat, ...] = (
         _mala_trace_count,
         _mala_read_samples,
         prefer=(".rd7", ".rd3"),
+    ),
+    RadarFormat(
+        SEGY_NAME, (".sgy", ".segy"), segy.read_header, _segy_trace_count, _segy_read_samples
     ),
 )
 
@@ -129,7 +141,8 @@ def format_for(path: str | Path) -> RadarFormat:
 
 
 def read_header(path: str | Path) -> RadarHeader:
-    """Read only the header, by the format the extension names. Cheap for every format."""
+    """Read the header, by the format the extension names. Cheap for every format but
+    a static-shifted SEG-Y, which is read whole (spec §15)."""
     path = Path(path)
     return format_for(path).read_header(path)
 

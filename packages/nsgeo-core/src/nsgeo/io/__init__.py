@@ -23,6 +23,7 @@ from nsgeo.io.formats import (
 )
 from nsgeo.io.header import RadarFileError, RadarHeader, companion
 from nsgeo.io.mala import MalaError, MalaHeader
+from nsgeo.io.segy import SegyError, SegyHeader
 
 __all__ = [
     "Dt1Error",
@@ -42,6 +43,8 @@ __all__ = [
     "RadarFileError",
     "RadarFormat",
     "RadarHeader",
+    "SegyError",
+    "SegyHeader",
     "UnsupportedFormat",
     "companion",
     "dzg_for",
