@@ -89,8 +89,10 @@ SHADOWED = {
     # (`_arm_pick` and `_toggle_cut_tool`), so both declarations are consumed.
     "failed": {"declared": 2, "connects": 2},
     # M17b Task 4: GridImportPage.changed and GpsImportPage.changed (title,
-    # Import text or enabled state moved). AddDataDialog connects each.
-    "changed": {"declared": 2, "connects": 2},
+    # Import text or enabled state moved). AddDataDialog connects each. #183:
+    # LiveRamp connects QGIS's QgsGradientColorRampDialog.changed (a stop
+    # moved), which nsgeo does not declare, raising connects to 3.
+    "changed": {"declared": 2, "connects": 3},
     # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
     # connects This grid's panel (Task 4); Task 5 connects the site's, raising
     # connects to 3.

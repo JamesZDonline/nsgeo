@@ -695,13 +695,29 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
    - **my own colours** keeps whatever you set on the slice layer's
-     **Symbology** page in QGIS. The **Symbology…** button beside the choice
+     **Symbology** page in QGIS. The **Symbology…** button under the choice
      opens that page, where you can pick a colour ramp, type a min and max, or
      use a cumulative cut. Your colours start from what nsgeo was showing.
      Numbers you type stay the same at every depth. A computed range (Min /
      max, Cumulative cut, Mean ± standard deviation) is worked out again for
      each slice, so a dim deep slice still uses the whole ramp. **Stretch** is
      greyed out while your own colours are on.
+
+     **Ramp…** opens QGIS's Select Color Ramp on the slice's colour ramp and
+     leaves it open. As you drag a stop, add one or change its colour, the
+     slice recolours on the map; there is no OK and Apply to click for each
+     try. The title gives the amplitudes the two ends of the ramp stand for
+     on this slice, for example *0 is -0.42, 1 is 0.42*. You can move the
+     depth slider while it is open: a computed range is worked out again for
+     each slice, and your stops keep their places along the ramp. **OK** keeps
+     the ramp and **Cancel** puts back the one you started with. A ramp of
+     hundreds of stops (QGIS's Turbo has 253) is too many to drag: choose it
+     on the Symbology page, then in Ramp… click **Fewer stops**. The ramp is
+     redrawn with the number of stops in the box beside it (7 to start), as
+     close to the original as that many allow. Six or seven keep Turbo's look.
+     Ramp… needs a **Singleband pseudocolor** style with a gradient ramp,
+     which is what your colours start as. It closes, keeping your changes, if you switch back to
+     nsgeo colours, tick **Show coverage** or change scope.
 
    This grid and Whole site each keep their own colours, and the site remembers
    them; a saved cube keeps them too. **Palette** still colours cuts and the

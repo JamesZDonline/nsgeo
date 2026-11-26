@@ -27,7 +27,7 @@ import math
 from typing import Any
 
 import numpy as np
-from nsgeo.render import colormap, display_range, gradient_stops
+from nsgeo.render import colormap, display_range, fitted_stops, gradient_stops
 from qgis.core import (
     QgsColorRampShader,
     QgsGradientColorRamp,
@@ -210,6 +210,99 @@ def set_range(layer: QgsRasterLayer, lo: float, hi: float) -> bool:
         layer.setRenderer(clone)
         return True
     return False
+
+
+def source_ramp(layer: QgsRasterLayer | None) -> QgsGradientColorRamp | None:
+    """A copy of the gradient the style's colours come from (#183), or None
+    when there is none to edit: not a pseudocolour renderer, or its ramp is
+    not a gradient (a preset or random ramp)."""
+    function = _ramp_function(layer.renderer() if layer is not None else None)
+    ramp = function.sourceColorRamp() if function is not None else None
+    if not isinstance(ramp, QgsGradientColorRamp):
+        return None
+    return ramp.clone()
+
+
+def set_ramp(layer: QgsRasterLayer, ramp: QgsGradientColorRamp) -> bool:
+    """Colour the style from `ramp`, keeping its range and min/max settings
+    (#183); False when the style has no ramp to replace.
+
+    Classes placed by the ramp ("Continuous") follow its stops, as QGIS's own
+    Classify does. Classes placed otherwise (equal interval, quantile, typed)
+    keep their values and take the ramp's colour at each.
+    """
+    renderer = layer.renderer()
+    if _ramp_function(renderer) is None:
+        return False
+    shown = _pseudocolour_range(renderer)
+    clone = renderer.clone()
+    function = clone.shader().rasterShaderFunction()
+    function.setSourceColorRamp(ramp.clone())
+    if shown is not None:
+        lo, hi = shown
+        function.setMinimumValue(lo)
+        function.setMaximumValue(hi)
+        clone.setClassificationMin(lo)
+        clone.setClassificationMax(hi)
+    if function.classificationMode() == QgsColorRampShader.ClassificationMode.Continuous:
+        function.classifyColorRamp()
+    else:
+        items = function.colorRampItemList()
+        span = (shown[1] - shown[0]) if shown is not None and shown[1] > shown[0] else None
+        recoloured = []
+        for index, item in enumerate(items):
+            if span is not None and math.isfinite(item.value):
+                share = (item.value - shown[0]) / span
+            else:
+                share = index / max(len(items) - 1, 1)
+            colour = ramp.color(min(max(share, 0.0), 1.0))
+            recoloured.append(QgsColorRampShader.ColorRampItem(item.value, colour, item.label))
+        function.setColorRampItemList(recoloured)
+    layer.setRenderer(clone)
+    return True
+
+
+def fewer_stops(ramp: QgsGradientColorRamp, count: int) -> QgsGradientColorRamp:
+    """A copy of `ramp` redrawn with `count` stops, ends included (#183): the
+    placing that strays least from it (`nsgeo.render.fitted_stops`). For a
+    ramp of hundreds of stops, such as QGIS's Turbo, cut down to a handful
+    to drag. Colours are fitted in red, green and blue; transparency is not
+    kept. The ramp given is not changed."""
+    table = np.array(
+        [ramp.color(i / 255.0).getRgb()[:3] for i in range(256)],
+        dtype=float,
+    )
+    stops = fitted_stops(table, count)
+    fewer = QgsGradientColorRamp(
+        QColor(*stops[0][1]),
+        QColor(*stops[-1][1]),
+        ramp.isDiscrete(),
+        [QgsGradientStop(position, QColor(*rgb)) for position, rgb in stops[1:-1]],
+    )
+    return fewer
+
+
+def ramp_title(layer: QgsRasterLayer | None) -> str:
+    """The live ramp dialog's title (#183): which amplitudes the two ends of
+    its 0–1 strip stand for on the slice now."""
+    base = "Slice colours"
+    if layer is None or layer.renderer() is None:
+        return base
+    origin = layer.renderer().minMaxOrigin()
+    if origin.limits() in _KINDS and origin.extent() == EXTENT_UPDATED:
+        return f"{base} · fitted to the map view"
+    shown = style_range(layer)
+    if shown is None:
+        return base
+    return f"{base} · 0 is {shown[0]:.3g}, 1 is {shown[1]:.3g}"
+
+
+def _ramp_function(renderer: Any) -> QgsColorRampShader | None:
+    """A pseudocolour renderer's colour ramp shader, else None."""
+    if not isinstance(renderer, QgsSingleBandPseudoColorRenderer) or renderer.shader() is None:
+        return None
+    function = renderer.shader().rasterShaderFunction()
+    return function if isinstance(function, QgsColorRampShader) else None
 
 
 def style_range(layer: QgsRasterLayer) -> tuple[float, float] | None:

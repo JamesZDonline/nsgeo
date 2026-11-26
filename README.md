@@ -114,6 +114,7 @@ release's notes list everything in it.
 | | A 3D Analysis ▾ drop-down on the toolbar, after Cut, holds Surface from picks…, 3D view and Export for ParaView…; ParaView… leaves the Slices panel ([#227]) | next release |
 | | Whole site never stuck, never frozen: a fine cell no longer freezes QGIS while its fill and colour stretch are worked out, in Whole site or This grid; the work happens in the background with its progress, a Cancel that puts the picture's settings back, and the last picture kept until the new one lands (Whole site at 0.02 m on ten grids: 197 s frozen before, now the picture in about 93 s with QGIS responsive). Also: a stuck site wait names what holds it, the stretch's memory peak is lower, Export is greyed while an export runs, and the site engine's review follow-ups ([#193], [#166], [#75], [#157], [#235]) | next release |
 | | The profile: a Show slice band checkbox; Fit becomes a button with Fit width and Fit height, and 1:1 shows true scale; each vertical axis shows ns, samples or m, chosen by clicking it; a cursor read-out that gives a selection's length while you drag it; a time zoom stays put when Time zero changes; and Time zero set by dragging its line on the profile, which shows the processed record to full depth while you do ([#131], [#5], [#11], [#14], [#158], [#163], [#238]) | next release |
+| | Move the colour ramp's stops and watch the slice recolour: with my own colours on, Ramp… in the Slices panel keeps QGIS's Select Color Ramp open and live on the slice, its title giving the amplitudes at each end; Fewer stops cuts a ramp such as Turbo's 253 stops down to a handful to drag ([#183]) | next release |
 
 ### In progress
 
@@ -128,7 +129,13 @@ release's notes list everything in it.
   Save site; the 3-D view reads a line it can't read only once, and reads
   time zero from channel 0, as the volume does; Plan D's tidy-ups, with a
   cut pick in the outlier list moving the profile's cursor to it.
-  Designing.
+  Built and reviewed, with session F's Profile panel merged in;
+  walkthrough next.
+- **M17c: true-distance profiles** ([#134]). A GPS line's profile draws each
+  trace at its true distance, with a gap where the cart was lifted; picks,
+  the velocity fit and migration follow. GPS lines in a grid share the
+  grid's ruler, so reversed lines are mirrored like tape lines, and
+  destagger's Measure works on them. Planning, probably in two plans.
 
 ### Next, in order
 
@@ -142,7 +149,7 @@ than reworking M16–M17 afterwards.
    with GPS lines drawn on their grid's ruler (reversed lines mirrored, as
    tape lines are) and their destagger measured, both moved up from M17d at
    the M17b walkthrough; and **M17d**,
-   outlines with holes and Place by GPS. M17c is next.
+   outlines with holes and Place by GPS. M17c is in progress (above).
 2. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 3. **M19: magnetometer data.** The first instrument other than GPR:
@@ -194,11 +201,10 @@ Grouped by area. The order within a group is not a priority.
   one cube, such as migration at each line's own velocity ([#178]); whole site
   at fine cells, the follow-ups: averaged previews ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
-  ([#167]); move the colour ramp's stops and watch the slice recolour as you
-  drag ([#183]); choose a
-  grid's preset straight from the Whole site grid list ([#199]); the fine-cell
-  follow-ups from making the fill background work: a cut's section and the
-  ParaView export still build their fills in the foreground, the ordinary
+  ([#167]); choose a grid's preset straight from the Whole site grid list
+  ([#199]); the fine-cell follow-ups from making the fill background work: a
+  cut's section and the ParaView export still build their fills in the
+  foreground, the ordinary
   slider tick at 0.02 m (about 0.6 s on Whole site), the old picture following
   the slider while a new fill works, and the colour stretch's remaining memory
   ([#236]).

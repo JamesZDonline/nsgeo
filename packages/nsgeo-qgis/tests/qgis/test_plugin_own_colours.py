@@ -221,6 +221,97 @@ def test_a_ramp_typed_by_hand_keeps_its_proportions(layer):
     assert [i.value for i in moved] == pytest.approx([0.0, 10.0, 100.0])
 
 
+# ---- #183: the ramp's stops moved live ----------------------------------------------------
+
+
+def _moved_white(position):
+    """The seismic seed's ramp with its white stop moved to `position`."""
+    from qgis.core import QgsGradientColorRamp, QgsGradientStop
+    from qgis.PyQt.QtGui import QColor
+
+    ramp = QgsGradientColorRamp(QColor(0, 0, 255), QColor(255, 0, 0))
+    ramp.setStops([QgsGradientStop(position, QColor(255, 255, 255))])
+    return ramp
+
+
+def test_the_source_ramp_is_the_styles_gradient(layer):
+    own_colours.seed_style(layer, "seismic", 5.0, False)
+    ramp = own_colours.source_ramp(layer)
+    assert ramp is not None and ramp.type() == "gradient"
+    assert [stop.offset for stop in ramp.stops()] == [pytest.approx(0.5, abs=0.01)]
+    ramp.setStops([])  # a copy: the layer's ramp is not touched
+    assert len(own_colours.source_ramp(layer).stops()) == 1
+
+
+def test_a_grey_renderer_has_no_ramp_to_edit(layer):
+    layer.setRenderer(QgsSingleBandGrayRenderer(layer.dataProvider(), 1))
+    assert own_colours.source_ramp(layer) is None
+    assert not own_colours.set_ramp(layer, _moved_white(0.7))
+
+
+def test_a_moved_stop_moves_its_colour_and_keeps_the_range(layer):
+    own_colours.seed_style(layer, "seismic", 5.0, False)
+    assert own_colours.set_ramp(layer, _moved_white(0.7))
+    renderer = layer.renderer()
+    assert own_colours.style_range(layer) == (-5.0, 5.0)
+    assert renderer.minMaxOrigin().limits() == QgsRasterMinMaxOrigin.Limits.NotSet
+    items = renderer.shader().rasterShaderFunction().colorRampItemList()
+    assert [i.value for i in items] == pytest.approx([-5.0, 2.0, 5.0])
+    assert _shade(renderer, 2.0) == (255, 255, 255)
+    assert [round(s.offset, 3) for s in own_colours.source_ramp(layer).stops()] == [0.7]
+
+
+def test_classes_not_placed_by_the_ramp_keep_their_values_and_take_its_colours(layer):
+    own_colours.seed_style(layer, "seismic", 5.0, False)
+    renderer = layer.renderer().clone()
+    function = renderer.shader().rasterShaderFunction()
+    function.setClassificationMode(QgsColorRampShader.ClassificationMode.EqualInterval)
+    function.setColorRampItemList(
+        [
+            QgsColorRampShader.ColorRampItem(value, function.colorRampItemList()[0].color, "")
+            for value in (-5.0, 0.0, 5.0)
+        ]
+    )
+    layer.setRenderer(renderer)
+    assert own_colours.set_ramp(layer, _moved_white(0.5))
+    items = layer.renderer().shader().rasterShaderFunction().colorRampItemList()
+    assert [i.value for i in items] == pytest.approx([-5.0, 0.0, 5.0])
+    assert [i.color.name() for i in items] == ["#0000ff", "#ffffff", "#ff0000"]
+
+
+def test_the_ramp_title_gives_the_amplitudes_at_each_end(layer):
+    own_colours.seed_style(layer, "seismic", 5.0, False)
+    assert own_colours.ramp_title(layer) == "Slice colours · 0 is -5, 1 is 5"
+    _set_origin(
+        layer,
+        QgsRasterMinMaxOrigin.Limits.MinimumMaximum,
+        QgsRasterMinMaxOrigin.Extent.UpdatedCanvas,
+    )
+    assert own_colours.ramp_title(layer) == "Slice colours · fitted to the map view"
+    assert own_colours.ramp_title(None) == "Slice colours"
+
+
+def test_a_ramp_of_hundreds_of_stops_is_refitted_to_a_handful(qgis_app):
+    from qgis.core import QgsStyle
+
+    turbo = QgsStyle.defaultStyle().colorRamp("Turbo")
+    assert len(turbo.stops()) > 200
+    fewer = own_colours.fewer_stops(turbo, 7)
+    assert fewer.type() == "gradient"
+    assert len(fewer.stops()) == 5, "two ends and five between"
+    assert fewer.color1().name() == turbo.color1().name()
+    assert fewer.color2().name() == turbo.color2().name()
+    worst = max(
+        max(
+            abs(a - b)
+            for a, b in zip(fewer.color(x / 255).getRgb()[:3], turbo.color(x / 255).getRgb()[:3])
+        )
+        for x in range(256)
+    )
+    assert worst <= 25, "still Turbo, give or take a few levels"
+    assert len(turbo.stops()) > 200, "the ramp given is not changed"
+
+
 # ---- the legend line and the crop ---------------------------------------------------------
 
 

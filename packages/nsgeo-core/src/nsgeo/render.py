@@ -26,6 +26,7 @@ __all__ = [
     "colormap_names",
     "decimate_columns",
     "display_range",
+    "fitted_stops",
     "gradient_stops",
     "row_envelope",
     "sample_stride",
@@ -409,6 +410,48 @@ def gradient_stops(
         ends.append(end)
         start = end
     return [(i / 255.0, (int(table[i, 0]), int(table[i, 1]), int(table[i, 2]))) for i in ends]
+
+
+def fitted_stops(lut: np.ndarray, count: int) -> list[tuple[float, tuple[int, int, int]]]:
+    """`count` colour stops that redraw `lut` as closely as `count` can (#183).
+
+    Like `gradient_stops`, but with the number of stops fixed rather than the
+    tolerance: of every way to place `count` stops on the table's entries,
+    both ends included, the one whose straight-line blend strays least from
+    the table at its worst entry. For a ramp of hundreds of stops (QGIS's
+    Turbo has 253) cut down to the handful a person can drag.
+    """
+    table = np.asarray(lut, dtype=float)
+    if table.shape != (256, 3):
+        raise ValueError(f"expected a (256, 3) table, got shape {table.shape}")
+    if not 2 <= count <= 256:
+        raise ValueError(f"count must be from 2 to 256, got {count}")
+    n = 256
+    # error[i, j]: the worst entry of a straight blend from entry i to entry j.
+    error = np.full((n, n), np.inf)
+    for i in range(n - 1):
+        ends = np.arange(i + 1, n)
+        span = np.arange(0, n - i)
+        share = span[None, :] / (ends - i)[:, None]  # (end, entry) offsets
+        inside = share <= 1.0
+        line = table[i] + np.clip(share, 0.0, 1.0)[..., None] * (table[ends] - table[i])[:, None]
+        off = np.abs(line - table[i:][None, :, :]).max(axis=2)
+        error[i, ends] = np.where(inside, off, 0.0).max(axis=1)
+    # Minimax over segment chains: best[s, j] is the least worst error of s
+    # segments from entry 0 to entry j.
+    best = np.full(n, np.inf)
+    best[0] = 0.0
+    came = np.zeros((count, n), dtype=int)
+    for s in range(1, count):
+        joined = np.maximum(best[:, None], error)  # (from, to)
+        came[s] = np.argmin(joined, axis=0)
+        best = joined[came[s], np.arange(n)]
+    picks = [n - 1]
+    for s in range(count - 1, 0, -1):
+        picks.append(int(came[s, picks[-1]]))
+    picks.reverse()
+    rgb = np.rint(table).astype(int)
+    return [(i / 255.0, (int(rgb[i, 0]), int(rgb[i, 1]), int(rgb[i, 2]))) for i in picks]
 
 
 _RANGE_KINDS = ("minimum_maximum", "cumulative_cut", "std_dev")

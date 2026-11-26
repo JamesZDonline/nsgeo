@@ -250,6 +250,7 @@ Amplitude to pixels, with no Qt.
 | `colormap_names` | The table names, optionally filtered by polarity. |
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
 | `display_range` | The colour range for an array by one of QGIS's computed rules: minimum and maximum, cumulative cut, or mean ± standard deviations. |
+| `fitted_stops` | A chosen number of colour stops that redraw a lookup table as closely as that many can, for cutting a ramp of hundreds of stops down to a few to drag. |
 | `gradient_stops` | The fewest colour stops that redraw a lookup table by straight-line blending, for a GIS gradient editor. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
 | `sample_stride` | The step of the strided subsample a clip measures a large array by; `limit_over_slices` takes the same values without joining its slices. |

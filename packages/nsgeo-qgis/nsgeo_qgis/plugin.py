@@ -157,6 +157,7 @@ from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
 from nsgeo_qgis.ui.grid_dialog import DEFAULT_SPACING, GridDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
+from nsgeo_qgis.ui.live_ramp import LiveRamp
 from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
@@ -308,6 +309,10 @@ class NsgeoPlugin:
         self._want_tabify = False
         self._want_tabify_surfaces = False
         self.slice_layer: SliceLayer | None = None
+        #: #183: QGIS's Select Color Ramp kept open and live on the slice.
+        self._live_ramp: LiveRamp | None = None
+        #: The scope the live ramp was opened in: it edits that scope's style.
+        self._live_ramp_scope: str | None = None
         self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
@@ -541,6 +546,8 @@ class NsgeoPlugin:
         self.slice_layer.own_style_changed.connect(self._on_own_style_changed)
         self.slice_layer.extent_in = self._canvas_extent_in
         self.slices_dock.symbology_requested.connect(self._open_slice_symbology)
+        self._live_ramp = LiveRamp(self._own_slice_layer, self.iface.mainWindow())
+        self.slices_dock.ramp_requested.connect(self._open_live_ramp)
         self.cut_sections = CutSections(self.session, self.slices_dock)
         self.profile_dock.set_cut_sections(self.cut_sections)
         self.map_link.set_sections(self.cut_sections)
@@ -847,6 +854,10 @@ class NsgeoPlugin:
         # a reference to a session this method is about to tear down.
         if self._line_choice_dialog is not None:
             self._line_choice_dialog.reject()
+        # #183: the live ramp too, while the slice layer it edits still exists.
+        if self._live_ramp is not None:
+            self._live_ramp.cancel()
+            self._live_ramp = None
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -1349,6 +1360,8 @@ class NsgeoPlugin:
                 dock.show_own_legend(own_colours.legend_text(layer.layer))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+        finally:
+            self._follow_live_ramp()
 
     def _on_own_style_changed(self, text: str) -> None:
         """`SliceLayer.own_style_changed`: remember the style for the scope on
@@ -1360,6 +1373,7 @@ class NsgeoPlugin:
                 return
             dock.set_own_style(text)
             dock.show_own_legend(own_colours.legend_text(layer.layer))
+            self._follow_live_ramp()
         except Exception as exc:  # noqa: BLE001 -- a slot must never raise
             self.message(f"could not remember the slice colours: {exc}", Qgis.MessageLevel.Warning)
 
@@ -1379,6 +1393,58 @@ class NsgeoPlugin:
             self.message(
                 f"could not open the slice's Symbology page: {exc}", Qgis.MessageLevel.Warning
             )
+
+    def _own_slice_layer(self) -> QgsRasterLayer | None:
+        """The slice layer while it wears the user's own colours, else None:
+        what the live ramp edits (#183)."""
+        layer = self.slice_layer
+        if layer is None or not layer.shows_own_colours():
+            return None
+        return layer.layer
+
+    def _open_live_ramp(self) -> None:
+        """`SlicesDock.ramp_requested`: QGIS's Select Color Ramp, kept open
+        and live on the slice (#183). A slot: never raises."""
+        try:
+            dock = self.slices_dock
+            if self._live_ramp is None or dock is None:
+                return
+            if self._own_slice_layer() is None:
+                self.message(
+                    "show a slice in your own colours first: the ramp belongs to the slice layer.",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            if not self._live_ramp.open():
+                self.message(
+                    "Ramp… edits a gradient colour ramp. On the Symbology page, choose "
+                    "Singleband pseudocolor with a gradient ramp first.",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            self._live_ramp_scope = dock.scope()
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not open the colour ramp: {exc}", Qgis.MessageLevel.Warning)
+
+    def _follow_live_ramp(self) -> None:
+        """Keep an open live ramp in step with the slice on screen (#183):
+        retitled for the slice's range, or closed keeping its edits once the
+        slice no longer wears this scope's own colours. Never raises."""
+        try:
+            ramp, dock = self._live_ramp, self.slices_dock
+            if ramp is None or ramp.dialog is None or dock is None:
+                return
+            if (
+                not dock.own_colours_on()
+                or dock.coverage_check.isChecked()
+                or dock.scope() != self._live_ramp_scope
+                or self._own_slice_layer() is None
+            ):
+                ramp.keep_and_close()
+            else:
+                ramp.follow()
+        except Exception as exc:  # noqa: BLE001 -- reached from slots
+            self.message(f"could not update the colour ramp: {exc}", Qgis.MessageLevel.Warning)
 
     def _canvas_extent_in(self, crs: QgsCoordinateReferenceSystem) -> tuple[float, ...] | None:
         """The map view as (xmin, ymin, xmax, ymax) in `crs`, for a slice style
