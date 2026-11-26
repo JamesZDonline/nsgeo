@@ -124,6 +124,31 @@ def test_every_file_changes_each_and_is_remembered(mag_site, dialog):
     assert before_remembered != new
 
 
+def test_every_file_asks_about_each_file_that_does_not_fit(mag_site, dialog, answer_modal):
+    session, root = mag_site
+    m1 = session.mag_file_on("M1")
+    m2 = _give_m2(session, root, readings=16)  # does not fit its grid
+    new = dataclasses.replace(MagSetup(), far_x=True)
+    assert dialog._problems(new) == []  # M1 itself fits
+    dialog.form.set_setup(new)
+    dialog.every_box.setChecked(True)
+    assert dialog.status.text().endswith("\n1 other file(s) would not fit with this setup.")
+    calls = answer_modal(QMessageBox, "question", NO)
+    dialog.accept()
+    assert len(calls) == 1
+    args = calls[0][0]
+    assert args[1] == "File does not fit its grid"
+    assert args[2].startswith("1 file(s) do not fit their grids:\nm2.dat: ")
+    assert "m1.dat" not in args[2]
+    assert args[2].endswith("\nApply anyway? Nothing is cropped or stretched.")
+    assert session.mag_file_on("M1") is m1 and session.mag_file_on("M2") is m2
+    assert dialog.changed_grids == []
+    answer_modal(QMessageBox, "question", YES)
+    dialog.accept()
+    assert sorted(dialog.changed_grids) == ["M1", "M2"]
+    assert session.mag_file_on("M1").setup == new and session.mag_file_on("M2").setup == new
+
+
 def test_without_the_checkbox_only_this_file_changes(mag_site, dialog):
     session, root = mag_site
     m2 = _give_m2(session, root)

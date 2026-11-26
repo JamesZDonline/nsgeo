@@ -963,6 +963,28 @@ def test_a_slice_layer_stays_directly_above_the_layer_it_is_told_to(mapped):
         mag.dispose()
 
 
+def test_insert_below_places_directly_below_or_at_the_bottom(mapped):
+    from nsgeo_qgis.slice_layer import insert_below
+    from qgis.core import QgsRasterLayer
+
+    sl, session, layers, project = mapped
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _draw(sl, "Anchor")
+    _draw_second = QgsRasterLayer("", "x", "gdal")
+    project.addMapLayer(_draw_second, False)
+    group = layers.group
+    insert_below(group, _draw_second, sl.layer)
+    assert (
+        group.children().index(group.findLayer(_draw_second.id()))
+        == group.children().index(group.findLayer(sl.layer.id())) + 1
+    )
+    stray = QgsRasterLayer("", "w", "gdal")
+    last = QgsRasterLayer("", "v", "gdal")
+    project.addMapLayer(last, False)
+    insert_below(group, last, stray)
+    assert group.children().index(group.findLayer(last.id())) == len(group.children()) - 1
+
+
 def test_insert_above_places_directly_above_or_at_the_bottom(mapped):
     from nsgeo_qgis.slice_layer import insert_above
     from qgis.core import QgsRasterLayer

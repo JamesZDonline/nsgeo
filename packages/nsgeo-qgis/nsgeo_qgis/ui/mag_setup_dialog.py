@@ -59,6 +59,7 @@ class MagSetupDialog(QDialog):
         self.form.set_setup(mag.setup)
         self._refresh()
         self.form.changed.connect(self._on_setup_changed)
+        self.every_box.toggled.connect(self._on_setup_changed)
 
     def _same_site(self) -> bool:
         return self.session.is_open and self.session.site is self._site
@@ -72,6 +73,22 @@ class MagSetupDialog(QDialog):
     def _problems(self, setup: MagSetup) -> list[str]:
         mag = self._mag
         return fit_problems(setup, mag.n_rows, mag.n_readings, self.session.grid(self.grid_id))
+
+    def _other_misfits(self, setup: MagSetup) -> list[str]:
+        """With the every-file box ticked, each OTHER file's problems against its own
+        grid, prefixed by the file name; [] otherwise."""
+        if not self.every_box.isChecked():
+            return []
+        lines: list[str] = []
+        for other in self.session.mag_files():
+            if other.grid_id == self.grid_id:
+                continue
+            grid = self.session.grid(other.grid_id)
+            lines += [
+                f"{other.path.name}: {p}"
+                for p in fit_problems(setup, other.n_rows, other.n_readings, grid)
+            ]
+        return lines
 
     def _on_setup_changed(self, *_: Any) -> None:
         try:
@@ -87,6 +104,9 @@ class MagSetupDialog(QDialog):
         lines = [missing_summary(dataclasses.replace(self._mag, setup=setup).readings())]
         if self._same_site():
             lines += self._problems(setup)
+            n_other = len({m.split(": ", 1)[0] for m in self._other_misfits(setup)})
+            if n_other:
+                lines.append(f"{n_other} other file(s) would not fit with this setup.")
         self.status.setText("\n".join(lines))
 
     def accept(self) -> None:
@@ -104,12 +124,24 @@ class MagSetupDialog(QDialog):
             self.status.setText(error)
             return
         problems = self._problems(setup)
-        if problems:
+        others = self._other_misfits(setup)
+        if others:
+            misfits = [f"{self._mag.path.name}: {p}" for p in problems] + others
+            n_files = len({m.split(": ", 1)[0] for m in misfits})
+            text = (
+                f"{n_files} file(s) do not fit their grids:\n"
+                + "\n".join(misfits)
+                + "\nApply anyway? Nothing is cropped or stretched."
+            )
+        elif problems:
             text = (
                 f"{self._mag.path.name} does not fit grid {self.grid_id} with this setup:\n"
                 + "\n".join(problems)
                 + "\nApply anyway? Nothing is cropped or stretched."
             )
+        else:
+            text = ""
+        if text:
             answer = QMessageBox.question(
                 self,
                 "File does not fit its grid",

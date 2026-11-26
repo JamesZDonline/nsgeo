@@ -142,6 +142,7 @@ from nsgeo_qgis.slice_layer import (
     SliceLayer,
     apply_smooth_resampling,
     insert_above,
+    insert_below,
 )
 from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.surface_layers import SurfaceLayers
@@ -2036,9 +2037,6 @@ class NsgeoPlugin:
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     return
-                # Windows refuses to overwrite a file a layer holds open.
-                for layer in shown:
-                    project.removeMapLayer(layer.id())
             own = None
             if dock.own_colours_on():
                 own = self.mag_layer.own_style_now() if self.mag_layer is not None else None
@@ -2049,6 +2047,10 @@ class NsgeoPlugin:
                 if mag is None:
                     raise ValueError(f"grid {grid_id} no longer has a magnetometer file")
                 spacings.append(mag.setup.spacing_m)
+            # Nothing below can fail before the write; the old layer goes right
+            # before it (Windows refuses to overwrite a file a layer holds open).
+            for layer in shown:
+                project.removeMapLayer(layer.id())
             try:
                 with busy_cursor():
                     write_mag_geotiff(path, mosaic, dock.settings(), spacings=spacings)
@@ -2066,6 +2068,7 @@ class NsgeoPlugin:
                 notes=notes,
                 own_style=own,
                 centre=mosaic.centre(),
+                mag=True,
             )
             if problem is not None:
                 self.message(f"Could not export the mag map: {problem}", Qgis.MessageLevel.Warning)
@@ -2455,6 +2458,7 @@ class NsgeoPlugin:
         notes: list[str] | None = None,
         own_style: str | None = None,
         centre: float = 0.0,
+        mag: bool = False,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
@@ -2498,7 +2502,7 @@ class NsgeoPlugin:
         layer = QgsRasterLayer(str(path), path.stem, "gdal")
         if not layer.isValid():
             return f"the exported GeoTIFF at {path} could not be reopened as a layer"
-        self._add_exported_layer(layer)
+        self._add_exported_layer(layer, mag=mag)
         if temporal is not None:
             temporal(layer)
             self._fit_temporal_controller(layer)
@@ -3330,9 +3334,10 @@ class NsgeoPlugin:
         if item in bar.items():
             bar.popWidget(item)
 
-    def _add_exported_layer(self, layer: Any) -> None:
-        """Show an exported GeoTIFF in the site's group, directly above the Mag
-        layer when it is there, else below the tables. With the group deleted
+    def _add_exported_layer(self, layer: Any, *, mag: bool = False) -> None:
+        """Show an exported GeoTIFF in the site's group: a GPR export directly above
+        the Mag layer, a mag export directly below it (the Mag panel's changes stay
+        visible), else below the tables; the live slice stays above both. With the group deleted
         by the user, on top of the Layers panel instead: never in the project
         with no place in the panel (#68)."""
         apply_smooth_resampling(layer)
@@ -3340,7 +3345,7 @@ class NsgeoPlugin:
         group = self.layers.group
         if group is not None:
             anchor = self.mag_layer.layer if self.mag_layer is not None else None
-            insert_above(group, layer, anchor)
+            (insert_below if mag else insert_above)(group, layer, anchor)
         else:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 

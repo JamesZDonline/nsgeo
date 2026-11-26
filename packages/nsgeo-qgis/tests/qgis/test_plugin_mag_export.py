@@ -163,23 +163,12 @@ def test_exporting_over_a_shown_file_asks_then_replaces_the_layer(shown, answer_
     np.testing.assert_array_equal(band, dock.export_map().array)
 
 
-def test_an_export_lands_above_the_mag_layer(shown, answer_modal):
-    plugin, root = shown
-    group = plugin.layers.group
-    mag_id = plugin.mag_layer.layer.id()
+def _index(group, layer):
+    return group.children().index(group.findLayer(layer.id()))
 
-    def index(layer):
-        return group.children().index(group.findLayer(layer.id()))
 
-    target = root / "mag-M1.tif"
-    _save_as(answer_modal, target)
-    plugin.mag_dock.export_requested.emit()
-    (exported,) = _layers_reading(target)
-    assert index(exported) + 1 == index(plugin.mag_layer.layer)
-    assert group.findLayer(mag_id) is not None
-
-    # A GPR export goes through the same path.
-    gpr = root / "gpr.tif"
+def _gpr_export(plugin, root, name="gpr.tif"):
+    gpr = root / name
     ds = gdal.GetDriverByName("GTiff").Create(str(gpr), 4, 4, 1, gdal.GDT_Float32)
     ds.SetGeoTransform((500.0, 0.5, 0.0, 700.0, 0.0, -0.5))
     ds.Close()
@@ -187,8 +176,92 @@ def test_an_export_lands_above_the_mag_layer(shown, answer_modal):
         gpr, limit=1.0, palette="amp_heat", unipolar=False, temporal=None
     )
     assert problem is None
-    (slice_export,) = _layers_reading(gpr)
-    assert index(slice_export) + 1 == index(plugin.mag_layer.layer)
+    (layer,) = _layers_reading(gpr)
+    return layer
+
+
+def _draw_slice(plugin):
+    from nsgeo.slices import CubeFrame
+
+    frame = CubeFrame(origin=(500.0, 700.0), azimuth=0.0, cell=0.5, nx=6, ny=6, crs="EPSG:32616")
+    plugin.slice_layer.update(
+        np.full((6, 6), 5.0, dtype=np.float32),
+        frame,
+        limit=10.0,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="x",
+    )
+
+
+def test_a_mag_export_lands_below_the_mag_layer_and_a_gpr_export_above_it(shown, answer_modal):
+    plugin, root = shown
+    group = plugin.layers.group
+    target = root / "mag-M1.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    (exported,) = _layers_reading(target)
+    assert _index(group, exported) == _index(group, plugin.mag_layer.layer) + 1
+    slice_export = _gpr_export(plugin, root)
+    assert _index(group, slice_export) + 1 == _index(group, plugin.mag_layer.layer)
+
+
+def test_a_slice_drawn_after_a_mag_export_is_above_it_and_above_the_mag_layer(shown, answer_modal):
+    plugin, root = shown
+    group = plugin.layers.group
+    target = root / "mag-M1.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    (exported,) = _layers_reading(target)
+    _draw_slice(plugin)
+    sl = plugin.slice_layer.layer
+    assert _index(group, sl) < _index(group, plugin.mag_layer.layer) < _index(group, exported)
+
+
+def test_the_slice_stays_on_top_through_gpr_then_mag_exports(shown, answer_modal):
+    plugin, root = shown
+    group = plugin.layers.group
+    _draw_slice(plugin)
+    sl = plugin.slice_layer.layer
+    gpr = _gpr_export(plugin, root)
+    target = root / "mag-M1.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    (mag_export,) = _layers_reading(target)
+    mag = plugin.mag_layer.layer
+    assert [_index(group, x) for x in (sl, gpr, mag, mag_export)] == sorted(
+        _index(group, x) for x in (sl, gpr, mag, mag_export)
+    )
+    assert _index(group, gpr) + 1 == _index(group, mag)
+    assert _index(group, mag) + 1 == _index(group, mag_export)
+
+
+def test_a_slice_joining_after_a_gpr_export_goes_above_it(shown):
+    plugin, root = shown
+    group = plugin.layers.group
+    gpr = _gpr_export(plugin, root)
+    _draw_slice(plugin)
+    assert _index(group, plugin.slice_layer.layer) < _index(group, gpr)
+
+
+def test_a_failed_write_after_replace_leaves_no_partial_file(shown, answer_modal, monkeypatch):
+    plugin, root = shown
+    dock = plugin.mag_dock
+    target = root / "mag-M1.tif"
+    _save_as(answer_modal, target)
+    dock.export_requested.emit()
+    assert len(_layers_reading(target)) == 1
+    plugin.messages.clear()
+
+    def boom(*args, **kwargs):
+        target.write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("nsgeo_qgis.plugin.write_mag_geotiff", boom)
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    dock.export_requested.emit()
+    assert plugin.messages == ["Could not export the mag map: disk full"]
+    assert not target.exists()
 
 
 def test_a_map_too_large_is_refused(shown, answer_modal, monkeypatch):

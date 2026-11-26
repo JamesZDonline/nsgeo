@@ -144,6 +144,38 @@ def insert_above(group: Any, layer: Any, anchor: Any | None) -> None:
     group.addLayer(layer)
 
 
+def insert_below(group: Any, layer: Any, anchor: Any | None) -> None:
+    """Add `layer` to `group` directly below `anchor`'s node; at the bottom when
+    `anchor` is None, deleted, or not in the group. Mag exports sit under the Mag layer."""
+    if anchor is not None and not sip.isdeleted(anchor):
+        node = group.findLayer(anchor.id())
+        if node is not None:
+            group.insertLayer(group.children().index(node) + 1, layer)
+            return
+    group.addLayer(layer)
+
+
+def top_of_exports(group: Any, anchor: Any | None) -> Any | None:
+    """The layer the live slice goes above: the top of the run of rasters sitting
+    directly above `anchor` (the GPR exports), else `anchor` itself. The slice is
+    above every export and the Mag layer."""
+    if anchor is None or sip.isdeleted(anchor):
+        return anchor
+    node = group.findLayer(anchor.id())
+    if node is None:
+        return anchor
+    kids = group.children()
+    i = kids.index(node)
+    top = anchor
+    while i > 0:
+        layer = kids[i - 1].layer() if hasattr(kids[i - 1], "layer") else None
+        if not isinstance(layer, QgsRasterLayer):
+            break
+        top = layer
+        i -= 1
+    return top
+
+
 def cache_root() -> Path | None:
     """Where the preview folders go: the user's cache folder, NOT the platform temp folder,
     because QGIS warns of "temporary layers" for a layer file under the temp folder (and
@@ -515,7 +547,8 @@ class SliceLayer(QObject):
         if group.findLayer(self.layer.id()) is not None:
             return
         other = self.above
-        insert_above(group, self.layer, other.layer if other is not None else None)
+        anchor = top_of_exports(group, other.layer if other is not None else None)
+        insert_above(group, self.layer, anchor)
 
     def _sweep(self) -> None:
         """Delete every scratch file but the two that may be wanted, and

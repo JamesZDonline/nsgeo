@@ -69,8 +69,9 @@ the known issues.
   grids, correct each traverse's destagger and scale, see the grids as a live
   map, one at a time or the whole site, and export the map as a GeoTIFF in nT.
 
-Not built yet: instruments other than GPR and the Bartington Grad601 magnetometer. The [roadmap](#roadmap) below shows
-what is coming, and known issues and smaller gaps are tracked in the
+Not built yet: instruments other than GPR and the Bartington Grad601
+magnetometer. The [roadmap](#roadmap) below shows what is coming, and known
+issues and smaller gaps are tracked in the
 [issues](https://github.com/JamesZDonline/nsgeo/issues).
 
 ## Roadmap

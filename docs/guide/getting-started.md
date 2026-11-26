@@ -137,7 +137,8 @@ any other QGIS panel.
   the site file isn't changed until you choose **Save site**. A magnetometer grid
   has its own row, with one file row under it once a file is imported. Click
   either to show the grid in **nsgeo Mag**. Right-click the grid for **Edit
-  grid…**, **Add magnetometer data…** and **Remove grid**, or the file row for
+  grid…**, **Edit lines…** (enabled once a file is imported), **Add magnetometer
+  data…** and **Remove grid**, or the file row for
   **Edit lines…**, **Change setup…** and **Remove file from site**, which never
   deletes the `.dat` file.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
@@ -1037,8 +1038,7 @@ choose **Edit lines…**. Each row is one traverse. Type a **Destagger** (m) or 
 destagger moves a traverse along the way it was walked, so the traverses walked
 one way and the other move opposite ways: if features on neighbouring traverses
 are offset, try a quarter of a metre, one sign or the other. Only Scale and
-Destagger can be changed here, and Measure is not available for magnetometer
-grids yet. The map redraws with the new values.
+Destagger can be changed here. The map redraws with the new values.
 
 If the setup was wrong, for example the wrong start corner, change it after the
 import: click **Change setup…** beside the file in **nsgeo Mag**, or right-click
@@ -1055,11 +1055,11 @@ writes what the panel shows, **This grid** or **Whole site**, at the panel's
 cell, as one band in nT with nothing where there is no data. The suggested file
 is `mag-<grid>.tif`, or `mag-site.tif`, in the site folder. A `.qml` style file
 beside it gives the same colours as the panel, or your own colours if they are
-on, so QGIS draws it as you saw it. The layer is added directly above the
-**Mag (live preview)** layer, and so are your GPR slice exports. If the file you
-choose is already a layer in the project, nsgeo asks before replacing it and
-its layer. A map too large to export at the cell is refused: choose a coarser
-cell.
+on, so QGIS draws it as you saw it. The layer is added just under the live **Mag
+(live preview)** layer, so the panel's changes stay visible; hide the Mag layer
+to see the export. Your GPR slice exports go directly above it. If the file you
+choose is already a layer in the project, nsgeo asks before replacing it and its
+layer. A map too large to export at the cell is refused: choose a coarser cell.
 
 Measure on a magnetometer grid is not built yet.
 
@@ -1074,7 +1074,7 @@ Everything for a site lives in its site folder:
 | `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
 | `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**, and the list of your surfaces. |
 | `surfaces` | One folder per grid with each surface's last build: a mesh, its depths and a fit report. Regenerable: **Rebuild** writes them again. |
-| `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
+| `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere (mag exports default to the site folder). |
 | `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
 | your magnetometer `.dat` files | Read where they are, never changed or rewritten. The site stores each one's path relative to the survey file, as it does for DZT files. |
