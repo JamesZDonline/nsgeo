@@ -26,12 +26,14 @@ def write_style(
     colormap_name: str,
     unipolar: bool,
     own_style: str | None = None,
+    centre: float = 0.0,
 ) -> Path:
     """Save `<stem>.qml` beside `path` and return it.
 
     QGIS applies a `.qml` of the same base name as the layer's default style
     when the raster is added. An existing one is replaced. `own_style`, the
-    user's own QGIS style, replaces the palette at `limit` when given. Raises
+    user's own QGIS style, replaces the palette at `limit` when given.
+    `centre` is the value the ramp is centred on (0 for a slice, the median for a mag map). Raises
     `OSError` when QGIS cannot write it, or cannot read `own_style`.
     """
     path = Path(path)
@@ -44,7 +46,7 @@ def write_style(
         except ValueError as exc:
             raise OSError(str(exc)) from exc
     else:
-        apply_renderer(layer, colormap_name, limit, unipolar)
+        apply_renderer(layer, colormap_name, limit, unipolar, centre)
     out = path.with_suffix(".qml")
     message, ok = layer.saveNamedStyle(str(out))
     if not ok:

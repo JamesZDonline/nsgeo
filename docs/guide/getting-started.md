@@ -1050,8 +1050,18 @@ file on the site** to change every file at once, each keeping its own
 corrections. The setup also becomes the one the next import starts from. Click
 **Apply**. Nothing in the `.dat` file is changed.
 
-Exporting the magnetometer map, and Measure on a magnetometer grid, are not
-built yet.
+To keep the map, click **Export GeoTIFF…** under Display in **nsgeo Mag**. It
+writes what the panel shows, **This grid** or **Whole site**, at the panel's
+cell, as one band in nT with nothing where there is no data. The suggested file
+is `mag-<grid>.tif`, or `mag-site.tif`, in the site folder. A `.qml` style file
+beside it gives the same colours as the panel, or your own colours if they are
+on, so QGIS draws it as you saw it. The layer is added directly above the
+**Mag (live preview)** layer, and so are your GPR slice exports. If the file you
+choose is already a layer in the project, nsgeo asks before replacing it and
+its layer. A map too large to export at the cell is refused: choose a coarser
+cell.
+
+Measure on a magnetometer grid is not built yet.
 
 ---
 

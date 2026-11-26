@@ -97,3 +97,13 @@ def test_the_users_own_style_goes_to_the_file(qgis_app, tif):
 def test_an_unreadable_own_style_is_an_os_error(qgis_app, tif):
     with pytest.raises(OSError):
         write_style(tif, limit=1.0, colormap_name="amp_heat", unipolar=False, own_style="<nope")
+
+
+def test_a_centre_shifts_the_exported_ramp(qgis_app, tif):
+    write_style(tif, limit=2.0, colormap_name="grey_black_high", unipolar=False, centre=10.0)
+    layer = QgsRasterLayer(str(tif), "export", "gdal")
+    renderer = layer.renderer()
+    assert renderer.classificationMin() == pytest.approx(8.0)
+    assert renderer.classificationMax() == pytest.approx(12.0)
+    assert _items(layer)[0].value == pytest.approx(8.0)
+    assert _items(layer)[-1].value == pytest.approx(12.0)

@@ -113,3 +113,19 @@ def test_the_cache_is_bounded_and_clearable(tmp_path):
     again = engine.grid_map(mag, grid, MagSettings(cell=0.5))[1]
     engine.clear()
     assert engine.grid_map(mag, grid, MagSettings(cell=0.5))[1] is not again
+
+
+def test_mosaic_takes_export_limits(tmp_path):
+    engine = MagEngine()
+    items = [(_file(tmp_path), _grid())]
+    settings = MagSettings()
+    default = engine.mosaic(items, settings)
+    roomy = engine.mosaic(items, settings, max_pixels=100_000_000, max_covered=100_000_000)
+    assert roomy.lattice.pixel == settings.cell
+    np.testing.assert_array_equal(roomy.array, default.array)
+    # A cap the cell cannot meet coarsens the lattice, as the defaults would.
+    tight = engine.mosaic(items, settings, max_pixels=100, max_covered=100)
+    assert tight.lattice.pixel > settings.cell
+    from nsgeo_qgis.mag_engine import MAG_EXPORT_MAX_PIXELS
+
+    assert MAG_EXPORT_MAX_PIXELS == 100_000_000

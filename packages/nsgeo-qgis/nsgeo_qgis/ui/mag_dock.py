@@ -42,6 +42,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis import mag_engine
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.mag_engine import (
     DEFAULT_MAG_FINISH,
@@ -88,6 +89,8 @@ class MagDock(QgsDockWidget):
     symbology_requested = pyqtSignal()
     #: Change setup… for the file shown (its grid id; the plugin owns the dialog).
     setup_requested = pyqtSignal(str)
+    #: Export GeoTIFF… of the map shown (the plugin owns the dialog and the file).
+    export_requested = pyqtSignal()
     error = pyqtSignal(str)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
@@ -178,6 +181,11 @@ class MagDock(QgsDockWidget):
         display_form.addRow("Palette", self.palette_combo)
         outer.addWidget(display)
 
+        self.export_button = QPushButton("Export GeoTIFF…")
+        self.export_button.setToolTip("Write the map shown as a GeoTIFF, in nT")
+        self.export_button.setEnabled(False)
+        outer.addWidget(self.export_button)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         outer.addWidget(self.status_label)
@@ -203,6 +211,7 @@ class MagDock(QgsDockWidget):
         self.colours_combo.currentIndexChanged.connect(self._on_colours_changed)
         self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
         self.setup_button.clicked.connect(self._on_setup_clicked)
+        self.export_button.clicked.connect(self._on_export_clicked)
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self._on_site_closed)
         session.grids_changed.connect(self._on_sources_changed)
@@ -230,6 +239,27 @@ class MagDock(QgsDockWidget):
 
     def subtitle(self) -> str:
         return self._subtitle
+
+    def export_map(self) -> MagMosaic | None:
+        """The shown scope at the panel's cell, made with the export's limits;
+        None when nothing is shown. Raises ValueError when the lattice would
+        come out coarser than the cell: the export is refused, not thinned."""
+        if self._map is None:
+            return None
+        items, _ = self._items()
+        if not items:
+            return None
+        settings = self.settings()
+        limit = mag_engine.MAG_EXPORT_MAX_PIXELS
+        with busy_cursor():
+            made = self.engine.mosaic(items, settings, max_pixels=limit, max_covered=limit)
+        if made is None:
+            return None
+        if made.lattice.pixel > settings.cell * (1.0 + 1e-9):
+            raise ValueError(
+                f"The mag map is too large to export at {settings.cell:g} m. Choose a coarser cell."
+            )
+        return made
 
     def set_scope(self, scope: str) -> None:
         if scope not in ("grid", "site"):
@@ -342,6 +372,7 @@ class MagDock(QgsDockWidget):
             self._drawn = []
         self._status = status
         self._subtitle = subtitle
+        self.export_button.setEnabled(shown is not None)
         self.status_label.setText(status)
         self.map_changed.emit()
 
@@ -441,6 +472,13 @@ class MagDock(QgsDockWidget):
                 self.setup_requested.emit(grid_id)
         except Exception as exc:  # noqa: BLE001 -- a slot must never raise
             self.error.emit(f"could not change the setup: {exc}")
+
+    def _on_export_clicked(self, *_: Any) -> None:
+        try:
+            if self._map is not None:
+                self.export_requested.emit()
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.error.emit(f"could not export the mag map: {exc}")
 
     def _sync_cell_floor(self) -> None:
         """The Cell spin cannot go below the reading interval of the files

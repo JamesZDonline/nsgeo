@@ -28,6 +28,8 @@ from nsgeo_qgis.slices_plan import SITE_MAX_COVERED_PIXELS, SITE_MAX_PIXELS, Sli
 MAG_STRETCH_PERCENTILE = 95.0
 #: Kriging out to three quarters of the traverse spacing, unsmoothed (P15).
 DEFAULT_MAG_FINISH = SliceFinish(method="kriging", max_distance_spacings=0.75)
+#: The most pixels an exported mag map may have: one float32 band, written on the GUI thread.
+MAG_EXPORT_MAX_PIXELS = 100_000_000
 
 
 @dataclass(frozen=True)
@@ -81,10 +83,17 @@ class MagEngine:
         return made
 
     def mosaic(
-        self, items: Sequence[tuple[MagFile, Grid]], settings: MagSettings
+        self,
+        items: Sequence[tuple[MagFile, Grid]],
+        settings: MagSettings,
+        *,
+        max_pixels: int = SITE_MAX_PIXELS,
+        max_covered: int = SITE_MAX_COVERED_PIXELS,
     ) -> MagMosaic | None:
         """Every grid in `items` on one lattice, in the CRS of the first.
-        A grid in another CRS is left out and named. None for no items."""
+        A grid in another CRS is left out and named. None for no items. The
+        lattice doubles its pixel until it fits `max_pixels` and `max_covered`
+        (the drawing's limits by default; an export passes its own)."""
         if not items:
             return None
         crs = items[0][1].crs
@@ -95,8 +104,8 @@ class MagEngine:
             maps,
             settings.cell,
             crs,
-            max_pixels=SITE_MAX_PIXELS,
-            max_covered=SITE_MAX_COVERED_PIXELS,
+            max_pixels=max_pixels,
+            max_covered=max_covered,
         )
         return MagMosaic(array, lattice, tuple(g.id for _, g in drawn), left_out)
 

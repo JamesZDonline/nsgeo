@@ -65,8 +65,11 @@ the known issues.
 - **Time and depth slices.** Bin a grid's processed lines into a volume, fill
   between the lines by kriging, inverse distance or minimum curvature, step
   through slices on the map as a live raster layer, and export them as GeoTIFFs.
+- **Magnetometer grids.** Import Bartington Grad601 files into magnetometer
+  grids, correct each traverse's destagger and scale, see the grids as a live
+  map, one at a time or the whole site, and export the map as a GeoTIFF in nT.
 
-Not built yet: instruments other than GPR. The [roadmap](#roadmap) below shows
+Not built yet: instruments other than GPR and the Bartington Grad601 magnetometer. The [roadmap](#roadmap) below shows
 what is coming, and known issues and smaller gaps are tracked in the
 [issues](https://github.com/JamesZDonline/nsgeo/issues).
 

@@ -106,6 +106,10 @@ SHADOWED = {
     # M19a Task 6: SlicesDock.symbology_requested and MagDock.symbology_requested
     # (#180), each connected in plugin.py to open its layer's Symbology page.
     "symbology_requested": {"declared": 2, "connects": 2},
+    # M19a Task 3: SlicesDock.export_requested (GPR slices) and
+    # MagDock.export_requested (Export GeoTIFF… on the Mag panel), each
+    # connected in plugin.py to its own export.
+    "export_requested": {"declared": 2, "connects": 2},
     # Hyperbola tracer: ProfileView.velocity_mode_requested (the Ctrl/Cmd press,
     # emitted from the view's press) is relayed by ProfileDock's own. The dock
     # connects the view's; the plugin connects the dock's.

@@ -132,6 +132,18 @@ def apply_renderer(
     apply_smooth_resampling(layer)
 
 
+def insert_above(group: Any, layer: Any, anchor: Any | None) -> None:
+    """Add `layer` to `group` directly above `anchor`'s node, or at the bottom
+    when `anchor` is None, deleted, or not in the group. The one rule for where
+    a layer sits over the Mag layer: the slice and every export use it."""
+    if anchor is not None and not sip.isdeleted(anchor):
+        node = group.findLayer(anchor.id())
+        if node is not None:
+            group.insertLayer(group.children().index(node), layer)
+            return
+    group.addLayer(layer)
+
+
 def cache_root() -> Path | None:
     """Where the preview folders go: the user's cache folder, NOT the platform temp folder,
     because QGIS warns of "temporary layers" for a layer file under the temp folder (and
@@ -502,18 +514,8 @@ class SliceLayer(QObject):
         assert self.layer is not None
         if group.findLayer(self.layer.id()) is not None:
             return
-        anchor = self._anchor_node(group)
-        if anchor is None:
-            group.addLayer(self.layer)
-        else:
-            group.insertLayer(group.children().index(anchor), self.layer)
-
-    def _anchor_node(self, group: Any) -> Any:
-        """The group's node for the layer this one stays above, if it is there."""
         other = self.above
-        if other is None or other.layer is None or sip.isdeleted(other.layer):
-            return None
-        return group.findLayer(other.layer.id())
+        insert_above(group, self.layer, other.layer if other is not None else None)
 
     def _sweep(self) -> None:
         """Delete every scratch file but the two that may be wanted, and

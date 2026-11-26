@@ -963,6 +963,39 @@ def test_a_slice_layer_stays_directly_above_the_layer_it_is_told_to(mapped):
         mag.dispose()
 
 
+def test_insert_above_places_directly_above_or_at_the_bottom(mapped):
+    from nsgeo_qgis.slice_layer import insert_above
+    from qgis.core import QgsRasterLayer
+
+    sl, session, layers, project = mapped
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _draw(sl, "Anchor")
+    group = layers.group
+    other = QgsRasterLayer(
+        "", "x", "gdal"
+    )  # an invalid layer is enough for the tree: only the order is under test
+    project.addMapLayer(other, False)
+    insert_above(group, other, sl.layer)
+    assert group.children().index(group.findLayer(other.id())) + 1 == group.children().index(
+        group.findLayer(sl.layer.id())
+    )
+    third = QgsRasterLayer("", "y", "gdal")
+    project.addMapLayer(third, False)
+    insert_above(group, third, None)
+    assert group.children().index(group.findLayer(third.id())) == len(group.children()) - 1
+    fourth = QgsRasterLayer("", "z", "gdal")
+    project.addMapLayer(fourth, False)
+    insert_above(group, fourth, other)  # an anchor that is itself in the group
+    assert group.children().index(group.findLayer(fourth.id())) + 1 == group.children().index(
+        group.findLayer(other.id())
+    )
+    stray = QgsRasterLayer("", "w", "gdal")
+    fifth = QgsRasterLayer("", "v", "gdal")
+    project.addMapLayer(fifth, False)
+    insert_above(group, fifth, stray)  # an anchor not in the group: the bottom
+    assert group.children().index(group.findLayer(fifth.id())) == len(group.children()) - 1
+
+
 def test_the_slice_layer_is_not_a_temporary_layer_to_qgis(qgis_app, tmp_path, monkeypatch):
     """QGIS warns on a new project or on exit when `isTemporary()`; a file under the platform
     temp folder counts, so the previews live in the cache folder (Qt's test mode keeps that

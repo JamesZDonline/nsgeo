@@ -106,6 +106,7 @@ from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import CORNER_ROLES, identity_curve
+from nsgeo_qgis.mag_export import write_mag_geotiff
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
@@ -136,7 +137,12 @@ from nsgeo_qgis.slice_export import (
     save_cube_npz,
     window_ns,
 )
-from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
+from nsgeo_qgis.slice_layer import (
+    SITE_LAYER_NAME,
+    SliceLayer,
+    apply_smooth_resampling,
+    insert_above,
+)
 from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.surface_layers import SurfaceLayers
 from nsgeo_qgis.surface_plan import (
@@ -563,6 +569,7 @@ class NsgeoPlugin:
         self.slice_layer.above = self.mag_layer
         self.mag_dock.symbology_requested.connect(self._open_mag_symbology)
         self.mag_dock.setup_requested.connect(self.open_mag_setup_dialog)
+        self.mag_dock.export_requested.connect(self._export_mag)
         self.mag_dock.map_changed.connect(self._on_mag_map_changed)
         self.session.site_closed.connect(self._clear_mag_layer)
         self.cut_sections = CutSections(self.session, self.slices_dock)
@@ -1981,6 +1988,92 @@ class NsgeoPlugin:
             coverage=coverage,
         )
 
+    def _export_mag(self) -> None:
+        """`MagDock.export_requested`: write the map the panel shows as a GeoTIFF and
+        add it above the Mag layer, styled as the panel is. On the GUI thread under
+        the busy cursor: one band. A slot: never raises."""
+        try:
+            assert self.session is not None
+            dock = self.mag_dock
+            if not self.session.is_open or dock is None:
+                return
+            try:
+                mosaic = dock.export_map()
+            except ValueError as exc:
+                self.message(str(exc), Qgis.MessageLevel.Warning)
+                return
+            if mosaic is None:
+                return
+            name = (
+                f"mag-{dock.grid_combo.currentData()}.tif"
+                if dock.scope() == "grid"
+                else "mag-site.tif"
+            )
+            chosen, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(),
+                "Export the mag map",
+                str(self.session.root / name),
+                "GeoTIFF (*.tif)",
+            )
+            if not chosen:
+                return
+            path = Path(chosen)
+            if path.suffix.lower() not in (".tif", ".tiff"):
+                path = path.with_suffix(".tif")
+            project = self.layers.project
+            shown = [
+                layer
+                for layer in project.mapLayers().values()
+                if _norm_path(layer.source().split("|")[0]) == _norm_path(path)
+            ]
+            if shown:
+                answer = QMessageBox.question(
+                    self.iface.mainWindow(),
+                    "Replace export",
+                    f"{path.name} is shown in the project. Replace it and its layer?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                # Windows refuses to overwrite a file a layer holds open.
+                for layer in shown:
+                    project.removeMapLayer(layer.id())
+            own = None
+            if dock.own_colours_on():
+                own = self.mag_layer.own_style_now() if self.mag_layer is not None else None
+                own = own if own is not None else dock.own_style()
+            first = self.session.mag_file_on(mosaic.grids[0]) if mosaic.grids else None
+            try:
+                with busy_cursor():
+                    write_mag_geotiff(
+                        path,
+                        mosaic,
+                        dock.settings(),
+                        spacing_m=first.setup.spacing_m if first is not None else None,
+                    )
+            except Exception as exc:  # noqa: BLE001 -- reported below, the file is partial
+                path.unlink(missing_ok=True)
+                self.message(f"Could not export the mag map: {exc}", Qgis.MessageLevel.Critical)
+                return
+            notes: list[str] = []
+            problem = self._add_export_layer(
+                path,
+                limit=mosaic.limit(),
+                palette=dock.palette(),
+                unipolar=False,
+                temporal=None,
+                notes=notes,
+                own_style=own,
+                centre=mosaic.centre(),
+            )
+            if problem is not None:
+                self.message(f"Could not export the mag map: {problem}", Qgis.MessageLevel.Warning)
+                return
+            self.message(" ".join([f"Exported {path.name}.", *notes]))
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"Could not export the mag map: {exc}", Qgis.MessageLevel.Critical)
+
     def _export_own_style(self, dock: SlicesDock) -> str | None:
         """The user's own colours for an export's style file (#180), or None
         for the plugin's: as the slice shows them now (this slice's computed
@@ -2361,6 +2454,7 @@ class NsgeoPlugin:
         temporal: Callable[[Any], None] | None,
         notes: list[str] | None = None,
         own_style: str | None = None,
+        centre: float = 0.0,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
@@ -2372,7 +2466,12 @@ class NsgeoPlugin:
         """
         try:
             write_style(
-                path, limit=limit, colormap_name=palette, unipolar=unipolar, own_style=own_style
+                path,
+                limit=limit,
+                colormap_name=palette,
+                unipolar=unipolar,
+                own_style=own_style,
+                centre=centre,
             )
         except Exception as exc:  # noqa: BLE001 -- the file is good; QGIS just draws it plainly
             QgsMessageLog.logMessage(
@@ -3232,14 +3331,16 @@ class NsgeoPlugin:
             bar.popWidget(item)
 
     def _add_exported_layer(self, layer: Any) -> None:
-        """Show an exported GeoTIFF in the site's group, below its tables.
-        With the group deleted by the user, on top of the Layers panel
-        instead: never in the project with no place in the panel (#68)."""
+        """Show an exported GeoTIFF in the site's group, directly above the Mag
+        layer when it is there, else below the tables. With the group deleted
+        by the user, on top of the Layers panel instead: never in the project
+        with no place in the panel (#68)."""
         apply_smooth_resampling(layer)
         self.layers.project.addMapLayer(layer, False)
         group = self.layers.group
         if group is not None:
-            group.addLayer(layer)
+            anchor = self.mag_layer.layer if self.mag_layer is not None else None
+            insert_above(group, layer, anchor)
         else:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 
