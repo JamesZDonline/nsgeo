@@ -121,9 +121,10 @@ release's notes list everything in it.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built and brought up to date with main: the import
-  is **Add data ▾ ▸ Magnetometer…**, and a site with mag saves as schema 5. Awaiting its
-  walkthrough. **Plan B:** export the
-  mag map, destagger in Edit lines, and change a file's setup after import.
+  is **Add data ▾ ▸ Magnetometer…**, and a site with mag saves as schema 5. Walkthrough
+  passed (18 of 19, one skipped). **Plan B building:** missing readings stay blank on the
+  map (done), then destagger in Edit lines, change a file's setup after import, and export
+  the mag map.
 - **3-D: the follow-ups** ([#204], [#203], [#219], [#218], [#228]). Surfaces
   stay fresh after an untouched ParaView export and after a reopen without
   Save site; the 3-D view reads a line it can't read only once, and reads
