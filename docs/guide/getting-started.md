@@ -695,7 +695,7 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
    - **my own colours** keeps whatever you set on the slice layer's
-     **Symbology** page in QGIS. The **Symbology…** button beside the choice
+     **Symbology** page in QGIS. The **Symbology…** button under the choice
      opens that page, where you can pick a colour ramp, type a min and max, or
      use a cumulative cut. Your colours start from what nsgeo was showing.
      Numbers you type stay the same at every depth. A computed range (Min /

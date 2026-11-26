@@ -815,11 +815,14 @@ class SlicesDock(QgsDockWidget):
         self.symbology_button.setToolTip("Open the slice layer's Symbology page")
         # #183: QGIS's Select Color Ramp, kept open and live on the slice.
         self.ramp_button = QPushButton("Ramp…")
-        colours_row = QHBoxLayout()
-        colours_row.addWidget(self.colours_combo, 1)
-        colours_row.addWidget(self.ramp_button)
-        colours_row.addWidget(self.symbology_button)
-        display_form.addRow("Colours", colours_row)
+        display_form.addRow("Colours", self.colours_combo)
+        # The two ways to edit your own colours, on a row of their own: beside
+        # the choice they widened the panel past Processing's (#121).
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self.ramp_button)
+        edit_row.addWidget(self.symbology_button)
+        edit_row.addStretch(1)
+        display_form.addRow("", edit_row)
 
         self.stretch_combo = QComboBox()
         self.stretch_combo.addItems(["shared across the cube", "this slice"])
