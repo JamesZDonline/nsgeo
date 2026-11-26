@@ -217,7 +217,8 @@ into it, and the site appears in **nsgeo Survey** under the folder's name.
 Now copy your radar files into the site folder. A subfolder is fine. Keep each
 DZT's DZX file beside it, so its marks are read too. Keep each DT1's HD file
 beside it as well: the HD is the DT1's header, and nsgeo cannot read a DT1
-without it. The same goes for a MALÅ line's RAD file, beside its RD3 or RD7. Keeping the radar files inside the site folder lets the whole site move as one folder (see
+without it. The same goes for a MALÅ line's RAD file, beside its RD3 or RD7. A SEG-Y line is a
+single file with nothing beside it. Keeping the radar files inside the site folder lets the whole site move as one folder (see
 [Where your data lives](#4-where-your-data-lives)).
 
 ### Step 2: Place a grid
@@ -334,12 +335,15 @@ log beside them, a note beside the switch says how many.
    purpose stay as recorded.
 3. Click **Add files…** and choose the radar files: GSSI DZT files,
    Sensors & Software DT1 files (each with its HD beside it), or MALÅ RD3 or
-   RD7 files (each with its RAD beside it). The file list shows every kind at
+   RD7 files (each with its RAD beside it), or SEG-Y files exported by
+   RadExplorer (`.sgy` or `.segy`). The file list shows every kind at
    once, or one kind at a time. Each file gets a row, with nsgeo's guess at its
    offset and direction. A MALÅ instrument records each line twice, as an RD3
    and an RD7 holding the same traces; the RD7 keeps more detail. If you choose
    both, only the RD7 is ticked, and the RD3's row says why. Either one imports
-   on its own.
+   on its own. SEG-Y written by software other than RadExplorer is listed
+   unticked, with the reason: its times and fields mean other things, and nsgeo
+   does not guess.
 4. Correct the table where the field day did not go to plan. Untick the box at
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
    **Offset (m)** or **Dir**. Use **↑** and **↓** to fix the order. Leaving out
@@ -351,7 +355,11 @@ log beside them, a note beside the switch says how many.
    header says, such as a DT1 with no time zero in it. A MALÅ line always
    comes in without a time zero, because its header does not give one that
    matches the data: add a **Time zero** step before anything that measures
-   depth. A CMP sounding (a DT1
+   depth. RadExplorer can shift each trace down by a static correction when it
+   exports SEG-Y. nsgeo undoes that shift, so a SEG-Y line comes in as
+   it was recorded, with time zero at the direct wave, and its row says so. If
+   the survey wheel jumped partway along a SEG-Y line, the line is still placed
+   with its traces evenly spaced, and its row says where the jump was. A CMP sounding (a DT1
    whose header calls it CMP or WARR) is listed but cannot be ticked: it
    measures velocity at one place, so it is not a line to place.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
@@ -443,8 +451,8 @@ their own. Switching keeps the files you have added, so you do not add them
 again.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
-   with the same name. GPS placement reads GSSI DZG logs only for now: a DT1
-   or MALÅ file added here is refused with **no GPS log read for this format yet**; place it
+   with the same name. GPS placement reads GSSI DZG logs only for now: a DT1,
+   MALÅ or SEG-Y file added here is refused with **no GPS log read for this format yet**; place it
    by Grid instead. A row shows the number of traces, how many fixes were RTK
    fixed, and how long the track runs without one (**Without RTK**).
 2. If the site has no coordinate system yet, nsgeo picks one from where the
