@@ -36,10 +36,12 @@ Radar readers (GSSI DZT, Sensors & Software DT1, MALÅ and SEG-Y from RadExplore
 | `FORMATS` | The registered radar formats, in the order the import lists them. |
 | `MalaError` | Raised when a MALÅ line or its .rad is missing, malformed or unsupported (multichannel files included). |
 | `MalaHeader` | A MALÅ line's header: a `RadarHeader` with the trace count, sample width, trigger and distance interval from its .rad. |
+| `NO_GPS_FORMAT` | The reason given for a line whose format has no GPS source yet. |
+| `NoGpsLog` | Raised for a line whose format has a GPS source but which has no log. |
 | `QUALITY_UNKNOWN` | The quality given to a fix from a log that records none (-1). |
 | `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
 | `RadarFileError` | Raised when a radar file is malformed, unsupported, or missing a companion file. |
-| `RadarFormat` | One registered format: its name, extensions, three readers, and which of its files to prefer when a line has two. |
+| `RadarFormat` | One registered format: its name, extensions, three readers, which of its files to prefer when a line has two, and its GPS log reader. |
 | `RadarHeader` | The header every radar format shares: sample axis, time zero, spacing, dielectric, antenna, import notes. |
 | `SegyError` | Raised when a SEG-Y file is malformed, or of a kind not read yet (any not from RadExplorer). |
 | `SegyHeader` | A SEG-Y line's header: a `RadarHeader` with the trace count, stored sample count, delay, largest static, trace step and jumps. |
@@ -47,8 +49,10 @@ Radar readers (GSSI DZT, Sensors & Software DT1, MALÅ and SEG-Y from RadExplore
 | `companion` | The file beside a radar file with its stem and a given suffix, in the spelling on disk. |
 | `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
 | `format_for` | The registered format that reads a path, by its extension in any case. |
+| `gps_formats` | The registered formats with a GPS source, in registry order. |
 | `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
+| `read_gps` | A line's GPS log as a `DzgLog`, by its format: a DZG, a MALÅ .cor, or a SEG-Y's trace positions. |
 | `read_header` | Read the header of any registered format, picked by the extension: cheaply, except a static-shifted SEG-Y, which is read whole. |
 | `read_samples` | Read all samples of any registered format as (channels, samples, traces). |
 | `sidecar_for` | The DZX beside a DZT, or the path itself if it is one; None when there is none. |

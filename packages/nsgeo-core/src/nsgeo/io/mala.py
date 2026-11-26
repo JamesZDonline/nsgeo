@@ -16,6 +16,8 @@ against eight lines of a GX450 HDR survey, each with both data files:
   wave in any unit, so time zero is not read: a Time zero step sets it.
 - Multichannel files (`DAT_0001_A1.rd3`, `_A2`, ...) are refused: none has
   been in hand to verify against.
+- The `.cor` beside a line is its GPS log (M21d, §16): one tab-separated row
+  per fix, trace numbers counted from 1, decimal degrees, GGA quality.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from typing import ClassVar
 
 import numpy as np
 
-from nsgeo.io.header import RadarFileError, RadarHeader, companion
+from nsgeo.io.dzg import DzgFix, DzgLog
+from nsgeo.io.header import NoGpsLog, RadarFileError, RadarHeader, companion
 
 _DTYPES = {".rd3": "<i2", ".rd7": "<i4"}
 #: More than this fraction between two readings of one quantity is a
@@ -230,3 +233,82 @@ def read_samples(path: str | Path, header: MalaHeader | None = None) -> np.ndarr
     if header.bytes_per_sample == 2:
         samples = np.left_shift(samples, 16)
     return np.ascontiguousarray(samples.T)[np.newaxis]
+
+
+_COR_COLUMNS = 10
+
+
+def _cor_number(row: int, what: str, value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        number = math.nan
+    if not math.isfinite(number):
+        raise MalaError(f"its .cor row {row} gives {what} as {value!r}, which is not a number")
+    return number
+
+
+def _utc_s(value: str) -> float | None:
+    try:
+        h, m, s = value.split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except ValueError:
+        return None
+
+
+def read_gps(path: str | Path, header: MalaHeader) -> DzgLog:
+    """The line's `.cor` as a GPS log: one fix per row, at trace number minus 1
+    (a `.cor` counts from 1, a DZG from 0), quality as given (§16)."""
+    path = Path(path)
+    cor = companion(path, ".cor")
+    if cor is None:
+        raise NoGpsLog(f"no {path.stem}.cor beside it")
+    try:
+        text = cor.read_bytes().decode("latin-1")
+    except OSError as exc:
+        raise MalaError(f"cannot read {cor.name}: {exc}") from exc
+    fixes: list[DzgFix] = []
+    previous: int | None = None
+    for i, line in enumerate((ln for ln in text.splitlines() if ln.strip()), start=1):
+        cols = [c.strip() for c in line.split("\t")]
+        if len(cols) != _COR_COLUMNS:
+            raise MalaError(f"its .cor row {i} has {len(cols)} columns, not {_COR_COLUMNS}")
+        trace_value = _cor_number(i, "the trace", cols[0])
+        if not trace_value.is_integer():
+            raise MalaError(
+                f"its .cor row {i} gives the trace as {cols[0]!r}, which is not a number"
+            )
+        trace = int(trace_value)
+        if previous is not None and trace <= previous:
+            raise MalaError(
+                f"its .cor row {i} names trace {trace} after trace {previous}: "
+                f"trace numbers must rise"
+            )
+        if not 1 <= trace <= header.n_traces:
+            raise MalaError(
+                f"its .cor names trace {trace}, but the line has {header.n_traces} traces"
+            )
+        previous = trace
+        lat = _cor_number(i, "the latitude", cols[3]) * (-1.0 if cols[4].upper() == "S" else 1.0)
+        lon = _cor_number(i, "the longitude", cols[5]) * (-1.0 if cols[6].upper() == "W" else 1.0)
+        quality = _cor_number(i, "the quality", cols[9])
+        altitude: float | None = None
+        if cols[8].upper() == "M":
+            try:
+                altitude = float(cols[7])
+            except ValueError:
+                altitude = None
+        fixes.append(
+            DzgFix(
+                trace=trace - 1,
+                utc_s=_utc_s(cols[2]),
+                lat=lat,
+                lon=lon,
+                quality=int(quality),
+                n_sats=None,
+                hdop=None,
+                alt_m=altitude,
+                geoid_m=None,
+            )
+        )
+    return DzgLog(fixes=tuple(fixes), bad_checksum=0, unpaired=0)

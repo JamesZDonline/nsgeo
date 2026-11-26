@@ -21,6 +21,11 @@ class RadarFileError(Exception):
     """Raised when a radar file is malformed, unsupported, or missing a companion file."""
 
 
+class NoGpsLog(RadarFileError):
+    """Raised for a line whose format has a GPS source, but which has no log:
+    no DZG or .cor beside it, or no position in its traces (spec M21 §16)."""
+
+
 @dataclass(frozen=True)
 class RadarHeader:
     #: The format's name as the user reads it, e.g. "GSSI DZT".

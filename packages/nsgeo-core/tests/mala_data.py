@@ -113,3 +113,34 @@ def write_mala_pair(stem_path: Path, data32: np.ndarray, **kw: Any) -> tuple[Pat
         **kw,
     )
     return rd7, rd3
+
+
+def write_cor(path: Path, rows: Sequence[tuple[int, float, float, int]]) -> Path:
+    """Write a MALÅ `.cor` GPS log in the real layout: tab-separated, CRLF-ended,
+    one row per fix of (trace counted from 1, latitude, longitude, quality), with
+    a fixed date, times a second apart and a 12.5 m altitude. Negative latitude
+    or longitude is written as S or W. Coordinates are made up: never a real one.
+    """
+    lines = []
+    for i, (trace, lat, lon, quality) in enumerate(rows):
+        s = 12 * 3600 + i
+        clock = f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}"
+        lines.append(
+            "\t".join(
+                [
+                    str(trace),
+                    "2000-01-01",
+                    clock,
+                    f"{abs(lat):.9f}",
+                    "S" if lat < 0 else "N",
+                    f"{abs(lon):.9f}",
+                    "W" if lon < 0 else "E",
+                    "12.5",
+                    "M",
+                    str(quality),
+                ]
+            )
+        )
+    path = Path(path)
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode("latin-1"))
+    return path

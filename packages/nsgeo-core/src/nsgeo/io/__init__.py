@@ -13,15 +13,18 @@ from nsgeo.io.dzt import DztError, DztHeader
 from nsgeo.io.dzx import DzxError, DzxInfo, DzxMark, read_dzx, sidecar_for
 from nsgeo.io.formats import (
     FORMATS,
+    NO_GPS_FORMAT,
     RadarFormat,
     UnsupportedFormat,
     format_for,
+    gps_formats,
+    read_gps,
     read_header,
     read_samples,
     supported_extensions,
     trace_count,
 )
-from nsgeo.io.header import RadarFileError, RadarHeader, companion
+from nsgeo.io.header import NoGpsLog, RadarFileError, RadarHeader, companion
 from nsgeo.io.mala import MalaError, MalaHeader
 from nsgeo.io.segy import SegyError, SegyHeader
 
@@ -39,6 +42,8 @@ __all__ = [
     "FORMATS",
     "MalaError",
     "MalaHeader",
+    "NO_GPS_FORMAT",
+    "NoGpsLog",
     "QUALITY_UNKNOWN",
     "RTK_FIXED",
     "RadarFileError",
@@ -50,8 +55,10 @@ __all__ = [
     "companion",
     "dzg_for",
     "format_for",
+    "gps_formats",
     "read_dzg",
     "read_dzx",
+    "read_gps",
     "read_header",
     "read_samples",
     "sidecar_for",

@@ -377,3 +377,39 @@ def track_from_log(
         anchor_on=anchor_on,
         smooth_m=smooth_m if anchor_on == ANCHOR_ALL else 0.0,
     )
+
+
+#: More than this fraction between the GPS and wheel lengths adds a note (§16).
+LENGTH_TOLERANCE: float = 0.20
+
+
+def gps_length_note(log: DzgLog, to_xy: ToXY, header: RadarHeader) -> str | None:
+    """A note when the line's GPS track and its wheel disagree on its length by
+    more than 20 %, else None (spec M21 §16).
+
+    The GPS length is the track through the anchors `track_from_log` would use,
+    thinned to positions `THIN_M` apart; the wheel's is their trace span over
+    the header's traces per metre. None when the line has no wheel spacing, or
+    the thinned track is under `THIN_M` long. Neither length is taken as right.
+    """
+    tpm = header.traces_per_metre
+    if not tpm > 0:
+        return None
+    rtk = anchor_rule(log) == ANCHOR_RTK
+    fixes = [
+        f
+        for f in log.fixes
+        if math.isfinite(f.lat) and math.isfinite(f.lon) and (not rtk or f.quality == RTK_FIXED)
+    ]
+    if len(fixes) < 2:
+        return None
+    xs, ys = to_xy(
+        np.array([f.lon for f in fixes], dtype=float), np.array([f.lat for f in fixes], dtype=float)
+    )
+    gps = thinned_length(np.column_stack([xs, ys]))
+    if gps < THIN_M:
+        return None
+    wheel = (fixes[-1].trace - fixes[0].trace) / tpm
+    if not wheel > 0 or abs(gps - wheel) <= LENGTH_TOLERANCE * wheel:
+        return None
+    return f"its GPS track is {gps:.0f} m but its wheel says {wheel:.0f} m: check which is right"

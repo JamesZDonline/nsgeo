@@ -32,7 +32,8 @@ from typing import ClassVar
 
 import numpy as np
 
-from nsgeo.io.header import RadarFileError, RadarHeader
+from nsgeo.io.dzg import QUALITY_UNKNOWN, DzgFix, DzgLog
+from nsgeo.io.header import NoGpsLog, RadarFileError, RadarHeader
 
 FILE_HEADER_BYTES = 3600
 TEXT_HEADER_BYTES = 3200
@@ -90,6 +91,10 @@ class _Traces:
     n_samples: np.ndarray
     interval: np.ndarray
     geographic: np.ndarray
+    #: Degrees x 10^6, little-endian (bytes 229-232 and 233-236). Read only by
+    #: `read_gps`: never kept in a header.
+    lon_e6: np.ndarray
+    lat_e6: np.ndarray
     samples: np.ndarray  # (n_traces, stored_samples) float32
 
 
@@ -174,6 +179,8 @@ def _traces(raw: np.ndarray, n_traces: int, n_samples: int) -> _Traces:
         n_samples=_column(body, 115, ">i2"),
         interval=_column(body, 117, ">i2"),
         geographic=_column(body, 227, "<i2"),
+        lon_e6=_column(body, 229, "<i4"),
+        lat_e6=_column(body, 233, "<i4"),
         samples=samples,
     )
 
@@ -334,3 +341,37 @@ def read_samples(path: str | Path, header: SegyHeader | None = None) -> np.ndarr
     out = np.take_along_axis(t.samples, np.minimum(index, stored - 1), axis=1)
     out = np.where(inside, out, np.float32(0)).astype(np.float32)
     return np.ascontiguousarray(out.T)[np.newaxis]
+
+
+NO_POSITIONS = "its traces carry no GPS positions"
+
+
+def read_gps(path: str | Path, header: SegyHeader) -> DzgLog:
+    """The positions in the trace headers as a GPS log (§16): one fix at the
+    first trace of each run of equal positions, among traces whose geographic
+    flag is set, with quality `QUALITY_UNKNOWN` and no time or altitude."""
+    path = Path(path)
+    _, stored, n_traces, t = _open(path)
+    if stored != header.stored_samples or n_traces != header.n_traces:
+        raise SegyError("its samples changed after its header was read")
+    flagged = np.flatnonzero(t.geographic == 1)
+    if flagged.size == 0:
+        raise NoGpsLog(NO_POSITIONS)
+    lon = t.lon_e6[flagged]
+    lat = t.lat_e6[flagged]
+    change = np.concatenate([[True], (np.diff(lon) != 0) | (np.diff(lat) != 0)])
+    fixes = tuple(
+        DzgFix(
+            trace=int(trace),
+            utc_s=None,
+            lat=float(la) / 1e6,
+            lon=float(lo) / 1e6,
+            quality=QUALITY_UNKNOWN,
+            n_sats=None,
+            hdop=None,
+            alt_m=None,
+            geoid_m=None,
+        )
+        for trace, lo, la in zip(flagged[change], lon[change], lat[change])
+    )
+    return DzgLog(fixes=fixes, bad_checksum=0, unpaired=0)

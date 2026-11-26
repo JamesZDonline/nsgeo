@@ -57,6 +57,7 @@ def write_segy(
     trace_samples: Mapping[int, int] | None = None,
     trace_dt: Mapping[int, int] | None = None,
     delays: Mapping[int, int] | None = None,
+    positions: np.ndarray | None = None,
 ) -> Path:
     """Write `data` (n_samples, n_traces) as a RadExplorer-style SEG-Y at `path`.
 
@@ -67,7 +68,9 @@ def write_segy(
     the static disagree. `stored_samples` defaults to the data plus the largest
     shift. `trace_samples`, `trace_dt` and `delays` override one trace's word
     (`{index: value}`). `little_endian` writes the binary header's words
-    little-endian.
+    little-endian. `positions` is (n_traces, 2) of made-up (lon, lat) degrees,
+    written x 10^6 little-endian with the geographic flag set; without it the
+    flag follows `geographic` and the coordinate bytes stay zero.
     """
     path = Path(path)
     data = np.asarray(data, dtype=np.float32)
@@ -105,7 +108,12 @@ def write_segy(
         struct.pack_into(">h", head, 108, delay)
         struct.pack_into(">h", head, 114, trace_samples.get(i, stored))
         struct.pack_into(">h", head, 116, trace_dt.get(i, dt_ps))
-        struct.pack_into("<h", head, 226, 1 if geographic else 0)
+        if positions is not None:
+            struct.pack_into("<h", head, 226, 1)
+            struct.pack_into("<i", head, 228, round(positions[i][0] * 1e6))
+            struct.pack_into("<i", head, 232, round(positions[i][1] * 1e6))
+        else:
+            struct.pack_into("<h", head, 226, 1 if geographic else 0)
         trace = np.zeros(stored, dtype=">f4")
         end = min(stored, shifts[i] + n_samples)
         trace[shifts[i] : end] = data[: end - shifts[i], i]

@@ -19,14 +19,18 @@ from typing import TypeVar
 import numpy as np
 
 from nsgeo.io import dt1, dzt, mala, segy
-from nsgeo.io.header import RadarFileError, RadarHeader, companion
+from nsgeo.io.dzg import DzgLog, dzg_for, read_dzg
+from nsgeo.io.header import NoGpsLog, RadarFileError, RadarHeader, companion
 
 __all__ = [
     "FORMATS",
+    "NO_GPS_FORMAT",
     "RadarFormat",
     "UnsupportedFormat",
     "companion",
     "format_for",
+    "gps_formats",
+    "read_gps",
     "read_header",
     "read_samples",
     "supported_extensions",
@@ -50,6 +54,13 @@ class RadarFormat:
     #: stem in one folder is chosen in more than one, the import ticks only
     #: the best. Empty for a format with one file per line.
     prefer: tuple[str, ...] = ()
+    #: The line's GPS log, or None for a format with no GPS source (spec §16).
+    #: Raises `NoGpsLog` for a line that has none.
+    read_gps: Callable[[Path, RadarHeader, int], DzgLog] | None = None
+
+
+#: A radar format nsgeo reads, but whose GPS log it does not (spec M21 C10).
+NO_GPS_FORMAT = "no GPS log read for this format yet"
 
 
 _H = TypeVar("_H", bound=RadarHeader)
@@ -99,6 +110,22 @@ def _segy_read_samples(path: Path, header: RadarHeader) -> np.ndarray:
     return segy.read_samples(path, _checked(SEGY_NAME, segy.SegyHeader, header, path))
 
 
+def _dzt_read_gps(path: Path, header: RadarHeader, n_traces: int) -> DzgLog:
+    _checked(DZT_NAME, dzt.DztHeader, header, path)
+    dzg = dzg_for(path)
+    if dzg is None:
+        raise NoGpsLog("no DZG beside it")
+    return read_dzg(dzg, n_traces)
+
+
+def _mala_read_gps(path: Path, header: RadarHeader, n_traces: int) -> DzgLog:
+    return mala.read_gps(path, _checked(MALA_NAME, mala.MalaHeader, header, path))
+
+
+def _segy_read_gps(path: Path, header: RadarHeader, n_traces: int) -> DzgLog:
+    return segy.read_gps(path, _checked(SEGY_NAME, segy.SegyHeader, header, path))
+
+
 DZT_NAME = dzt.DztHeader.format_name
 DT1_NAME = dt1.Dt1Header.format_name
 MALA_NAME = mala.MalaHeader.format_name
@@ -106,7 +133,14 @@ SEGY_NAME = segy.SegyHeader.format_name
 
 #: In the order the import's file picker lists them.
 FORMATS: tuple[RadarFormat, ...] = (
-    RadarFormat(DZT_NAME, (".dzt",), dzt.read_header, _dzt_trace_count, _dzt_read_samples),
+    RadarFormat(
+        DZT_NAME,
+        (".dzt",),
+        dzt.read_header,
+        _dzt_trace_count,
+        _dzt_read_samples,
+        read_gps=_dzt_read_gps,
+    ),
     RadarFormat(DT1_NAME, (".dt1",), dt1.read_header, _dt1_trace_count, _dt1_read_samples),
     RadarFormat(
         MALA_NAME,
@@ -115,9 +149,15 @@ FORMATS: tuple[RadarFormat, ...] = (
         _mala_trace_count,
         _mala_read_samples,
         prefer=(".rd7", ".rd3"),
+        read_gps=_mala_read_gps,
     ),
     RadarFormat(
-        SEGY_NAME, (".sgy", ".segy"), segy.read_header, _segy_trace_count, _segy_read_samples
+        SEGY_NAME,
+        (".sgy", ".segy"),
+        segy.read_header,
+        _segy_trace_count,
+        _segy_read_samples,
+        read_gps=_segy_read_gps,
     ),
 )
 
@@ -158,3 +198,19 @@ def read_samples(path: str | Path, header: RadarHeader | None = None) -> np.ndar
     path = Path(path)
     fmt = format_for(path)
     return fmt.read_samples(path, fmt.read_header(path) if header is None else header)
+
+
+def gps_formats() -> tuple[RadarFormat, ...]:
+    """The registered formats with a GPS source, in registry order."""
+    return tuple(fmt for fmt in FORMATS if fmt.read_gps is not None)
+
+
+def read_gps(path: str | Path, header: RadarHeader, n_traces: int) -> DzgLog:
+    """The line's GPS log, by its format (spec §16). `UnsupportedFormat` with
+    `NO_GPS_FORMAT` for a format with no GPS source; `NoGpsLog` for a line with
+    no log."""
+    path = Path(path)
+    fmt = format_for(path)
+    if fmt.read_gps is None:
+        raise UnsupportedFormat(NO_GPS_FORMAT)
+    return fmt.read_gps(path, header, n_traces)
