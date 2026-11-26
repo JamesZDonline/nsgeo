@@ -7,9 +7,9 @@ one band of at most `MAG_EXPORT_MAX_PIXELS` pixels.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
-from nsgeo.mag import MagSetup
 from nsgeo.render import PercentileClip
 
 from nsgeo_qgis.export_pipeline import ExportBand
@@ -20,17 +20,22 @@ BAND_DESCRIPTION = "Magnetic gradient (nT)"
 
 
 def write_mag_geotiff(
-    path: Path, mosaic: MagMosaic, settings: MagSettings, *, spacing_m: float | None = None
+    path: Path, mosaic: MagMosaic, settings: MagSettings, *, spacings: Sequence[float]
 ) -> None:
     """Write `mosaic` to `path`: one band, NaN nodata, in the mosaic's CRS.
 
     The dataset metadata names the instrument, the unit, the grids and the
-    settings the map was made with; `spacing_m`, the traverse spacing (the
-    first shown file's), turns the reach into metres. A file the writer could not finish is
-    left for the caller to delete.
+    settings the map was made with; `spacings`, each grid's traverse
+    spacing in `mosaic.grids` order, turns the reach into metres per grid: one
+    number when they agree, else one per grid, comma-joined in that order. A file the
+    writer could not finish is left for the caller to delete.
     """
     finish = settings.finish
-    spacing = spacing_m if spacing_m is not None else MagSetup().spacing_m
+    if len(spacings) != len(mosaic.grids):
+        raise ValueError("one traverse spacing is needed for each grid in the map")
+    # The metres the map's own fill used for each grid (`SliceFinish.in_metres`).
+    reach = [finish.in_metres(spacing).max_distance_m for spacing in spacings]
+    distances = str(reach[0]) if len(set(reach)) == 1 else ",".join(str(r) for r in reach)
 
     def tag_dataset(dataset: object) -> None:
         dataset.SetMetadata(  # type: ignore[attr-defined]
@@ -40,7 +45,7 @@ def write_mag_geotiff(
                 "NSGEO_GRIDS": ",".join(mosaic.grids),
                 "NSGEO_CELL_M": str(settings.cell),
                 "NSGEO_INTERPOLATION": finish.method,
-                "NSGEO_MAX_DISTANCE_M": str(finish.max_distance_spacings * spacing),
+                "NSGEO_MAX_DISTANCE_M": distances,
                 "NSGEO_SMOOTH_X_M": str(finish.smooth_x_m),
                 "NSGEO_SMOOTH_Y_M": str(finish.smooth_y_m),
             }

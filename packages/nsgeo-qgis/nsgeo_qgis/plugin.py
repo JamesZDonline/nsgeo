@@ -2043,15 +2043,15 @@ class NsgeoPlugin:
             if dock.own_colours_on():
                 own = self.mag_layer.own_style_now() if self.mag_layer is not None else None
                 own = own if own is not None else dock.own_style()
-            first = self.session.mag_file_on(mosaic.grids[0]) if mosaic.grids else None
+            spacings = []
+            for grid_id in mosaic.grids:
+                mag = self.session.mag_file_on(grid_id)
+                if mag is None:
+                    raise ValueError(f"grid {grid_id} no longer has a magnetometer file")
+                spacings.append(mag.setup.spacing_m)
             try:
                 with busy_cursor():
-                    write_mag_geotiff(
-                        path,
-                        mosaic,
-                        dock.settings(),
-                        spacing_m=first.setup.spacing_m if first is not None else None,
-                    )
+                    write_mag_geotiff(path, mosaic, dock.settings(), spacings=spacings)
             except Exception as exc:  # noqa: BLE001 -- reported below, the file is partial
                 path.unlink(missing_ok=True)
                 self.message(f"Could not export the mag map: {exc}", Qgis.MessageLevel.Critical)

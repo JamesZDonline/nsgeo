@@ -217,3 +217,47 @@ def test_export_is_disabled_with_nothing_drawn(plugin, mag_site):
     plugin.mag_dock.show_grid("M1")
     plugin.mag_dock.refresh(closed_ok=True)
     assert plugin.mag_dock.export_button.isEnabled()
+
+
+def _metadata(path):
+    ds = gdal.Open(str(path))
+    try:
+        return ds.GetMetadata()
+    finally:
+        ds.Close()
+
+
+def test_equal_spacings_write_one_max_distance(shown, answer_modal):
+    plugin, root = shown
+    target = root / "one.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    meta = _metadata(target)
+    reach = plugin.mag_dock.settings().finish.max_distance_spacings
+    assert meta["NSGEO_MAX_DISTANCE_M"] == str(reach * 0.5)
+
+
+def test_different_spacings_write_a_max_distance_per_grid_in_grid_order(shown, answer_modal):
+    import dataclasses
+
+    from nsgeo.mag import MagFile, MagSetup
+    from plugin_testing import synthetic_grad601
+
+    plugin, root = shown
+    plugin.session.set_mag_file(
+        MagFile.open(
+            synthetic_grad601(root / "raw" / "mag", "m2.dat"),
+            "M2",
+            dataclasses.replace(MagSetup(), spacing_m=0.25),
+        )
+    )
+    plugin.mag_dock.set_scope("site")
+    plugin.mag_dock.refresh(closed_ok=True)
+    assert plugin.mag_dock.current_map().grids == ("M1", "M2")
+    target = root / "mag-site.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    meta = _metadata(target)
+    reach = plugin.mag_dock.settings().finish.max_distance_spacings
+    assert meta["NSGEO_GRIDS"] == "M1,M2"
+    assert meta["NSGEO_MAX_DISTANCE_M"] == f"{reach * 0.5},{reach * 0.25}"
