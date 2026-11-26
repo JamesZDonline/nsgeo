@@ -80,15 +80,19 @@ Coordinate frames and trace placement.
 
 | Name | Purpose |
 |---|---|
+| `ANCHOR_ALL` | `TrackPlacement.anchor_on` for a line without RTK: every fix with a position places traces. |
+| `ANCHOR_RTK` | `TrackPlacement.anchor_on` for a line with RTK: only RTK-fixed fixes place traces (the default). |
 | `Grid` | A survey grid: origin, azimuth, size, CRS, default line spacing and an optional velocity model. |
 | `GridFit` | The result of fitting a grid to corner points. |
 | `GridPlacement` | A line positioned parametrically within a grid frame. |
 | `Placement` | How traces are positioned; the protocol placements satisfy. |
 | `fit_grid_from_corners` | Least-squares rigid fit of grid-local metres to world coordinates. |
-| `TrackPlacement` | A line placed along the RTK GPS track logged in its DZG. Only RTK-fixed fixes place traces; a dropout is bridged by a straight segment (`bridges`), the ends run on by wheel at the line's heading (`end_runs`), and `travel_shift` moves every trace forward along the walked path. |
+| `TrackPlacement` | A line placed along its GPS track. RTK-fixed fixes place traces, or every fix for a line without RTK (`anchor_on`), optionally smoothed (`smooth_m`); a dropout is bridged by a straight segment (`bridges`), the ends run on by wheel at the line's heading (`end_runs`), and `travel_shift` moves every trace forward along the walked path. |
 | `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
 | `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
-| `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
+| `anchor_rule` | Whether a `DzgLog` places on its RTK fixes (two or more) or on all its fixes. |
+| `gps_length_note` | A note when a line's thinned GPS track and its wheel disagree on its length by more than 20 %. |
+| `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`, anchored by `anchor_rule`. Raises `ValueError` when there is no position, or only one. |
 | `ALONG_DEG` | 20 degrees: a line within this of the main direction runs along it. |
 | `MIN_VOTE_M` | 1 m: a line whose first-to-last chord is shorter does not vote for the main direction. |
 | `TrackFrame` | A fitted grid rectangle (origin, azimuth, `size_x`, `size_y`, `lined_up`); `as_grid(id, crs, spacing)` makes the `Grid`. |

@@ -1,11 +1,12 @@
 """Planning an Import GPS lines table (M17a, #134). No Qt and no qgis.
 
-Each DZT with a DZG beside it becomes one row: a line placed along the RTK
-track, at travel_shift 0, with the counts the dialog shows, or a refusal in
-the dialog's own words. The shift is applied at Import, to every ready row
-(`shifted_lines`). The projection, the "already in the site" test and the
-"can this CRS place that spot" test are injected, so all of it runs in the
-Qt-free tier.
+Each radar file with a GPS log becomes one row: a DZT's DZG, a MALÅ line's
+.cor, a SEG-Y's trace positions (radar formats spec §16). The line is placed
+along the RTK track, or along every fix for a log without RTK, at travel_shift
+0, with the counts the dialog shows, or a refusal in the dialog's own words.
+The shift is applied at Import, to every ready row (`shifted_lines`). The
+projection, the "already in the site" test and the "can this CRS place that
+spot" test are injected, so all of it runs in the Qt-free tier.
 """
 
 from __future__ import annotations
@@ -19,31 +20,40 @@ from pathlib import Path
 import numpy as np
 from nsgeo.geometry import (
     ALONG_DEG,
+    ANCHOR_RTK,
     END_LIMIT_M,
     MIN_VOTE_M,
     Bridge,
     Grid,
     ToXY,
+    anchor_rule,
+    gps_length_note,
     metres_outside,
     track_from_log,
 )
 from nsgeo.io import (
+    NO_GPS_FORMAT,
     RTK_FIXED,
     DzgError,
     DzgLog,
-    DztHeader,
+    NoGpsLog,
     RadarFileError,
-    dzg_for,
-    read_dzg,
+    UnsupportedFormat,
+    format_for,
+    read_gps,
     read_header,
     trace_count,
 )
+from nsgeo.io import gps_formats as _gps_formats
 from nsgeo.model import Line
 
 NO_DZG = "no DZG beside it"
-#: A radar format nsgeo reads, but whose GPS log it does not read yet (spec
-#: M21 C10, until M21d). Said before any DZG is looked for.
-NO_GPS_FORMAT = "no GPS log read for this format yet"
+# NO_GPS_FORMAT (a format with no GPS source, DT1) now lives in nsgeo.io; it is
+# imported above, so `gps_import.NO_GPS_FORMAT` still names it.
+#: The lesser file of a MALÅ pair chosen in GPS mode (spec §14, §16).
+SAME_TRACES = "the same traces as {best}, which is also chosen"
+NO_RTK = "no RTK fix: placed on its {n} GPS fixes as recorded"
+NO_RTK_SMOOTHED = "no RTK fix: placed on its {n} GPS fixes, smoothed over {m:g} m"
 ALREADY_IN_SITE = "already in the site"
 OUTSIDE = "outside {gid}"
 #: A stretch outside the grid shorter than this is not worth a line (metres).
@@ -73,29 +83,53 @@ class GpsRow:
     bridges: tuple[Bridge, ...]
     end_runs: tuple[float, float]
     refusal: str | None  # None when ready
+    #: Facts for a ready row: placed without RTK, the GPS and wheel lengths apart.
+    notes: tuple[str, ...] = ()
 
     @property
     def without_rtk_m(self) -> float:
         return sum(b.metres for b in self.bridges)
 
 
-def _first_fixed(log: DzgLog) -> tuple[float, float] | None:
+def _first_anchor(log: DzgLog) -> tuple[float, float] | None:
+    """(lon, lat) of the first fix the line will be placed by: the first RTK fix
+    when the log has two, else the first fix with a position."""
+    rtk = anchor_rule(log) == ANCHOR_RTK
     for f in log.fixes:
-        if f.quality == RTK_FIXED and math.isfinite(f.lat) and math.isfinite(f.lon):
+        if (not rtk or f.quality == RTK_FIXED) and math.isfinite(f.lat) and math.isfinite(f.lon):
             return f.lon, f.lat
     return None
 
 
-def first_fixed_lonlat(path: Path) -> tuple[float, float] | None:
-    """(lon, lat) of the first RTK fix in the DZG beside the DZT `path`, or
-    None when there is no DZG, it cannot be read, or it has no RTK fix."""
+def _log_for(path: Path) -> DzgLog | None:
+    """The file's GPS log, or None when it has none or it cannot be read."""
     try:
-        dzg = dzg_for(path)
-        if dzg is None:
-            return None
-        return _first_fixed(read_dzg(dzg))
-    except (DzgError, OSError):
+        header = read_header(path)
+        return read_gps(path, header, trace_count(path, header))
+    except (RadarFileError, DzgError, OSError):
         return None
+
+
+def first_fixed_lonlat(path: Path) -> tuple[float, float] | None:
+    """(lon, lat) of the first fix the file's line would be placed by, or None
+    when it has no GPS log, the log cannot be read, or it has no position."""
+    log = _log_for(Path(path))
+    return None if log is None else _first_anchor(log)
+
+
+def gps_file_filter() -> str:
+    """GPS mode's picker filter: the formats with a GPS source, together and one
+    by one, then all files (spec §16)."""
+
+    def globs(extensions: Sequence[str]) -> str:
+        return " ".join(f"*{e} *{e.upper()}" for e in extensions)
+
+    formats = _gps_formats()
+    every = [e for fmt in formats for e in fmt.extensions]
+    parts = [f"All GPS radar files ({globs(every)})"]
+    parts += [f"{fmt.name} ({globs(fmt.extensions)})" for fmt in formats]
+    parts.append("All files (*)")
+    return ";;".join(parts)
 
 
 def _refused(
@@ -122,31 +156,42 @@ def _plan_one(
     crs: str,
     taken: Callable[[Path], bool],
     usable: Callable[[float, float], bool],
+    smooth_m: float = 0.0,
 ) -> GpsRow:
     try:
         header = read_header(path)
         n_traces = trace_count(path, header)
     except (RadarFileError, OSError) as exc:
         return _refused(path, f"could not read it: {exc}")
-    if not isinstance(header, DztHeader):
-        return _refused(path, NO_GPS_FORMAT, n_traces)
-    dzg = dzg_for(path)
-    if dzg is None:
-        return _refused(path, NO_DZG, n_traces)
     try:
-        log = read_dzg(dzg, n_traces)
-    except (DzgError, OSError) as exc:
+        log = read_gps(path, header, n_traces)
+    except NoGpsLog as exc:
+        return _refused(path, str(exc), n_traces)
+    except UnsupportedFormat:
+        return _refused(path, NO_GPS_FORMAT, n_traces)
+    except (RadarFileError, DzgError, OSError) as exc:
         return _refused(path, f"could not read it: {exc}", n_traces)
     # Where the line starts decides whether `crs` can place it, asked before
     # anything is projected: a transform that fails point by point would
     # otherwise make the anchors vanish and the row read "no RTK-fixed position".
-    first = _first_fixed(log)
+    first = _first_anchor(log)
     if first is not None and not usable(first[0], first[1]):
         return _refused(path, f"outside what {crs} can place", n_traces, log)
     try:
-        placement = track_from_log(log, to_xy, crs, label=path.stem)
+        placement = track_from_log(log, to_xy, crs, label=path.stem, smooth_m=smooth_m)
     except ValueError as exc:
         return _refused(path, str(exc), n_traces, log)
+    notes: list[str] = []
+    if placement.anchor_on != ANCHOR_RTK:
+        n = len(placement.anchors())
+        notes.append(
+            NO_RTK_SMOOTHED.format(n=n, m=placement.smooth_m)
+            if placement.smooth_m > 0
+            else NO_RTK.format(n=n)
+        )
+    length = gps_length_note(log, to_xy, header)
+    if length is not None:
+        notes.append(length)
     bridges = placement.bridges()
     end_runs = placement.end_runs(n_traces, header)
     if taken(path):
@@ -160,6 +205,7 @@ def _plan_one(
             bridges=bridges,
             end_runs=end_runs,
             refusal=ALREADY_IN_SITE,
+            notes=tuple(notes),
         )
     return GpsRow(
         path=path,
@@ -170,6 +216,7 @@ def _plan_one(
         bridges=bridges,
         end_runs=end_runs,
         refusal=None,
+        notes=tuple(notes),
     )
 
 
@@ -179,11 +226,40 @@ def plan_gps_rows(
     crs: str,
     taken: Callable[[Path], bool],
     usable: Callable[[float, float], bool],
+    smooth_m: float = 0.0,
 ) -> list[GpsRow]:
     """One row per path, in the order given. `taken(path)` says the file is
     already a line of the site; `usable(lon, lat)` says `crs` can place that
-    spot (asked at each row's first RTK fix)."""
-    return [_plan_one(Path(p), to_xy, crs, taken, usable) for p in paths]
+    spot (asked at each row's first anchor). `smooth_m` smooths the lines
+    placed without RTK. Of a MALÅ pair, only the best readable file is kept."""
+    rows = [_plan_one(Path(p), to_xy, crs, taken, usable, smooth_m) for p in paths]
+    return _prefer(rows)
+
+
+def _prefer(rows: list[GpsRow]) -> list[GpsRow]:
+    """The registry's `prefer` rule (spec §14) in GPS mode: of one stem in one
+    folder chosen in more than one preferred extension, the best that read is
+    kept and the others are refused as the same traces."""
+    groups: dict[tuple[str, Path, str], list[int]] = {}
+    for i, row in enumerate(rows):
+        try:
+            fmt = format_for(row.path)
+        except UnsupportedFormat:
+            continue
+        if row.path.suffix.lower() in fmt.prefer and row.n_traces is not None:
+            groups.setdefault((fmt.name, row.path.parent, row.path.stem), []).append(i)
+    out = list(rows)
+    for (name, _, _), members in groups.items():
+        if len(members) < 2:
+            continue
+        prefer = next(f.prefer for f in _gps_formats() if f.name == name)
+        best = min(members, key=lambda i: prefer.index(rows[i].path.suffix.lower()))
+        for i in members:
+            if i != best:
+                out[i] = dataclasses.replace(
+                    rows[i], line=None, refusal=SAME_TRACES.format(best=rows[best].path.name)
+                )
+    return out
 
 
 def shifted_lines(rows: Sequence[GpsRow], metres: float, grid_id: str | None = None) -> list[Line]:
@@ -269,9 +345,16 @@ def import_messages(
 
 
 def count_with_gps(paths: Sequence[Path]) -> int:
-    """How many of the DZT files in `paths` have a DZG beside them that holds
-    at least one RTK fix with a position (the Add data dialog's GPS note)."""
-    return sum(1 for p in paths if first_fixed_lonlat(p) is not None)
+    """How many of the files in `paths` have a GPS log with at least two fixes
+    with a position (the Add data dialog's GPS note): DZT, MALÅ or SEG-Y."""
+
+    def placeable(path: Path) -> bool:
+        log = _log_for(Path(path))
+        if log is None:
+            return False
+        return sum(1 for f in log.fixes if math.isfinite(f.lat) and math.isfinite(f.lon)) >= 2
+
+    return sum(1 for p in paths if placeable(p))
 
 
 @dataclass(frozen=True)

@@ -20,10 +20,14 @@ from plugin_testing import (
     synthetic_dt1,
     synthetic_dzt,
     synthetic_gps_dzt,
+    synthetic_gps_mala,
+    synthetic_gps_segy,
     synthetic_mala,
+    synthetic_mala_pair,
     synthetic_segy,
 )
 from tests.dzg_data import local_xy, write_dzg
+from tests.mala_data import write_cor
 
 LAT0, LON0 = 45.2, 10.5
 TO_XY = local_xy(LAT0, LON0)
@@ -155,8 +159,10 @@ def test_first_fixed_lonlat_is_the_first_rtk_fix_of_the_dzg_beside_the_dzt(tmp_p
 def test_first_fixed_lonlat_is_none_when_there_is_nothing_to_read(tmp_path):
     assert first_fixed_lonlat(synthetic_dzt(tmp_path, "FILE__001.DZT")) is None
     assert first_fixed_lonlat(tmp_path / "missing.DZT") is None
+    # A log with no RTK fix is placed on its fixes now (radar formats spec §16),
+    # so its first fix is where the line starts.
     none = make(tmp_path, "FILE__002.DZT", {25: 1, 75: 1, 125: 1, 175: 1})
-    assert first_fixed_lonlat(none) is None
+    assert first_fixed_lonlat(none) == pytest.approx((fix(25)[2], fix(25)[1]))
 
 
 def test_shifted_lines_sets_the_shift_on_ready_rows_only(tmp_path):
@@ -222,13 +228,14 @@ def test_the_crs_is_asked_before_anything_is_projected(tmp_path):
     assert row.refusal == f"outside what {CRS} can place"
 
 
-def test_count_with_gps_counts_the_files_whose_dzg_holds_an_rtk_fix(tmp_path):
+def test_count_with_gps_counts_the_files_whose_log_has_two_positions(tmp_path):
     with_fix = make(tmp_path, "FILE__001.DZT")
     float_only = synthetic_gps_dzt(
         tmp_path, "FILE__002.DZT", [fix(t, 5) for t in (25, 75)], traces_per_metre=10.0
     )
     bare = synthetic_dzt(tmp_path, "FILE__003.DZT")
-    assert count_with_gps([with_fix, float_only, bare]) == 1
+    # A float-only log places now (§16), so it counts.
+    assert count_with_gps([with_fix, float_only, bare]) == 2
     assert count_with_gps([with_fix, make(tmp_path, "FILE__004.DZT")]) == 2
     assert count_with_gps([]) == 0
 
@@ -469,18 +476,74 @@ def test_an_unreadable_dt1_is_refused_not_raised(tmp_path):
     assert row.line is None and row.refusal == "could not read it: no LINE01.HD beside it"
 
 
-def test_a_mala_line_is_refused_whatever_lies_beside_it(tmp_path):
-    p = synthetic_mala(tmp_path, "DAT_0001.rd7", n_traces=200)
-    p.with_suffix(".cor").write_text("1\t2024-01-01\t00:00:00\t0\tN\t0\tE\t0\tM\t1\n")
-    write_dzg(p.with_suffix(".DZG"), [fix(25), fix(75), fix(125)])
-    (row,) = plan([p])
-    assert row.line is None and row.refusal == NO_GPS_FORMAT
-    assert row.n_traces == 200 and row.n_fixes == 0
+# ---- M21d: MALÅ and SEG-Y lines placed by their own logs (spec §16) ------------
 
 
-def test_a_segy_line_is_refused_though_its_traces_carry_the_geographic_flag(tmp_path):
-    p = synthetic_segy(tmp_path, "LINE01.sgy", n_traces=200)
-    write_dzg(p.with_suffix(".DZG"), [fix(25), fix(75), fix(125)])
+def _cor_rows(n=10, step_traces=20, quality=2):
+    """Rows of a made-up .cor walking north at 0.1 m a trace, traces counted from 1."""
+    return [(1 + i * step_traces, *fix(i * step_traces)[1:3], quality) for i in range(n)]
+
+
+def test_a_mala_line_is_placed_by_its_cor_not_a_dzg_beside_it(tmp_path):
+    p = synthetic_gps_mala(tmp_path, "DAT_0001.rd7", _cor_rows(), n_traces=200)
+    write_dzg(p.with_suffix(".DZG"), [fix(25, 4), fix(75, 4), fix(125, 4)])
     (row,) = plan([p])
-    assert row.line is None and row.refusal == NO_GPS_FORMAT
-    assert row.n_traces == 200 and row.n_fixes == 0
+    assert row.refusal is None and row.line is not None
+    assert row.line.placement.anchor_on == "all" and row.n_fixes == 10 and row.n_fixed == 0
+    assert row.notes[0] == "no RTK fix: placed on its 10 GPS fixes as recorded"
+    assert row.bridges == ()
+
+
+def test_a_segy_line_is_placed_by_its_trace_positions(tmp_path):
+    positions = [(fix(i)[2], fix(i)[1]) for i in range(200)]
+    p = synthetic_gps_segy(tmp_path, "LINE01.sgy", positions, n_traces=200)
+    (row,) = plan([p])
+    assert row.refusal is None and row.line.placement.anchor_on == "all"
+    assert row.notes[0].startswith("no RTK fix: placed on its ")
+
+
+def test_smoothing_reaches_the_placement_and_the_note(tmp_path):
+    p = synthetic_gps_mala(tmp_path, "DAT_0001.rd7", _cor_rows(), n_traces=200)
+    (row,) = plan_gps_rows([p], TO_XY, CRS, never, always, smooth_m=5.0)
+    assert row.line.placement.smooth_m == 5.0
+    assert row.notes[0] == "no RTK fix: placed on its 10 GPS fixes, smoothed over 5 m"
+
+
+def test_lines_without_a_log_say_why(tmp_path):
+    mala = synthetic_mala(tmp_path, "DAT_0002.rd7", n_traces=50)
+    segy = synthetic_segy(tmp_path, "LINE02.sgy", n_traces=50, geographic=False)
+    dt1 = synthetic_dt1(tmp_path, "LINE03.DT1", n_traces=50)
+    rows = plan([mala, segy, dt1])
+    assert [r.refusal for r in rows] == [
+        "no DAT_0002.cor beside it",
+        "its traces carry no GPS positions",
+        NO_GPS_FORMAT,
+    ]
+
+
+def test_a_mala_pair_places_only_its_rd7(tmp_path):
+    rd7, rd3 = synthetic_mala_pair(tmp_path, "DAT_0004", n_traces=200)
+    write_cor(rd7.with_suffix(".cor"), _cor_rows())
+    rows = {r.path.name: r for r in plan([rd3, rd7])}
+    assert rows["DAT_0004.rd7"].refusal is None
+    assert rows["DAT_0004.rd3"].line is None
+    assert rows["DAT_0004.rd3"].refusal == "the same traces as DAT_0004.rd7, which is also chosen"
+
+
+def test_the_length_note_appears_when_gps_and_wheel_disagree(tmp_path):
+    # The wheel says 0.5 m a trace (100 m over 200 traces); the log walks 0.1 m
+    # a trace, a fifth of that.
+    p = synthetic_gps_mala(tmp_path, "DAT_0005.rd7", _cor_rows(), n_traces=200, interval=0.5)
+    (row,) = plan([p])
+    assert any(
+        n.startswith("its GPS track is ") and n.endswith("check which is right") for n in row.notes
+    )
+    q = synthetic_gps_mala(tmp_path, "DAT_0006.rd7", _cor_rows(), n_traces=200, interval=0.1)
+    (agree,) = plan([q])
+    assert len(agree.notes) == 1
+
+
+def test_an_rtk_dzt_row_is_unchanged_and_has_no_note(tmp_path):
+    (row,) = plan([make(tmp_path, "FILE__001.DZT")])
+    assert row.refusal is None and row.notes == ()
+    assert row.line.placement.anchor_on == "rtk" and row.line.placement.smooth_m == 0.0

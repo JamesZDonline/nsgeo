@@ -15,6 +15,7 @@ from nsgeo_qgis.ui.gps_import_dialog import (
     COL_ENDS,
     COL_GAP,
     COL_STATUS,
+    EMPTY_STATUS,
     HEADERS,
     lonlat_to_xy,
 )
@@ -121,7 +122,7 @@ def test_adding_files_plans_rows_and_shows_the_coordinates(session, tmp_path):
     assert d_dlg.windowTitle() == "Add GPR data into a new grid"
     assert [d.table.horizontalHeaderItem(c).text() for c in range(6)] == HEADERS
     assert HEADERS == ["File", "Traces", "RTK fixes", "Without RTK", "Ends", "Status"]
-    assert d.status.text() == "Add DZT files that have a DZG beside them."
+    assert d.status.text() == EMPTY_STATUS
     assert not d_dlg.import_button.isEnabled()
 
     raw = tmp_path / "raw"
@@ -189,7 +190,7 @@ def test_remove_drops_the_selected_rows_and_replans(session, tmp_path):
     d.table.selectAll()
     d.remove_selected()
     assert d.table.rowCount() == 0
-    assert d.status.text() == "Add DZT files that have a DZG beside them."
+    assert d.status.text() == EMPTY_STATUS
     assert not d_dlg.import_button.isEnabled()
     d_dlg.reject()
 

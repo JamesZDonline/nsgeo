@@ -722,6 +722,26 @@ def synthetic_gps_dzt(
     return path
 
 
+def synthetic_gps_mala(folder: Path, name: str, rows: Any, n_traces: int = 200, **kw: Any) -> Path:
+    """A synthetic MALÅ line with a `.cor` beside it. `rows` are `(trace counted
+    from 1, lat, lon, quality)`, made up; `kw` goes to `synthetic_mala`."""
+    from tests.mala_data import write_cor
+
+    path = synthetic_mala(folder, name, n_traces=n_traces, **kw)
+    write_cor(path.with_suffix(".cor"), list(rows))
+    return path
+
+
+def synthetic_gps_segy(
+    folder: Path, name: str, positions: Any, n_traces: int = 200, **kw: Any
+) -> Path:
+    """A synthetic SEG-Y whose traces carry `positions`, (lon, lat) per trace,
+    made up; `kw` goes to `synthetic_segy`."""
+    return synthetic_segy(
+        folder, name, n_traces=n_traces, positions=np.asarray(positions, dtype=float), **kw
+    )
+
+
 CRS = "EPSG:32632"
 LAT0, LON0 = 45.2, 10.5
 M_PER_DEG = 6_371_000.0 * math.pi / 180.0

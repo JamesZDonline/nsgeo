@@ -39,7 +39,7 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
 )
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -65,6 +65,7 @@ from nsgeo_qgis.gps_import import (
     GpsImportResult,
     GpsRow,
     first_fixed_lonlat,
+    gps_file_filter,
     import_messages,
     plan_gps_rows,
     shifted_lines,
@@ -102,12 +103,20 @@ FITTED_SMALLEST = (
 )
 GRID_LOST = "grid {gid!r} no longer exists; nothing was imported"
 
-FILE_FILTER = "GSSI radar files (*.dzt *.DZT)"
+#: From the registry's formats with a GPS source (radar formats spec §16).
+FILE_FILTER = gps_file_filter()
+SMOOTH_TIP = (
+    "Lines placed without RTK only: averages each GPS fix with those within half this "
+    "distance along the track. 0 places them as recorded. Change it per line later from "
+    "Edit lines."
+)
+#: How long the Smooth box waits after a change before replanning, which re-reads files.
+SMOOTH_DEBOUNCE_MS = 300
 SHIFT_TIP = (
     "Moves every trace forward along the way its line was walked, for every line in "
     "this import. Change it per line later from the Survey panel."
 )
-EMPTY_STATUS = "Add DZT files that have a DZG beside them."
+EMPTY_STATUS = "Add radar files that have a GPS log: a DZT's DZG, a MALÅ line's .cor, or SEG-Y."
 # The mockup's cues (Checkpoint C1): amber for a ready row worth a look, red
 # for a refused one.
 FLAG_BG, FLAG_FG = "#fbf3df", "#8a5a00"
@@ -234,6 +243,24 @@ class GpsImportPage(QWidget):
         crs_row.addWidget(self.crs_label)
         crs_row.addWidget(self.note_label, 1)
         form.addRow("Coordinates:", crs_row)
+        self.smooth = QDoubleSpinBox()
+        self.smooth.setRange(0.0, 20.0)
+        self.smooth.setDecimals(1)
+        self.smooth.setSingleStep(0.5)
+        self.smooth.setValue(0.0)
+        self.smooth.setToolTip(SMOOTH_TIP)
+        smooth_note = QLabel(SMOOTH_TIP)
+        smooth_note.setStyleSheet("color: gray;")
+        smooth_note.setWordWrap(True)
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(self.smooth)
+        smooth_row.addWidget(smooth_note, 1)
+        form.addRow("Smooth (m)", smooth_row)
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setSingleShot(True)
+        self._smooth_timer.setInterval(SMOOTH_DEBOUNCE_MS)
+        self._smooth_timer.timeout.connect(self._smooth_settled)
+        self.smooth.valueChanged.connect(self._smooth_changed)
         layout.addLayout(form)
 
         self.status = QLabel(EMPTY_STATUS)
@@ -325,9 +352,7 @@ class GpsImportPage(QWidget):
     # ---- rows -----------------------------------------------------------------
     def _choose_files(self) -> None:
         try:
-            paths, _ = QFileDialog.getOpenFileNames(
-                self, "Select DZT files", "", FILE_FILTER + ";;All files (*)"
-            )
+            paths, _ = QFileDialog.getOpenFileNames(self, "Select radar files", "", FILE_FILTER)
             if paths:
                 self.add_files([Path(p) for p in paths])
         except Exception as exc:  # noqa: BLE001 -- a slot (clicked): see plugin.py's module docstring
@@ -394,10 +419,31 @@ class GpsImportPage(QWidget):
             return usable_at(crs, QgsPointXY(lon, lat))[0] is None
 
         self._planned = plan_gps_rows(
-            self._paths, lonlat_to_xy(crs), crs.authid(), is_taken, usable
+            self._paths,
+            lonlat_to_xy(crs),
+            crs.authid(),
+            is_taken,
+            usable,
+            smooth_m=self.smooth.value(),
         )
         self._apply_target()
         self._refresh()
+
+    def _smooth_changed(self, *_: Any) -> None:
+        # A slot (valueChanged): replanning re-reads every file, so wait for the
+        # value to settle.
+        try:
+            self._smooth_timer.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
+            self.status.setText(f"could not smooth the lines: {exc}")
+
+    def _smooth_settled(self) -> None:
+        # A slot (timeout).
+        try:
+            if self._paths:
+                self._replan()
+        except Exception as exc:  # noqa: BLE001 -- a slot: see plugin.py's module docstring
+            self.status.setText(f"could not smooth the lines: {exc}")
 
     # ---- the target grid ------------------------------------------------------
     def _fill_target_combo(self) -> None:
@@ -573,7 +619,7 @@ class GpsImportPage(QWidget):
                 COL_FIXES: f"{row.n_fixed} of {row.n_fixes}" if row.n_fixes else "—",
                 COL_GAP: f"{row.without_rtk_m:.1f} m" if planned and row.bridges else "—",
                 COL_ENDS: f"{row.end_runs[0]:.2f} / {row.end_runs[1]:.2f} m" if planned else "—",
-                status_col: "ready" if ready else (row.refusal or ""),
+                status_col: " · ".join(["ready", *row.notes]) if ready else (row.refusal or ""),
             }
             flagged = {COL_GAP: bool(row.bridges) and planned, COL_ENDS: long_end and planned}
             if existing:

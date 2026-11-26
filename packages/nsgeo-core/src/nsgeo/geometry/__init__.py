@@ -6,11 +6,15 @@ from nsgeo.geometry.fit import GridFit, fit_grid_from_corners
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement, Placement
 from nsgeo.geometry.track import (
+    ANCHOR_ALL,
+    ANCHOR_RTK,
     END_LIMIT_M,
     Bridge,
     ToXY,
     TrackFix,
     TrackPlacement,
+    anchor_rule,
+    gps_length_note,
     track_from_log,
 )
 from nsgeo.geometry.track_fit import (
@@ -25,6 +29,8 @@ from nsgeo.geometry.track_fit import (
 
 __all__ = [
     "ALONG_DEG",
+    "ANCHOR_ALL",
+    "ANCHOR_RTK",
     "Bridge",
     "END_LIMIT_M",
     "Grid",
@@ -36,8 +42,10 @@ __all__ = [
     "TrackFix",
     "TrackFrame",
     "TrackPlacement",
+    "anchor_rule",
     "fit_frame",
     "fit_grid_from_corners",
+    "gps_length_note",
     "main_direction",
     "measure_spacing",
     "metres_outside",
