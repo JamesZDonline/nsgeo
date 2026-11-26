@@ -4071,6 +4071,164 @@ def test_the_symbology_button_opens_the_slice_layers_symbology_page(plugin, fake
     assert fake_iface.layer_properties == [(plugin.slice_layer.layer, "mOptsPage_Style")]
 
 
+# ---- #183: move the ramp's stops and watch the slice recolour ------------------------------
+
+
+def _stops(plugin):
+    from nsgeo_qgis.own_colours import source_ramp
+
+    return [round(stop.offset, 3) for stop in source_ramp(plugin.slice_layer.layer).stops()]
+
+
+def _with_white_at(dialog, position):
+    """What dragging a single middle stop to `position` leaves in the dialog."""
+    from qgis.core import QgsGradientStop
+    from qgis.PyQt.QtGui import QColor
+
+    ramp = dialog.ramp()
+    ramp.setStops([QgsGradientStop(position, QColor(255, 255, 0))])
+    dialog.setRamp(ramp)
+
+
+def _open_ramp(plugin):
+    dock = plugin.slices_dock
+    _own(dock)
+    dock.ramp_button.click()
+    dialog = plugin._live_ramp.dialog
+    assert dialog is not None and dialog.isVisible()
+    assert not dialog.isModal(), "the map has to keep drawing while the dialog is open"
+    return dialog
+
+
+def test_fewer_stops_refits_the_ramp_on_the_slice_and_cancel_still_undoes_it(plugin):
+    from qgis.core import QgsStyle
+
+    dialog = _open_ramp(plugin)
+    before = _stops(plugin)
+    live = plugin._live_ramp
+    assert live.stops_spin.value() == 7 and live.fewer_button.isVisible()
+    dialog.setRamp(QgsStyle.defaultStyle().colorRamp("Turbo"))
+    assert len(_stops(plugin)) > 200
+    live.stops_spin.setValue(6)
+    live.fewer_button.click()
+    assert len(dialog.ramp().stops()) == 4
+    assert len(_stops(plugin)) == 4, "on the slice at once"
+    dialog.reject()
+    _events()
+    assert _stops(plugin) == before
+
+
+def test_moving_a_stop_recolours_the_slice_at_once_and_is_remembered(plugin):
+    from nsgeo_qgis.own_colours import style_range, style_text
+
+    dialog = _open_ramp(plugin)
+    lo, hi = style_range(plugin.slice_layer.layer)
+    assert dialog.windowTitle() == f"Slice colours · 0 is {lo:.3g}, 1 is {hi:.3g}"
+    _with_white_at(dialog, 0.8)
+    assert _stops(plugin) == [0.8], "on the slice before OK"
+    assert style_range(plugin.slice_layer.layer) == pytest.approx((lo, hi))
+    assert plugin.session.slice_colours("grid")["style"] == style_text(plugin.slice_layer.layer)
+    dialog.accept()
+    _events()
+    assert plugin._live_ramp.dialog is None
+    assert _stops(plugin) == [0.8]
+
+
+def test_cancel_puts_the_ramp_back(plugin):
+    from nsgeo_qgis.own_colours import style_text
+
+    dialog = _open_ramp(plugin)
+    before = _stops(plugin)
+    _with_white_at(dialog, 0.2)
+    dialog.reject()
+    _events()
+    assert plugin._live_ramp.dialog is None
+    assert _stops(plugin) == before
+    assert plugin.session.slice_colours("grid")["style"] == style_text(plugin.slice_layer.layer)
+
+
+def test_the_moved_stops_stay_as_the_depth_slider_moves_and_the_title_follows(plugin):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    dock = plugin.slices_dock
+    dialog = _open_ramp(plugin)
+    layer = plugin.slice_layer.layer
+    shown = layer.renderer()
+    renderer = shown.clone()
+    renderer.setClassificationMin(shown.classificationMin())
+    renderer.setClassificationMax(shown.classificationMax())
+    origin = renderer.minMaxOrigin()
+    origin.setLimits(QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    origin.setStatAccuracy(QgsRasterMinMaxOrigin.StatAccuracy.Exact)
+    renderer.setMinMaxOrigin(origin)
+    layer.setRenderer(renderer)
+    _with_white_at(dialog, 0.3)
+    titles = []
+    for step in (3, 9):
+        dock.slice_slider.setValue(step)
+        _events()
+        assert _stops(plugin) == [0.3]
+        lo, hi = _range(plugin)
+        assert dialog.windowTitle() == f"Slice colours · 0 is {lo:.3g}, 1 is {hi:.3g}"
+        titles.append(dialog.windowTitle())
+    assert titles[0] != titles[1]
+    _with_white_at(dialog, 0.6)
+    assert _stops(plugin) == [0.6], "still live on the new slice"
+    dialog.accept()
+
+
+@pytest.mark.parametrize("leave", ["plugin colours", "coverage"])
+def test_leaving_the_users_colours_closes_the_ramp_keeping_its_edits(plugin, leave):
+    dock = plugin.slices_dock
+    dialog = _open_ramp(plugin)
+    _with_white_at(dialog, 0.7)
+    if leave == "coverage":
+        dock.coverage_check.setChecked(True)
+    else:
+        dock.colours_combo.setCurrentIndex(0)
+    _events()
+    assert plugin._live_ramp.dialog is None
+    if leave == "coverage":
+        dock.coverage_check.setChecked(False)
+    else:
+        _own(dock)
+    _events()
+    assert _stops(plugin) == [0.7]
+
+
+def test_switching_scope_closes_the_ramp_so_it_cannot_edit_the_other_scopes_style(plugin):
+    dock = plugin.slices_dock
+    whole_site(plugin)
+    _own(dock)  # both scopes in their own colours: only the scope differs
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    dialog = _open_ramp(plugin)
+    _with_white_at(dialog, 0.7)
+    whole_site(plugin)
+    assert dock.own_colours_on()
+    assert plugin._live_ramp.dialog is None
+    assert _stops(plugin) != [0.7], "Whole site's style was not edited"
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    assert _stops(plugin) == [0.7], "This grid kept its edit"
+
+
+def test_a_style_with_no_gradient_ramp_says_where_to_choose_one(plugin, monkeypatch):
+    from qgis.core import QgsSingleBandGrayRenderer
+
+    dock = plugin.slices_dock
+    said = []
+    monkeypatch.setattr(plugin, "message", lambda text, *a, **k: said.append(text))
+    _own(dock)
+    layer = plugin.slice_layer.layer
+    layer.setRenderer(QgsSingleBandGrayRenderer(layer.dataProvider(), 1))
+    dock.ramp_button.click()
+    assert plugin._live_ramp.dialog is None
+    assert len(said) == 1 and "Singleband pseudocolor" in said[0]
+
+
 def test_each_scope_keeps_its_own_colours(plugin):
     from nsgeo_qgis.own_colours import set_range
 

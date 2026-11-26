@@ -5845,3 +5845,21 @@ def test_an_import_into_the_shown_empty_grid_prepares_with_the_imports_preset_on
     # a Choose-lines change keeps P in the grid's remembered source
     dock.set_included(tuple(session.keys())[:1])
     assert session.slice_source("A")["preset"] == "p"
+
+
+def test_the_ramp_button_is_live_when_the_symbology_button_is(docked):
+    """#183: the live ramp edits the same style, under the same rules."""
+    dock, session = docked
+    requested = []
+    dock.ramp_requested.connect(lambda: requested.append(True))
+    assert not dock.ramp_button.isEnabled()
+    dock.colours_combo.setCurrentIndex(1)
+    assert dock.ramp_button.isEnabled()
+    dock.ramp_button.click()
+    assert requested == [True]
+    dock.coverage_check.setChecked(True)
+    assert not dock.ramp_button.isEnabled()
+    assert "Show coverage" in dock.ramp_button.toolTip()
+    dock.coverage_check.setChecked(False)
+    dock.colours_combo.setCurrentIndex(0)
+    assert not dock.ramp_button.isEnabled()

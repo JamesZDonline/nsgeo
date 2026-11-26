@@ -289,6 +289,8 @@ class SlicesDock(QgsDockWidget):
     export_requested = pyqtSignal()
     #: #180: open the slice layer's Symbology page (the plugin has `iface`).
     symbology_requested = pyqtSignal()
+    #: #183: open the live colour ramp over the slice layer.
+    ramp_requested = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -811,8 +813,11 @@ class SlicesDock(QgsDockWidget):
         )
         self.symbology_button = QPushButton("Symbology…")
         self.symbology_button.setToolTip("Open the slice layer's Symbology page")
+        # #183: QGIS's Select Color Ramp, kept open and live on the slice.
+        self.ramp_button = QPushButton("Ramp…")
         colours_row = QHBoxLayout()
         colours_row.addWidget(self.colours_combo, 1)
+        colours_row.addWidget(self.ramp_button)
         colours_row.addWidget(self.symbology_button)
         display_form.addRow("Colours", colours_row)
 
@@ -976,6 +981,7 @@ class SlicesDock(QgsDockWidget):
         self.palette_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
         self.colours_combo.currentIndexChanged.connect(self._on_colours_changed)
         self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
+        self.ramp_button.clicked.connect(lambda: self.ramp_requested.emit())
         session.site_opened.connect(self._sync_colours)
         session.site_closed.connect(self._sync_colours)
         self.coverage_check.toggled.connect(lambda _checked: self._sync_colours())
@@ -3728,6 +3734,12 @@ class SlicesDock(QgsDockWidget):
             "Untick Show coverage to edit your own colours"
             if own and coverage
             else "Open the slice layer's Symbology page"
+        )
+        self.ramp_button.setEnabled(own and not coverage)
+        self.ramp_button.setToolTip(
+            "Untick Show coverage to edit your own colours"
+            if own and coverage
+            else "Move the colour ramp's stops and watch the slice recolour as you drag"
         )
         self.palette_combo.setToolTip(
             "Colours cuts and Show coverage. The slice wears your own colours." if own else ""

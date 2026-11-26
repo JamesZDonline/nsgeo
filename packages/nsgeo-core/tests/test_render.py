@@ -421,6 +421,54 @@ def test_gradient_stops_validate_the_table():
         render.gradient_stops(np.zeros((10, 3), dtype=np.uint8))
 
 
+# ---- #183: a ramp refitted to a chosen number of stops -----------------------------------
+
+
+def _rebuilt(stops):
+    positions = np.array([p for p, _ in stops])
+    colours = np.array([c for _, c in stops], dtype=float)
+    return np.stack(
+        [np.interp(np.arange(256) / 255.0, positions, colours[:, k]) for k in range(3)], axis=1
+    )
+
+
+def test_fitted_stops_are_the_count_asked_for_from_end_to_end():
+    for count in (2, 5, 7, 12):
+        stops = render.fitted_stops(colormap("seismic"), count)
+        positions = [p for p, _ in stops]
+        assert len(stops) == count
+        assert positions[0] == 0.0 and positions[-1] == 1.0
+        assert (np.diff(positions) > 0).all()
+
+
+def test_fitted_stops_do_at_least_as_well_as_the_tolerance_walk():
+    """The fit is the best for its count: never worse than `gradient_stops`
+    given the same number of stops, and better than it on a curved table."""
+    lut = colormap("amp_heat").astype(float)
+    for tolerance in (8.0, 16.0, 32.0):
+        walked = render.gradient_stops(lut, tolerance)
+        fitted = render.fitted_stops(lut, len(walked))
+        assert np.abs(_rebuilt(fitted) - lut).max() <= np.abs(_rebuilt(walked) - lut).max() + 1.0
+
+
+def test_fitted_stops_put_one_at_each_bend():
+    # A tent: black up to white at the middle and back down. Three stops
+    # redraw it exactly, with the middle one on the peak.
+    up = np.linspace(0, 255, 128)
+    tent = np.repeat(np.concatenate([up, up[::-1]])[:, None], 3, axis=1)
+    stops = render.fitted_stops(tent, 3)
+    assert stops[1][0] == pytest.approx(127 / 255.0, abs=1.5 / 255)
+    assert np.abs(_rebuilt(stops) - tent).max() <= 2.0
+
+
+def test_fitted_stops_refuse_a_count_below_two_or_above_the_table():
+    lut = colormap("seismic")
+    for count in (0, 1, 257):
+        with pytest.raises(ValueError):
+            render.fitted_stops(lut, count)
+    assert len(render.fitted_stops(lut, 256)) == 256
+
+
 def test_display_range_minimum_maximum_ignores_nodata():
     values = np.array([[np.nan, -2.0], [5.0, np.inf]])
     assert render.display_range(values, "minimum_maximum") == (-2.0, 5.0)
