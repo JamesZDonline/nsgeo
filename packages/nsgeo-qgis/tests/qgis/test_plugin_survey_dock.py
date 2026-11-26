@@ -1718,9 +1718,22 @@ def test_a_mag_grid_menu_offers_mag_data_not_gpr(mag_dock, answer_modal, message
     assert asked == ["M2"]
     # The file row's actions.
     menu = _right_click(dock, grids["M1"].child(0))
-    assert _texts(menu) == ["Edit lines…", "Remove file from site"]
+    assert _texts(menu) == ["Edit lines…", "Change setup…", "Remove file from site"]
     # A GPR grid still offers GPR data.
     assert "Add GPR data…" in _texts(_right_click(dock, grids["G1"]))
+    assert message_log == []
+
+
+def test_a_mag_file_row_offers_change_setup(mag_dock, answer_modal, message_log):
+    session, dock = mag_dock
+    answer_modal(QMenu, "exec", None)
+    asked = []
+    dock.mag_setup_requested.connect(asked.append)
+    grids = _mag_items(dock)
+    menu = _right_click(dock, grids["M1"].child(0))
+    assert _texts(menu) == ["Edit lines…", "Change setup…", "Remove file from site"]
+    _action(menu, "Change setup…").trigger()
+    assert asked == ["M1"]
     assert message_log == []
 
 

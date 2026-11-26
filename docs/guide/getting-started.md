@@ -138,7 +138,8 @@ any other QGIS panel.
   has its own row, with one file row under it once a file is imported. Click
   either to show the grid in **nsgeo Mag**. Right-click the grid for **Edit
   grid…**, **Add magnetometer data…** and **Remove grid**, or the file row for
-  **Remove file from site**, which never deletes the `.dat` file.
+  **Edit lines…**, **Change setup…** and **Remove file from site**, which never
+  deletes the `.dat` file.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. Every line on a grid is
@@ -1038,6 +1039,16 @@ one way and the other move opposite ways: if features on neighbouring traverses
 are offset, try a quarter of a metre, one sign or the other. Only Scale and
 Destagger can be changed here, and Measure is not available for magnetometer
 grids yet. The map redraws with the new values.
+
+If the setup was wrong, for example the wrong start corner, change it after the
+import: click **Change setup…** beside the file in **nsgeo Mag**, or right-click
+the file row in **nsgeo Survey**. The form is the one the import used, with the
+file's own setup in it. The status under it shows how many readings would be
+missing and whether the file still fits its grid. Each traverse keeps the
+destagger and scale you typed. Tick **Use this setup for every magnetometer
+file on the site** to change every file at once, each keeping its own
+corrections. The setup also becomes the one the next import starts from. Click
+**Apply**. Nothing in the `.dat` file is changed.
 
 Exporting the magnetometer map, and Measure on a magnetometer grid, are not
 built yet.

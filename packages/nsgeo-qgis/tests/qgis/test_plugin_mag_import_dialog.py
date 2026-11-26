@@ -129,7 +129,7 @@ def test_a_bad_setup_is_reported_and_nothing_changes(mag_site, dialog, folder):
     session, _ = mag_site
     before = session.mag_setup()
     dialog.add_files([synthetic_grad601(folder, "a.dat")])
-    dialog.separation_spin.setValue(0.7)
+    dialog.setup_form.separation_spin.setValue(0.7)
     with pytest.raises(ValueError, match="sensor separation"):
         dialog.setup()
     dialog.accept()
@@ -201,17 +201,17 @@ def test_the_columns_follow_the_setup_and_the_grid(mag_site, dialog, folder):
     assert t.item(0, 2).text() == "8 × 32"
     assert t.item(0, 3).text() == "6"
     assert t.item(0, 4).text() == "yes"
-    dialog.missing_spin.setValue(8)  # a run of 6 no longer counts
+    dialog.setup_form.missing_spin.setValue(8)  # a run of 6 no longer counts
     assert t.item(0, 3).text() == "0"
-    dialog.rpm_spin.setValue(4)
+    dialog.setup_form.rpm_spin.setValue(4)
     assert t.item(0, 4).text() != "yes"
     assert t.item(0, 4).toolTip() != ""
 
 
 def test_the_flipped_box_is_disabled_when_parallel(dialog):
-    assert dialog.flipped_box.isEnabled()
-    dialog.walked_combo.setCurrentIndex(dialog.walked_combo.findData(False))
-    assert not dialog.flipped_box.isEnabled()
+    assert dialog.setup_form.flipped_box.isEnabled()
+    dialog.setup_form.walked_combo.setCurrentIndex(dialog.setup_form.walked_combo.findData(False))
+    assert not dialog.setup_form.flipped_box.isEnabled()
 
 
 def test_grid_combos_refill_and_keep_each_choice(mag_site, dialog, folder):
@@ -258,20 +258,20 @@ def test_the_picture_arrows_follow_the_walking_pattern_and_the_corner(qgis_app):
 
 
 def test_the_picture_shows_the_error_when_the_setup_is_invalid(dialog):
-    dialog.separation_spin.setValue(0.7)
-    assert dialog.picture.arrows() == []
-    assert "sensor separation" in dialog.picture.error_text
-    dialog.separation_spin.setValue(1.0)
-    assert len(dialog.picture.arrows()) == 8
+    dialog.setup_form.separation_spin.setValue(0.7)
+    assert dialog.setup_form.picture.arrows() == []
+    assert "sensor separation" in dialog.setup_form.picture.error_text
+    dialog.setup_form.separation_spin.setValue(1.0)
+    assert len(dialog.setup_form.picture.arrows()) == 8
 
 
 def test_changing_a_field_changes_the_dialog_picture(dialog):
-    before = dialog.picture.arrows()
-    dialog.walked_combo.setCurrentIndex(dialog.walked_combo.findData(False))
-    assert dialog.picture.arrows() != before
-    before = dialog.picture.arrows()
-    dialog.corner_combo.setCurrentIndex(dialog.corner_combo.findData(2))
-    assert dialog.picture.arrows() != before
+    before = dialog.setup_form.picture.arrows()
+    dialog.setup_form.walked_combo.setCurrentIndex(dialog.setup_form.walked_combo.findData(False))
+    assert dialog.setup_form.picture.arrows() != before
+    before = dialog.setup_form.picture.arrows()
+    dialog.setup_form.corner_combo.setCurrentIndex(dialog.setup_form.corner_combo.findData(2))
+    assert dialog.setup_form.picture.arrows() != before
 
 
 # ---- the plugin ----------------------------------------------------------------

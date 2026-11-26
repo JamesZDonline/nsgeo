@@ -609,6 +609,30 @@ class SiteSession(QObject):
             self.set_mag_file(dataclasses.replace(mag, scales=tuple(scales), shifts=tuple(shifts)))
         return EditOutcome(changed=tuple(changed), skipped=tuple(skipped))
 
+    def change_mag_setup(
+        self, grid_id: str, setup: MagSetup, *, every_file: bool = False
+    ) -> list[str]:
+        """Give `grid_id`'s file `setup`, or every mag file on the site when
+        `every_file` (which also remembers `setup` for the next import). Each
+        file keeps its scales and shifts. Returns the grid ids whose file
+        changed; one `mag_changed` and one dirty mark, only when something did.
+        `KeyError` for a grid with no file."""
+        site = self._require_site()
+        mag = self.mag_file_on(grid_id)
+        if mag is None:
+            raise KeyError(f"grid {grid_id!r} has no magnetometer file")
+        targets = list(site.mag_files) if every_file else [mag]
+        done = [m for m in targets if m.setup != setup]
+        if every_file:
+            self.remember_mag_setup(setup)
+        if not done:
+            return []
+        swap = {id(m): dataclasses.replace(m, setup=setup) for m in done}
+        site.mag_files = [swap.get(id(m), m) for m in site.mag_files]
+        self._set_dirty(True)
+        self.mag_changed.emit()
+        return [m.grid_id for m in done]
+
     def remove_mag_file(self, key: str) -> None:
         site = self._require_site()
         gone = self.mag_for_key(key)

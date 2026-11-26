@@ -92,7 +92,9 @@ SHADOWED = {
     "failed": {"declared": 2, "connects": 2},
     # M17b Task 4: GridImportPage.changed and GpsImportPage.changed (title,
     # Import text or enabled state moved). AddDataDialog connects each.
-    "changed": {"declared": 2, "connects": 2},
+    # M19a Task 2: MagSetupForm.changed (a field was edited), connected by both
+    # of its users, MagImportDialog and MagSetupDialog.
+    "changed": {"declared": 3, "connects": 4},
     # M17b's AddDataDialog.imported and M19a's MagImportDialog.imported, met at
     # the main merge (2026-11-20): plugin.py connects each where it opens it.
     "imported": {"declared": 2, "connects": 2},

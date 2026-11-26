@@ -22,19 +22,14 @@ from nsgeo.mag import MagFile, MagFileError, MagSetup, fit_problems, missing_sum
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -42,18 +37,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.mag_setup_picture import MagSetupPicture
+from nsgeo_qgis.ui.mag_setup_form import MagSetupForm
 
 FILE_FILTER = "Grad601 grid (*.dat *.DAT)"
 COL_FILE, COL_GRID, COL_SIZE, COL_MISSING, COL_FITS = range(5)
 _NONE = "—"
-#: Each corner's item data is `far_x + 2 * far_y`.
-_CORNERS = (
-    ("At the origin", 0),
-    ("At the far end of X", 1),
-    ("At the far end of Y", 2),
-    ("At the far corner", 3),
-)
 
 
 @dataclass
@@ -76,7 +64,6 @@ class MagImportDialog(QDialog):
         self._prefer = grid_id
         self._rows: list[_Row] = []
         self._combos: list[QComboBox] = []
-        self._updating = False
         self.setWindowTitle("Add magnetometer data")
         self.resize(900, 640)
         layout = QVBoxLayout(self)
@@ -102,47 +89,8 @@ class MagImportDialog(QDialog):
         row_buttons.addStretch(1)
         layout.addLayout(row_buttons)
 
-        group = QGroupBox("Setup (remembered for this site)")
-        group_layout = QHBoxLayout(group)
-        form = QFormLayout()
-        self.axis_combo = QComboBox()
-        self.axis_combo.addItem("X", "x")
-        self.axis_combo.addItem("Y", "y")
-        form.addRow("Traverses run along", self.axis_combo)
-        self.corner_combo = QComboBox()
-        for text, data in _CORNERS:
-            self.corner_combo.addItem(text, data)
-        form.addRow("First traverse starts", self.corner_combo)
-        self.spacing_spin = self._double(0.01, 100.0, 0.05)
-        form.addRow("Traverse spacing (m)", self.spacing_spin)
-        self.offset_spin = self._double(0.0, 100.0, 0.05)
-        form.addRow("First traverse offset (m)", self.offset_spin)
-        self.rpm_spin = self._double(0.1, 1000.0, 1.0)
-        form.addRow("Readings per metre", self.rpm_spin)
-        self.sensors_spin = QSpinBox()
-        self.sensors_spin.setRange(1, 4)
-        form.addRow("Sensors", self.sensors_spin)
-        self.separation_spin = self._double(0.01, 100.0, 0.5)
-        form.addRow("Sensor separation (m)", self.separation_spin)
-        self.walked_combo = QComboBox()
-        self.walked_combo.addItem("Zigzag", True)
-        self.walked_combo.addItem("Parallel", False)
-        form.addRow("Walked", self.walked_combo)
-        self.flipped_box = QCheckBox("Return traverses already flipped by the download")
-        form.addRow(self.flipped_box)
-        run_row = QHBoxLayout()
-        self.missing_spin = QSpinBox()
-        self.missing_spin.setRange(1, 50)
-        run_row.addWidget(QLabel("Missing data: runs of"))
-        run_row.addWidget(self.missing_spin)
-        run_row.addWidget(QLabel("or more zeros"))
-        run_row.addStretch(1)
-        form.addRow(run_row)
-        group_layout.addLayout(form, 1)
-        self.picture = MagSetupPicture()
-        self.picture.setMinimumWidth(280)
-        group_layout.addWidget(self.picture, 1)
-        layout.addWidget(group)
+        self.setup_form = MagSetupForm("Setup (remembered for this site)")
+        layout.addWidget(self.setup_form)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -155,71 +103,20 @@ class MagImportDialog(QDialog):
         layout.addWidget(buttons)
 
         self.set_setup(session.mag_setup() or MagSetup())
-        for signal in (
-            self.axis_combo.currentIndexChanged,
-            self.corner_combo.currentIndexChanged,
-            self.spacing_spin.valueChanged,
-            self.offset_spin.valueChanged,
-            self.rpm_spin.valueChanged,
-            self.sensors_spin.valueChanged,
-            self.separation_spin.valueChanged,
-            self.walked_combo.currentIndexChanged,
-            self.flipped_box.toggled,
-            self.missing_spin.valueChanged,
-        ):
-            signal.connect(self._on_setup_changed)
+        self.setup_form.changed.connect(self._on_setup_changed)
         session.grids_changed.connect(self._on_grids_changed)
-
-    @staticmethod
-    def _double(low: float, high: float, step: float) -> QDoubleSpinBox:
-        spin = QDoubleSpinBox()
-        spin.setRange(low, high)
-        spin.setDecimals(3)
-        spin.setSingleStep(step)
-        return spin
 
     # ---- the setup ---------------------------------------------------------
     def setup(self) -> MagSetup:
         """The setup the form holds. A `ValueError` carries `MagSetup`'s own message."""
-        corner = self.corner_combo.currentData()
-        return MagSetup(
-            axis=self.axis_combo.currentData(),
-            far_x=bool(corner & 1),
-            far_y=bool(corner & 2),
-            spacing_m=self.spacing_spin.value(),
-            first_offset_m=self.offset_spin.value(),
-            readings_per_metre=self.rpm_spin.value(),
-            sensors=self.sensors_spin.value(),
-            sensor_separation_m=self.separation_spin.value(),
-            zigzag=bool(self.walked_combo.currentData()),
-            flipped=self.flipped_box.isChecked(),
-            missing_run=self.missing_spin.value(),
-        )
+        return self.setup_form.setup()
 
     def set_setup(self, setup: MagSetup) -> None:
-        was, self._updating = self._updating, True
-        try:
-            self.axis_combo.setCurrentIndex(self.axis_combo.findData(setup.axis))
-            self.corner_combo.setCurrentIndex(
-                self.corner_combo.findData(int(setup.far_x) + 2 * int(setup.far_y))
-            )
-            self.spacing_spin.setValue(setup.spacing_m)
-            self.offset_spin.setValue(setup.first_offset_m)
-            self.rpm_spin.setValue(setup.readings_per_metre)
-            self.sensors_spin.setValue(setup.sensors)
-            self.separation_spin.setValue(setup.sensor_separation_m)
-            self.walked_combo.setCurrentIndex(self.walked_combo.findData(setup.zigzag))
-            self.flipped_box.setChecked(setup.flipped)
-            self.missing_spin.setValue(setup.missing_run)
-        finally:
-            self._updating = was
+        self.setup_form.set_setup(setup)
         self._on_setup_changed()
 
     def _on_setup_changed(self, *_: Any) -> None:
-        if self._updating:
-            return
         try:
-            self.flipped_box.setEnabled(bool(self.walked_combo.currentData()))
             self._refresh()
         except Exception as exc:  # noqa: BLE001 -- a slot must never raise; the status line reports
             self.status.setText(f"could not update the setup: {exc}")
@@ -337,10 +234,6 @@ class MagImportDialog(QDialog):
 
     def _refresh(self) -> None:
         setup, error = self._setup_or_none()
-        if setup is None:
-            self.picture.set_error(error)
-        else:
-            self.picture.set_setup(setup)
         grid_ids = self._grids()
         for i, row in enumerate(self._rows):
             self.table.item(i, COL_FILE).setText(row.path.name)

@@ -114,6 +114,7 @@ class SurveyDock(QgsDockWidget):
     edit_grid_requested = pyqtSignal(str)
     import_requested = pyqtSignal(str)
     mag_import_requested = pyqtSignal(str)  # a mag grid id
+    mag_setup_requested = pyqtSignal(str)  # a mag grid id: Change setup… on its file
     mag_grid_selected = pyqtSignal(str)  # a click on a mag grid row or its file row
     fit_tracks_requested = pyqtSignal(list)  # keys of the GPS lines (M17b)
     grid_velocity_requested = pyqtSignal(str)
@@ -656,6 +657,7 @@ class SurveyDock(QgsDockWidget):
                 # Worked out here, inside the guard, not when the action fires.
                 file_grid = self.session.mag_for_key(mag_key).grid_id
                 menu.addAction("Edit lines…", lambda: self._request_edit(file_grid, []))
+                menu.addAction("Change setup…", lambda: self.mag_setup_requested.emit(file_grid))
                 menu.addAction(
                     "Remove file from site", lambda: self.remove_mag_file_action(mag_key)
                 )

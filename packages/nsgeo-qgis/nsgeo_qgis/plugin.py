@@ -159,6 +159,7 @@ from nsgeo_qgis.ui.grid_dialog import DEFAULT_SPACING, GridDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.mag_dock import MagDock, draw_mag_layer
 from nsgeo_qgis.ui.mag_import_dialog import MagImportDialog
+from nsgeo_qgis.ui.mag_setup_dialog import MagSetupDialog
 from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
@@ -436,6 +437,7 @@ class NsgeoPlugin:
         self.survey_dock.import_requested.connect(self._add_data_from_survey)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_velocity_dialog)
         self.survey_dock.mag_import_requested.connect(self.open_mag_import_dialog)
+        self.survey_dock.mag_setup_requested.connect(self.open_mag_setup_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
@@ -560,6 +562,7 @@ class NsgeoPlugin:
         # The mag raster is opaque: the GPR slice always draws directly over it.
         self.slice_layer.above = self.mag_layer
         self.mag_dock.symbology_requested.connect(self._open_mag_symbology)
+        self.mag_dock.setup_requested.connect(self.open_mag_setup_dialog)
         self.mag_dock.map_changed.connect(self._on_mag_map_changed)
         self.session.site_closed.connect(self._clear_mag_layer)
         self.cut_sections = CutSections(self.session, self.slices_dock)
@@ -3300,6 +3303,28 @@ class NsgeoPlugin:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def open_mag_setup_dialog(self, grid_id: str) -> None:
+        """Change setup… for a mag grid's file: modal, one decision. A slot."""
+        try:
+            assert self.session is not None
+            if not self.session.is_open or self.session.mag_file_on(grid_id) is None:
+                return
+            dialog = MagSetupDialog(self.session, grid_id, parent=self.iface.mainWindow())
+            try:
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                if accepted and dialog.changed_grids:
+                    if dialog.every_file:
+                        self.message(
+                            f"Setup changed for {len(dialog.changed_grids)} magnetometer files."
+                        )
+                    else:
+                        name = self.session.mag_file_on(grid_id)
+                        self.message(f"{name.path.name if name else grid_id}: setup changed.")
+            finally:
+                dialog.deleteLater()
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not change the setup: {exc}", Qgis.MessageLevel.Warning)
 
     def _new_mag_grid(self) -> None:
         """The import dialog's New mag grid…: the grid dialog as a magnetometer. A slot."""

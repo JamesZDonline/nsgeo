@@ -414,3 +414,16 @@ def test_the_floor_follows_the_finest_file_shown(world, mag_site):
     assert dock.cell_spin.minimum() == pytest.approx(0.125)
     dock.set_scope("site")  # the finest of the files shown
     assert dock.cell_spin.minimum() == pytest.approx(0.125)
+
+
+def test_change_setup_is_offered_for_the_shown_file(world):
+    dock = world.dock
+    asked = []
+    dock.setup_requested.connect(asked.append)
+    dock.show_grid("M1")
+    assert dock.setup_button.text() == "Change setup…"
+    assert dock.setup_button.isEnabled()
+    dock.setup_button.click()
+    assert asked == ["M1"]
+    dock.show_grid("M2")
+    assert not dock.setup_button.isEnabled()

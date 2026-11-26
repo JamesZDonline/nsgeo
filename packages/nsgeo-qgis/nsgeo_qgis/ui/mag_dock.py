@@ -86,6 +86,8 @@ class MagDock(QgsDockWidget):
     map_changed = pyqtSignal()
     #: Open the mag layer's Symbology page (the plugin has `iface`).
     symbology_requested = pyqtSignal()
+    #: Change setup… for the file shown (its grid id; the plugin owns the dialog).
+    setup_requested = pyqtSignal(str)
     error = pyqtSignal(str)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
@@ -130,7 +132,13 @@ class MagDock(QgsDockWidget):
         self.file_label = QLabel("")
         self.missing_label = QLabel("")
         source_form.addRow("Grid", self.grid_combo)
-        source_form.addRow("File", self.file_label)
+        self.setup_button = QPushButton("Change setup…")
+        self.setup_button.setToolTip("Change the walking setup of the file shown")
+        self.setup_button.setEnabled(False)
+        file_row = QHBoxLayout()
+        file_row.addWidget(self.file_label, 1)
+        file_row.addWidget(self.setup_button)
+        source_form.addRow("File", file_row)
         source_form.addRow("Missing", self.missing_label)
         outer.addWidget(source)
 
@@ -194,6 +202,7 @@ class MagDock(QgsDockWidget):
         self.palette_combo.currentIndexChanged.connect(self._on_palette_changed)
         self.colours_combo.currentIndexChanged.connect(self._on_colours_changed)
         self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
+        self.setup_button.clicked.connect(self._on_setup_clicked)
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self._on_site_closed)
         session.grids_changed.connect(self._on_sources_changed)
@@ -405,6 +414,7 @@ class MagDock(QgsDockWidget):
         grid_id = self.grid_combo.currentData()
         if self.session.is_open and grid_id is not None:
             mag = self.session.mag_file_on(grid_id)
+        self.setup_button.setEnabled(mag is not None)
         if mag is None:
             self.file_label.setText("none")
             self.missing_label.setText("")
@@ -423,6 +433,14 @@ class MagDock(QgsDockWidget):
         self.missing_label.setText(str(missing) if missing else "none")
         self.finish_panel.set_spacing(mag.setup.spacing_m)
         self._sync_cell_floor()
+
+    def _on_setup_clicked(self, *_: Any) -> None:
+        try:
+            grid_id = self.grid_combo.currentData()
+            if grid_id is not None and self.session.mag_file_on(grid_id) is not None:
+                self.setup_requested.emit(grid_id)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.error.emit(f"could not change the setup: {exc}")
 
     def _sync_cell_floor(self) -> None:
         """The Cell spin cannot go below the reading interval of the files
