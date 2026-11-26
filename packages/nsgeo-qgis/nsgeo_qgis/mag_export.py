@@ -19,6 +19,23 @@ from nsgeo_qgis.slice_export import write_north_up
 BAND_DESCRIPTION = "Magnetic gradient (nT)"
 
 
+def is_mag_export(path: Path | str) -> bool:
+    """Whether the GeoTIFF at `path` is a mag export (`NSGEO_INSTRUMENT=mag`); False
+    when it cannot be read."""
+    from osgeo import gdal
+
+    try:
+        ds = gdal.Open(str(path))
+        if ds is None:
+            return False
+        try:
+            return (ds.GetMetadata() or {}).get("NSGEO_INSTRUMENT") == "mag"
+        finally:
+            ds = None
+    except Exception:  # noqa: BLE001 -- unreadable: treat as a GPR export
+        return False
+
+
 def write_mag_geotiff(
     path: Path, mosaic: MagMosaic, settings: MagSettings, *, spacings: Sequence[float]
 ) -> None:

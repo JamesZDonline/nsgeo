@@ -106,7 +106,7 @@ from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import CORNER_ROLES, identity_curve
-from nsgeo_qgis.mag_export import write_mag_geotiff
+from nsgeo_qgis.mag_export import is_mag_export, write_mag_geotiff
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
@@ -2068,7 +2068,6 @@ class NsgeoPlugin:
                 notes=notes,
                 own_style=own,
                 centre=mosaic.centre(),
-                mag=True,
             )
             if problem is not None:
                 self.message(f"Could not export the mag map: {problem}", Qgis.MessageLevel.Warning)
@@ -2458,7 +2457,6 @@ class NsgeoPlugin:
         notes: list[str] | None = None,
         own_style: str | None = None,
         centre: float = 0.0,
-        mag: bool = False,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
@@ -2502,7 +2500,7 @@ class NsgeoPlugin:
         layer = QgsRasterLayer(str(path), path.stem, "gdal")
         if not layer.isValid():
             return f"the exported GeoTIFF at {path} could not be reopened as a layer"
-        self._add_exported_layer(layer, mag=mag)
+        self._add_exported_layer(layer)
         if temporal is not None:
             temporal(layer)
             self._fit_temporal_controller(layer)
@@ -3334,7 +3332,7 @@ class NsgeoPlugin:
         if item in bar.items():
             bar.popWidget(item)
 
-    def _add_exported_layer(self, layer: Any, *, mag: bool = False) -> None:
+    def _add_exported_layer(self, layer: Any) -> None:
         """Show an exported GeoTIFF in the site's group: a GPR export directly above
         the Mag layer, a mag export directly below it (the Mag panel's changes stay
         visible), else below the tables; the live slice stays above both. With the group deleted
@@ -3345,7 +3343,9 @@ class NsgeoPlugin:
         group = self.layers.group
         if group is not None:
             anchor = self.mag_layer.layer if self.mag_layer is not None else None
-            (insert_below if mag else insert_above)(group, layer, anchor)
+            # A mag export (read from the file) goes under the Mag layer, on every path.
+            place = insert_below if is_mag_export(layer.source().split("|")[0]) else insert_above
+            place(group, layer, anchor)
         else:
             self.layers.project.layerTreeRoot().insertLayer(0, layer)
 

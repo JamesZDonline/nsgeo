@@ -206,6 +206,20 @@ def test_a_mag_export_lands_below_the_mag_layer_and_a_gpr_export_above_it(shown,
     assert _index(group, slice_export) + 1 == _index(group, plugin.mag_layer.layer)
 
 
+def test_a_restored_mag_export_goes_back_under_the_mag_layer(shown, answer_modal):
+    plugin, root = shown
+    group = plugin.layers.group
+    target = root / "mag-M1.tif"
+    _save_as(answer_modal, target)
+    plugin.mag_dock.export_requested.emit()
+    (exported,) = _layers_reading(target)
+    plugin.layers.project.removeMapLayer(exported.id())
+    back, lost, _ = plugin._restore_layers([("mag-M1", target)])
+    assert back == ["mag-M1"] and lost == []
+    (restored,) = _layers_reading(target)
+    assert _index(group, restored) == _index(group, plugin.mag_layer.layer) + 1
+
+
 def test_a_slice_drawn_after_a_mag_export_is_above_it_and_above_the_mag_layer(shown, answer_modal):
     plugin, root = shown
     group = plugin.layers.group

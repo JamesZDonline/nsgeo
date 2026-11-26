@@ -167,6 +167,7 @@ def top_of_exports(group: Any, anchor: Any | None) -> Any | None:
     kids = group.children()
     i = kids.index(node)
     top = anchor
+    # Any raster there counts, even a user's own: under the live slice is harmless.
     while i > 0:
         layer = kids[i - 1].layer() if hasattr(kids[i - 1], "layer") else None
         if not isinstance(layer, QgsRasterLayer):
