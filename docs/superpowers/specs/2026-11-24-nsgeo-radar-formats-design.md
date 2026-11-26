@@ -98,24 +98,49 @@ Eight lines from a GX450 HDR survey (an archived public dataset), each with `.ra
 
 ### SEG-Y from RadExplorer: `.sgy` (+ `.sgy.vm`)
 
-18 lines from one survey, exported by RadExplorer.
+18 lines from one survey, exported by RadExplorer. Below they are LINE01–LINE18, in the order of
+their file names; the local copies are renamed so, because the names carry the site.
 
-- **Big-endian SEG-Y rev 1**: a 3,200-byte EBCDIC text header, a 400-byte binary header, then
-  per trace a 240-byte header and `IEEE float32` samples (format code 5). Sample counts differ
-  between files (2,006–2,478), as they may in SEG-Y.
-- **The text header documents RadExplorer's departures from the standard**, and they matter:
+- **Big-endian SEG-Y**: a 3,200-byte EBCDIC text header, a 400-byte binary header, then
+  per trace a 240-byte header and `IEEE float32` samples (format code 5). The binary header's
+  revision word (bytes 3501–3502) is 0, and its only other non-zero words are the sample
+  interval, the sample count and the format code. Every trace has the binary header's sample
+  count. Trace sequence numbers count from 0.
+- **The text header documents RadExplorer's departures from the standard.** Measured
+  2026-11-25, two of them hold as written and two do not:
   1. Sample interval and delay are in **picoseconds** (406 ps here), not microseconds. Read as
-     standard SEG-Y, every time is a million times too long.
-  2. Marks are in trace-header bytes 239–240, flagged by 0x55 in 237–238 (no marks in these files).
-  3. Coordinates in bytes 73–88 are metres or arc-seconds. Here X is distance along the line in
-     mm (scalar -1000) and Y is 0. The step is 68–69 mm (one millimetre of rounding), so spacing
-     is even.
+     standard SEG-Y, every time is a million times too long. Holds.
+  2. Marks are in trace-header bytes 239–240, flagged by 0x55 in 237–238. **Not as written:**
+     five lines carry marks (1–5 each), and their flag is 1 and their number counts from 1,
+     both **little-endian**, like item 4. No trace has 0x55.
+  3. Coordinates in bytes 73–88 are metres or arc-seconds (coordinate units, bytes 89–90, is 1:
+     length). Here X is distance along the line in mm (scalar −1000) and Y is 0. Holds. The
+     step is 68 or 69 mm (integer millimetres), 68.44 mm on average in every line. One line
+     (LINE04 below) has two jumps, 0.274 m and 3.149 m, before its 491st and 586th traces. One
+     line's X starts at 10.471 m, not 0.
   4. **Geographic coordinates** are in bytes 229–236 as degrees × 10^6, flagged by 1 in 227–228.
      **These fields are little-endian inside an otherwise big-endian file**: the flag reads 256
-     big-endian and 1 little-endian, and only the little-endian reading gives plausible positions
-     (hundreds of distinct fixes per line, about 0.1 m apart).
-- **Time zero is not settled.** The trace delay is 9.8–11.8 ns. The first break is at 20–43 ns
-  from the first sample, which is late for a direct wave whichever way the delay is applied.
+     big-endian and 1 little-endian on every trace of every line, and only the little-endian
+     reading gives plausible positions (hundreds of distinct fixes per line, about 0.1 m apart).
+- **The files are static-shifted exports, which the text header does not say.** Trace-header
+  bytes 101–102 (group static) hold a per-trace number of nanoseconds, and each trace's samples
+  are pushed down by that much and padded with exact zeros above and below. Underneath, every
+  trace is one unbroken run of non-zero samples, exactly **344** long in the first seven lines
+  and **424** in the other eleven. The run's first sample is `static / 0.406 ns` down to within
+  5.1 samples. The static is stored in whole nanoseconds (±1.2 samples), and the rest of the
+  drift grows with the static, about 0.22 % of it, which suggests the true interval is nearer
+  0.4069 ns than the 406 ps stored.
+- **Trace 0's static is bogus** in 17 of the 18 lines: 644–836 ns, where the other traces' are
+  0–122 ns. That one trace is why the stored sample counts are so large (2,006–2,478) and
+  differ between lines: the window was stretched to fit it.
+- **Time zero is the delay, below the first sample.** Each trace's delay word (bytes 109–110)
+  is 11,766 ps (11,765 in two lines, 9,766 in one), and lag B (bytes 107–108) is exactly its
+  negative. With each trace's live run moved back to the top, the mean trace's first break (the
+  first sample past 10 % of its peak) is 11.4–13.8 ns down in every line, the 9,766-ps line
+  included. So the first sample is the delay *before* time zero: `position_ns = −delay`, which
+  puts the first break at −0.4 to +2.0 ns (+2.8 in the 9,766-ps line). Read as `+delay`, the
+  first break would be about 24 ns after time zero.
+- **No antenna is named** anywhere in the file.
 - `.sgy.vm` files are RadExplorer display settings (a colour scheme, a font). Not read.
 
 ### Not yet identified
@@ -371,3 +396,49 @@ File and test names; where the shared companion lookup lives; whether `nsgeo.io.
 - **Antenna** is `ANTENNAS` with MALÅ's trailing `=<n>` code removed (`GX450 HDR (v.1)`).
   `epsr` is 0: the `.rad` has none, and the import's dielectric note asks for a velocity.
 - **GPS mode stays DZT-only**, and the `.cor`, `.mrk` and `.srd` are not read (C10, C11).
+
+## 15. M21c's calls (2026-11-25, with its plan)
+
+- **The static shift is undone**, revising C5's "no per-format decoding" for a second case. §2's
+  measurement shows RadExplorer moved each trace down by its static and padded it with zeros, so
+  the samples as stored are not the samples recorded, and a time slice through them would cut
+  each trace at a different time. When any trace's static (bytes 101–102) is non-zero, each
+  trace is read from its first non-zero sample, and the line has as many samples as its longest
+  run of samples from first non-zero to last non-zero (344 or 424 here, not 2,006–2,478). The
+  shift comes from the zeros, not the static, because the static is rounded to whole
+  nanoseconds. The static is the cross-check instead: a trace whose zeros disagree with it by
+  more than 4 samples plus 1 % of the shift is refused (the real traces come within 2.6 samples plus the drift, at most 0.87 of a 3-sample allowance, too close), since a trace whose real data begins
+  with exact zeros would otherwise be cut. The topography the statics carried is not used (no
+  milestone reads elevation yet), and a note says the shift was undone. Bogus trace-0 statics
+  need no special case: that trace's zeros undo it like any other.
+- **Time zero is `−delay`**, revising C6's `+delay` against §2's measurement. The delay must
+  be the same on every trace, or the file is refused.
+- **Spacing is the mean of the regular steps, and jumps are a note**, revising C7's "else 0
+  with a note". A step is the distance between consecutive traces' (X, Y), with the coordinate
+  scalar applied. It is regular when within 5 % of the median step. `traces_per_metre` is 1 over
+  the mean regular step (68.44 mm here, where integer millimetres make the median 68). Any
+  irregular step adds a note naming how many and the largest, and the line is placed at the
+  even step. C7's 0 would untick a wheel-triggered line as if it were timed, and one 3 m jump
+  near the end of a 40 m line does not make it timed. Placing the traces at their true distances
+  is M17b's work. Coordinates that do not move at all give 0 with no note (the import's
+  time-triggered note covers it). Arc-second coordinates (units 2) give 0 with a note. The
+  coordinates themselves are never kept in the header: X and Y may be real eastings and
+  northings, so only the step and the jump count are.
+- **What makes a file RadExplorer:** `RadExplorer` in its text header, decoded as EBCDIC (or
+  as Latin-1 when its first byte is an ASCII `C`). Then format code 5, read big-endian, no
+  extended text headers, every trace with the binary header's sample count and interval, and a
+  file size of whole traces. Anything else is refused by name. The revision word is not
+  checked: these files say 0 and follow the 1975 layout.
+- **The little-endian geographic flag is counted, not used.** `SegyHeader.geographic_traces` is
+  how many traces have it set (all of them here). The coordinates are not read until M21d, and
+  M21d reads them from the data file itself, not from a companion, so C10's `gps_for` will need
+  to allow that.
+- **Marks are not read** (C11). §2's correction (little-endian flag 1, not 0x55) is for the
+  marks follow-up.
+- **The sample interval is the stored 406 ps**, though §2 suggests 0.4069 ns. 0.22 % is 0.4 ns
+  at the bottom of a 424-sample trace, and correcting it would be a guess.
+- **`read_header` reads the whole file** when the traces are static-shifted, because the line's
+  sample count depends on every trace's zeros. The largest sample file is 10.9 MB. `trace_count`
+  stays a stat.
+- **Antenna** is empty and `epsr` 0: the file names neither. The facts line shows `antenna ?`.
+- **GPS mode stays DZT-only** (C10).
