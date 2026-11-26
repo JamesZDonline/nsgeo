@@ -26,7 +26,9 @@ from plugin_testing import (
     needs_real_data,
     synthetic_dt1,
     synthetic_dzt,
+    synthetic_mala,
     synthetic_mala_pair,
+    synthetic_segy,
 )
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QFormLayout, QMessageBox
@@ -405,6 +407,32 @@ def test_a_mala_pair_beside_a_dzt_and_a_dt1_imports_only_its_rd7(session, tmp_pa
     d_dlg.accept()
     assert sorted(d.imported_keys) == ["raw/DAT_0003.rd7", "raw/FILE__001.DZT", "raw/LINE02.DT1"]
     assert session.line_for_key("raw/DAT_0003.rd7").n_traces == 20
+
+
+def test_a_segy_beside_a_dzt_a_dt1_and_a_mala_line_imports_with_them(
+    session, tmp_path, answer_modal
+):
+    raw = tmp_path / "raw"
+    files = [
+        synthetic_dzt(raw, "FILE__001.DZT"),
+        synthetic_dt1(raw, "LINE02.DT1", n_traces=40),
+        synthetic_mala(raw, "DAT_0003.rd7", n_traces=20),
+        synthetic_segy(raw, "LINE04.sgy", n_traces=30, statics_ns=[700] + [5] * 29),
+    ]
+    answer_modal(QFileDialog, "getOpenFileNames", ([str(p) for p in files], ""))
+    d_dlg = grid_dialog(session, grid_id="A")
+    d = d_dlg.grid_page
+    d._choose_files()
+    assert d.table.rowCount() == 4
+    assert all(r.include for r in d.rows)
+    d_dlg.accept()
+    assert sorted(d.imported_keys) == [
+        "raw/DAT_0003.rd7",
+        "raw/FILE__001.DZT",
+        "raw/LINE02.DT1",
+        "raw/LINE04.sgy",
+    ]
+    assert session.line_for_key("raw/LINE04.sgy").n_traces == 30
 
 
 def test_a_cmp_sounding_is_listed_but_cannot_be_ticked(session, tmp_path):

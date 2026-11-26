@@ -115,6 +115,22 @@ def synthetic_mala_pair(
     return write_mala_pair(folder / stem, _mala_pattern(stem, n_samples, n_traces), **kw)
 
 
+def synthetic_segy(folder: Path, name: str, n_traces: int = 60, n_samples: int = 500, **kw) -> Path:
+    """A small synthetic RadExplorer SEG-Y with a visible float pattern.
+
+    `kw` goes to the core's `tests.segy_data.write_segy` (statics_ns, x_mm,
+    delay_ps, text, ...). The pattern holds no exact zero, so a static shift
+    written with `statics_ns` is undone exactly."""
+    from tests.segy_data import write_segy
+
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(zlib.crc32(Path(name).stem.encode()))
+    data = rng.normal(size=(n_samples, n_traces))
+    data = np.where(data == 0, 1e-3, data)
+    data[40:44, :] = 6.0  # a flat band, as synthetic_dzt has
+    return write_segy(folder / name, data.astype(np.float32), **kw)
+
+
 def _mala_pattern(name: str, n_samples: int, n_traces: int) -> np.ndarray:
     rng = np.random.default_rng(zlib.crc32(Path(name).stem.encode()))
     data = (rng.normal(size=(n_samples, n_traces)) * 3000).clip(-32768, 32767)

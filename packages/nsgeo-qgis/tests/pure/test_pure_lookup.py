@@ -31,6 +31,7 @@ from plugin_testing import (
     synthetic_dzt,
     synthetic_mala,
     synthetic_mala_pair,
+    synthetic_segy,
 )
 
 OPTS = ImportOptions(grid_id="A", axis="y", spacing=0.5, grid_size_along=11.0)
@@ -732,3 +733,30 @@ def test_a_lone_rd3_is_ticked(tmp_path):
     (row,) = plan_import([synthetic_mala(tmp_path, "DAT_0002.rd3")], OPTS)
     assert row.include and row.placeable and MALA_TIME_ZERO in row.note
     assert row.traces_per_metre == pytest.approx(2.0)  # the writer's 0.5 m interval
+
+
+# ---- M21c: SEG-Y from RadExplorer -------------------------------------------
+
+SEGY_STATIC = "its traces carry a static shift of up to 700 ns: read as recorded, without it"
+
+
+def test_a_static_shifted_segy_is_ticked_with_its_notes(tmp_path):
+    p = synthetic_segy(tmp_path, "LINE01.sgy", n_traces=30, statics_ns=[700] + [5] * 29)
+    (row,) = plan_import([p], OPTS)
+    assert row.include and row.placeable and row.n_traces == 30
+    assert SEGY_STATIC in row.note and "header ε 0 is outside" in row.note
+
+
+def test_a_segy_whose_wheel_jumped_is_ticked_with_the_jump_note(tmp_path):
+    x = [68 * i for i in range(20)] + [68 * 19 + 3000 + 68 * i for i in range(10)]
+    (row,) = plan_import([synthetic_segy(tmp_path, "LINE02.sgy", n_traces=30, x_mm=x)], OPTS)
+    assert row.include and row.placeable
+    assert "its trace coordinates jump at 1 trace, the largest 3 m at trace 21" in row.note
+
+
+def test_a_segy_from_other_software_is_listed_unticked_with_why(tmp_path):
+    from tests.segy_data import OTHER_TEXT
+
+    (row,) = plan_import([synthetic_segy(tmp_path, "OTHER.sgy", text=OTHER_TEXT)], OPTS)
+    assert not row.include
+    assert "cannot read header: not a RadExplorer SEG-Y, the only kind nsgeo reads yet" in row.note
