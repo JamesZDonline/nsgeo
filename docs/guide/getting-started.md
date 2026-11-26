@@ -106,7 +106,7 @@ stay exactly where they are.
 | **Open site…** | Opens an existing site by its `survey.nsgeo.json` file. |
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
-| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: GPR files placed by a grid's tapes (see [Step 3](#step-3-import-radar-files)), or placed along their RTK GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
+| **Add data ▾** | Adds survey data to the site. **GPR…** opens one dialog with a **Place lines by: Grid \| GPS** switch: GPR files placed by a grid's tapes (see [Step 3](#step-3-import-radar-files)), or placed along their GPS tracks (see [Step 3a](#step-3a-import-gps-lines)). |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile, or drag a box around it to trace it, to measure the radar velocity from it. Ctrl+click (Cmd+click on a Mac) does the same with velocity mode off. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
@@ -217,7 +217,8 @@ into it, and the site appears in **nsgeo Survey** under the folder's name.
 Now copy your radar files into the site folder. A subfolder is fine. Keep each
 DZT's DZX file beside it, so its marks are read too. Keep each DT1's HD file
 beside it as well: the HD is the DT1's header, and nsgeo cannot read a DT1
-without it. The same goes for a MALÅ line's RAD file, beside its RD3 or RD7. A SEG-Y line is a
+without it. The same goes for a MALÅ line's RAD file, beside its RD3 or RD7, and its COR
+file, which holds its GPS positions. A SEG-Y line is a
 single file with nothing beside it. Keeping the radar files inside the site folder lets the whole site move as one folder (see
 [Where your data lives](#4-where-your-data-lives)).
 
@@ -391,7 +392,7 @@ edge. The message bar tells you how many moved.
 
 A GPS line can be in the table too. It is placed by its track, so its **Offset**,
 **Dir**, **Start** and **Scale** read **—** and cannot change; only its **Label**,
-**Destagger** and **Grid** can. A change to a whole selection and **Measure**
+**Destagger**, **Grid** and, for a line placed without RTK, **Smooth (m)** can. A change to a whole selection and **Measure**
 leave GPS rows alone and say so: "Left 3 GPS line(s) alone: Offset applies to tape
 lines only."
 
@@ -440,21 +441,25 @@ reason. While it runs the button reads **Stop**, and pressing it changes nothing
 
 ### Step 3a: Import GPS lines
 
-Some surveys were walked with an RTK GPS on the cart. The radar then writes a
+Some surveys were walked with a GPS on the cart. A GSSI radar then writes a
 **DZG** file beside each DZT: a text log of the GPS sentences, each tied to the
-trace being recorded when it arrived. If your lines have DZG files, you can
-place them by where the cart really went instead of by tapes and a grid.
+trace being recorded when it arrived. A MALÅ radar writes a **COR** file beside
+each RD3 or RD7, and RadExplorer keeps the positions inside each SEG-Y file. If
+your lines have one of these, you can place them by where the cart really went
+instead of by tapes and a grid.
 
 Click **Add data ▾**, then **GPR…**, and switch **Place lines by** to **GPS**. It
 needs an open site; it does not need a grid yet, because the lines can make
 their own. Switching keeps the files you have added, so you do not add them
 again.
 
-1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
-   with the same name. GPS placement reads GSSI DZG logs only for now: a DT1,
-   MALÅ or SEG-Y file added here is refused with **no GPS log read for this format yet**; place it
-   by Grid instead. A row shows the number of traces, how many fixes were RTK
-   fixed, and how long the track runs without one (**Without RTK**).
+1. Click **Add files…** and choose the radar files: DZT files with their DZG
+   beside them, MALÅ RD7 or RD3 files with their COR beside them, or SEG-Y files
+   exported by RadExplorer. A Sensors & Software DT1 file added here is refused
+   with **no GPS log read for this format yet**; place it by Grid instead. If you
+   choose both the RD3 and the RD7 of a MALÅ line, only the RD7 is placed. A row
+   shows the number of traces, how many fixes were RTK fixed, and how long the
+   track runs without one (**Without RTK**).
 2. If the site has no coordinate system yet, nsgeo picks one from where the
    first line lies, and the dialog says which. Every later import goes into that
    system. A file that cannot be placed in it is refused, with the reason in its
@@ -478,11 +483,25 @@ again.
      stretches it: the grid is made from the ready rows only.
 4. Set **Destagger (m)** if you already know it. It applies to every line in
    the import, and you can change it per line afterwards (below).
-5. Click **Import**. The button names what it will do, for example **Import 60
+5. A line whose log never reached an RTK fix (every MALÅ and SEG-Y line so far,
+   and any DZT whose GPS never fixed) is placed on its GPS fixes as recorded, and
+   its **Status** says so: *ready · no RTK fix: placed on its 283 GPS fixes as
+   recorded*. Ordinary GPS scatters by a metre or two, so such a line can
+   zig-zag. **Smooth (m)** evens it out: each fix is averaged with the fixes
+   within half that distance along the track. It applies to every line placed
+   without RTK in the import, and you can change it per line afterwards in
+   **Edit lines** (below). 0 leaves the fixes as recorded, and they are always
+   kept, so smoothing can be changed or undone.
+6. A row also says when the GPS and the survey wheel disagree on how long the
+   line is by more than a fifth, for example *its GPS track is 176 m but its
+   wheel says 83 m: check which is right*. nsgeo does not choose: GPS placement
+   uses the GPS, and Grid placement uses the wheel. Look at the line on the map
+   against something you know.
+7. Click **Import**. The button names what it will do, for example **Import 60
    line(s) into new grid North**. A new grid is made and the lines are added in
    one step; if adding the lines fails, the new grid is taken away again.
 
-Files GPS cannot place (no DZG beside them, or no RTK-fixed position) are not
+Files GPS cannot place (no GPS log, or fewer than two positions in it) are not
 dropped. After the GPS lines go in, the dialog stays open, switched to **Grid**
 on the same grid, holding only those files. Each one's **Offset** and **Dir**
 are guessed from the GPS lines either side of it in file order and shown in
@@ -495,7 +514,7 @@ then click **Import** to place them by the tapes, or
 when the lines either side do not run along one of the grid's axes.
 
 The lines are drawn along the walk, in their grid's colour, so the turns at
-the line ends show. Only RTK-fixed positions place a line. Past the first and
+the line ends show. A line with RTK fixes is placed by those alone. Past the first and
 last of them, the line carries on in a straight line by the wheel. If the log
 loses its RTK fix part way, the traces in between are spread along the straight
 stretch between the two good fixes, and that stretch is a **bridge**. The
