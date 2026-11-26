@@ -22,7 +22,7 @@ from typing import Any
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
-from nsgeo.geometry.track import TrackFix, TrackPlacement
+from nsgeo.geometry.track import ANCHOR_RTK, TrackFix, TrackPlacement
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.base import build_step, get_step, param_problem, step_title
@@ -52,11 +52,18 @@ VELOCITY_SOURCE_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
 #: A site with any GPS line saves as 4 and only then gains a top-level `"crs"`
 #: (GPS lines spec §15). A site without GPS lines still saves as 1 to 3.
 TRACK_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1
+#: A site with any GPS line placed without RTK (`anchor_on` "all") or smoothed
+#: saves as 5, so a build that predates them refuses the file instead of failing
+#: to place the line. A site whose GPS lines are all RTK-anchored still saves as
+#: 4 (radar formats spec §16). M19 also adds a version: whichever merges second
+#: chains its constant from the other's.
+TRACK_ANCHOR_SCHEMA_VERSION = TRACK_SCHEMA_VERSION + 1
 READABLE_SCHEMA_VERSIONS = (
     SCHEMA_VERSION,
     CUTS_SCHEMA_VERSION,
     VELOCITY_SOURCE_SCHEMA_VERSION,
     TRACK_SCHEMA_VERSION,
+    TRACK_ANCHOR_SCHEMA_VERSION,
 )
 _FIT_ID = re.compile(r"fit-(\d+)")
 
@@ -169,6 +176,10 @@ def _placement_to_dict(placement: Any) -> dict[str, Any]:
         track["label"] = placement.label
         if placement.travel_shift != 0.0:
             track["travel_shift"] = placement.travel_shift
+        if placement.anchor_on != ANCHOR_RTK:
+            track["anchor_on"] = placement.anchor_on
+        if placement.smooth_m != 0.0:
+            track["smooth_m"] = placement.smooth_m
         track["fixes"] = [_fix_to_row(f) for f in placement.fixes]
         return track
     raise ProjectError(f"cannot serialise placement of type {type(placement).__name__}")
@@ -224,6 +235,8 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement | TrackPlacement:
             grid_id=doc.get("grid_id"),
             label=doc.get("label"),
             travel_shift=float(doc.get("travel_shift", 0.0)),
+            anchor_on=str(doc.get("anchor_on", ANCHOR_RTK)),
+            smooth_m=float(doc.get("smooth_m", 0.0)),
         )
     if kind != "grid":
         raise ProjectError(f"unknown placement type {kind!r}")
@@ -349,7 +362,14 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     has_record = any(g.velocity_source is not None for g in site.grids) or any(
         ln.velocity_source is not None for ln in site.lines
     )
-    if has_gps:
+    anchored = any(
+        isinstance(ln.placement, TrackPlacement)
+        and (ln.placement.anchor_on != ANCHOR_RTK or ln.placement.smooth_m != 0.0)
+        for ln in site.lines
+    )
+    if anchored:
+        version = TRACK_ANCHOR_SCHEMA_VERSION
+    elif has_gps:
         version = TRACK_SCHEMA_VERSION
     elif has_record:
         version = VELOCITY_SOURCE_SCHEMA_VERSION

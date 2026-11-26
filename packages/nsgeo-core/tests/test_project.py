@@ -17,6 +17,7 @@ from nsgeo.processing import StepStack, build_step
 from nsgeo.project import (
     CUTS_SCHEMA_VERSION,
     READABLE_SCHEMA_VERSIONS,
+    TRACK_ANCHOR_SCHEMA_VERSION,
     TRACK_SCHEMA_VERSION,
     VELOCITY_SOURCE_SCHEMA_VERSION,
     ProjectError,
@@ -125,9 +126,9 @@ def test_rejects_future_schema_version(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 5
+    doc["schema_version"] = 6
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 5"):
+    with pytest.raises(ProjectError, match="schema version 6"):
         load_site(out)
 
 
@@ -846,18 +847,18 @@ def test_cuts_round_trip_and_bump_the_schema_only_when_present(tmp_path):
     assert load_site(path).cuts == []
 
 
-def test_loads_schema_1_to_4_and_refuses_5(tmp_path):
-    assert READABLE_SCHEMA_VERSIONS == (1, 2, 3, 4)
+def test_loads_schema_1_to_5_and_refuses_6(tmp_path):
+    assert READABLE_SCHEMA_VERSIONS == (1, 2, 3, 4, 5)
     path = tmp_path / "survey.nsgeo.json"
     save_site(_cut_site(), path)
     doc = json.loads(path.read_text())
-    for version, ok in ((1, True), (2, True), (3, True), (4, True), (5, False)):
+    for version, ok in ((1, True), (2, True), (3, True), (4, True), (5, True), (6, False)):
         doc["schema_version"] = version
         path.write_text(json.dumps(doc))
         if ok:
             load_site(path)
         else:
-            with pytest.raises(ProjectError, match="schema version 5"):
+            with pytest.raises(ProjectError, match="schema version 6"):
                 load_site(path)
 
 
@@ -970,9 +971,9 @@ def test_a_site_loads_and_a_newer_schema_version_is_refused(tmp_path, site):
     save_site(site, out)
     load_site(out)
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 5
+    doc["schema_version"] = 6
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 5"):
+    with pytest.raises(ProjectError, match="schema version 6"):
         load_site(out)
 
 
@@ -1308,16 +1309,16 @@ def test_travel_shift_and_grid_id_are_written_only_when_set(tmp_path):
     assert back.travel_shift == 0.24 and back.grid_id == "G1"
 
 
-def test_schema_4_is_readable_and_5_is_not(tmp_path):
-    assert 4 in READABLE_SCHEMA_VERSIONS and 5 not in READABLE_SCHEMA_VERSIONS
+def test_schema_4_is_readable_and_6_is_not(tmp_path):
+    assert 4 in READABLE_SCHEMA_VERSIONS and 6 not in READABLE_SCHEMA_VERSIONS
     site, _ = _gps_site(tmp_path)
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     assert load_site(out).lines
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 5
+    doc["schema_version"] = 6
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 5"):
+    with pytest.raises(ProjectError, match="schema version 6"):
         load_site(out)
 
 
@@ -1410,3 +1411,49 @@ def test_an_empty_import_presets_is_not_written(tmp_path):
     save_site(_two_grid_site(), path)
     assert "import_presets" not in json.loads(path.read_text())
     assert load_site(path).import_presets == {}
+
+
+# --- GPS lines without RTK, and smoothing (M21d, radar formats spec §16) --------
+
+
+def _unanchored_site(tmp_path, smooth_m=0.0):
+    site, dzt = _gps_site(tmp_path)
+    placement = dataclasses.replace(site.lines[0].placement, anchor_on="all", smooth_m=smooth_m)
+    site.lines = [dataclasses.replace(site.lines[0], placement=placement)]
+    return site, dzt
+
+
+@pytest.mark.parametrize("smooth_m", [0.0, 2.5])
+def test_a_track_without_rtk_round_trips_at_schema_5(tmp_path, smooth_m):
+    site, _ = _unanchored_site(tmp_path, smooth_m)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == TRACK_ANCHOR_SCHEMA_VERSION == 5
+    placement = doc["lines"][0]["placement"]
+    assert placement["anchor_on"] == "all"
+    assert placement.get("smooth_m", 0.0) == smooth_m
+    loaded = load_site(out).lines[0].placement
+    assert loaded == site.lines[0].placement
+    assert (loaded.anchor_on, loaded.smooth_m) == ("all", smooth_m)
+
+
+def test_an_rtk_only_site_still_saves_at_schema_4_with_no_new_key(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    assert doc["schema_version"] == 4
+    placement = doc["lines"][0]["placement"]
+    assert "anchor_on" not in placement and "smooth_m" not in placement
+
+
+def test_a_schema_5_track_without_the_fields_reads_as_rtk(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["schema_version"] = 5
+    out.write_text(json.dumps(doc))
+    loaded = load_site(out).lines[0].placement
+    assert (loaded.anchor_on, loaded.smooth_m) == ("rtk", 0.0)

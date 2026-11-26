@@ -36,6 +36,7 @@ Radar readers (GSSI DZT, Sensors & Software DT1, MALÅ and SEG-Y from RadExplore
 | `FORMATS` | The registered radar formats, in the order the import lists them. |
 | `MalaError` | Raised when a MALÅ line or its .rad is missing, malformed or unsupported (multichannel files included). |
 | `MalaHeader` | A MALÅ line's header: a `RadarHeader` with the trace count, sample width, trigger and distance interval from its .rad. |
+| `QUALITY_UNKNOWN` | The quality given to a fix from a log that records none (-1). |
 | `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
 | `RadarFileError` | Raised when a radar file is malformed, unsupported, or missing a companion file. |
 | `RadarFormat` | One registered format: its name, extensions, three readers, and which of its files to prefer when a line has two. |

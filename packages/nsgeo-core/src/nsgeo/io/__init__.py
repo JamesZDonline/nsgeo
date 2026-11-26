@@ -8,7 +8,7 @@ format's own module keeps its own functions under the same names.
 from __future__ import annotations
 
 from nsgeo.io.dt1 import Dt1Error, Dt1Header
-from nsgeo.io.dzg import RTK_FIXED, DzgError, DzgFix, DzgLog, dzg_for, read_dzg
+from nsgeo.io.dzg import QUALITY_UNKNOWN, RTK_FIXED, DzgError, DzgFix, DzgLog, dzg_for, read_dzg
 from nsgeo.io.dzt import DztError, DztHeader
 from nsgeo.io.dzx import DzxError, DzxInfo, DzxMark, read_dzx, sidecar_for
 from nsgeo.io.formats import (
@@ -39,6 +39,7 @@ __all__ = [
     "FORMATS",
     "MalaError",
     "MalaHeader",
+    "QUALITY_UNKNOWN",
     "RTK_FIXED",
     "RadarFileError",
     "RadarFormat",

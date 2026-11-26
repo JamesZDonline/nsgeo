@@ -15,6 +15,9 @@ from pathlib import Path
 RTK_FIXED = 4
 """GGA fix quality for an RTK fixed solution."""
 
+QUALITY_UNKNOWN = -1
+"""The quality of a fix from a log that records none (RadExplorer SEG-Y, spec M21 §16)."""
+
 
 class DzgError(ValueError):
     """Raised when a DZG's trace numbers cannot be trusted."""

@@ -88,15 +88,16 @@ def test_rows_that_cannot_be_placed_are_refused_with_their_reason(tmp_path):
         tmp_path, "FILE__004.DZT", [fix(50), fix(25), fix(75)], traces_per_metre=10.0
     )
     rows = plan([bare, none, one, falling])
-    assert [r.refusal for r in rows[:3]] == [
-        "no DZG beside it",
-        "no RTK-fixed position",
-        "only one RTK-fixed position",
-    ]
+    assert rows[0].refusal == "no DZG beside it"
+    # Fewer than two RTK fixes no longer refuse the line: it is placed on all
+    # its fixes (radar formats spec §16).
+    for r in rows[1:3]:
+        assert r.refusal is None and r.line is not None
+        assert r.line.placement.anchor_on == "all"
     assert rows[3].refusal is not None
     assert rows[3].refusal.startswith("could not read it: ")
     assert "trace numbers must rise" in rows[3].refusal
-    for r in rows:
+    for r in (rows[0], rows[3]):
         assert r.line is None
         assert r.bridges == () and r.end_runs == (0.0, 0.0)
     assert rows[0].n_traces == 60  # the DZT itself read fine

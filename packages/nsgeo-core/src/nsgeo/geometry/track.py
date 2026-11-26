@@ -1,11 +1,15 @@
-"""A line placed along the RTK GPS track logged beside its DZT (M17a, #134).
+"""A line placed along the GPS track logged with it (M17a, #134; M21d).
 
-Only RTK-fixed fixes (quality 4) are anchors. Traces between two anchors sit on
-the straight segment between them, evenly by trace number, so a dropout to
-float or plain GPS is bridged, never trusted. Past the first and last anchor a
-line runs on in a straight line at its heading, by the wheel's metres per
-trace. `travel_shift` moves every trace forward along the walked path, as it
-does for `GridPlacement` (#47).
+A track with two or more RTK-fixed fixes (quality 4) anchors on those only.
+Traces between two anchors sit on the straight segment between them, evenly by
+trace number, so a dropout to float or plain GPS is bridged, never trusted.
+Past the first and last anchor a line runs on in a straight line at its
+heading, by the wheel's metres per trace. `travel_shift` moves every trace
+forward along the walked path, as it does for `GridPlacement` (#47).
+
+A track with fewer RTK fixes (MALÅ `.cor` and SEG-Y logs have none) anchors on
+every fix with a position, `anchor_on="all"`, optionally smoothed over
+`smooth_m` metres along the track (spec M21 §16).
 
 The projection is injected: the core has no pyproj. `to_xy(lon, lat)` takes
 degrees and returns metres in the placement's CRS.
@@ -13,6 +17,7 @@ degrees and returns metres in the placement's CRS.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
@@ -81,18 +86,75 @@ class Bridge:
     metres: float
 
 
+#: `TrackPlacement.anchor_on` values.
+ANCHOR_RTK = "rtk"
+ANCHOR_ALL = "all"
+
+
+def _positioned(fix: TrackFix) -> bool:
+    return math.isfinite(fix.x) and math.isfinite(fix.y)
+
+
 def _is_anchor(fix: TrackFix) -> bool:
-    return fix.quality == RTK_FIXED and math.isfinite(fix.x) and math.isfinite(fix.y)
+    return fix.quality == RTK_FIXED and _positioned(fix)
+
+
+#: The thinning step for measuring a jittery track's length: positions at
+#: least this far apart along it (spec M21 §16).
+THIN_M: float = 5.0
+
+
+def thinned_length(xy: np.ndarray, step: float = THIN_M) -> float:
+    """The length of the path through `xy` (n, 2), keeping only points at least
+    `step` from the last kept one (and the last point). Jitter of a metre or two
+    would otherwise make a 1 Hz track 10-50 % long by itself."""
+    if len(xy) < 2:
+        return 0.0
+    kept = [xy[0]]
+    for p in xy[1:]:
+        if math.hypot(*(p - kept[-1])) >= step:
+            kept.append(p)
+    if math.hypot(*(xy[-1] - kept[-1])) > 0:
+        kept.append(xy[-1])
+    k = np.array(kept)
+    return float(np.hypot(*np.diff(k, axis=0).T).sum())
+
+
+def smoothed(anchors: tuple[TrackFix, ...], smooth_m: float) -> tuple[TrackFix, ...]:
+    """`anchors` with each position the mean of the anchors within `smooth_m / 2`
+    of it along the track; the window shrinks at the ends. 0 returns them as they
+    are, the same objects.
+
+    Distance along the track is measured by trace number, scaled by the track's
+    thinned length over its trace span: traces are evenly spaced in distance on a
+    wheel-triggered line, and the raw path between jittery fixes is not.
+    """
+    if smooth_m <= 0 or len(anchors) < 3:
+        return anchors
+    xy = np.array([(f.x, f.y) for f in anchors])
+    traces = np.array([f.trace for f in anchors], dtype=float)
+    span = traces[-1] - traces[0]
+    length = thinned_length(xy)
+    if not length > 0:
+        length = float(np.hypot(*np.diff(xy, axis=0).T).sum())
+    s = (traces - traces[0]) * (length / span)
+    lo = np.searchsorted(s, s - smooth_m / 2.0 - 1e-9, side="left")
+    hi = np.searchsorted(s, s + smooth_m / 2.0 + 1e-9, side="right")
+    sums = np.vstack([np.zeros((1, 2)), np.cumsum(xy, axis=0)])
+    mean = (sums[hi] - sums[lo]) / (hi - lo)[:, None]
+    return tuple(dataclasses.replace(f, x=float(x), y=float(y)) for f, (x, y) in zip(anchors, mean))
 
 
 @dataclass(frozen=True)
 class TrackPlacement:
-    """A line placed along its RTK GPS track.
+    """A line placed along its GPS track.
 
     `fixes` are every fix of the log in trace order, whatever the quality: a
     non-RTK fix between two anchors is what marks a bridge. `travel_shift` is
     metres, positive moving every trace forward along the way the line was
-    walked.
+    walked. `anchor_on` is "rtk" (RTK-fixed fixes only) or "all" (every fix
+    with a position, for a line without RTK); `smooth_m` smooths an "all"
+    track's anchors over that many metres along it, 0 leaving them as recorded.
     """
 
     fixes: tuple[TrackFix, ...]
@@ -100,31 +162,49 @@ class TrackPlacement:
     grid_id: str | None = None
     label: str | None = None
     travel_shift: float = 0.0
+    anchor_on: str = ANCHOR_RTK
+    smooth_m: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fixes", tuple(self.fixes))
         for a, b in zip(self.fixes, self.fixes[1:]):
             if not b.trace > a.trace:
                 raise ValueError("trace numbers must rise along a GPS track")
+        if self.anchor_on not in (ANCHOR_RTK, ANCHOR_ALL):
+            raise ValueError(f"anchor_on must be 'rtk' or 'all', got {self.anchor_on!r}")
+        if not (math.isfinite(self.smooth_m) and self.smooth_m >= 0):
+            raise ValueError(f"smooth_m must be 0 or more, got {self.smooth_m!r}")
+        if self.smooth_m > 0 and self.anchor_on == ANCHOR_RTK:
+            raise ValueError("smoothing is for tracks without RTK")
+        what = "RTK-fixed" if self.anchor_on == ANCHOR_RTK else "GPS"
         anchors = self.anchors()
         if not anchors:
-            raise ValueError("no RTK-fixed position")
+            raise ValueError(f"no {what} position")
         if len(anchors) == 1:
-            raise ValueError("only one RTK-fixed position")
+            raise ValueError(f"only one {what} position")
         if all(math.hypot(a.x - anchors[0].x, a.y - anchors[0].y) < 1e-9 for a in anchors):
-            raise ValueError("the RTK-fixed positions all lie at one point")
+            raise ValueError(f"the {what} positions all lie at one point")
         if not math.isfinite(self.travel_shift):
             raise ValueError(f"travel_shift must be finite, got {self.travel_shift!r}")
 
     def anchors(self) -> tuple[TrackFix, ...]:
-        """The RTK-fixed fixes with a position: the only ones traces are placed by."""
+        """The fixes traces are placed by, as recorded: the RTK-fixed fixes with a
+        position, or for an "all" track every fix with one."""
+        if self.anchor_on == ANCHOR_ALL:
+            return tuple(f for f in self.fixes if _positioned(f))
         return tuple(f for f in self.fixes if _is_anchor(f))
+
+    def placed_anchors(self) -> tuple[TrackFix, ...]:
+        """`anchors()` smoothed by `smooth_m`; the same objects when it is 0."""
+        return smoothed(self.anchors(), self.smooth_m)
 
     def bridges(self) -> tuple[Bridge, ...]:
         """Each pair of consecutive anchors with a non-anchor fix between them."""
         out: list[Bridge] = []
         last: TrackFix | None = None
         gap = False
+        if self.anchor_on == ANCHOR_ALL:
+            return ()
         for f in self.fixes:
             if _is_anchor(f):
                 if last is not None and gap:
@@ -159,7 +239,7 @@ class TrackPlacement:
         return np.array([best.x - end.x, best.y - end.y]) / best_d
 
     def _ends(self, header: RadarHeader) -> tuple[tuple[TrackFix, np.ndarray, float], ...]:
-        a = self.anchors()
+        a = self.placed_anchors()
         first_dir = self._heading(a[0], list(a[1:]))
         last_dir = self._heading(a[-1], list(reversed(a[:-1])))
         return (
@@ -170,7 +250,7 @@ class TrackPlacement:
     def positions(self, n_traces: int, header: RadarHeader) -> np.ndarray:
         """(n_traces, 2) unshifted: on the anchor segments between anchors, and on
         straight runs at the heading beyond the first and last."""
-        a = self.anchors()
+        a = self.placed_anchors()
         idx = np.arange(n_traces, dtype=float)
         traces = np.array([f.trace for f in a], dtype=float)
         xs = np.array([f.x for f in a])
@@ -244,20 +324,33 @@ class TrackPlacement:
         return v / np.hypot(*v)
 
 
-def track_from_log(
-    log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None
-) -> TrackPlacement:
-    """Place a DZG's fixes in `crs` with `to_xy`. Fixes with no position keep NaN x/y.
+def anchor_rule(log: DzgLog) -> str:
+    """ "rtk" when the log has two or more RTK-fixed positions, else "all" (§16)."""
+    fixed = sum(
+        1
+        for f in log.fixes
+        if f.quality == RTK_FIXED and math.isfinite(f.lat) and math.isfinite(f.lon)
+    )
+    return ANCHOR_RTK if fixed >= 2 else ANCHOR_ALL
 
-    Raises ValueError("no RTK-fixed position") or ValueError("only one RTK-fixed
-    position") before projecting anything.
+
+def track_from_log(
+    log: DzgLog, to_xy: ToXY, crs: str, *, label: str | None = None, smooth_m: float = 0.0
+) -> TrackPlacement:
+    """Place a GPS log's fixes in `crs` with `to_xy`. Fixes with no position keep NaN x/y.
+
+    Two or more RTK-fixed positions anchor on those, ignoring `smooth_m`; fewer
+    anchor on every positioned fix, smoothed over `smooth_m` metres. Raises
+    ValueError("no GPS position") or ValueError("only one GPS position") before
+    projecting anything.
     """
     positioned = [f for f in log.fixes if math.isfinite(f.lat) and math.isfinite(f.lon)]
-    fixed = sum(1 for f in positioned if f.quality == RTK_FIXED)
-    if fixed == 0:
-        raise ValueError("no RTK-fixed position")
-    if fixed == 1:
-        raise ValueError("only one RTK-fixed position")
+    anchor_on = anchor_rule(log)
+    if anchor_on == ANCHOR_ALL:
+        if not positioned:
+            raise ValueError("no GPS position")
+        if len(positioned) == 1:
+            raise ValueError("only one GPS position")
     xs, ys = to_xy(
         np.array([f.lon for f in positioned], dtype=float),
         np.array([f.lat for f in positioned], dtype=float),
@@ -277,4 +370,10 @@ def track_from_log(
         )
         for f in log.fixes
     )
-    return TrackPlacement(fixes=fixes, crs=crs, label=label)
+    return TrackPlacement(
+        fixes=fixes,
+        crs=crs,
+        label=label,
+        anchor_on=anchor_on,
+        smooth_m=smooth_m if anchor_on == ANCHOR_ALL else 0.0,
+    )

@@ -12,7 +12,7 @@ from nsgeo.geometry.track import (
     TrackPlacement,
     track_from_log,
 )
-from nsgeo.io import DzgFix, DzgLog
+from nsgeo.io import QUALITY_UNKNOWN, DzgFix, DzgLog
 from nsgeo.io.dzt import read_header
 
 from tests.synthetic import write_dzt
@@ -316,17 +316,141 @@ def test_track_from_log_refuses_before_building():
     def to_xy(lon, lat):
         raise AssertionError("must not project")
 
+    # Fewer than two RTK fixes anchor on every positioned fix (§16): with one
+    # fix, or none positioned, there is nothing to place, and nothing is projected.
     one = DzgLog((DzgFix(10, None, 45.2, 10.5, 4, None, None, None, None),), 0, 0)
-    with pytest.raises(ValueError, match="^only one RTK-fixed position$"):
+    with pytest.raises(ValueError, match="^only one GPS position$"):
         track_from_log(one, to_xy, "X")
-    none = DzgLog((DzgFix(10, None, 45.2, 10.5, 5, None, None, None, None),), 0, 0)
-    with pytest.raises(ValueError, match="^no RTK-fixed position$"):
-        track_from_log(none, to_xy, "X")
     nopos = DzgLog((DzgFix(10, None, float("nan"), float("nan"), 4, None, None, None, None),), 0, 0)
-    with pytest.raises(ValueError, match="^no RTK-fixed position$"):
+    with pytest.raises(ValueError, match="^no GPS position$"):
         track_from_log(nopos, to_xy, "X")
+
+
+def test_one_rtk_fix_among_float_fixes_now_anchors_on_all_of_them():
+    fixes = (
+        DzgFix(10, None, 45.2, 10.5, 5, None, None, None, None),
+        DzgFix(20, None, 45.2001, 10.5, 4, None, None, None, None),
+        DzgFix(30, None, 45.2002, 10.5, 5, None, None, None, None),
+    )
+    t = track_from_log(DzgLog(fixes, 0, 0), _to_xy, "X", smooth_m=3.0)
+    assert t.anchor_on == "all" and t.smooth_m == 3.0 and len(t.anchors()) == 3
+    assert t.bridges() == ()
 
 
 def test_frames_are_not_needed(header):
     c = _track(L_SHAPE).trace_coords(81, header, {})
     assert c.shape == (81, 2)
+
+
+# ---- M21d: tracks without RTK, and smoothing (spec §16) -----------------------
+
+
+def _to_xy(lon, lat):
+    """A flat local projection about the made-up origin: metres per degree."""
+    m = 111_320.0
+    return (np.asarray(lon) - 10.5) * m * np.cos(np.radians(45.2)), (np.asarray(lat) - 45.2) * m
+
+
+def _log(qualities, step_deg=0.00001):
+    return DzgLog(
+        tuple(
+            DzgFix(10 * i, None, 45.2 + i * step_deg, 10.5, q, None, None, None, None)
+            for i, q in enumerate(qualities)
+        ),
+        0,
+        0,
+    )
+
+
+@pytest.mark.parametrize("n_rtk, anchor_on", [(0, "all"), (1, "all"), (2, "rtk"), (5, "rtk")])
+def test_track_from_log_anchors_on_rtk_only_when_it_has_two(n_rtk, anchor_on):
+    qualities = [4] * n_rtk + [2] * (20 - n_rtk)
+    t = track_from_log(_log(qualities), _to_xy, "X", smooth_m=4.0)
+    assert t.anchor_on == anchor_on
+    assert t.smooth_m == (4.0 if anchor_on == "all" else 0.0)
+    assert len(t.anchors()) == (20 if anchor_on == "all" else n_rtk)
+
+
+def test_an_all_track_places_traces_on_every_positioned_fix(header):
+    nan = float("nan")
+    fixes = (
+        _fix(0, 0.0, 0.0, 2),
+        TrackFix(trace=5, x=nan, y=nan, lat=nan, lon=nan, quality=0),
+        _fix(10, 1.0, 0.0, QUALITY_UNKNOWN),
+        _fix(20, 1.0, 2.0, 1),
+    )
+    t = TrackPlacement(fixes=fixes, crs="LOCAL", anchor_on="all")
+    pos = t.positions(21, header)
+    np.testing.assert_allclose(pos[5], (0.5, 0.0), atol=1e-9)
+    np.testing.assert_allclose(pos[15], (1.0, 1.0), atol=1e-9)
+    assert t.bridges() == ()
+
+
+def test_all_track_errors():
+    with pytest.raises(ValueError, match="^no GPS position$"):
+        _track([(1, float("nan"), float("nan"), 2)], anchor_on="all")
+    with pytest.raises(ValueError, match="^only one GPS position$"):
+        _track([(1, 0.0, 0.0, 2)], anchor_on="all")
+    with pytest.raises(ValueError, match="^the GPS positions all lie at one point$"):
+        _track([(1, 2.0, 3.0, 2), (2, 2.0, 3.0, 1)], anchor_on="all")
+    with pytest.raises(ValueError, match=r"^smooth_m must be 0 or more, got -1\.0$"):
+        _track([(1, 0.0, 0.0, 2), (2, 1.0, 0.0, 2)], anchor_on="all", smooth_m=-1.0)
+    with pytest.raises(ValueError, match="^smoothing is for tracks without RTK$"):
+        _track(L_SHAPE, smooth_m=2.0)
+    with pytest.raises(ValueError, match="anchor_on must be"):
+        _track(L_SHAPE, anchor_on="some")
+
+
+def _jittered(smooth_m):
+    """A straight east-going track, a fix every metre, alternating 1 m north and south."""
+    points = [(10 * i, float(i), 1.0 if i % 2 else -1.0, 2) for i in range(61)]
+    return _track(points, anchor_on="all", smooth_m=smooth_m)
+
+
+def test_smoothing_evens_out_jitter_and_zero_changes_nothing(header):
+    raw = _jittered(0.0)
+    assert raw.placed_anchors() is raw.anchors() or raw.placed_anchors() == raw.anchors()
+    assert all(a is b for a, b in zip(raw.placed_anchors(), raw.anchors()))
+    pos = raw.positions(601, header)
+    assert np.abs(pos[::10, 1]).min() == pytest.approx(1.0)
+
+    smooth = _jittered(12.0)
+    inner = [a.y for a in smooth.placed_anchors()[6:-6]]
+    assert max(abs(y) for y in inner) < 0.1
+    # The raw fixes are kept: only the placed anchors move.
+    assert [f.y for f in smooth.fixes] == [f.y for f in raw.fixes]
+
+
+def test_the_smoothing_window_is_in_metres_and_shrinks_at_the_ends():
+    # Eleven fixes 1 m apart, ten traces apart; then the same line at twice the
+    # fix density. A ±1 m window holds 3 fixes in the first and 5 in the second,
+    # and the means come out the same: the window is in metres, not fixes.
+    sparse = _track([(10 * i, float(i), 0.0, 2) for i in range(11)], anchor_on="all", smooth_m=2.0)
+    dense = _track([(5 * i, 0.5 * i, 0.0, 2) for i in range(21)], anchor_on="all", smooth_m=2.0)
+    xs = [a.x for a in sparse.placed_anchors()]
+    assert xs[0] == pytest.approx(0.5) and xs[5] == pytest.approx(5.0)
+    assert xs[10] == pytest.approx(9.5)
+    xd = [a.x for a in dense.placed_anchors()]
+    assert xd[0] == pytest.approx(0.5) and xd[10] == pytest.approx(5.0)
+    assert xd[20] == pytest.approx(9.5)
+
+
+def test_thinned_length_ignores_jitter_but_keeps_the_end():
+    from nsgeo.geometry.track import thinned_length
+
+    xy = np.array([(float(i), 1.0 if i % 2 else -1.0) for i in range(101)])
+    raw = float(np.hypot(*np.diff(xy, axis=0).T).sum())
+    assert raw > 200
+    # 2 m of peak-to-peak jitter still adds about 8 % at a 5 m step, against 124 % raw.
+    assert 100.0 < thinned_length(xy) < 110.0
+    assert thinned_length(xy[:1]) == 0.0
+
+
+def test_ends_and_heading_use_the_smoothed_anchors(header):
+    smooth = _jittered(12.0)
+    pos = smooth.positions(611, header)
+    # Past the last anchor the line runs on at the smoothed heading: east, not
+    # zig-zagging north or south by the last fix's jitter.
+    assert abs(pos[610, 1] - pos[600, 1]) < 0.2
+    start, end = smooth.end_runs(611, header)
+    assert start == 0.0 and end == pytest.approx(10 * (1 / header.traces_per_metre))
