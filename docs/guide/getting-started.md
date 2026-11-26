@@ -1022,6 +1022,8 @@ magnetometer grid.
 4. **Click Import.** For each file, nsgeo says how many readings are missing
    data and on which traverses. Missing data are runs of zeros that the download
    writes where a sensor logged nothing. They are left out of the map.
+   Readings the instrument did not log are left blank: interpolation never
+   fills them.
 
 The **nsgeo Mag** panel opens on the grid you imported. **This grid** maps that
 grid and **Whole site** maps every magnetometer grid that holds a file. Choose

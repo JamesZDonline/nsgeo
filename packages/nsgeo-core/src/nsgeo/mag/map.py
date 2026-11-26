@@ -50,6 +50,30 @@ def bin_readings(frame: CubeFrame, world: np.ndarray, values: np.ndarray) -> np.
     return _mean_per_cell(frame.cell_index(world), np.asarray(values, dtype=float), frame)
 
 
+def missing_mask(frame: CubeFrame, boxes: np.ndarray, cell: float) -> np.ndarray:
+    """bool `(ny, nx)`: True where a cell's centre lies in any half-open grid-local box.
+
+    Boxes are marked one at a time over their own cell range, so a file with
+    thousands of missing readings costs no more than its boxes' area.
+    """
+    mask = np.zeros((frame.ny, frame.nx), dtype=bool)
+
+    def first_at_or_after(edge: float) -> int:
+        # Cell k's centre is (k + 0.5) * cell. The tolerance keeps a centre
+        # that sits on an edge from flipping sides with rounding.
+        return math.ceil(edge / cell - 0.5 - 1e-9)
+
+    for x0, y0, x1, y1 in np.asarray(boxes, dtype=float).reshape(-1, 4):
+        # Keep x0 <= centre < x1, and the same in y.
+        c0 = max(0, first_at_or_after(x0))
+        c1 = min(frame.nx, first_at_or_after(x1))
+        r0 = max(0, first_at_or_after(y0))
+        r1 = min(frame.ny, first_at_or_after(y1))
+        if c0 < c1 and r0 < r1:
+            mask[r0:r1, c0:c1] = True
+    return mask
+
+
 def grid_map(
     mag: MagFile, grid: Grid, cell: float, settings: FinishSettings
 ) -> tuple[CubeFrame, np.ndarray]:
@@ -73,7 +97,11 @@ def grid_map(
         settings.max_distance_m,
         settings.search_radius_m,
     )
-    return frame, finish_slice(binned, weights, cell, settings)
+    finished = finish_slice(binned, weights, cell, settings)
+    # Missing readings are never filled: neither the fill nor the smoothing
+    # may put a value where the instrument logged nothing (mag plan B, Q13).
+    finished[missing_mask(frame, mag.missing_footprints(grid), cell)] = np.nan
+    return frame, finished
 
 
 def mosaic(

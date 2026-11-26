@@ -146,3 +146,15 @@ def test_real_neighbours_join_along_their_traverses():
         assert ok.sum() > 100, label
         r = float(np.corrcoef(left[ok], right[ok])[0, 1])
         assert r >= 0.8, f"{label}: r={r:.3f}"
+
+
+def test_real_missing_blocks_are_blank_on_the_map():
+    """Each 1.5 m run on two traverses leaves two 1.5 x 0.5 m blocks blank (mag plan B, Q13)."""
+    for name in ("example4.dat", "example6.dat"):
+        origin = LAYOUT[name]
+        (path,) = [p for p in MAG_FILES if p.name == name]
+        grid = Grid(name, origin, 0.0, 30.0, 30.0, CRS, 0.5, instrument="mag")
+        mag = MagFile.open(path, name, MagSetup(axis="x", far_y=True, far_x=False))
+        for cell, blank in ((0.125, 96), (0.25, 24), (0.5, 6)):
+            _, out = grid_map(mag, grid, cell, FINISH)
+            assert int(np.isnan(out).sum()) == blank, (name, cell)

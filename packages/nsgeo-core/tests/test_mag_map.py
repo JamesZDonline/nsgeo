@@ -117,3 +117,90 @@ def test_a_rotated_grid_far_from_the_origin_bins_each_traverse_in_one_column(tmp
     per_column = np.isfinite(binned).sum(axis=0)
     assert (per_column > 0).sum() == 8
     assert set(per_column[per_column > 0]) == {32}
+
+
+# -- Missing readings stay blank (mag plan B, Q13) --------------------------------
+
+GAP_ROW = 29  # traverse 30, an interior traverse
+GAP = slice(80, 92)  # 12 readings, 1.5 m at 8 per metre
+
+
+def _gapped(tmp_path, *, gap=True):
+    """A 30 m grid of 60 traverses x 240 readings, 1.5 m missing on traverse 30."""
+    setup = MagSetup(axis="x")
+    grid = Grid("M", (0.0, 0.0), 0.0, 30.0, 30.0, CRS, 0.5, instrument="mag")
+    values = np.full((60, 240), 5.0)
+    if gap:
+        values[GAP_ROW, GAP] = 0.0
+    path = write_grad601(tmp_path / ("gap.dat" if gap else "full.dat"), values)
+    return MagFile.open(path, "M", setup), grid
+
+
+DEFAULT_FINISH = FinishSettings("kriging", 0.375, 1.0)
+
+
+def _footprint_cells(mag, grid, cell):
+    """(rows, cols) of the cells whose centres lie in the missing readings' footprint."""
+    (t,) = [t for t in mag.traverses(grid) if t.row == GAP_ROW]
+    stored_gap = np.zeros(mag.n_readings, dtype=bool)
+    stored_gap[GAP] = True
+    missing = t.walked(stored_gap)
+    along = t.placement.local(mag.n_readings, 8.0)[missing][:, 0]
+    half_along = 0.5 / 8.0 * t.placement.scale
+    lo, hi = along.min() - half_along, along.max() + half_along
+    across = t.placement.offset
+    centres = (np.arange(round(30.0 / cell)) + 0.5) * cell
+    cols = np.flatnonzero((centres >= lo) & (centres < hi))
+    rows = np.flatnonzero((centres >= across - 0.25) & (centres < across + 0.25))
+    return rows, cols
+
+
+def test_a_missing_run_is_blank_across_its_traverse_footprint(tmp_path):
+    mag, grid = _gapped(tmp_path)
+    _, out = grid_map(mag, grid, DEFAULT_CELL_M, DEFAULT_FINISH)
+    rows, cols = _footprint_cells(mag, grid, DEFAULT_CELL_M)
+    assert (rows.size, cols.size) == (4, 12)
+    expected = np.zeros(out.shape, dtype=bool)
+    expected[np.ix_(rows, cols)] = True
+    np.testing.assert_array_equal(np.isnan(out), expected)
+
+
+@pytest.mark.parametrize("method", ["none", "idw", "kriging", "min_curvature"])
+def test_missing_readings_stay_blank_under_every_finish(tmp_path, method):
+    mag, grid = _gapped(tmp_path)
+    finish = FinishSettings(method, 1.5, 3.0, smooth_x_m=1.0, smooth_y_m=1.0)
+    _, out = grid_map(mag, grid, DEFAULT_CELL_M, finish)
+    rows, cols = _footprint_cells(mag, grid, DEFAULT_CELL_M)
+    assert np.isnan(out[np.ix_(rows, cols)]).all()
+    # The traverses either side of the gap are still drawn beside it.
+    (t,) = [t for t in mag.traverses(grid) if t.row == GAP_ROW]
+    beside = [int((t.placement.offset + d) // DEFAULT_CELL_M) for d in (-0.5, 0.5)]
+    assert np.isfinite(out[np.ix_(beside, cols)]).all()
+
+
+def test_a_destaggered_traverse_carries_its_blank_with_it(tmp_path):
+    import dataclasses
+
+    mag, grid = _gapped(tmp_path)
+    _, before = grid_map(mag, grid, DEFAULT_CELL_M, DEFAULT_FINISH)
+    shifts = list(mag.shifts)
+    shifts[GAP_ROW] = 0.25
+    moved = dataclasses.replace(mag, shifts=tuple(shifts))
+    _, after = grid_map(moved, grid, DEFAULT_CELL_M, DEFAULT_FINISH)
+    (t,) = [t for t in moved.traverses(grid) if t.row == GAP_ROW]
+    step = round(0.25 / DEFAULT_CELL_M) * t.placement.direction
+    np.testing.assert_array_equal(np.isnan(after), np.roll(np.isnan(before), step, axis=1))
+
+
+def test_a_file_with_nothing_missing_maps_as_before(tmp_path):
+    from nsgeo.mag import map as mag_map
+
+    mag, grid = _gapped(tmp_path, gap=False)
+    assert (
+        mag_map.missing_mask(
+            CubeFrame.for_grid(grid, DEFAULT_CELL_M), mag.missing_footprints(grid), DEFAULT_CELL_M
+        ).sum()
+        == 0
+    )
+    _, out = grid_map(mag, grid, DEFAULT_CELL_M, DEFAULT_FINISH)
+    assert np.isfinite(out).all()

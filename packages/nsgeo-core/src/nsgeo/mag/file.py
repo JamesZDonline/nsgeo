@@ -109,6 +109,33 @@ class MagFile:
             return np.empty((0, 2)), np.empty(0)
         return np.concatenate(xy), np.concatenate(values)
 
+    def missing_footprints(self, grid: Grid) -> np.ndarray:
+        """(k, 4) grid-local boxes (x0, y0, x1, y1), one per missing reading, half-open.
+
+        Each is centred on where the reading would have been: half a traverse
+        spacing either side across, half a reading interval (times the
+        traverse's scale) either side along. A map leaves these blank (mag plan B, Q13).
+        """
+        readings = self.readings()
+        per_metre = self.setup.readings_per_metre
+        half_across = self.setup.spacing_m / 2.0
+        boxes: list[np.ndarray] = []
+        for t in self.traverses(grid):
+            missing = ~np.isfinite(t.walked(readings[t.row]))
+            if not missing.any():
+                continue
+            centres = t.placement.local(self.n_readings, per_metre)[missing]
+            half_along = 0.5 / per_metre * t.placement.scale
+            half = (
+                np.array([half_along, half_across])
+                if self.setup.axis == "x"
+                else np.array([half_across, half_along])
+            )
+            boxes.append(np.hstack([centres - half, centres + half]))
+        if not boxes:
+            return np.empty((0, 4))
+        return np.concatenate(boxes)
+
     def points(self, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
         """Every finite reading as ((m, 2) world coordinates, (m,) values)."""
         local, values = self.local_points(grid)

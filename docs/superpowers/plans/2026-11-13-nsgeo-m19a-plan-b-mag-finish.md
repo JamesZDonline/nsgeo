@@ -127,7 +127,7 @@ These are as in Plan A: the same virtualenvs, `.venv-tools`, and real data linke
   - **V3 and G6, too many panels, and Survey sections per instrument:** a design discussion, filed as #244. Not in this plan.
   - **G4, the post-import messages are easy to miss;** **G5, grey out Import on an empty list rather than say "Add a file to import."** Both are fine for now in the author's words. File them as Plan A follow-ups after the merge (Task 4).
   - **P3:** the GPR export landing under the mag map "isn't a big deal"; Task 3 fixes it anyway (Q11).
-- [ ] Land Plan A fixes first: Task 0.
+- [x] Land Plan A fixes first: Task 0.
 - [x] Take in main. **Done 2026-11-20** at the author's request, before Plan A's walkthrough: main 0255dbd (M16, M17a, M17b, sessions A–E) merged into `nsgeo-m19-mag`. What changed for this plan:
   - **Schema:** main now holds versions 3 (velocity records) and 4 (GPS lines), so `MAG_SCHEMA_VERSION` is **5**. The writer writes the highest feature the site holds (mag, then GPS, then a velocity record, then cuts).
   - **Add data:** the toolbar's Import mag… is gone. The magnetometer import is **Add data ▾ ▸ Magnetometer…** (`Plugin.act_add_mag`, `_add_mag_from_toolbar`), beside GPR…; its dialog is titled "Add magnetometer data"; the Survey panel's mag grid item reads **Add magnetometer data…**. Main's GPR import is `AddDataDialog` with a Grid page (`GridImportPage`) and a GPS page; neither lists a mag grid.
@@ -162,17 +162,17 @@ def missing_mask(frame: CubeFrame, boxes: np.ndarray, cell: float) -> np.ndarray
 
 `grid_map` sets `finished[missing_mask(...)] = np.nan` after `finish_slice` and before it returns. Mark cells box by box over each box's cell range, not by testing every cell against every box: example3 has 7273 missing readings.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `test_mag_map.py`, synthetic file from `mag_data.write_grad601` (a 60 × 240 grid, 1.5 m of missing readings on one interior traverse):
     - `test_a_missing_run_is_blank_across_its_traverse_footprint`: at 0.125 m the blank is exactly the 12 × 4 cells of the footprint (1.5 m × 0.5 m) under the default finish.
     - `test_missing_readings_stay_blank_under_every_finish`: none, IDW, kriging and minimum curvature, max distance 3 spacings, smoothing 1 m in X and Y. The footprint is NaN every time, and the cells of the traverses either side are finite.
     - `test_a_destaggered_traverse_carries_its_blank_with_it`: a shift of +0.25 m on that traverse moves the blank 0.25 m along it.
     - `test_a_file_with_nothing_missing_maps_as_before`: identical output to Plan A's `grid_map` for a file without missing runs.
   - `test_mag_real_files.py`: `test_real_missing_blocks_are_blank_on_the_map`. With the inferred layout and the default finish (kriging, 0.375 m, search 1.0 m), example4 and example6 have exactly 96 NaN cells at 0.125 m, 24 at 0.25 m, 6 at 0.5 m.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement** `missing_footprints`, then `missing_mask`, then the line in `grid_map`. Add one sentence to the guide's Mag panel section: `"Readings the instrument did not log are left blank: interpolation never fills them."`
-- [ ] **Step 4: Run** the core + pure tier and `test_plugin_mag_dock.py` and `test_plugin_session_mag.py` unchanged, lint and types. All green; the real-data test ran.
-- [ ] **Step 5: Commit and push.** `fix(mag): leave missing readings blank; interpolation never fills them (M19a)`.
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement** `missing_footprints`, then `missing_mask`, then the line in `grid_map`. Add one sentence to the guide's Mag panel section: `"Readings the instrument did not log are left blank: interpolation never fills them."`
+- [x] **Step 4: Run** the core + pure tier and `test_plugin_mag_dock.py` and `test_plugin_session_mag.py` unchanged, lint and types. All green; the real-data test ran.
+- [x] **Step 5: Commit and push.** `fix(mag): leave missing readings blank; interpolation never fills them (M19a)`.
 
 ---
 
