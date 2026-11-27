@@ -281,6 +281,7 @@ class FillFlow(QObject):
             limit = getattr(job, "limit", None)
             if limit is None:
                 return  # stale: its fill was refused, so it measured nothing
+            job.land()  # the solves it read are recently used again (#236)
             self._on_stretch(self._stretch_key, float(limit), bool(job.final))
         except Exception as exc:  # noqa: BLE001 -- from the worker's poll timer
             _log(f"could not take the colour stretch: {exc}")

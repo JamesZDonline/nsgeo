@@ -176,6 +176,9 @@ class GridStretch:
     held: tuple[SliceFill, FillWeights | None] | None = None
     #: A copy of the engine's solved-slice cache (minimum curvature only).
     solved: dict[bytes, np.ndarray] = field(default_factory=dict)
+    #: GUI thread: marks solve keys recently used in the engine's own cache,
+    #: as the synchronous stretch does when it reads them (None: no cache).
+    touch: Callable[[Sequence[bytes]], None] | None = None
 
 
 def draw_window(
@@ -187,18 +190,22 @@ def draw_window(
     *,
     mode: str,
     solved: Mapping[bytes, np.ndarray],
+    used: list[bytes] | None = None,
 ) -> np.ndarray:
     """One window as the stretch draws it. `mode` is `"fill"` (the fill),
     `"solved"` (a cached minimum-curvature solve, smoothed; `_Unsolved` when not
-    cached) or `"preview"` (the kriging stand-in)."""
+    cached; its key appended to `used`) or `"preview"` (the kriging stand-in)."""
     if mode == "solved":
         from nsgeo_qgis.slices_engine import solve_key
 
         if not fills.holds(coverage):
             raise _Unsolved
-        hit = solved.get(solve_key(values))
+        key = solve_key(values)
+        hit = solved.get(key)
         if hit is None:
             raise _Unsolved
+        if used is not None:
+            used.append(key)
         return smooth(hit, cell, settings.smooth_x_m, settings.smooth_y_m)
     fill, preview = fills.get(coverage)
     if mode == "preview":
@@ -242,6 +249,9 @@ class StretchJob:
         #: nothing to measure, so it measures nothing (never the empty site's
         #: limit, which would read as final).
         self._released = False
+        #: The solve keys a final minimum-curvature pass read, by grid, with
+        #: each grid's `touch`: refreshed in the engines when the job lands.
+        self._used: list[tuple[Callable[[Sequence[bytes]], None], list[bytes]]] = []
         #: Written by the worker, read by the GUI thread: a float store.
         self.fraction = 0.0
 
@@ -250,6 +260,7 @@ class StretchJob:
         everything captured is released at the end: `land` needs only `limit`
         and `final`, so a job run again measures nothing."""
         self.limit, self.final, self.fraction = None, False, 0.0
+        self._used = []
         if self._released:
             return
         try:
@@ -275,13 +286,14 @@ class StretchJob:
 
         total = len(self._steps) * (2 if self._curvature else 1)
         done = 0
+        used: dict[str, list[bytes]] = {grid_id: [] for grid_id in self._grids}
 
         def windows(mode: str) -> Iterator[np.ndarray]:
             nonlocal done
             for step in self._steps:
                 if should_stop():
                     raise SolveStopped
-                yield from self._window(step, fills, mode)
+                yield from self._window(step, fills, mode, used)
                 done += 1
                 self.fraction = done / total
 
@@ -295,12 +307,21 @@ class StretchJob:
         else:
             try:
                 self.limit, self.final = pass_("solved"), True
+                self._used = [
+                    (touch, used[grid_id])
+                    for grid_id, grid in self._grids.items()
+                    if (touch := grid.touch) is not None and used[grid_id]
+                ]
             except _Unsolved:
                 self.limit, self.final = pass_("preview"), False
         self.fraction = 1.0
 
     def _window(
-        self, step: Mapping[str, SliceWindow | None], fills: Mapping[str, _Fills], mode: str
+        self,
+        step: Mapping[str, SliceWindow | None],
+        fills: Mapping[str, _Fills],
+        mode: str,
+        used: Mapping[str, list[bytes]],
     ) -> Iterator[np.ndarray]:
         binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for grid_id, window in step.items():
@@ -310,7 +331,14 @@ class StretchJob:
         def draw(grid_id: str, values: np.ndarray, cov: np.ndarray) -> np.ndarray:
             grid = self._grids[grid_id]
             return draw_window(
-                values, cov, fills[grid_id], grid.cell, grid.settings, mode=mode, solved=grid.solved
+                values,
+                cov,
+                fills[grid_id],
+                grid.cell,
+                grid.settings,
+                mode=mode,
+                solved=grid.solved,
+                used=used[grid_id],
             )
 
         if not self._site:
@@ -319,5 +347,10 @@ class StretchJob:
         return iter(shown.values())
 
     def land(self) -> bool:
-        """GUI thread: the scope stores `limit` and `final`."""
+        """GUI thread: the scope stores `limit` and `final`. The solves a final
+        pass read are marked recently used in their engines, as the synchronous
+        stretch marks them, so the next solves evict other slices first."""
+        used, self._used = self._used, []
+        for touch, keys in used:
+            touch(keys)
         return True

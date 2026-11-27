@@ -634,12 +634,14 @@ class FakeStretch(StretchJob):
         self.final = final
         self.pause = pause
         self.fraction = 0.0
+        self.lands = 0
 
     def run(self, should_stop) -> None:
         time.sleep(self.pause)
         self.fraction = 1.0
 
     def land(self) -> bool:
+        self.lands += 1
         return True
 
 
@@ -713,6 +715,19 @@ def test_a_stretch_with_no_limit_is_dropped(flow_probe):
     assert flow.stretching
     assert spin_until(lambda: not flow.stretching, 10_000)
     assert not [entry for entry in log if isinstance(entry, tuple) and entry[0] == "stretch"]
+
+
+def test_a_measured_stretch_is_landed_before_it_is_handed_on(flow_probe):
+    """#236: the stretch job's `land` runs on the GUI thread (it refreshes the
+    solves it read in their engines); a stale one, which measured nothing, is not."""
+    flow, _, log = flow_probe
+    measured, stale = FakeStretch(1.0), FakeStretch(None)
+    flow.request_stretch("s", measured)
+    assert spin_until(lambda: ("stretch", "s", 1.0, True) in log, 10_000)
+    assert measured.lands == 1
+    flow.request_stretch("t", stale)
+    assert spin_until(lambda: not flow.stretching, 10_000)
+    assert stale.lands == 0
 
 
 def test_a_stretch_request_waits_for_the_fills_and_for_its_own_key(flow_probe):

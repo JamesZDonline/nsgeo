@@ -335,3 +335,27 @@ def test_a_released_stretch_job_run_again_measures_nothing(sourced, stopped):  #
         job.run(lambda: False)
     job.run(lambda: False)
     assert (job.limit, job.final) == (None, False)
+
+
+def test_a_final_stretch_job_refreshes_the_solves_it_read(sourced):  # noqa: F811
+    """#236: the synchronous final stretch marks each solve it reads as
+    recently used (`move_to_end`); the job read a copy, so its landing left them
+    first in line for eviction. Landing now refreshes them in the engine."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    finish = SliceFinish(method="min_curvature")
+    for job in engine.stretch_solves(THICKNESS, finish):
+        job.run(lambda: False)
+        assert job.land()
+    used = list(engine._solved)
+    assert used, "the stretch measured no solved window"
+    for n in range(slices_engine.SOLVED_SLICES_KEPT - len(used)):
+        engine._keep_solved(f"other {n}".encode(), np.zeros(1))
+    assert list(engine._solved)[: len(used)] == used  # the stretch's are oldest now
+    job = engine.stretch_job(THICKNESS, PercentileClip(), finish)
+    job.run(lambda: False)
+    assert job.final is True
+    assert job.land() is True
+    assert list(engine._solved)[-len(used) :] == used, "the stretch's solves stayed oldest"
+    engine.stretch_limit(THICKNESS, PercentileClip(), finish)
+    assert list(engine._solved)[-len(used) :] == used  # as the synchronous stretch leaves them
