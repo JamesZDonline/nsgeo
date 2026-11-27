@@ -3044,6 +3044,10 @@ def test_cuts_table_has_the_declared_fields_and_is_read_only(populated):
     symbol = lyr.renderer().symbol()
     assert symbol.color().name() == "#e6550d"
     assert symbol.width() == pytest.approx(0.6)
+    # Solid, unlike the dashed survey lines (cut spec §4.8).
+    stroke = symbol.symbolLayer(0)
+    assert not stroke.useCustomDashPattern()
+    assert stroke.penStyle() == Qt.PenStyle.SolidLine
     assert lyr.labelsEnabled()
     assert lyr.labeling().settings().fieldName == "name"
 
@@ -3060,11 +3064,29 @@ def test_refill_cuts_places_a_cut_in_world_coordinates(populated):
     (feat,) = _cut_features(layers)
     assert (feat["cut_key"], feat["name"], feat["grid_id"]) == (key, "Cut 1", "A")
     assert feat["length_m"] == pytest.approx(5.0)
-    first = feat.geometry().asPolyline()[0]
-    expected = GRID.to_world([[1.0, 1.0]])[0]
-    assert (first.x(), first.y()) == pytest.approx(tuple(expected), abs=1e-6)
+    drawn = [(p.x(), p.y()) for p in feat.geometry().asPolyline()]
+    expected = GRID.to_world(np.asarray(_CUT, dtype=float))
+    assert len(drawn) == len(_CUT)
+    for point, want in zip(drawn, expected):
+        assert point == pytest.approx(tuple(want), abs=1e-6)
     session.remove_cut(key)
     assert layers.feature_count("cuts") == 0
+
+
+def test_adding_renaming_and_deleting_a_cut_refills_only_the_cuts(populated, monkeypatch):
+    """A cut changes no grid, line or mark and moves no pick, so `cuts_changed`
+    refills the cuts table alone (#171 §2)."""
+    session, layers, _ = populated
+    others = []
+    for name in ("refill_grids", "refill_lines", "refill_marks", "refill_rtk_gaps", "follow_lines"):
+        monkeypatch.setattr(layers, name, lambda name=name: others.append(name) or 0)
+    key = session.add_cut("A", _CUT)
+    assert [f["name"] for f in _cut_features(layers)] == ["Cut 1"]
+    session.rename_cut(key, "North")
+    assert [f["name"] for f in _cut_features(layers)] == ["North"]
+    session.remove_cut(key)
+    assert layers.feature_count("cuts") == 0
+    assert others == []
 
 
 def test_a_moved_grid_moves_its_cuts(populated):

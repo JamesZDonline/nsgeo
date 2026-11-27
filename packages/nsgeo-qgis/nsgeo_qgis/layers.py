@@ -449,7 +449,7 @@ class SiteLayers(QObject):
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
-        session.cuts_changed.connect(self.refresh)
+        session.cuts_changed.connect(self.refresh_cuts)
         # #97: a pick keeps its sample when its line's time zero moves.
         session.stack_changed.connect(self._on_stack_changed)
         session.line_opened.connect(self._on_line_opened)
@@ -2443,6 +2443,29 @@ class SiteLayers(QObject):
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
         without_layer_flag(layer, QgsMapLayer.LayerFlag.Identifiable)
         layer.triggerRepaint()
+
+    def refresh_cuts(self) -> None:
+        """`cuts_changed`: refill the cuts table alone (#171 §2).
+
+        Adding, renaming or deleting a cut moves no grid, line, mark or pick,
+        so `refresh`'s other refills and its `follow_lines` over every pick
+        would be waste. Without a cuts table to refill (none made yet, or
+        removed from the legend by hand) the whole `refresh` runs instead,
+        which makes it. A grid removal that takes cuts with it also sends
+        `grids_changed`, whose `refresh` covers everything else.
+
+        A slot on a Qt signal: it reports rather than raises.
+        """
+        site = self.session.site
+        if site is None:
+            return
+        if "cuts" not in self.layers or self.crs() is None:
+            self.refresh()
+            return
+        try:
+            self.refill_cuts()
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            _log(f"could not refill 'cuts': {exc}", Qgis.MessageLevel.Critical)
 
     def refill_cuts(self) -> None:
         site = self.session.site
