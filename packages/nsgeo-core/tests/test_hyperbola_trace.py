@@ -221,6 +221,16 @@ def test_too_few_surviving_edges_gives_the_cleaning_message_not_the_fits(monkeyp
         trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
 
 
+def test_one_to_three_strong_edges_give_the_cleaning_message_not_the_fits():
+    # A box only as wide as the flat top of a hyperbola whose legs fade at
+    # once leaves three strong edges. When edges were counted only after the
+    # first fit, these three reached fit_hyperbola, and its own refusal
+    # ("Searching for the apex ... Click another point.") came back instead.
+    data, t, x = _scene([Planted(100, 15.0, 0.07, fade_from_trace=0)])
+    with pytest.raises(ValueError, match=TOO_FEW.replace(r"\d+", "3")):
+        trace_hyperbola(data, t, x, TraceBox(96, 104, 10.0, 30.0))
+
+
 def test_thinning_never_repeats_a_trace():
     # Among layers the cleaning leaves gaps between the surviving edges, so
     # two evenly spaced targets can share a nearest survivor. Each target
@@ -244,10 +254,8 @@ def test_a_box_top_cutting_into_the_band_does_not_shift_the_fit():
 
 def test_noise_alone_is_no_hyperbola():
     data, t, x = _scene([])
-    with pytest.raises(
-        ValueError,
-        match="No hyperbola was found in the box.|The hyperbola in the box is too faint to trace.",
-    ):
+    # Spec §10: noise only gives "no hyperbola", not "too faint".
+    with pytest.raises(ValueError, match=NO_HYPERBOLA):
         trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
 
 
@@ -451,6 +459,14 @@ def test_a_box_twice_as_big_takes_the_same_lobe(seed):
         fits.append(_fit(dots, x))
     tight, big = fits
     assert abs(tight.v_m_ns - big.v_m_ns) <= 2 * np.hypot(tight.v_stderr_m_ns, big.v_stderr_m_ns)
+
+
+def test_a_layer_half_a_period_after_the_apex_edge_gives_the_velocity():
+    # The phase the xfail below once held: with the lobe chosen near the apex
+    # this layer now reads 0.9% fast, inside 2 sigma.
+    data, t, x = _layered_scene(20.0, 0.08, 30, 0.5, seed=1)
+    dots = trace_hyperbola(data, t, x, TraceBox(58, 142, 18.0, 25.6))
+    assert _within_2_sigma(_fit(dots, x), 0.08)
 
 
 @pytest.mark.xfail(

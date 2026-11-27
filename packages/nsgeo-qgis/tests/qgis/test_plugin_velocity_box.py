@@ -11,8 +11,8 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.processing.base import Radargram, retime_ns
 from nsgeo.velocity_fit import refit
-from plugin_testing import send_move_while_pressed, synthetic_dzt
-from qgis.PyQt.QtCore import QPoint, Qt
+from plugin_testing import send_hover, send_move_while_pressed, synthetic_dzt
+from qgis.PyQt.QtCore import QPoint, QRectF, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication, QMessageBox
 from tests.planted import REAL_DT_NS, REAL_NOISE_RATIO, REAL_PERIOD_NS, Planted, plant
@@ -27,6 +27,9 @@ V = 0.07
 # The DZT header's start position is -11.086 ns, so the first rows are padded to
 # put the planted time axis on the radar's clock.
 PAD = 51
+# What a box on noise alone says (spec §10), and the advice after a refusal.
+NO_HYPERBOLA = "No hyperbola was found in the box."
+SWITCH_OFF = "Switch it off in the processing stack to trace, or click the points by hand."
 
 
 def _write_planted(folder, name, *, hyperbola: bool, direct_wave: bool = False):
@@ -180,7 +183,7 @@ def test_each_amplitude_transform_refuses_with_its_title(plugin, name, title):
     _drag(v, *_box_around(v))
     assert dock.velocity_points() == hand
     assert dock.velocity_note.text().startswith(
-        f"Cannot trace with {title} on: it removes the edge the tracer follows."
+        f"Cannot trace with {title} on: it removes the edge the tracer follows. {SWITCH_OFF} "
     )
 
 
@@ -201,9 +204,7 @@ def test_a_box_on_empty_ground_says_why_and_keeps_the_dots(plugin):
     hand = _three_hand_dots(plugin)
     _drag(v, *_box_around(v, traces=(5, 40), ns=(60.0, 90.0)))  # noise only
     assert dock.velocity_points() == hand
-    note = dock.velocity_note.text()
-    assert note
-    assert "hyperbola" in note.lower() or "faint" in note.lower() or "few points" in note
+    assert dock.velocity_note.text().startswith(f"{NO_HYPERBOLA} ")
 
 
 def test_a_right_click_discard_clears_the_box_note(plugin):
@@ -248,13 +249,85 @@ def test_a_box_drawn_backwards_or_past_the_edge_is_normalised_and_clipped(plugin
     _drag(v, b, a)  # bottom-right to top-left
     w = v.transform.width
     _drag(v, a, (w + 40, b[1]))  # past the image's right edge
-    assert len(got) == 2
-    for first, last, top, bottom in got:
-        assert 0 <= first <= last < N_TRACES
-        assert top <= bottom
-        assert v.transform.time_lo - 1e-6 <= top and bottom <= v.transform.time_hi + 1e-6
-    assert got[0][:2] == (30, 90) or abs(got[0][0] - 30) <= 1
-    assert got[1][1] == N_TRACES - 1
+    t = v.transform
+    # The drag lands on whole pixels; the box reads its corners from those.
+    first, last = (t.trace_index_at(round(x)) for x in (a[0], b[0]))
+    top, bottom = (t.time_of_y(round(y)) for y in (a[1], b[1]))
+    assert abs(first - 30) <= 1 and abs(last - 90) <= 1
+    assert got == [(first, last, top, bottom), (first, N_TRACES - 1, top, bottom)]
+
+
+def test_the_box_being_dragged_is_shown_normalised_and_clipped(plugin):
+    v = _view(plugin)
+    assert v.velocity_box_rect() is None
+    a, b = _box_around(v)
+    (ax, ay), (bx, by) = ((round(x), round(y)) for x, y in (a, b))
+    QTest.mousePress(v, LEFT, NO_MOD, _pos(v, *b))
+    assert v.velocity_box_rect() is None  # a press alone is not yet a box
+    send_move_while_pressed(v, _pos(v, *a), LEFT)  # up and to the left
+    assert v.velocity_box_rect() == QRectF(ax, ay, bx - ax, by - ay)
+    w = v.transform.width
+    send_move_while_pressed(v, _pos(v, w + 40, ay), LEFT)  # past the right edge
+    assert v.velocity_box_rect() == QRectF(bx, ay, w - bx, by - ay)
+    QTest.mouseRelease(v, LEFT, NO_MOD, _pos(v, w + 40, ay))
+    assert v.velocity_box_rect() is None
+
+
+def test_a_release_lost_mid_drag_abandons_the_box(plugin):
+    # Focus stolen mid-drag: no release arrives, and the next move comes with
+    # no button held. The box goes, and nothing is traced, then or later.
+    v, dock = _view(plugin), plugin.profile_dock
+    got: list = []
+    v.velocity_box_drawn.connect(lambda *args: got.append(args))
+    a, b = _box_around(v)
+    QTest.mousePress(v, LEFT, NO_MOD, _pos(v, *a))
+    send_move_while_pressed(v, _pos(v, *b), LEFT)
+    assert v.velocity_box_rect() is not None
+    send_hover(v, _pos(v, *b))
+    assert v.velocity_box_rect() is None
+    QTest.mouseRelease(v, LEFT, NO_MOD, _pos(v, *b))  # a stray late release
+    assert got == []
+    assert dock.velocity_points() == []
+    _drag(v, a, b)  # the next box is traced as usual
+    assert len(got) == 1
+    assert len(dock.velocity_points()) >= 4
+
+
+def _noise_box_note(plugin):
+    """Four hand dots, enough to save, then a box on noise: the note says why
+    it drew nothing."""
+    v, dock = _view(plugin), plugin.profile_dock
+    _three_hand_dots(plugin)
+    _click(v, *_px(v, 80, 21.0))
+    assert dock.save_fit_button.isEnabled()
+    _drag(v, *_box_around(v, traces=(5, 40), ns=(60.0, 90.0)))
+    assert dock.velocity_note.text().startswith(f"{NO_HYPERBOLA} ")
+
+
+def test_saving_the_fit_clears_the_box_note(plugin):
+    dock = plugin.profile_dock
+    _noise_box_note(plugin)
+    dock.save_fit_button.click()
+    assert dock.velocity_points() == []
+    assert NO_HYPERBOLA not in dock.velocity_note.text()
+
+
+def test_switching_line_clears_the_box_note(plugin):
+    s, dock = plugin.session, plugin.profile_dock
+    _noise_box_note(plugin)
+    s.open_line(s.keys()[1])
+    assert NO_HYPERBOLA not in dock.velocity_note.text()
+    s.open_line(s.keys()[0])
+    assert NO_HYPERBOLA not in dock.velocity_note.text()
+
+
+def test_turning_velocity_off_clears_the_box_note(plugin):
+    dock = plugin.profile_dock
+    _noise_box_note(plugin)
+    for on in (False, True):
+        plugin.act_velocity.setChecked(on)
+        plugin.act_velocity.triggered.emit(on)
+        assert NO_HYPERBOLA not in dock.velocity_note.text()
 
 
 def test_a_saved_traced_fit_refits_to_the_velocity_shown(plugin):

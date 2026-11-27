@@ -4,12 +4,14 @@ mode off, through the assembled plugin with real Qt mouse events."""
 from __future__ import annotations
 
 from nsgeo_qgis.plugin import VELOCITY_ON_CUT_TIP, VELOCITY_TIP
-from plugin_testing import send_move_while_pressed
+from plugin_testing import send_move_while_pressed, spin_until
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
+from test_plugin_slices_dock import PRESET, _ready
 from test_plugin_velocity_box import (  # noqa: F401 -- plugin is the shared fixture
     LEFT,
+    N_TRACES,
     _box_around,
     _pos,
     _px,
@@ -67,7 +69,10 @@ def test_ctrl_drag_traces_a_box(plugin):  # noqa: F811
     send_move_while_pressed(v, _pos(v, *b), LEFT)
     QTest.mouseRelease(v, LEFT, CTRL, _pos(v, *b))
     assert plugin.act_velocity.isChecked()
-    assert 4 <= len(dock.velocity_points()) <= 10
+    traces = [tr for tr, _ in dock.velocity_points()]
+    assert 4 <= len(traces) <= 10
+    # The dots run down both legs to the box's sides (traces 30 and 90).
+    assert min(traces) <= 32 and max(traces) >= 88
 
 
 def test_ctrl_shift_click_does_neither(plugin):  # noqa: F811
@@ -90,17 +95,24 @@ def test_shift_click_still_picks_with_velocity_on(plugin):  # noqa: F811
 
 
 def test_ctrl_click_on_a_cut_places_nothing_and_says_why(plugin, monkeypatch):  # noqa: F811
-    s = plugin.session
-    cut = s.add_cut("A", [(1.0, 1.0), (4.0, 1.0)])
-    v = _view(plugin)
-    shown = v.transform  # a cut has no data in this fixture, so keep the line's transform
+    s, v = plugin.session, _view(plugin)
+    # A cut draws once its grid is shown in the Slices panel.
+    s.site.presets["p"] = list(PRESET)
+    s.presets_changed.emit()
+    _ready(plugin.slices_dock)
+    cut = s.add_cut("A", [(0.5, 2.0), (4.5, 2.0)])
+    line = v.transform
     s.open_line(cut)
-    v.transform = shown
-    _velocity_off(plugin)
+    # The cut's own section, not the line still drawn from before.
+    drew = spin_until(lambda: v.transform is not None and v.transform is not line, 20_000)
+    assert drew, "the cut never drew"
+    assert v.transform.n_traces != N_TRACES
+    assert not plugin.act_velocity.isEnabled()
     said: list = []
     monkeypatch.setattr(plugin, "message", lambda text, level=None, **kw: said.append(text))
     _ctrl_click(v, *_px(v, 5, 12.0))
     assert not plugin.act_velocity.isChecked()
+    assert not v._velocity_mode
     assert plugin.profile_dock.velocity_points() == []
     assert said == [VELOCITY_ON_CUT_TIP]
 
