@@ -456,6 +456,55 @@ def test_unload_does_not_offer_a_cancel_that_would_be_ignored(fake_iface, tmp_pa
     assert plugin.survey_dock is None  # unload proceeded regardless of the answer
 
 
+def _dismissed_by(buttons, dismiss):
+    """Show a real QMessageBox with `buttons`, try to `dismiss` it, and
+    return (still showing, the button Qt answered with)."""
+    box = QMessageBox(QMessageBox.Icon.Question, "Unsaved changes", "Save?", buttons)
+    box.show()
+    QApplication.processEvents()
+    dismiss(box)
+    QTest.qWait(300)  # Esc animates a click on the escape button first
+    still_showing = box.isVisible()
+    answer = box.standardButton(box.clickedButton()) if box.clickedButton() else None
+    box.done(0)
+    box.deleteLater()
+    return still_showing, answer
+
+
+def _press_escape(box):
+    QTest.keyClick(box, Qt.Key.Key_Escape)
+
+
+def _close_window(box):
+    box.close()
+
+
+@pytest.mark.parametrize("dismiss", [_press_escape, _close_window], ids=["escape", "close"])
+def test_only_the_unload_prompt_cannot_be_dismissed(fake_iface, tmp_path, answer_modal, dismiss):
+    # #24, decided: the unload Save|Discard prompt has no escape button, so
+    # Esc and the window close button do nothing there. Deliberately: QGIS
+    # unloads the plugin whatever the answer, and an Esc that silently
+    # meant Discard would throw away work on a reflex keypress. New and
+    # Open keep Cancel, and Qt uses it as their escape button, so
+    # dismissing those prompts cancels the action. Pinned on the button
+    # sets each caller really passes, shown in a real QMessageBox.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(GRID)
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Cancel)
+    plugin.new_site()
+    plugin.open_site()
+    plugin.unload()
+    new_buttons, open_buttons, unload_buttons = (args[3] for args, _ in calls)
+
+    assert _dismissed_by(unload_buttons, dismiss) == (True, None)
+    for buttons in (new_buttons, open_buttons):
+        assert _dismissed_by(buttons, dismiss) == (False, QMessageBox.StandardButton.Cancel)
+
+
 def test_unload_saves_a_dirty_site_when_the_user_chooses_save(fake_iface, tmp_path, answer_modal):
     import nsgeo_qgis
 

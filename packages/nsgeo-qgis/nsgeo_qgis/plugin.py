@@ -2815,6 +2815,17 @@ class NsgeoPlugin:
         that cannot do what it says must not be offered. new_site() and
         open_site() can genuinely abort their own action, so they keep
         the default of True.
+
+        Without Cancel, that prompt cannot be dismissed either (#24): Qt
+        makes a RejectRole or NoRole button the escape button, Save |
+        Discard has neither, so Esc and the window close button do
+        nothing and the prompt must be answered. That is deliberate, not
+        an accident of Qt's auto-detection: an Esc that meant Discard
+        would throw away the site on a reflex keypress, and one that
+        meant Save would write without being asked. With Cancel in the
+        set, Qt makes Cancel the escape button, so dismissing the New or
+        Open prompt cancels that action.
+        test_only_the_unload_prompt_cannot_be_dismissed pins both.
         """
         assert self.session is not None
         if not self.session.is_open:
