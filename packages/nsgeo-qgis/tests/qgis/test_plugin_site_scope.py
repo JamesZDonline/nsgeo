@@ -2749,7 +2749,7 @@ def test_a_site_refine_for_a_window_left_behind_never_draws(plugin, monkeypatch)
     move may be A's."""
     dock = _site_minimum_curvature(plugin, 500.0)
     site, scope = dock.site_engine, dock._site
-    gate, finished_late = threading.Event(), threading.Event()
+    gate, started, finished_late = threading.Event(), threading.Event(), threading.Event()
     late: list = []
     real = site.pending_solves
 
@@ -2761,6 +2761,7 @@ def test_a_site_refine_for_a_window_left_behind_never_draws(plugin, monkeypatch)
             run = job.run
 
             def run_late(should_stop):
+                started.set()
                 try:
                     gate.wait(10)
                     run(lambda: False)  # deaf to the cancel
@@ -2776,7 +2777,11 @@ def test_a_site_refine_for_a_window_left_behind_never_draws(plugin, monkeypatch)
     a_top, a_thickness = scope.drawn_at
     drawn: list = []
     try:
-        _pump_until(lambda: dock.refiner.busy)  # A rested and its first solve began
+        # A rested and the worker is inside its first solve. Not
+        # `refiner.busy`: that is set as the list is queued, and a worker slow
+        # to pick it up would see the move to B's cancel first and skip A's
+        # job, which never then runs.
+        _pump_until(started.is_set)
         dock.slice_changed.connect(lambda: drawn.append(dock.current_site_slice()))
         dock.slice_slider.setValue(40)
         _events()
