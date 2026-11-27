@@ -33,7 +33,10 @@ def run_and_list_mounts(tmp_path: Path) -> list[str]:
     env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
     out = subprocess.run(
         ["bash", str(scripts / SCRIPT.name), "img", "true"],
-        env=env, capture_output=True, text=True, check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.splitlines()
     return [out[i + 1] for i, arg in enumerate(out) if arg == "-v"]
 
