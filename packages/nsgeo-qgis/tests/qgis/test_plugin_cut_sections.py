@@ -373,6 +373,26 @@ def test_a_streaming_engine_over_budget_refuses_to_build_a_cube(shown, monkeypat
     assert key not in sections._streamed
 
 
+def test_too_big_is_announced_once_while_it_stands(shown, monkeypatch):
+    """A slice tick changes nothing about a cube too big to hold, so the cut is not
+    announced again on every one; it is when the budget, the source or the cube moves
+    (#171 §4)."""
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    monkeypatch.setattr(cut_sections_module, "DEFAULT_BUDGET_BYTES", 1)
+    assert sections.section(key, build_cube=True) == TOO_BIG_TEXT.format(grid="A")
+    changed = Spy(sections.section_changed)
+    for _ in range(3):
+        dock.slice_changed.emit()
+    assert changed.calls == []
+    # The engine holding a cube of its own after all: the cut may now read it.
+    engine.cube()
+    dock.slice_changed.emit()
+    assert changed.calls == [(key,)]
+
+
 def test_a_streaming_engine_under_budget_keeps_its_cube_across_a_line_visit(shown):
     """The cube is dropped when a cut on another engine opens, the cut goes, its source
     changes or the site closes, never because the working item moved to a line: a visit

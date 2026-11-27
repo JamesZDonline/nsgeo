@@ -11,7 +11,14 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo_qgis.maptools.cut_tool import CutTool
-from nsgeo_qgis.plugin import CUT_HINT_TEXT, OUTSIDE_TEXT, TOO_FEW_TEXT
+from nsgeo_qgis.plugin import (
+    CUT_HINT_TEXT,
+    CUT_OPEN_FAILED_TEXT,
+    CUT_REFUSED_TEXT,
+    NO_GRID_REACHABLE_TEXT,
+    OUTSIDE_TEXT,
+    TOO_FEW_TEXT,
+)
 from plugin_testing import send_map_key, send_map_mouse, synthetic_dzt
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -167,6 +174,54 @@ def test_one_point_or_two_on_the_same_spot_is_refused(drawing):
 
     _draw(d, (310, 210), (310, 210))
     assert TOO_FEW_TEXT in _bar(d.bar)
+    assert d.session.cut_keys() == []
+
+
+def test_a_point_that_is_not_finite_is_not_called_too_few(drawing):
+    """`Cut.new` refuses a non-finite vertex with a ValueError too; it is not "two
+    different points" (#171 §4)."""
+    d = drawing
+    d.plugin._on_cut_drawn([QgsPointXY(310, 210), QgsPointXY(float("inf"), 240)])
+    texts = _bar(d.bar)
+    assert TOO_FEW_TEXT not in texts
+    assert [t for t in texts if t.startswith(CUT_REFUSED_TEXT.format(reason=""))], texts
+    assert any("finite" in t for t in texts), texts
+    assert d.session.cut_keys() == []
+
+
+def test_a_cut_added_but_not_opened_says_so(drawing, monkeypatch):
+    """The cut is in the survey: the message must not say it could not be added (#171 §4)."""
+    d = drawing
+
+    def refuse(key):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(d.session, "open_line", refuse)
+    d.plugin._on_cut_drawn([QgsPointXY(310, 210), QgsPointXY(340, 240)])
+    (key,) = d.session.cut_keys()
+    texts = _bar(d.bar)
+    assert CUT_OPEN_FAILED_TEXT.format(name="Cut 1", reason="boom") in texts
+    assert not [t for t in texts if "could not add" in t], texts
+
+
+def test_no_grid_reachable_from_the_canvas_crs_says_so(drawing, monkeypatch):
+    """When no grid's CRS can be reached from the canvas, the click is not "outside a
+    grid": the transform is the reason (#171 §4)."""
+    from nsgeo_qgis import plugin as plugin_module
+
+    d = drawing
+
+    def unreachable(canvas_crs, grid_crs, project):
+        def fail(p):
+            raise QgsCsException("no transform")
+
+        return SimpleNamespace(transform=fail)
+
+    monkeypatch.setattr(plugin_module, "crs_transform", unreachable)
+    d.plugin._on_cut_drawn([QgsPointXY(310, 210), QgsPointXY(340, 240)])
+    texts = _bar(d.bar)
+    assert NO_GRID_REACHABLE_TEXT in texts
+    assert OUTSIDE_TEXT not in texts
     assert d.session.cut_keys() == []
 
 

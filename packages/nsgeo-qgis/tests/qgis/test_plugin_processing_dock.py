@@ -614,6 +614,23 @@ def test_a_cut_shows_that_processing_does_not_apply(opened):
     assert dock.add_button.isEnabled()
 
 
+def test_a_visit_to_a_cut_keeps_the_selected_row(opened):
+    """Line, cut, line: the cut empties the list, and the row selected before it is
+    selected again on the way back (#171 §4)."""
+    session, dock, key = opened
+    dock.add_step("dewow")
+    dock.add_step("gain_agc")
+    dock.list.setCurrentRow(1)
+    got = []
+    dock.step_selected.connect(got.append)
+    cut = session.add_cut("A", [(1.0, 1.0), (6.0, 1.0)])
+    session.open_line(cut)
+    assert dock.list.currentRow() == -1
+    session.open_line(key)
+    assert dock.list.currentRow() == 1
+    assert got[-1] == 1
+
+
 # ---- a refusal that stays (#197) ------------------------------------------
 
 

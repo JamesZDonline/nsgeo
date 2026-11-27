@@ -283,8 +283,9 @@ class CutSections(QObject):
         self.slices_dock = slices_dock
         self._cache: dict[str, _Entry] = {}
         #: Cuts last answered with a message, and what they wait for: "source"
-        #: (no engine shows their grid), "cube" (a preview with none built) or
-        #: "failed" (a build that failed, waiting for its inputs to change).
+        #: (no engine shows their grid), "cube" (a preview with none built),
+        #: "too_big" (a streaming engine over the residency budget) or "failed"
+        #: (a build that failed, waiting for its inputs to change).
         #: A cut with nothing cached would never be announced otherwise.
         self._waiting: dict[str, str] = {}
         #: Cuts opened on a streaming engine, and the engine whose cube each one built (or
@@ -387,12 +388,12 @@ class CutSections(QObject):
             if not build_cube:
                 self._waiting[key] = "cube"
                 return NO_CUBE_TEXT.format(name=cut.name, grid=cut.grid_id)
-            if engine.mode == "streaming" and engine.estimate.total_bytes > DEFAULT_BUDGET_BYTES:
+            if self._too_big(source):
                 # The engine chose to stream because the cube does not fit the budget; a cut
                 # would build it on the GUI thread and hold it while the status says
                 # "streaming" (M15 final review, I2).
                 self._drop(key)
-                self._waiting[key] = "source"
+                self._waiting[key] = "too_big"
                 return TOO_BIG_TEXT.format(name=cut.name, grid=cut.grid_id)
             failed = self._failure_for(key, engine)
             if failed is not None:
@@ -439,6 +440,12 @@ class CutSections(QObject):
         if build_cube and section.standing_in:
             self._arm(key, stamp)
         return section
+
+    @staticmethod
+    def _too_big(source: CutSource) -> bool:
+        """Whether the source's engine streams because its cube would not fit the budget."""
+        engine = source.engine
+        return engine.mode == "streaming" and engine.estimate.total_bytes > DEFAULT_BUDGET_BYTES
 
     def _failure_for(self, key: str, engine: SliceEngine) -> str | None:
         """The reason a build failed for this cut on this engine, while neither the
@@ -936,6 +943,10 @@ class CutSections(QObject):
                 ready = source is not None and (reason == "source" or source.engine.has_cube)
                 if reason == "cube" and source is None:
                     ready = True  # the message changes to "show the grid"
+                if reason == "too_big":
+                    # Announced again only once the answer may differ, never on every slice
+                    # tick while the cube is still too big to hold (#171 §4).
+                    ready = source is None or source.engine.has_cube or not self._too_big(source)
                 if reason == "failed":
                     # A failed build is announced again only when it may be tried again.
                     ready = (

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import math
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -188,6 +189,12 @@ VELOCITY_ON_CUT_TIP = (
 
 OUTSIDE_TEXT = "Start a cut inside a grid."
 TOO_FEW_TEXT = "A cut needs two different points."
+CUT_REFUSED_TEXT = "The cut could not be added: {reason}"
+CUT_OPEN_FAILED_TEXT = "{name} was added but could not be opened: {reason}"
+NO_GRID_REACHABLE_TEXT = (
+    "The map's coordinate system cannot be transformed to any grid's, so a cut cannot be "
+    "placed. Check the project's coordinate system."
+)
 CUT_HINT_TEXT = (
     "Cut: click to add points; right-click or Enter to finish; "
     "Backspace removes the last point; Esc cancels."
@@ -2603,10 +2610,12 @@ class NsgeoPlugin:
     def _on_cut_failed(self, reason: str) -> None:
         self.message(f"drawing a cut failed: {reason}", Qgis.MessageLevel.Critical)
 
-    def _cut_grid_and_vertices(self, points: Sequence[QgsPointXY]) -> tuple[str, list[Any]] | None:
+    def _cut_grid_and_vertices(self, points: Sequence[QgsPointXY]) -> tuple[str, list[Any]] | str:
         """The grid the FIRST point is inside (the first in survey order when
-        several are), and all the points as that grid's metres; None when the
-        first point is in no grid (cut spec call 6).
+        several are), and all the points as that grid's metres; else the reason
+        there is none to show: `OUTSIDE_TEXT` when the first point is in no grid
+        (cut spec call 6), `NO_GRID_REACHABLE_TEXT` when no grid's CRS can be
+        reached from the canvas at all, so nothing could be inside (#171 §4).
 
         Only the first point chooses the grid; the rest are transformed after,
         so a later point that will not transform cannot pass over the grid the
@@ -2618,6 +2627,7 @@ class NsgeoPlugin:
         assert site is not None
         canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
         first = points[0]
+        reached = False
         for grid in site.grids:
             try:
                 transform = crs_transform(
@@ -2626,6 +2636,7 @@ class NsgeoPlugin:
                 head = transform.transform(first) if transform else first
             except (RuntimeError, QgsCsException):
                 continue  # this grid's CRS cannot be reached from the click: it is not in this grid
+            reached = True
             x, y = grid.to_local(np.array([[head.x(), head.y()]], dtype=float))[0]
             if not (0.0 <= x <= grid.size_x and 0.0 <= y <= grid.size_y):
                 continue
@@ -2637,7 +2648,7 @@ class NsgeoPlugin:
                 ) from exc
             world = np.array([(q.x(), q.y()) for q in mapped], dtype=float)
             return grid.id, [(float(a), float(b)) for a, b in grid.to_local(world)]
-        return None
+        return OUTSIDE_TEXT if reached or not site.grids else NO_GRID_REACHABLE_TEXT
 
     def _on_cut_drawn(self, points: list[QgsPointXY]) -> None:
         """A finished path: add the cut to the first grid its first point is
@@ -2646,18 +2657,31 @@ class NsgeoPlugin:
             if self.session is None or not self.session.is_open:
                 return
             found = self._cut_grid_and_vertices(points)
-            if found is None:
-                self.message(OUTSIDE_TEXT, Qgis.MessageLevel.Warning)
+            if isinstance(found, str):
+                self.message(found, Qgis.MessageLevel.Warning)
                 return
             grid_id, vertices = found
             try:
                 key = self.session.add_cut(grid_id, vertices)
-            except ValueError:
-                self.message(TOO_FEW_TEXT, Qgis.MessageLevel.Warning)
+            except ValueError as exc:
+                # `Cut.new` refuses a non-finite vertex with a ValueError too (#171 §4).
+                finite = all(math.isfinite(c) for vertex in vertices for c in vertex)
+                text = TOO_FEW_TEXT if finite else CUT_REFUSED_TEXT.format(reason=exc)
+                self.message(text, Qgis.MessageLevel.Warning)
                 return
-            self.session.open_line(key)
         except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
             self.message(f"could not add the cut: {exc}", Qgis.MessageLevel.Critical)
+            return
+        try:
+            self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- the cut is in the survey: say so (#171 §4)
+            try:
+                name = self.session.cut_for_key(key).name
+            except KeyError:
+                name = key
+            self.message(
+                CUT_OPEN_FAILED_TEXT.format(name=name, reason=exc), Qgis.MessageLevel.Critical
+            )
 
     # ---- the current layer (plan call 10) -----------------------------------
     def _on_current_layer_changed(self, layer: Any) -> None:

@@ -161,6 +161,8 @@ class ProcessingDock(QgsDockWidget):
         self._updating = 0
         # The step the open line's stack refuses to run, or None.
         self._refusal: StepRefused | None = None
+        # The row selected on the line before a cut was opened, -1 for none (#171 §4).
+        self._row_before_cut = -1
         # `_show_form` last actually displayed: the (key, row) it was shown
         # at, AND the step object identity found there. `rebuild()` emits
         # `step_selected` unconditionally every time it runs, including the
@@ -334,6 +336,15 @@ class ProcessingDock(QgsDockWidget):
         self.status.setText("")
         on_cut = key is not None and is_cut_key(key)
         keep = self.list.currentRow()
+        # A cut empties the list, so the row selected on the line before it is
+        # remembered for the way back (#171 §4).
+        if on_cut:
+            if keep >= 0:
+                self._row_before_cut = keep
+        else:
+            if keep < 0:
+                keep = self._row_before_cut
+            self._row_before_cut = -1
         self._updating += 1
         try:
             self.list.clear()
