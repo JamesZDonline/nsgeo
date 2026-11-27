@@ -1647,11 +1647,12 @@ def processing_first(qgis_app, tmp_path):
 def test_closing_the_site_with_the_cutoff_selected_is_quiet_in_either_order(
     processing_first, message_log
 ):
-    """`close_site` drops the site, then emits `line_opened("")`. The
-    Processing panel answers that with `step_selected(-1)`, and when that
-    reaches `set_selected_step` before this dock's own `_open` has dropped
-    the working line, `_handle_row` reads that line's stack from a site
-    that is gone. Only plugin.py's construction order kept it quiet."""
+    """`close_site` emits `line_opened("")`. The Processing panel answers
+    that with `step_selected(-1)`, and when that reaches
+    `set_selected_step` before this dock's own `_open` has dropped the
+    working line, `_handle_row` reads that line's stack. It used to read
+    it from a site that was already gone; only plugin.py's construction
+    order kept it quiet (#12 now emits while the site is still open)."""
     session, processing, dock, key, line = processing_first
     _cutoff_setup(session, key, line)
     processing.list.setCurrentRow(0)

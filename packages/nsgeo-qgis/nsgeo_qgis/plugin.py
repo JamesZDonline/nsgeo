@@ -989,13 +989,13 @@ class NsgeoPlugin:
             self.layers.detach()
             self.layers = None
         # Not cancelled: a QgsTask has no way to interrupt a blocking disk
-        # read partway through, and LineLoader keeps every submitted task
-        # referenced (its own `_pending`) until it actually finishes, so
-        # dropping this plugin's reference here does not abandon an
-        # in-flight load -- it completes and reports through the same
-        # finished() path as always, just with the site-identity check
-        # there almost certainly finding a different (or no) site open by
-        # then and declining to write anywhere (see loader.py).
+        # read partway through. Dropping this reference CAN abandon a load
+        # still in flight (#19): it is the loader's last strong reference,
+        # so its `_pending` keep-alive lasts only until the cyclic collector
+        # frees loader and task together, and the load then never reports.
+        # That is harmless: the only session it could write to is one the
+        # plugin stops holding on the next line, so nothing reads it any
+        # more. loader.py's module docstring has the argument.
         self.loader = None
         self.session = None
 
@@ -2816,6 +2816,17 @@ class NsgeoPlugin:
         that cannot do what it says must not be offered. new_site() and
         open_site() can genuinely abort their own action, so they keep
         the default of True.
+
+        Without Cancel, that prompt cannot be dismissed either (#24): Qt
+        makes a RejectRole or NoRole button the escape button, Save |
+        Discard has neither, so Esc and the window close button do
+        nothing and the prompt must be answered. That is deliberate, not
+        an accident of Qt's auto-detection: an Esc that meant Discard
+        would throw away the site on a reflex keypress, and one that
+        meant Save would write without being asked. With Cancel in the
+        set, Qt makes Cancel the escape button, so dismissing the New or
+        Open prompt cancels that action.
+        test_only_the_unload_prompt_cannot_be_dismissed pins both.
         """
         assert self.session is not None
         if not self.session.is_open:

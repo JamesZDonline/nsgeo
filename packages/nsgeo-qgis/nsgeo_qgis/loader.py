@@ -28,6 +28,27 @@ blocked by a stale entry) is therefore not enough on its own to keep a
 task alive until it truly finishes; `_pending` below is the deliberate
 keep-alive that is not tied to which site the task was requested against.
 
+`_pending` only keeps tasks alive while something keeps the loader itself
+alive, and after the plugin's `unload()` nothing does (#19). The loader has
+no Qt parent; `unload()` drops the plugin's reference, the last strong one,
+and a signal connection does not keep a parentless receiver alive. What is
+left is a reference cycle: loader -> `_pending` -> task -> its `finished`
+callback -> loader. A load still in flight at unload therefore lasts only
+as long as that cycle does. It may finish and report as usual, or the
+cyclic collector may free loader and task first, and then it vanishes:
+`on_finished` is never called and nothing is reported. Which one happens
+depends on when the collector runs. Checked directly on QGIS 3.44: a
+task whose last reference is dropped never reports, and the cycle only
+puts that off until the next collection. Both outcomes are harmless.
+`finished()` writes only to this loader's session, which nothing but the
+loader still holds after `unload()`: a load that lands writes where
+nothing reads it any more (the slots still connected are guarded), and
+one that vanishes was going to be thrown away. A load that fails can
+still reach `on_error`, so at worst one error lands on the message bar.
+Keeping the loader alive past unload (a module-level hold, or a parent,
+released once `_pending` empties) was considered and left out: it changes
+behaviour to save a result nobody can see.
+
 A fourth: `_tasks.clear()` on site_closed frees a key up for a fresh
 request immediately (see above), which means a *stale* task's own
 `finished()` can arrive after a *different*, live task has already been
