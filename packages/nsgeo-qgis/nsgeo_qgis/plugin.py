@@ -989,13 +989,12 @@ class NsgeoPlugin:
             self.layers.detach()
             self.layers = None
         # Not cancelled: a QgsTask has no way to interrupt a blocking disk
-        # read partway through, and LineLoader keeps every submitted task
-        # referenced (its own `_pending`) until it actually finishes, so
-        # dropping this plugin's reference here does not abandon an
-        # in-flight load -- it completes and reports through the same
-        # finished() path as always, just with the site-identity check
-        # there almost certainly finding a different (or no) site open by
-        # then and declining to write anywhere (see loader.py).
+        # read partway through. Dropping this reference CAN abandon a load
+        # still in flight (#19): it is the loader's last strong reference,
+        # so its `_pending` keep-alive lasts only until the cyclic collector
+        # frees loader and task together, and the load then never reports.
+        # That is harmless: the only session it could write to is dropped
+        # on the next line. loader.py's module docstring has the argument.
         self.loader = None
         self.session = None
 
