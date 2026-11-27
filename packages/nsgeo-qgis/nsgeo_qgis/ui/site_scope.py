@@ -883,9 +883,10 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- reached from task callbacks
             _log(f"could not update the site list: {exc}")
 
-    def _on_included_changed(self, grid_ids: object) -> None:
+    def _on_included_changed(self, grid_ids: Iterable[str]) -> None:
+        # `SiteSourcePanel.included_changed` is `pyqtSignal(object)`: the ids, a tuple.
         try:
-            included = tuple(grid_ids)  # type: ignore[call-overload]
+            included = tuple(grid_ids)
             if included == self.included():
                 return
             self.session.set_site_view(grids=included)
