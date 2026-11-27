@@ -1595,7 +1595,9 @@ def test_a_footprint_for_a_disposed_engine_is_refused(site3, make_site):
     assert job.footprint is None
 
 
-def test_a_grid_no_stretch_window_reaches_still_gets_its_fill(site3_factory, make_site, monkeypatch):
+def test_a_grid_no_stretch_window_reaches_still_gets_its_fill(
+    site3_factory, make_site, monkeypatch
+):
     """#236: with every grid wanted (a shared stretch), `_coverage_for` gave no
     cells for a grid none of the stretch's windows reaches, so it got no fill,
     while `weights_cached(finish)` waits for every grid with an axis: it stayed
@@ -1615,3 +1617,22 @@ def test_a_grid_no_stretch_window_reaches_still_gets_its_fill(site3_factory, mak
         job.run(lambda: False)
         assert job.land() is True
     assert site.weights_cached(FINISH), "a grid with an axis was left without its fill"
+
+
+def test_the_redraw_time_counts_the_slicing_a_tick_took_first(site3, make_site, monkeypatch):
+    """#236: a tick slices each grid once, before `slice_at` (`sliced`, for
+    `fills_missing`), so the redraw time `slice_at` measured left the slicing
+    out. A tick handed its own slicing counts it."""
+    site, _ = prepared(make_site, site3)
+    site.slice_at(20.0, 5.0, **TICK)  # the fills, built outside the measured tick
+    site._redraw_ms = None
+    real = site._sliced
+
+    def slow_slicing(*args, **kwargs):
+        time.sleep(0.2)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site, "_sliced", slow_slicing)
+    taken = site.sliced(20.0, 5.0)
+    site.slice_at(20.0, 5.0, **TICK, sliced=taken)
+    assert site._redraw_ms >= 200.0, f"the redraw left the slicing out: {site._redraw_ms:.0f} ms"
