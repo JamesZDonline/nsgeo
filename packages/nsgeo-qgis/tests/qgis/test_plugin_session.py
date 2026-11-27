@@ -704,6 +704,44 @@ def test_close_site_emits_line_opened_empty_and_resets_allow_absolute_when_a_lin
     assert session._allow_absolute is False
 
 
+def test_close_site_says_no_line_is_current_while_the_site_is_still_readable(session, tmp_path):
+    # #12: close_site() used to tear the site down first and only then emit
+    # line_opened(""), so every slot that read the session while handling
+    # that "no line is current" signal found an already-closed site. The
+    # session settles this once for all slots: line_opened("") goes out with
+    # no line current or previewed but the site still open, and
+    # site_closed follows once it is gone.
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 2))
+    a, b = session.keys()
+    session.append_step(a, build_step("dewow"))
+    session.open_line(a)
+    session.set_preview(b)
+    seen: list = []
+
+    def on_line_opened(key):
+        seen.append(
+            (
+                "line_opened",
+                key,
+                session.is_open,
+                session.current_key,
+                session.preview_key,
+                session.display_key,
+                session.keys(),
+                len(session.stack_for(a, insert=False).entries),
+            )
+        )
+
+    session.line_opened.connect(on_line_opened)
+    session.site_closed.connect(lambda: seen.append(("site_closed", session.is_open)))
+    session.close_site()
+    assert seen == [
+        ("line_opened", "", True, None, None, None, [a, b], 1),
+        ("site_closed", False),
+    ]
+
+
 def test_new_site_refuses_an_occupied_folder_without_touching_what_is_there(qgis_app, tmp_path):
     """The guard is the only thing between "New site..." on an existing
     project folder and `save_site` writing an empty Site over it.

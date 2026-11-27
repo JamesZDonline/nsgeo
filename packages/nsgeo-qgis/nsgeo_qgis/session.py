@@ -481,6 +481,19 @@ class SiteSession(QObject):
         if self._site is None:
             return
         had_current_line = self._current_key is not None
+        self._current_key = None
+        self._current_trace = -1
+        self._selection = (-1, -1)
+        self._preview_key = None
+        self._preview_trace = -1
+        if had_current_line:
+            # Same "no line is current" transition remove_line() reports;
+            # a widget bound only to line_opened must not keep a stale line.
+            # Emitted BEFORE the site goes (#12): no line is current or
+            # previewed any more, but the site is still open, so a slot that
+            # reads the session here sees a coherent one. site_closed below
+            # is the signal that says the site itself is gone.
+            self.line_opened.emit("")
         self._site = None
         self._json_path = None
         self._root = None
@@ -488,17 +501,8 @@ class SiteSession(QObject):
         self._lines_by_key = {}
         self._profiles.clear()
         self._channel.clear()
-        self._current_key = None
-        self._current_trace = -1
-        self._selection = (-1, -1)
-        self._preview_key = None
-        self._preview_trace = -1
         self._allow_absolute = False
         self._set_dirty(False)
-        if had_current_line:
-            # Same "no line is current" transition remove_line() reports;
-            # a widget bound only to line_opened must not keep a stale line.
-            self.line_opened.emit("")
         self.site_closed.emit()
 
     # ---- keys and lookups -------------------------------------------------
