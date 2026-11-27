@@ -10,11 +10,14 @@ import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.slices import (
+    CubeBlock,
     CubeFrame,
     CurvaturePlan,
     FinishSettings,
     Provenance,
+    SliceCube,
     SolveStopped,
+    ZAxis,
     bilinear_taps,
     build_cube,
     finish_slice,
@@ -224,7 +227,11 @@ def test_columns_blend_as_the_slice_picture_does():
     for k in (10, 90, 170):
         expected = sample(finish_slice(cube.level(k), fill, 0.2, settings), taps)
         np.testing.assert_allclose(out[k], expected, rtol=0, atol=1e-6, equal_nan=True)
-    # blank where the nearest cell is blank, whatever its neighbours hold
+    # Blank where the nearest cell is blank, whatever its neighbours hold. This asks for
+    # any finite neighbour, not "three finite neighbours": with lines 0.5 m apart and 0.2 m
+    # cells, a blank nearest cell has its finite taps on one covered row only. Measured
+    # 2026-11-27 on this path: of 95 such columns, 28 have no finite tap and 67 have two,
+    # none three, so the stronger check would match no column (#171 §7).
     none = plan_fill(cube.coverage() > 0, 0.2, "none", 0.0, 0.0)
     raw = finish_section(cube, none, columns, FinishSettings("none", 0.0, 0.0))
     nearest_blank = np.isnan(cube.values_at(columns.cells)[0])
@@ -234,6 +241,46 @@ def test_columns_blend_as_the_slice_picture_does():
     ).any(axis=0)
     assert (nearest_blank & neighbours_finite).any()
     assert np.isnan(raw[:, nearest_blank]).all()
+
+
+def _synthetic_cube(frame, nz=5, seed=7):
+    """Every other row of cells covered with seeded values: no real files needed."""
+    rng = np.random.default_rng(seed)
+    rows = np.arange(0, frame.ny, 2)
+    cells = (rows[:, None] * frame.nx + np.arange(frame.nx)[None, :]).ravel()
+    block = CubeBlock(
+        cells=cells.astype(np.int64),
+        mean=rng.normal(size=(nz, cells.size)).astype(np.float32),
+        count=np.ones(cells.size, dtype=np.int32),
+    )
+    return SliceCube(frame, ZAxis(2.0, 0.5, nz), (block,), _prov())
+
+
+@pytest.mark.parametrize(
+    ("name", "local", "smoothing"),
+    [
+        ("along x, smoothed along x", path((1.0, 2.5), (13.0, 2.5)), (0.3, 0.0)),
+        ("along x, smoothed both ways", path((1.0, 2.5), (13.0, 2.5)), (0.3, 0.2)),
+        ("across the frame edge", path((17.0, 1.2), (23.0, 3.9)), (0.3, 0.2)),
+    ],
+)
+def test_a_smoothed_section_equals_the_smoothed_slice_along_x_and_over_the_edge(
+    name, local, smoothing
+):
+    """Smoothing along X, and a cut that leaves the frame, both read what the finished
+    slice shows (checked by hand in M15's review; #171 §7)."""
+    cube = _synthetic_cube(axis_frame())
+    columns = section_columns(cube.frame, local)
+    if name.startswith("across"):
+        assert (columns.cells < 0).any() and (columns.cells >= 0).any()
+    settings = FinishSettings("idw", 0.375, 1.0, smooth_x_m=smoothing[0], smooth_y_m=smoothing[1])
+    fill = plan_fill(cube.coverage() > 0, 0.2, "idw", 0.375, 1.0)
+    out = finish_section(cube, fill, columns, settings)
+    for k in range(cube.z.nz):
+        expected = sample(finish_slice(cube.level(k), fill, 0.2, settings), columns.taps)
+        np.testing.assert_allclose(out[k], expected, rtol=0, atol=1e-5, equal_nan=True)
+    assert np.isfinite(out[:, columns.cells >= 0]).all()
+    assert np.isnan(out[:, columns.cells < 0]).all()
 
 
 FINISHES = [

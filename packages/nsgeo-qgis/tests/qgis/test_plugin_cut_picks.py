@@ -348,6 +348,34 @@ def test_add_cut_pick_refuses_a_line_key_and_clamps_the_distance(opened):
     assert isinstance(pick, Pick) and pick.distance_m == pytest.approx(4.0)
     assert pick.time_ns == T and pick.trace == 400
     assert is_cut_key(pick.line_key)
+    # A negative distance clamps to the cut's start, and a negative column to 0 (#171 §7).
+    start = session.add_cut_pick(key, -3, -2.0, T, "{}")
+    assert start.distance_m == 0.0 and start.trace == 0
+
+
+def test_write_pick_on_a_cut_that_is_gone_refuses_with_the_reason(opened):
+    """`write_pick`'s own guard, whatever its callers check first (#171 §7)."""
+    plugin, key = opened
+    plugin.session.remove_cut(key)
+    gone = Pick(key, 3, T, 1.0, None, None, "{}", note="", created="")
+    with pytest.raises(RuntimeError, match=f"no cut with key {key!r}"):
+        plugin.layers.write_pick(gone)
+    assert _rows(plugin) == []
+
+
+def test_a_pick_with_no_section_on_screen_says_why_on_the_message_bar(opened, monkeypatch):
+    """`_add_cut_pick` raises with the reason, and `_on_pick_requested` puts it on the
+    message bar rather than losing it (#171 §7)."""
+    plugin, key = opened
+    said = []
+    monkeypatch.setattr(plugin, "message", lambda text, level=None, **kw: said.append(text))
+    monkeypatch.setattr(plugin.profile_dock, "shown_cut_section", lambda k: None)
+    plugin._on_pick_requested(key, 5, T)
+    assert said == [
+        "could not author the pick: the profile shows no section for this cut, "
+        "so there is no column"
+    ]
+    assert _rows(plugin) == []
 
 
 def test_a_cut_pick_with_no_velocity_anywhere_has_no_depth(opened):

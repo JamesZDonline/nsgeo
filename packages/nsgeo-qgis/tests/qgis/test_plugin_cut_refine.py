@@ -49,12 +49,14 @@ def _to_min_curvature(dock):
 def ran(monkeypatch):
     """Every job the cut worker runs, on a short rest and with a pause per job."""
     monkeypatch.setattr(cut_sections_module, "CUT_SOLVE_REST_MS", 20)
-    log = SimpleNamespace(levels=[], threads=[], running=0, pause=0.0)
+    log = SimpleNamespace(levels=[], threads=[], running=0, pause=0.0, gate=None)
     real = CutLevelJob.run
 
     def run(self, should_stop):
         log.running += 1
         try:
+            if log.gate is not None:
+                log.gate.wait(10)  # a test holding the solve where it is
             log.levels.append(self.level)
             log.threads.append(threading.current_thread().name)
             time.sleep(log.pause)
@@ -63,7 +65,9 @@ def ran(monkeypatch):
             log.running -= 1
 
     monkeypatch.setattr(CutLevelJob, "run", run)
-    return log
+    yield log
+    if log.gate is not None:
+        log.gate.set()  # never leave the worker waiting past the test
 
 
 @pytest.fixture
@@ -432,9 +436,35 @@ def test_a_mid_solve_title_counts_the_depths_solved(working):
         return int(pd.windowTitle().split(marker)[1].split(" ")[0]) > 0
 
     assert spin_until(counted)
-    done, total = _held(sections, key).solved
-    assert 0 < done < total == nz
-    assert f"{marker}" in pd.windowTitle() and f" of {nz} depths" in pd.windowTitle()
+    # Held where it is, so the solve cannot finish between the spin and the read below
+    # (#171 §7). At most the one job already past the gate still lands.
+    ran.gate = threading.Event()
+    try:
+        done, total = _held(sections, key).solved
+        assert 0 < done < total == nz
+        assert f"{marker}" in pd.windowTitle() and f" of {nz} depths" in pd.windowTitle()
+    finally:
+        ran.gate.set()
+
+
+def test_a_landing_solve_redraws_at_most_every_cut_redraw_ms(working):
+    """Rows land far faster than the profile is told: at most one `section_changed` per
+    `CUT_REDRAW_MS` while solving, then the one the finish sends (#171 §7)."""
+    pd, dock, session, sections, key, ran = working
+    ran.pause = 0.005
+    stamps = []
+    sections.section_changed.connect(
+        lambda k: stamps.append((time.monotonic(), _held(sections, k).standing_in))
+    )
+    started = time.monotonic()
+    assert spin_until(lambda: _done(sections, key), timeout_ms=60_000)
+    elapsed = time.monotonic() - started
+    mid = [t for t, standing_in in stamps if standing_in]
+    assert stamps[-1][1] is False  # the finish
+    assert len(ran.levels) > len(mid) + 1  # fewer redraws than rows landed
+    assert len(mid) <= elapsed / (CUT_REDRAW_MS / 1000.0) + 1
+    gaps = np.diff(mid)
+    assert (gaps >= 0.9 * CUT_REDRAW_MS / 1000.0).all(), gaps
 
 
 def test_a_redraw_during_the_solve_keeps_the_zoom_the_cursor_and_the_selection(working):

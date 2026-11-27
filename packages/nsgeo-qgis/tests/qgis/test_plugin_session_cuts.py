@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 from nsgeo.geometry.placement import GridPlacement
-from nsgeo.model import is_cut_key
+from nsgeo.model import Cut, is_cut_key
 from nsgeo.model.survey import Line
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
@@ -146,7 +144,9 @@ def test_keys_stay_lines_only(session, tmp_path):
     cut = session.add_cut("A", V)
     assert cut not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
     assert not any(is_cut_key(k) for k in session.keys())  # noqa: SIM118
-    assert dataclasses.is_dataclass(session.cut_for_key(cut))
+    got = session.cut_for_key(cut)
+    assert isinstance(got, Cut) and got.key == cut
+    assert (got.grid_id, got.vertices) == ("A", tuple(V))
 
 
 def test_open_preview_trace_and_selection_accept_cut_keys(session):

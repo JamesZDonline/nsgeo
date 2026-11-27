@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import QMessageBox
 from test_plugin_slices_dock import _ready
 
 GRID = Grid("A", (500.0, 700.0), 10.497, 6.0, 6.0, "EPSG:32616", 0.5)
+GRID_B = Grid("B", (508.0, 700.0), 0.0, 4.0, 4.0, "EPSG:32616", 0.5)  # beside A, no lines
 UTM16 = QgsCoordinateReferenceSystem("EPSG:32616")
 WGS84 = QgsCoordinateReferenceSystem("EPSG:4326")
 CUT = [(1.55, 0.5), (1.9, 3.0)]  # oblique to the lines, 0.1-0.4 m from line x = 1.5 near its start
@@ -279,6 +280,39 @@ def test_the_band_reads_its_columns_once_per_section(cutlink, monkeypatch):
     assert asked.count(c.key) >= 2
 
 
+def test_a_cut_on_a_grid_the_panel_does_not_show_previews_with_no_cursor(cutlink):
+    """The real "no source" path: the Slices panel shows grid A, the cut is on B (#171 §7)."""
+    c = cutlink
+    c.session.add_grid(GRID_B)
+    other = c.session.add_cut("B", CUT)
+    assert c.sections.source_for("B") is None
+    c.link.set_cut_mode(True)
+    local = _local_on_cut(c.session, other, 0.33)
+
+    _hover(c, _world(GRID_B, local))
+
+    assert c.session.preview_key == other
+    assert c.session.preview_trace == -1
+    assert not c.link._marker.isVisible()
+
+
+def test_a_cut_whose_engine_holds_no_cube_previews_its_column_but_no_marker(cutlink):
+    """The real "source but no cube" path: the column needs no cube, the marker's position
+    does, and a hover never builds one (#171 §7)."""
+    c = cutlink
+    c.link.set_cut_mode(True)
+    c.dock.engine.drop_cube()
+    point, column = _spot(c, 0.33)
+    assert column is not None
+
+    _hover(c, point)
+
+    assert c.session.preview_key == c.key
+    assert c.session.preview_trace == column
+    assert not c.dock.engine.has_cube
+    assert not c.link._marker.isVisible()
+
+
 def test_a_cut_with_no_section_shows_no_cursor_but_still_previews(cutlink):
     c = cutlink
     c.link.set_cut_mode(True)
@@ -325,6 +359,7 @@ def test_hovering_a_cut_while_a_line_works_never_writes_to_the_cut(cutlink):
     point, _ = _spot(c, 0.33)
     _hover(c, point)
     assert c.session.preview_key == c.key
+    rows = c.layers.feature_count("picks")
     written: list[int] = []
     c.session.picks_changed.connect(lambda: written.append(1))
 
@@ -332,6 +367,7 @@ def test_hovering_a_cut_while_a_line_works_never_writes_to_the_cut(cutlink):
         c.session.add_pick(c.key, 3, 10.0)
 
     assert written == []
+    assert c.layers.feature_count("picks") == rows  # counted, not only unannounced (#171 §7)
 
 
 def test_the_plugin_follows_the_current_layer(fake_iface, tmp_path, answer_modal):
