@@ -1518,6 +1518,35 @@ def test_cancelling_a_fill_the_stretch_asked_for_keeps_the_picture_and_says_so(
         _close(plugin, answer_modal)
 
 
+def test_cancelling_a_fill_for_a_new_depth_says_no_picture_was_drawn(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    """The note that the picture stays is only for a fill the picture on the map
+    does not need: a slider move into a grid's range asks for that grid's fill
+    to draw the new depth, which a Cancel leaves undrawn."""
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        site, flow = dock.site_engine, dock.fill_flow
+        inside, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        dock.stretch_combo.setCurrentIndex(1)  # "this slice": only the shown grids fill
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, 0.25)
+        assert spin_until(lambda: _picture_cell(dock) == 0.25, 60_000)
+        _wait_idle(dock)
+        slow_jobs(monkeypatch, site.engine_for("C"), ("fill_job",), pause=1.0)
+        dock.slice_slider.setValue(inside)
+        assert spin_until(lambda: flow.working, 10_000), "the new depth never asked for C's fill"
+        flow.cancel()
+        assert flow.latched
+        assert FILL_CANCELLED_KEPT_NOTE not in _notes(dock)
+        assert FILL_CANCELLED_NOTE in _notes(dock)
+    finally:
+        _close(plugin, answer_modal)
+
+
 def test_the_rest_builds_nothing_on_the_gui_thread_for_a_grid_above_the_depth(
     fake_iface, site3_factory, answer_modal, monkeypatch
 ):

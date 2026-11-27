@@ -1384,9 +1384,18 @@ class SiteScope:
             held = (
                 self.slice is not None
                 and at is not None
+                and at == self._slider_at()  # not a fill for a new depth
                 and self.engine.weights_cached(self.dock.site_finish.value(), at=at)
             )
             self.dock.fill_picture.cancelled(SITE_OWNER, picture_held=held)
+
+    def _slider_at(self) -> tuple[float, float] | None:
+        """`(top_ns, thickness_ns)` the panel asks for now, as a tick takes it."""
+        z = self.engine.site_z
+        if z is None:
+            return None
+        thickness, _ = levels(z, self.dock.thickness_spin.value(), self.dock.step_spin.value())
+        return z.t0_ns + self.dock.slice_slider.value() * z.dz_ns, thickness * z.dz_ns
 
     def fill_record(self) -> dict[str, Any]:
         return dict(self.session.site_resolution()) if self.session.is_open else {}

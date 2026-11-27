@@ -66,7 +66,9 @@ class FillPicture:
         for a field the record holds at another value than the one drawn: that
         is an edit not applied yet (the cell's debounce: the cell drawn is the
         frame's), so the picture keeps what it knew when it was drawn at that
-        value (#236: Cancel wrote a seeded cell back as if chosen)."""
+        value (#236: Cancel wrote a seeded cell back as if chosen). With no
+        earlier picture of this owner at that value there is nothing to keep,
+        and the record is read as before."""
         record = self._read_record()
         drawn = fill_settings(cell, finish)
         previous = (
@@ -86,11 +88,6 @@ class FillPicture:
         self._picture = None
 
     # ---- the latch ---------------------------------------------------------
-    @property
-    def noted(self) -> bool:
-        """Whether the Warnings note is to be shown."""
-        return self._note is not None
-
     @property
     def note(self) -> str | None:
         """The Warnings note to show, or None."""

@@ -4,8 +4,9 @@
 only numpy and what was captured when it was made on the GUI thread (a frozen
 `WindowSource` per grid, copies of the solved cache, the clip and the
 normalisation inputs). It touches no Qt, session or QGIS object and never a
-live engine. `land()` runs on the GUI thread afterwards; the scope stores the
-result.
+live engine. `land()` runs on the GUI thread afterwards: it marks the cached
+solves a final pass read as recently used in their engines (`GridStretch.touch`,
+called there only), and the scope stores the result.
 
 The per-window measurement is a handful of pure functions here -- `shared_windows`,
 `shown_window`, `limit_of` and `draw_window` -- that the synchronous paths

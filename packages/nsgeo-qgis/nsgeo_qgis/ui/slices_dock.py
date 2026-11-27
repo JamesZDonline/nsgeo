@@ -3432,6 +3432,8 @@ class SlicesDock(QgsDockWidget):
                 if self._scope == "site":
                     self._site.show_failure(text)
                     return
+                # Defensive: a scope switch stops the flow, so This grid
+                # never sees a footprint's failure.
                 self.show_refine()
                 self.error.emit(text)
                 return
