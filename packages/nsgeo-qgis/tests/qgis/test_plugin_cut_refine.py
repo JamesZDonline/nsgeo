@@ -218,6 +218,32 @@ def test_a_pick_while_kriging_stands_in_records_kriging(site, monkeypatch):  # n
     assert doc["finish"]["method"] == "kriging" and doc["standing_in_for"] == "min_curvature"
 
 
+def test_a_pick_mid_solve_records_what_its_own_depth_shows(site, ran):  # noqa: F811
+    """A depth already solved is minimum curvature, one still owed is kriging (#171 §3)."""
+    plugin = site
+    ran.pause = 0.05
+    _to_min_curvature(plugin.slices_dock)
+    key = plugin.session.add_cut("A", H)
+    plugin.session.open_line(key)
+    sections = plugin.cut_sections
+    assert spin_until(lambda: len(sections._cache[key].levels) >= 3)
+    entry = sections._cache[key]
+    z = entry.section.z
+    solved = min(entry.levels)
+    # The one farthest from the band's centre is solved last.
+    centre = sections._centre_level(z)
+    owed = max((k for k in range(z.nz) if k not in entry.levels), key=lambda k: abs(k - centre))
+    plugin._on_pick_requested(key, 5, z.t0_ns + solved * z.dz_ns)
+    plugin._on_pick_requested(key, 5, z.t0_ns + owed * z.dz_ns)
+    assert owed not in entry.levels and _held(sections, key).standing_in  # still mid-solve
+    rows = list(plugin.layers.layers["picks"].getFeatures())[-2:]
+    on_solved, on_owed = (json.loads(row["stack_json"]) for row in rows)
+    assert on_solved["finish"]["method"] == "min_curvature"
+    assert "standing_in_for" not in on_solved
+    assert on_owed["finish"]["method"] == "kriging"
+    assert on_owed["standing_in_for"] == "min_curvature"
+
+
 def test_the_slices_own_refine_lands_while_a_cut_is_solving(working):
     pd, dock, session, sections, key, ran = working
     ran.pause = 0.05

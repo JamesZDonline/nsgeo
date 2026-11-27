@@ -153,6 +153,14 @@ class CutSection:
     provenance_json: str
 
 
+def _solved_provenance(provenance_json: str) -> str:
+    """A kriging stand-in's provenance, relabelled as the minimum curvature it stood in for."""
+    doc = json.loads(provenance_json)
+    doc["finish"]["method"] = "min_curvature"
+    doc.pop("standing_in_for", None)
+    return json.dumps(doc)
+
+
 @dataclass
 class _Entry:
     """A cached section and what it was made from.
@@ -560,6 +568,26 @@ class CutSections(QObject):
         if section.standing_in and section.solved[0] != len(entry.levels):
             entry.section = dataclasses.replace(section, solved=(len(entry.levels), section.z.nz))
 
+    def pick_provenance(self, section: CutSection, time_ns: float) -> str:
+        """The provenance a pick at `time_ns` on `section` records (#171 §3).
+
+        The section's own, except while its solve is landing: a pick on a depth
+        whose row is already solved says minimum curvature, not the kriging
+        that still stands in for the rest. The rows are shared with the cached
+        section, so a landed row is what the pick was made on even before the
+        throttled redraw shows it.
+        """
+        if not section.standing_in:
+            return section.provenance_json
+        entry = self._cache.get(section.key)
+        if entry is None or entry.section.values is not section.values:
+            return section.provenance_json
+        z = section.z
+        level = min(max(round((time_ns - z.t0_ns) / z.dz_ns), 0), z.nz - 1)
+        if level not in entry.levels:
+            return section.provenance_json
+        return _solved_provenance(section.provenance_json)
+
     def column_at(self, key: str, distance_m: float) -> int | None:
         """The index of the column nearest `distance_m` along the cut (cut spec call 14).
 
@@ -768,15 +796,12 @@ class CutSections(QObject):
         nz = section.z.nz
         done = nz if finished else len(entry.levels)
         if finished:
-            doc = json.loads(section.provenance_json)
-            doc["finish"]["method"] = "min_curvature"
-            doc.pop("standing_in_for", None)
             section = dataclasses.replace(
                 section,
                 method="min_curvature",
                 standing_in=False,
                 solved=(nz, nz),
-                provenance_json=json.dumps(doc),
+                provenance_json=_solved_provenance(section.provenance_json),
             )
         else:
             section = dataclasses.replace(section, solved=(done, nz))

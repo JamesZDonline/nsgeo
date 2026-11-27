@@ -2721,9 +2721,13 @@ class NsgeoPlugin:
             raise RuntimeError("the profile shows no section for this cut, so there is no column")
         distances = section.columns.distance_m
         index = max(0, min(int(column), distances.size - 1))
-        self.session.add_cut_pick(
-            key, index, float(distances[index]), time_ns, section.provenance_json
+        sections = self.cut_sections
+        provenance = (
+            section.provenance_json
+            if sections is None
+            else sections.pick_provenance(section, time_ns)
         )
+        self.session.add_cut_pick(key, index, float(distances[index]), time_ns, provenance)
 
     def message(
         self, text: str, level: Any = None, title: str = "nsgeo", duration: int = 6
