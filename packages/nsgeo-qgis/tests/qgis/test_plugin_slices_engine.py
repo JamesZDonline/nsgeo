@@ -1102,6 +1102,48 @@ def test_a_velocity_edit_drops_a_resident_cube_rather_than_serving_stale_provena
     assert not engine.has_cube, "a velocity edit left a stale cube in place"
 
 
+def test_a_velocity_edit_keeps_the_values_generation(sourced):
+    """A velocity edit drops the cube for its provenance alone (Ruling Q): the values
+    a rebuild gives are the same, so `values_generation` holds through the drop and
+    the rebuild while `cube_generation` moves (#171 §1)."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(True)
+    engine.slice_at(SliceWindow(4, 14))
+    cube_gen, values_gen = engine.cube_generation, engine.values_generation
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert not engine.has_cube
+    assert engine.cube_generation != cube_gen
+    assert engine.values_generation == values_gen
+    rebuilt = engine.cube()
+    assert rebuilt.provenance.velocity == VelocityModel.constant(0.09).to_dict()
+    assert engine.values_generation == values_gen
+    engine.drop_cube()
+    assert engine.values_generation != values_gen  # an ordinary drop still moves it
+
+
+@pytest.mark.parametrize("action", ["drop_cube", "re_prepare", "resolution", "clear"])
+def test_a_change_after_a_velocity_drop_moves_the_values_generation(sourced, action):
+    """With no cube held after the velocity drop, a change that assigns no new cube
+    must still move the values generation, or the next build would pass for the old
+    values."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(True)
+    engine.slice_at(SliceWindow(4, 14))
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    values_gen = engine.values_generation
+    if action == "drop_cube":
+        engine.drop_cube()
+    elif action == "re_prepare":
+        _prepare(engine, session)
+    elif action == "resolution":
+        engine.set_resolution(Resolution(cell=0.5, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    else:
+        engine.clear()
+    assert engine.values_generation != values_gen
+
+
 def test_a_raising_on_prepared_still_reports_and_does_not_hang(sourced):
     """`_finish_preparation` runs from `finished`'s own `finally`, OUTSIDE
     its `except` -- so a raising `on_prepared` (Task 3's dock rebuilds

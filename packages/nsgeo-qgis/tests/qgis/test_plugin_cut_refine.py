@@ -21,6 +21,7 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.slices.section import curvature_margin_cells
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import cut_sections as cut_sections_module
 from nsgeo_qgis.cut_sections import (
     CUT_REDRAW_MS,
@@ -364,6 +365,46 @@ def test_a_palette_change_after_the_solve_keeps_it(working):
     assert changed.count(key) >= 1  # redrawn in the new colours
     assert len(ran.levels) == jobs  # and nothing solved again
     assert pd.windowTitle().endswith("Minimum curvature")
+
+
+@pytest.mark.parametrize("resident", [True, False])
+def test_a_grid_velocity_change_keeps_a_finished_solve(working, resident):
+    """A velocity edit moves only the depth labels and the provenance, never the rows: the
+    solved section stays and is relabelled, and nothing is solved again (#171 §1)."""
+    pd, dock, session, sections, key, ran = working
+    dock.engine.set_always_resident(resident)
+    assert spin_until(lambda: _done(sections, key))
+    jobs = len(ran.levels)
+    before = _held(sections, key)
+    changed = []
+    sections.section_changed.connect(changed.append)
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    QCoreApplication.processEvents()
+    time.sleep(0.1)
+    QCoreApplication.processEvents()
+    after = sections.section(key, build_cube=True)
+    assert after.values is before.values and not after.standing_in
+    assert after.method == "min_curvature"
+    doc = json.loads(after.provenance_json)
+    assert doc["cube"]["velocity"] == VelocityModel.constant(0.09).to_dict()
+    assert doc["finish"]["method"] == "min_curvature"
+    assert changed.count(key) >= 1  # the profile is told to redraw the new labels
+    time.sleep(0.1)
+    QCoreApplication.processEvents()
+    assert len(ran.levels) == jobs  # nothing solved again
+    assert pd.windowTitle().endswith("Minimum curvature")
+
+
+def test_a_grid_velocity_change_mid_solve_keeps_solving(working):
+    pd, dock, session, sections, key, ran = working
+    ran.pause = 0.02
+    assert spin_until(lambda: len(ran.levels) >= 3)
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    ran.pause = 0.0
+    assert spin_until(lambda: _done(sections, key))
+    assert sorted(ran.levels) == list(range(len(ran.levels)))  # no depth solved twice
+    doc = json.loads(_held(sections, key).provenance_json)
+    assert doc["cube"]["velocity"] == VelocityModel.constant(0.09).to_dict()
 
 
 def test_a_rename_mid_solve_keeps_solving_and_shows_the_new_name(working):

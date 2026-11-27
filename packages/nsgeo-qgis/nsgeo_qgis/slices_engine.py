@@ -399,6 +399,11 @@ class SliceEngine(QObject):
         #: moved nothing was to THIS grid -- its velocity -- or to another.
         self._grid_seen: Any = None
         self._cube_generation = 0
+        #: `cube_generation` less the velocity-only drops (#171 §1): see `values_generation`.
+        self._values_generation = 0
+        #: True from a velocity-only drop until the next assignment of `_cube`: a cube
+        #: built then has the dropped one's values; anything else moves them.
+        self._values_kept = False
         self._cube_held: SliceCube | None = None
         #: The interpolation weights for the current frame and settings, built
         #: on first use and kept: applying them is cheap per slice, building
@@ -601,7 +606,25 @@ class SliceEngine(QObject):
         # moves exactly when the cube held does (see `cube_generation`).
         if cube is not self._cube_held:
             self._cube_generation += 1
+        if self._values_kept:
+            # After a velocity-only drop: a build makes the same values again; any other
+            # assignment (a drop, a re-source, a resolution, `clear`, even with no cube
+            # held) means the next build may not.
+            self._values_kept = False
+            if cube is None:
+                self._values_generation += 1
+        elif cube is not self._cube_held:
+            self._values_generation += 1
         self._cube_held = cube
+
+    def _drop_cube_for_velocity(self) -> None:
+        """Ruling Q's drop: the cube goes for its frozen provenance, but its values stay
+        true, so `values_generation` holds and the next build keeps it too."""
+        if self._cube_held is None:
+            return
+        self._cube_held = None
+        self._cube_generation += 1
+        self._values_kept = True
 
     @property
     def cube_generation(self) -> int:
@@ -610,6 +633,14 @@ class SliceEngine(QObject):
         section is fingerprinted by: a rebuild with the same source, frame and
         axis is a new cube, and `id()` of one nothing holds could repeat."""
         return self._cube_generation
+
+    @property
+    def values_generation(self) -> int:
+        """`cube_generation`, except that a velocity-only edit (Ruling Q) moves it
+        neither when it drops the cube nor when the cube is next built: velocity
+        relabels depths and the provenance, never a cube's values. What a cut's rows
+        are fingerprinted by, so a velocity edit keeps its solve (#171 §1)."""
+        return self._values_generation
 
     @property
     def preparation_generation(self) -> int:
@@ -1258,7 +1289,7 @@ class SliceEngine(QObject):
                 self._report(f"could not re-prepare after the grid changed: {exc}")
             return
         if grid != self._grid_seen:
-            self._cube = None  # Ruling Q: this grid's velocity changed
+            self._drop_cube_for_velocity()  # Ruling Q: this grid's velocity changed
         self._grid_seen = grid
 
     @staticmethod

@@ -549,11 +549,13 @@ class CutSections(QObject):
     @staticmethod
     def _relabel(entry: _Entry, cut: Cut, source: CutSource, shown: tuple[Any, ...]) -> bool:
         """Bring a section's labels up to date without touching its rows: a
-        new palette, or a new name in its provenance. True when it changed."""
+        new palette, or a new name or grid velocity in its provenance (a velocity
+        moves the depth labels, never the values: #171 §1). True when it changed."""
         if entry.shown == shown:
             return False
         doc = json.loads(entry.section.provenance_json)
         doc["cut_name"] = cut.name
+        doc["cube"]["velocity"] = shown[-1]
         entry.section = dataclasses.replace(
             entry.section, source=source, provenance_json=json.dumps(doc)
         )
@@ -813,10 +815,12 @@ class CutSections(QObject):
         """(what the rows are made from, what only labels them). Cheap: it builds nothing.
 
         The rows follow cut spec §4.4's list: the source (preset, transform,
-        lines, cell: the engine and its cube), the method, max distance,
-        smoothing and scope, and the cut's path on the grid. The palette and
-        the cut's name are not on it, so a recolour or a rename leaves a
-        solved section, and a solve under way, alone.
+        lines, cell: the engine and its cube's values), the method, max distance,
+        smoothing and scope, and the cut's path on the grid. The palette, the
+        cut's name and the grid's velocity are not on it, so a recolour, a rename
+        or a velocity edit leaves a solved section, and a solve under way, alone.
+        The engine's `values_generation`, not its `cube_generation`, is why: a
+        velocity edit drops the cube only for its provenance (Ruling Q, #171 §1).
         """
         engine = source.engine
         grid = self.session.grid(cut.grid_id)
@@ -825,14 +829,21 @@ class CutSections(QObject):
             engine.choice,
             engine.frame,
             engine.z,
-            engine.cube_generation,
+            engine.values_generation,
             source.settings,
             source.scope,
             tuple(tuple(v) for v in cut.vertices),
             cut.grid_id,
             (grid.origin, grid.azimuth, grid.size_x, grid.size_y, grid.crs, grid.default_spacing),
         )
-        return rows, (source.palette, source.unipolar, cut.name)
+        return rows, (source.palette, source.unipolar, cut.name, self._velocity(cut.grid_id))
+
+    def _velocity(self, grid_id: str) -> dict[str, Any] | None:
+        """The grid's velocity as a cube's provenance records it (`SliceEngine.provenance`),
+        None when there is none to read. Last in `shown`, where `_relabel` reads it."""
+        with contextlib.suppress(KeyError, RuntimeError):
+            return self.session.grid_depth_velocity(grid_id).to_dict()
+        return None
 
     def _build(self, key: str, cut: Cut, source: CutSource) -> CutSection:
         engine = source.engine
