@@ -2,9 +2,10 @@
 
 1. Regenerate per table, never per file: rebuilding `lines` truncates and
    refills that table; the file is never deleted, so picks survive and
-   Windows file locks never bite. Nor is it renamed, moved or copied as a
-   single file: SQLite's `-wal`/`-shm`/`-journal` sidecars would not follow
-   it (#23; see `SiteSession._sqlite_journals`).
+   Windows file locks never bite. Nor does this module rename, move or copy
+   it as a single file: SQLite's `-wal`/`-shm`/`-journal` sidecars would not
+   follow it (#23; `SiteSession._resolve_package` is the one guarded rename,
+   behind `SiteSession._sqlite_journals`).
 2. All writes go through the loaded QGIS layer's data provider, never a
    second OGR handle on a package QGIS already has open.
 3. Derived tables (grids, lines, marks) are read-only in QGIS; the survey
@@ -1185,9 +1186,10 @@ class SiteLayers(QObject):
             # above -- i.e. `picks` never existed in this package at
             # all. A table WITH rows already in it goes through
             # `_rebuild_picks` instead (the branch just above), which
-            # styles its own way once the migration is safely complete
-            # -- see that method's own comment for why a migrated
-            # package is styled too rather than left as-is.
+            # keeps the table's own saved style through the migration and
+            # styles it only when it had none -- see that method's own
+            # comment for why a migrated package is styled too rather
+            # than left as-is.
             self._style_new_picks_table(path)
 
     def _recover_picks_backup(self, path: str) -> bool:
@@ -1294,7 +1296,8 @@ class SiteLayers(QObject):
 
         Sequence: migrate every row into a fresh, differently-named table
         and confirm the row count matches exactly (the original `picks`
-        is untouched throughout this part); only then rename the
+        is untouched throughout this part, beyond first saving the loaded
+        layer's own buffered edits into it -- see below); only then rename the
         original out of the way, rename the migrated table into its
         place, and drop the renamed-out original. If the rename-in step
         itself fails, the original is renamed back before re-raising, so
@@ -1373,7 +1376,8 @@ class SiteLayers(QObject):
         # instead of being hidden here.
         self._drop_table_if_exists(conn, _PICKS_BACKUP)
         # The dropped table's style rows stay behind under its name (#37);
-        # cleared too, so they are not carried onto "picks" below.
+        # cleared too, unless "picks" has no style of its own for them to
+        # be carried over beside -- see `_clear_backup_style_rows`.
         self._clear_backup_style_rows(conn)
         conn.renameVectorTable("", "picks", _PICKS_BACKUP)
         try:
@@ -1401,14 +1405,25 @@ class SiteLayers(QObject):
 
     @staticmethod
     def _clear_backup_style_rows(conn: Any) -> None:
-        """Best-effort: delete any `layer_styles` row still under
-        `_PICKS_BACKUP`'s name -- the orphan each rebuild before #37's fix
-        left behind -- before the old "picks" is renamed onto that name.
-        Cosmetic, so a failure is logged and the rebuild goes on; the
-        worst left is an orphan row, as before."""
+        """Best-effort: delete the `layer_styles` rows still under
+        `_PICKS_BACKUP`'s name, before the old "picks" is renamed onto that
+        name, so the carry after the swap moves only that table's own.
+
+        Only while "picks" has a default style of its own. Rows under the
+        backup's name are either the orphan each rebuild before #37's fix
+        left behind (and every such rebuild also styled "picks", so they
+        go), or a style stranded by a rebuild killed between its rename-in
+        and its carry -- possibly the user's own, and "picks" then has
+        none, so they are kept and carried back. Cosmetic, so a failure is
+        logged and the rebuild goes on.
+        """
         try:
             if _has_style_table(conn):
-                conn.executeSql(f"DELETE FROM layer_styles WHERE f_table_name = '{_PICKS_BACKUP}'")
+                conn.executeSql(
+                    f"DELETE FROM layer_styles WHERE f_table_name = '{_PICKS_BACKUP}' "
+                    "AND EXISTS (SELECT 1 FROM layer_styles "
+                    "WHERE f_table_name = 'picks' AND useAsDefault)"
+                )
         except Exception as exc:  # noqa: BLE001 -- see the docstring
             _log(f"could not clear an old picks backup's saved style: {exc}")
 
@@ -1435,12 +1450,18 @@ class SiteLayers(QObject):
                 f"UPDATE layer_styles SET f_table_name = 'picks' "
                 f"WHERE f_table_name = '{_PICKS_BACKUP}'"
             )
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            _log(f"could not keep the picks layer's saved style through its rebuild: {exc}")
+            return False
+        try:
             rows = conn.executeSql(
                 "SELECT COUNT(*) FROM layer_styles WHERE f_table_name = 'picks' AND useAsDefault"
             )
         except Exception as exc:  # noqa: BLE001 -- see the docstring
-            _log(f"could not keep the picks layer's saved style through its rebuild: {exc}")
-            return False
+            # The rows did move; styling now could overwrite a carried
+            # "default" with nsgeo's, so leave the table as carried.
+            _log(f"could not check the picks layer's carried style: {exc}")
+            return True
         return bool(rows and rows[0] and rows[0][0])
 
     def _save_picks_edits_before_rebuild(self) -> None:
@@ -1457,10 +1478,12 @@ class SiteLayers(QObject):
         one is gone.
 
         Unlike a site close, a rebuild can be refused, so a commit that
-        fails raises instead of going on without the edits: `picks` is
-        left untouched in its old CRS, the edits stay in the buffer, and
-        `ensure_tables` reports it at Critical and tries again on the
-        next refresh. Nothing is lost either way.
+        fails raises instead of going on without the edits: `picks` is not
+        rebuilt and stays in its old CRS, whatever part of the commit did
+        not land stays in the buffer (a commit applies its stages in turn,
+        so an earlier stage may already be on disk), and `ensure_tables`
+        reports it at Critical; the rebuild is tried again on the next
+        refresh. Nothing is discarded either way.
 
         The layer's own signals are unbound first, as `detach()` does:
         the commit would otherwise reach `_on_picks_committed`, whose
@@ -1478,8 +1501,9 @@ class SiteLayers(QObject):
             errors = "; ".join(layer.commitErrors()) or "no reason given"
             raise RuntimeError(
                 f"could not save {pending} unsaved edit(s) to 'picks' before rebuilding "
-                f"it, so it was not rebuilt; the edits are still unsaved in the layer: "
-                f"{errors}"
+                f"it, so it was not rebuilt; what did not save is still in the layer's "
+                f"edit buffer. Save or roll back the picks layer's edits, then reopen "
+                f"the site: {errors}"
             )
         _log(
             f"saved {pending} unsaved edit(s) to 'picks' before rebuilding it for the "
@@ -1736,7 +1760,9 @@ class SiteLayers(QObject):
         (a buffered commit made during teardown re-entrantly emitting
         `picks_changed` for a site the session has already forgotten).
 
-        Also called from `_bind_picks_signals` itself, to release
+        Also called from `_save_picks_edits_before_rebuild`, before it
+        commits the buffer ahead of a rebuild, for the reason given there,
+        and from `_bind_picks_signals` itself, to release
         whatever was bound before attaching to the (possibly different)
         layer object now in `self.layers`. One signal at a time, each
         guarded by its own `sip.isdeleted` check and
@@ -1858,9 +1884,10 @@ class SiteLayers(QObject):
         see `_style_picks` for the style itself and why it has to be
         saved into the GeoPackage rather than merely set on an in-memory
         layer object, and see this method's two call sites (`_ensure_table`
-        for a brand new table, `_rebuild_picks` for a migrated one) for
-        why both cases reach here but an ordinary reopen of an
-        already-current table never does.
+        for a brand new table, `_rebuild_picks` for a migrated one that
+        carried no default style of its own across, #37) for why both
+        cases reach here but an ordinary reopen of an already-current
+        table never does.
 
         Opened here only long enough to set and save the style, then
         closed (`del`) before `ensure_tables()`'s own loop opens the real

@@ -350,7 +350,9 @@ def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
     renames it into place. A migrated (pre-M8-schema) package has no
     DURABLE style to preserve -- nothing before this fix ever called
     `saveStyleToDatabase` for `picks`, so every open until now showed
-    QGIS's own fresh-random default regardless of what came before.
+    QGIS's own fresh-random default regardless of what came before. The
+    style `new_site` just saved is deleted below to match, so this runs
+    the fallback rather than the carry of a saved style (#37).
     Styled the same as a brand new table, rather than left permanently
     unstyled: this migration runs once, exactly when the schema changes,
     so a package old enough to still need it is exactly the package that
@@ -368,6 +370,7 @@ def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
     package = session.gpkg_path
     layers.detach()
     project.clear()
+    _package_sql(package, "DELETE FROM layer_styles")  # a pre-M8 package had none
 
     old_spec = [
         (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
@@ -473,6 +476,30 @@ def test_an_orphan_style_row_from_an_earlier_rebuild_is_not_carried_onto_picks(p
     assert _style_rows(path) == [_PICKS_BACKUP]  # the orphan, as #37 measured it
     layers.ensure_tables()  # a fresh, unstyled-by-the-user picks table
     _save_default_style(layers.layers["picks"], "#00ff00")
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"
+    assert _style_rows(path) == ["picks"]
+    fresh = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+    assert fresh.renderer().symbol().color().name() == "#00ff00"
+
+
+def test_a_style_stranded_under_the_backup_name_comes_back_to_picks(populated):
+    # A rebuild killed between its rename-in and its style carry leaves the
+    # user's style under the backup's name and `picks` with none. With no
+    # style of its own to keep, `picks` gets the stranded one back rather
+    # than nsgeo's.
+    session, layers, _ = populated
+    path = str(session.gpkg_path)
+    _save_default_style(layers.layers["picks"], "#00ff00")
+    conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+    layers._drop_loaded_layer("picks")
+    conn.renameVectorTable("", "picks", _PICKS_BACKUP)
+    conn.dropVectorTable("", _PICKS_BACKUP)
+    assert _style_rows(path) == [_PICKS_BACKUP]  # stranded
+    layers.ensure_tables()  # `picks` again, as `_recover_picks_backup` would leave it
+    _package_sql(path, "DELETE FROM layer_styles WHERE f_table_name = 'picks'")
 
     session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
 
@@ -1603,6 +1630,7 @@ def test_a_rebuild_whose_buffered_edits_cannot_be_saved_leaves_picks_alone(popul
     monkeypatch.undo()
 
     assert layers.layers["picks"] is picks  # not dropped
+    assert layers._bound_picks is picks  # and rebound after the refused rebuild
     assert picks.isModified()
     assert [f["note"] for f in picks.getFeatures()] == ["cannot be saved yet"]
     on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
@@ -1625,7 +1653,9 @@ def test_dropping_a_layer_with_buffered_edits_says_so_at_critical(populated):
         disconnect()
 
     critical = int(Qgis.MessageLevel.Critical)
-    assert any("picks" in msg and "1" in msg and level == critical for msg, level in seen), seen
+    assert any(
+        "'picks'" in msg and "1 unsaved edit" in msg and level == critical for msg, level in seen
+    ), seen
 
 
 # --- M8 acceptance walkthrough, Finding A: the author's own words --
