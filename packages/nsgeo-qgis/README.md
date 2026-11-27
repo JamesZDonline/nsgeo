@@ -135,7 +135,12 @@ The zip holds one folder, `nsgeo_qgis/`, with the core vendored at
 shows as `build <12 hex>`; a development checkout shows `development checkout`
 instead. The zip is built from tracked files only. The build refuses a dirty
 tree unless given `--allow-dirty`, and refuses any file type outside its
-allowlist.
+allowlist. A build with uncommitted changes records `<sha>+dirty`, which About
+shows as `build <12 hex>+dirty`, and `--tag` refuses `--allow-dirty`.
+
+Releases are built on Linux CI. The build copies files from the working tree as
+they are, so a hand build on Windows with git's `core.autocrlf` on can ship
+files with CRLF line endings, which a CI build would not.
 
 To check a zip in real QGIS, install it into a fresh profile and start QGIS under
 xvfb with the smoke probe:

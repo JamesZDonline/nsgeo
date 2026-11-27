@@ -87,3 +87,11 @@ def test_actions_are_on_node24_majors():
     assert uses
     old = [f"{a}@v{v}" for a, v in uses if int(v) < NODE24_MAJOR.get(a, 0)]
     assert not old, f"still on Node 20: {old}"
+
+
+def test_actionlint_is_pinned_by_digest():
+    # It runs as a docker image over the repo, so pin the exact image (#53).
+    # GitHub's own actions stay on major tags, QGIS images float within a minor.
+    ref = re.search(r"uses: docker://rhysd/actionlint(\S*)", CI.read_text(encoding="utf-8"))
+    assert ref, "actionlint step not found"
+    assert re.fullmatch(r"@sha256:[0-9a-f]{64}", ref.group(1)), ref.group(1)
