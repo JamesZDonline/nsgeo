@@ -1217,21 +1217,27 @@ class SiteScope:
             dock.show_refine()
             dock.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slots and timers
-            # No preview stands, so no refine is owed (plan call 5).
-            self.refine.stop()
-            self.dock.fill_flow.stop()
-            self._clear_shown()
-            dock.status_label.setText(self.engine.status_text())
-            dock.show_refine()
-            self.slice = None
-            self.window = None
-            self.drawn_at = None
-            dock.readout.setText(f"error: {exc}")
-            dock.site_depths_label.setText("")
-            dock.legend_label.setText("")
-            dock.slice_changed.emit()
-            dock.window_cleared.emit()
-            dock.error.emit(str(exc))
+            self.show_failure(str(exc))
+
+    def show_failure(self, text: str) -> None:
+        """The tick failed (or the footprints it waited for did, #236): nothing
+        on the map, the error on the readout and in the message bar."""
+        dock = self.dock
+        # No preview stands, so no refine is owed (plan call 5).
+        self.refine.stop()
+        dock.fill_flow.stop()
+        self._clear_shown()
+        dock.status_label.setText(self.engine.status_text())
+        dock.show_refine()
+        self.slice = None
+        self.window = None
+        self.drawn_at = None
+        dock.readout.setText(f"error: {text}")
+        dock.site_depths_label.setText("")
+        dock.legend_label.setText("")
+        dock.slice_changed.emit()
+        dock.window_cleared.emit()
+        dock.error.emit(text)
 
     # ---- #193: the fills and the stretch, worked out in the background --------
     def _fills_ready(

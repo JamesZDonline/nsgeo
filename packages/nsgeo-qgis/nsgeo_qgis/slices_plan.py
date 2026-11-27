@@ -105,6 +105,9 @@ FILL_THREAD_NAME_PREFIX = "nsgeo-fill"
 FILL_WORKING_INDICATOR = "Working out the fill at {cell:g} m: {percent}%"
 FILL_WORKING_GRIDS_INDICATOR = "Working out the fill at {cell:g} m: grid {n} of {total}"
 STRETCH_WORKING_INDICATOR = "Working out the colour stretch…"
+#: The working line while only the site's footprints are gathered (a coverage
+#: draw at a new cell: no fill is worked out), #236.
+FOOTPRINT_WORKING_INDICATOR = "Placing the grids on the map at {cell:g} m: grid {n} of {total}"
 FILL_CANCEL_LINK = "Cancel"
 FILL_CANCELLED_NOTE = (
     "The picture was not drawn: its fill was cancelled. "

@@ -47,6 +47,7 @@ from nsgeo_qgis.slices_plan import (
     FILL_POLL_MS,
     FILL_WORKING_GRIDS_INDICATOR,
     FILL_WORKING_INDICATOR,
+    FOOTPRINT_WORKING_INDICATOR,
     STRETCH_WORKING_INDICATOR,
 )
 from nsgeo_qgis.stretch_jobs import StretchJob
@@ -121,11 +122,13 @@ class FillFlow(QObject):
         if self._working:
             if grids:
                 # Footprint jobs follow the fills and are not counted: the line
-                # stays on the last grid while they run. Footprints alone count
-                # themselves.
-                total = self._fill_count or self._total
-                n = min(self._landed + 1, total)
-                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=total)
+                # stays on the last grid while they run. Footprints alone (a
+                # coverage draw) count themselves, in their own words (#236).
+                if not self._fill_count:
+                    n = min(self._landed + 1, self._total)
+                    return FOOTPRINT_WORKING_INDICATOR.format(cell=cell_m, n=n, total=self._total)
+                n = min(self._landed + 1, self._fill_count)
+                return FILL_WORKING_GRIDS_INDICATOR.format(cell=cell_m, n=n, total=self._fill_count)
             fraction = 0.0
             if self._landed < len(self._fills):
                 fraction = self._fills[self._landed].fraction
@@ -288,7 +291,12 @@ class FillFlow(QObject):
 
     def _failed_with(self, message: str) -> None:
         try:
-            what = "fill" if self._working else "colour stretch"
+            what = "colour stretch"
+            if self._working:
+                # The list runs in order, so the job that failed is the first
+                # not landed: a footprint is named as one (#236).
+                failed = self._fills[self._landed] if self._landed < len(self._fills) else None
+                what = "footprints" if isinstance(failed, FootprintJob) else "fill"
             self._clear()
             self._failed = True
             if self._on_error is not None:

@@ -20,12 +20,13 @@ import time
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
-from nsgeo_qgis.fill_jobs import FillJob
+from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 from nsgeo_qgis.slices_plan import (
     FILL_BUDGET_S,
     FILL_CANCELLED_NOTE,
     FILL_WORKING_GRIDS_INDICATOR,
     FILL_WORKING_INDICATOR,
+    FOOTPRINT_WORKING_INDICATOR,
     STRETCH_WORKING_INDICATOR,
     Resolution,
     SliceFinish,
@@ -674,6 +675,25 @@ class FakeFill(FillJob):
         return not self.refuse
 
 
+class FakeFootprint(FootprintJob):
+    """A footprint job that only sleeps, or fails with `error`."""
+
+    def __init__(self, pause: float = 0.0, *, error: Exception | None = None) -> None:
+        self.pause = pause
+        self.error = error
+        self.fraction = 0.0
+        self.footprint = None
+
+    def run(self, should_stop) -> None:
+        time.sleep(self.pause)
+        if self.error is not None:
+            raise self.error
+        self.fraction = 1.0
+
+    def land(self) -> bool:
+        return True
+
+
 class FakeStretch(StretchJob):
     def __init__(self, limit: float | None, final: bool = True, pause: float = 0.0) -> None:
         self.limit = limit
@@ -817,6 +837,25 @@ def test_progress_reads_the_running_job_or_the_grids_landed(flow_probe):
     )
     assert spin_until(lambda: not flow.working, 10_000)
     assert flow.progress_text(0.05, grids=False) == ""
+
+
+def test_footprints_alone_are_worded_as_placing_the_grids(flow_probe):
+    """#236: a coverage draw's footprint request read "Working out the fill"."""
+    flow, _, _ = flow_probe
+    flow.request("k", [FakeFootprint(0.6), FakeFootprint(0.0)], stretch_key="s")
+    assert flow.progress_text(0.05, grids=True) == FOOTPRINT_WORKING_INDICATOR.format(
+        cell=0.05, n=1, total=2
+    )
+    assert spin_until(lambda: not flow.working, 10_000)
+
+
+def test_a_failed_footprint_is_named_as_the_footprints(flow_probe):
+    """#236: a failed footprint gather was reported as a failed fill."""
+    flow, _, log = flow_probe
+    failing = FakeFootprint(error=ValueError("no transform"))
+    assert flow.request("k", [FakeFill(), failing], stretch_key="s") is False
+    assert spin_until(lambda: not flow.working, 10_000)
+    assert ("error", "footprints", "ValueError: no transform") in log
 
 
 def test_stop_never_touches_the_latch(flow_probe):
@@ -1601,6 +1640,32 @@ def test_a_footprint_for_a_stale_lattice_never_lands(site_quick, monkeypatch):
     assert _applied_cell(dock) == 0.25
     site = dock.site_engine
     assert set(site._gathers) == set(site.ready_grids)
+
+
+def test_a_failed_footprint_shows_the_error_and_no_stale_picture(site_quick, monkeypatch):
+    """#236: a footprint that failed on the worker read "could not work out the
+    fill", kept the picture of the old lattice and set no error readout. It is
+    shown as a failed draw is: the error on the readout, nothing on the map."""
+    from nsgeo_qgis import site_geometry
+
+    _, dock = site_quick
+    real = site_geometry.gather_footprint
+
+    def failing(*args, **kwargs):
+        if threading.current_thread() is not threading.main_thread():
+            raise ValueError("no transform")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site_geometry, "gather_footprint", failing)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    _site_cell(dock, 0.15)
+    assert spin_until(lambda: bool(errors), 60_000), "the failure was never reported"
+    _wait_idle(dock)
+    assert errors == ["could not place the grids on the map: ValueError: no transform"]
+    assert dock.readout.text() == f"error: {errors[0]}"
+    assert dock.current_site_slice() is None, "the old lattice's picture stayed"
+    assert not dock.cancel_link.isVisibleTo(dock)
 
 
 def test_this_grids_first_north_up_plan_is_built_on_the_worker(

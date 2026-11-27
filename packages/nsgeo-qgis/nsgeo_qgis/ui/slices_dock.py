@@ -3425,6 +3425,17 @@ class SlicesDock(QgsDockWidget):
 
     def _on_fill_error(self, what: str, message: str) -> None:
         try:
+            if what == "footprints":
+                # Only the site gathers footprints, for a new lattice: the
+                # picture on the map is the old lattice's, so the failure is
+                # shown as a failed draw is (#236).
+                text = f"could not place the grids on the map: {message}"
+                if self._scope == "site":
+                    self._site.show_failure(text)
+                    return
+                self.show_refine()
+                self.error.emit(text)
+                return
             self.show_refine()
             self.error.emit(f"could not work out the {what}: {message}")
         except Exception:  # noqa: BLE001 -- from the worker's poll timer
