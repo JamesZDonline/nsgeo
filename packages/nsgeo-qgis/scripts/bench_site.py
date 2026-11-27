@@ -91,7 +91,7 @@ def write_site(
     At `azimuth` the whole block of grids is turned about the first one's
     origin, so the grids still meet edge to edge along their own axes.
     """
-    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry import Grid
     from tests.synthetic import write_dzt
 
     rng = np.random.default_rng(0)
@@ -138,8 +138,8 @@ def bench(
     azimuth: float = 0.0,
     scale: float | None = None,
 ) -> dict:
-    from nsgeo.geometry.placement import GridPlacement
-    from nsgeo.model.survey import Line
+    from nsgeo.geometry import GridPlacement
+    from nsgeo.model import Line
     from nsgeo.render import PercentileClip
     from nsgeo.slices import SliceWindow
     from nsgeo_qgis.session import SiteSession

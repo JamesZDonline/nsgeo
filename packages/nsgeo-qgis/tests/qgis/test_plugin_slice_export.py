@@ -1406,10 +1406,12 @@ def test_each_band_records_its_window_so_a_layer_can_be_timed_again(exportable, 
     path = tmp_path / "t.tif"
     GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
     ds = gdal.Open(str(path))
-    for i, band in enumerate(plan.bands):
-        lo, hi = window_times_ns(plan.z, band.window)
-        assert ds.GetRasterBand(i + 1).GetMetadata()["NSGEO_WINDOW_NS"] == f"{lo},{hi}"
-    ds = None
+    try:
+        for i, band in enumerate(plan.bands):
+            lo, hi = window_times_ns(plan.z, band.window)
+            assert ds.GetRasterBand(i + 1).GetMetadata()["NSGEO_WINDOW_NS"] == f"{lo},{hi}"
+    finally:
+        ds.Close()
     layer = QgsRasterLayer(str(path), "t", "gdal")
     assert restore_band_times(layer, path) == "set"
     props = layer.temporalProperties()
@@ -1426,7 +1428,7 @@ def test_a_file_without_band_windows_cannot_be_timed_again(tmp_path):
     path = tmp_path / "old.tif"
     ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 2, gdal.GDT_Float32)
     ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
-    ds = None
+    ds.Close()
     layer = QgsRasterLayer(str(path), "old", "gdal")
     assert restore_band_times(layer, path) == "missing"
     assert not layer.temporalProperties().isActive()
@@ -1452,7 +1454,7 @@ def test_a_companion_from_before_the_counts_tag_is_still_counts(tmp_path):
     ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
     ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
     ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
-    ds = None
+    ds.Close()
     layer = QgsRasterLayer(str(path), "old_coverage", "gdal")
     assert restore_band_times(layer, path) == "counts"
 
@@ -1474,7 +1476,7 @@ def test_a_values_file_not_named_as_a_companion_is_not_counts(tmp_path):
     ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
     ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
     ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
-    ds = None
+    ds.Close()
     layer = QgsRasterLayer(str(path), "plain", "gdal")
     assert restore_band_times(layer, path) == "missing"
 

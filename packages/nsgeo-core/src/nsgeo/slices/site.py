@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from nsgeo.slices.display import SliceWindow
+from nsgeo.slices.display import SliceWindow, snap_eps
 from nsgeo.slices.frame import CubeFrame, ZAxis
 from nsgeo.slices.resample import Taps, max_pool_counts, sample, sample_counts
 
@@ -32,16 +32,6 @@ SEAM_WIDTH_SPACINGS = 1.5
 MIN_SEAM_CELLS = 20
 
 _SNAP = 1e-6  # levels: window and axis snapping
-
-
-def _snap_eps(coords: Iterable[float], pixel: float) -> float:
-    """Scale-aware snapping tolerance, in pixels, for a coordinate ratio.
-
-    The same `64 * eps * max(1, |coord|) / pixel` margin `to_north_up` uses:
-    a fixed epsilon on the ratio is too small at UTM magnitudes.
-    """
-    magnitude = max(1.0, *(abs(c) for c in coords))
-    return 64.0 * float(np.finfo(float).eps) * magnitude / pixel
 
 
 @dataclass(frozen=True)
@@ -98,7 +88,7 @@ class SiteLattice:
         ymin = min(e[1] for e in extents)
         xmax = max(e[2] for e in extents)
         ymax = max(e[3] for e in extents)
-        eps = _snap_eps((xmin, ymin, xmax, ymax), pixel)
+        eps = snap_eps((xmin, ymin, xmax, ymax), pixel)
         ix0 = math.floor(xmin / pixel + eps)
         ix1 = math.ceil(xmax / pixel - eps)
         iy0 = math.floor(ymin / pixel + eps)
@@ -460,7 +450,8 @@ def background_level(
     if magnitude.size == 0:
         return None
     keep = max(1, math.ceil(BACKGROUND_FRACTION * magnitude.size - 1e-9))
-    level = float(np.sort(magnitude)[:keep].mean())
+    # The weakest `keep`, in no order: a partition, not a full sort (#75).
+    level = float(np.partition(magnitude, keep - 1)[:keep].mean())
     return level if level > 0.0 else None
 
 
@@ -493,9 +484,12 @@ def edge_match_solve(
     `x_a + ln S_ab = x_b + ln S_ba` in log gains. Every connected group is
     solved at once (minimum-norm, since a group has one free constant) and
     then anchored so its corrected backgrounds match the site's in the
-    geometric mean. A group with no known level keeps its minimum-norm
-    solution, so a lone grid with level None has gain 1. A final shift makes
-    the geometric mean of all gains 1.
+    geometric mean. A group with no known level is not anchored: it keeps
+    its minimum-norm solution, so a lone grid with level None is at 1 until
+    the last step. That step, a final shift making the geometric mean of all
+    gains 1, moves every grid alike, so such a grid generally ends away from
+    1: when a grid with level None shares a group with known levels, that
+    group's anchor shift no longer cancels out across the site (#75).
     """
     ids = sorted(levels)
     ln_level = {g: math.log(level) for g in ids if (level := levels[g])}

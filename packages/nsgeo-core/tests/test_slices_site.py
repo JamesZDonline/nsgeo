@@ -296,6 +296,17 @@ def test_compose_footprints_refuses_a_window_off_the_lattice():
         Footprint(0, 1, 0, 1, taps)
 
 
+def test_compose_footprints_refuses_values_that_do_not_match_their_taps():
+    # #75: a layer paired with another frame's values raises; it never reads a wrong cell.
+    lat = SiteLattice(0.0, 2.0, 1.0, 2, 2, CRS)
+    frame = CubeFrame((0.0, 0.0), 0.0, 1.0, 2, 2, CRS)
+    where = footprint(bilinear_taps(frame, lat.pixel_centres()), 2, 2)
+    assert compose_footprints(lat, [(where, np.ones((2, 2)))]).shape == (2, 2)
+    for wrong in (np.ones((1, 4)), np.ones((3, 3)), np.ones(4)):
+        with pytest.raises(ValueError, match="expected values of shape"):
+            compose_footprints(lat, [(where, wrong)])
+
+
 # --- the window mapping --------------------------------------------------------
 
 
@@ -374,11 +385,6 @@ def test_find_seams_needs_min_cells_on_both_sides():
     frames = {"A": _frame(0.0, 0.0), "B": _frame(5.0, 0.0)}
     spacings = {"A": 0.5, "B": 0.5}  # width 0.75: three columns each side
 
-    def coverage(n_strip):
-        c = np.zeros((20, 20), dtype=int)
-        c[:, 10:] = 1  # plenty away from the seam
-        return c, n_strip
-
     full = np.ones((20, 20), dtype=int)
     cb = np.zeros((20, 20), dtype=int)
     cb.ravel()[[r * 20 + c for r in range(10) for c in range(2)][:19]] = 1  # 19 in B's strip
@@ -414,6 +420,20 @@ def test_background_level_ignores_unpopulated_cells_and_is_none_when_empty():
     assert background_level(v, c, mask) == pytest.approx(1.5)  # {1, 2}: keeps ceil(1.5) = 2
     assert background_level(v, np.zeros_like(c)) is None
     assert background_level(np.zeros((2, 2)), np.ones((2, 2), dtype=int)) is None
+
+
+def test_background_level_agrees_with_a_full_sort():
+    # #75: it partitions instead of sorting. The kept set is the same; only the order
+    # it is summed in differs, a few ulps at most.
+    rng = np.random.default_rng(75)
+    for n in (1, 2, 3, 4, 7, 100, 4001):
+        v = rng.normal(size=n) * rng.uniform(1e-3, 1e3)
+        c = np.ones(n, dtype=int)
+        keep = max(1, math.ceil(0.75 * n - 1e-9))
+        want = float(np.sort(np.abs(v))[:keep].mean())
+        assert background_level(v, c) == pytest.approx(want, rel=1e-12, abs=0.0)
+    ties = np.array([3.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 3.0])
+    assert background_level(ties, np.ones(8, dtype=int)) == pytest.approx(8.0 / 6.0, rel=1e-12)
 
 
 def test_background_level_measures_magnitude_on_signed_data():
@@ -573,6 +593,64 @@ def test_edge_normalise_drops_a_seam_whose_strip_has_no_level():
     out = normalise("edge", zero, seams)  # A has no level; seam dropped; B alone
     assert out["A"] == (1.0, 0.0)
     assert out["B"][0] == pytest.approx(1.0)
+
+
+def _loop_residuals(gains, terms):
+    """|x_a + ln S_ab - x_b - ln S_ba| per seam term, keyed by `(a, b)`."""
+    x = {g: math.log(v) for g, v in gains.items()}
+    return {
+        (a, b): abs(x[a] + math.log(s_ab) - x[b] - math.log(s_ba)) for a, b, s_ab, s_ba, _ in terms
+    }
+
+
+def test_a_heavy_seam_keeps_its_weight_share_of_a_loop_closure_error():
+    # #75: a triangle whose seam ratios multiply to 1.1 round the loop. Least squares
+    # weighted by w leaves seam i the share (1/w_i) / sum(1/w) of the closure error, so
+    # the heavy seam keeps 1/201 of it. Unweighted (no sqrt(weight)) gives each a third;
+    # weighted by w squared (weight, not its square root) gives the heavy one 1/20001.
+    closure = math.log(1.1)
+    terms = [("A", "B", 1.1, 1.0, 100.0), ("B", "C", 1.0, 1.0, 1.0), ("A", "C", 1.0, 1.0, 1.0)]
+    r = _loop_residuals(edge_match_solve(dict.fromkeys("ABC", 1.0), terms), terms)
+    share = 1.0 / (1.0 / 100.0 + 2.0)
+    assert r["A", "B"] == pytest.approx(closure * share / 100.0, rel=1e-9)
+    assert r["B", "C"] == pytest.approx(closure * share, rel=1e-9)
+    assert r["A", "C"] == pytest.approx(closure * share, rel=1e-9)
+
+
+def test_edge_normalise_weights_a_seam_by_its_smaller_strip():
+    # #75: the same loop through `normalise`. Seam A-B has 200 strip cells on A's side
+    # but 2 on B's, so its weight is min = 2 and it keeps most of the closure error:
+    # (1/2) / (1/2 + 1/20 + 1/20) = 5/6. Weighted by max (200) it would keep 1/21.
+    def rows(*spans):
+        mask = np.zeros((20, 20), dtype=bool)
+        for r0, r1, c0, c1 in spans:
+            mask[r0:r1, c0:c1] = True
+        return mask
+
+    ones = np.ones((20, 20), dtype=int)
+    a_values = np.ones((20, 20))
+    a_values[0:10] = 1.1  # A's side of A-B reads 1.1, every other strip 1.0
+    slices = {"A": (a_values, ones), "B": (np.ones((20, 20)), ones), "C": (np.ones((20, 20)), ones)}
+    seams = [
+        Seam("A", "B", rows((0, 10, 0, 20)), rows((0, 1, 0, 2))),  # 200 and 2 cells
+        Seam("B", "C", rows((10, 11, 0, 20)), rows((0, 1, 0, 20))),  # 20 and 20
+        Seam("A", "C", rows((15, 16, 0, 20)), rows((10, 11, 0, 20))),  # 20 and 20
+    ]
+    gains = {g: a for g, (a, _) in normalise("edge", slices, seams).items()}
+    terms = [("A", "B", 1.1, 1.0, 0.0), ("B", "C", 1.0, 1.0, 0.0), ("A", "C", 1.0, 1.0, 0.0)]
+    r = _loop_residuals(gains, terms)
+    assert r["A", "B"] == pytest.approx(math.log(1.1) * 5.0 / 6.0, rel=1e-9)
+    assert r["B", "C"] == pytest.approx(math.log(1.1) / 12.0, rel=1e-9)
+
+
+def test_a_grid_with_no_level_is_moved_by_the_final_shift():
+    # #75: gain 1 is not promised. D has no level and no seam, but B (no level) shares a
+    # group with A (level 1), so the group is anchored up by ln 2 and the final shift,
+    # which makes the geometric mean of every gain 1, moves D down by ln 2 / 4.
+    g = edge_match_solve({"A": 1.0, "B": None, "C": 4.0, "D": None}, [("A", "B", 1.0, 1.0, 5.0)])
+    assert g["D"] == pytest.approx(2.0**-0.25)
+    assert g["A"] == pytest.approx(2.0**0.75) and g["B"] == pytest.approx(2.0**0.75)
+    assert math.prod(g.values()) == pytest.approx(1.0)
 
 
 def test_normalise_refuses_an_unknown_method():
