@@ -5,7 +5,8 @@ Usage: python packages/nsgeo-qgis/scripts/build_zip.py
 
 The zip is built from `git ls-files` only, so an untracked survey file can
 never ship, and from nothing outside the allowlist. Two builds of one commit
-are byte-identical.
+are byte-identical. A build with uncommitted changes (--allow-dirty) records
+`commit=<sha>+dirty`, and a tagged release build may not be dirty.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ EXTRA_FILES = {
     "packages/nsgeo-qgis/LICENSE": f"{ARC_ROOT}/LICENSE",
     "packages/nsgeo-core/LICENSE": f"{ARC_VENDOR}/nsgeo/LICENSE",
 }
+ARC_METADATA = f"{ARC_ROOT}/metadata.txt"
+ALLOWED_NAMES = {"LICENSE"}
 ALLOWED_SUFFIXES = {".py", ".txt", ".md"}
 HELP_SUFFIXES = {".html", ".css", ".png"}
 
@@ -52,10 +55,22 @@ def _git(repo: Path, *args: str) -> str:
 
 def read_versions(repo: Path) -> tuple[str, str]:
     """(plugin_version, core_version), the core's parsed with ast, never imported."""
+    metadata = f"{QGIS_SRC}/metadata.txt"
     cfg = configparser.ConfigParser()
-    cfg.read(repo / QGIS_SRC / "metadata.txt", encoding="utf-8")
-    plugin = cfg["general"]["version"]
-    tree = ast.parse((repo / CORE_SRC / "__init__.py").read_text(encoding="utf-8"))
+    try:
+        if not cfg.read(repo / metadata, encoding="utf-8"):
+            raise BuildError(f"{metadata} is missing")
+        plugin = cfg["general"]["version"].strip()
+    except (configparser.Error, UnicodeDecodeError) as exc:
+        raise BuildError(f"{metadata} is malformed: {exc}") from exc
+    except KeyError as exc:
+        raise BuildError(f"{metadata} has no version= under [general]") from exc
+    if not plugin:
+        raise BuildError(f"{metadata} has an empty version= under [general]")
+    try:
+        tree = ast.parse((repo / CORE_SRC / "__init__.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        raise BuildError(f"cannot read {CORE_SRC}/__init__.py: {exc}") from exc
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets
@@ -82,7 +97,7 @@ def _allowed(arcname: str) -> bool:
     if "__pycache__" in parts:
         return False
     name = parts[-1]
-    if name.startswith("LICENSE") or name == "VERSION":
+    if name in ALLOWED_NAMES:
         return True
     suffix = Path(name).suffix.lower()
     if suffix in ALLOWED_SUFFIXES:
@@ -102,12 +117,42 @@ def zip_plan(repo: Path) -> list[tuple[str, Path]]:
             plan.append((dst + rel[len(src) :], repo / rel))
     tracked_extra = set(_tracked(repo, "packages"))
     for rel, arc in EXTRA_FILES.items():
-        if rel in tracked_extra:
-            plan.append((arc, repo / rel))
+        if rel not in tracked_extra:
+            raise BuildError(f"{rel} is not tracked; the zip must carry both licences")
+        plan.append((arc, repo / rel))
     refused = sorted(arc for arc, _ in plan if not _allowed(arc))
     if refused:
         raise BuildError("tracked files outside the zip allowlist: " + ", ".join(refused))
     return sorted(plan, key=lambda item: item[0])
+
+
+def _check_entries(names: list[str]) -> None:
+    """One entry per name, and exactly one metadata.txt, at the plugin root.
+
+    QGIS's Install from ZIP takes the plugin folder from the first sorted entry
+    ending in metadata.txt, so a second one could install the wrong folder.
+    """
+    seen: set[str] = set()
+    duplicates = sorted({n for n in names if n in seen or seen.add(n)})
+    if duplicates:
+        raise BuildError("more than one zip entry named: " + ", ".join(duplicates))
+    metadata = sorted(n for n in names if n.endswith("metadata.txt"))
+    if metadata != [ARC_METADATA]:
+        raise BuildError(
+            f"the zip must hold exactly one metadata.txt, {ARC_METADATA}; found: "
+            + (", ".join(metadata) or "none")
+        )
+
+
+def _read(repo: Path, src: Path) -> bytes:
+    try:
+        return src.read_bytes()
+    except OSError as exc:
+        rel = src.relative_to(repo).as_posix()
+        raise BuildError(
+            f"{rel} is tracked but cannot be read from the working tree "
+            f"(deleted without committing?): {exc.strerror}"
+        ) from exc
 
 
 def _entry(arcname: str, when: time.struct_time) -> zipfile.ZipInfo:
@@ -122,8 +167,11 @@ def build_zip(
     repo: Path, out_dir: Path, *, allow_dirty: bool = False, tag: str | None = None
 ) -> Path:
     if tag is not None:
+        if allow_dirty:
+            raise BuildError(f"a tagged build ({tag}) must be clean; drop --allow-dirty")
         check_tag(tag, repo)
-    if not allow_dirty and _git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+    dirty = bool(_git(repo, "status", "--porcelain", "--untracked-files=no").strip())
+    if dirty and not allow_dirty:
         raise BuildError(
             "the working tree has uncommitted changes to tracked files; "
             "commit them or pass --allow-dirty"
@@ -131,11 +179,12 @@ def build_zip(
     plugin, core = read_versions(repo)
     head = _git(repo, "rev-parse", "HEAD").strip()
     when = time.gmtime(int(_git(repo, "log", "-1", "--format=%ct").strip()))
-    version_text = f"core={core}\ncommit={head}\n"
+    version_text = f"core={core}\ncommit={head}{'+dirty' if dirty else ''}\n"
 
-    entries: list[tuple[str, bytes]] = [(arc, src.read_bytes()) for arc, src in zip_plan(repo)]
+    entries: list[tuple[str, bytes]] = [(arc, _read(repo, src)) for arc, src in zip_plan(repo)]
     entries.append((f"{ARC_VENDOR}/VERSION", version_text.encode("utf-8")))
     entries.sort(key=lambda e: e[0])
+    _check_entries([arc for arc, _ in entries])
 
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"nsgeo_qgis-{plugin}.zip"

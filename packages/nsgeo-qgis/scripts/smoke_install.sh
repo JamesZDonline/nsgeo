@@ -28,11 +28,19 @@ python3 -m zipfile -e "$zip" "$plugins"
 # QGIS refuses to start on the offscreen platform without an X server, so the
 # probe runs against xvfb's display instead.
 unset QT_QPA_PLATFORM
+# The container sets neither: Qt warns about the C locale and the unset runtime dir.
+export LANG=C.UTF-8
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 0700 "$XDG_RUNTIME_DIR"
+fi
 export NSGEO_SMOKE_OUT=/tmp/nsgeo-smoke.json
 rm -f "$NSGEO_SMOKE_OUT"
 
 status=0
-timeout 300 xvfb-run -a qgis --nologo --code "$here/smoke_probe.py" || status=$?
+# -k: a QGIS that ignores SIGTERM gets SIGKILL 30 s later.
+timeout -k 30 300 xvfb-run -a qgis --nologo --code "$here/smoke_probe.py" || status=$?
 
 if [ -f "$NSGEO_SMOKE_OUT" ]; then
     cat "$NSGEO_SMOKE_OUT"

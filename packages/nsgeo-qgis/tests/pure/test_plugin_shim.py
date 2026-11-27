@@ -54,5 +54,10 @@ def test_build_label_names_the_commit_in_a_zip(tmp_path):
     assert nsgeo_qgis.build_label(tmp_path) == "build ab12ab12ab12"
 
 
+def test_build_label_shows_a_dirty_build(tmp_path):
+    (tmp_path / "VERSION").write_text("core=0.1.0\ncommit=" + "ab12" * 10 + "+dirty\n")
+    assert nsgeo_qgis.build_label(tmp_path) == "build ab12ab12ab12+dirty"
+
+
 def test_build_label_says_development_checkout_without_one(tmp_path):
     assert nsgeo_qgis.build_label(tmp_path) == "development checkout"
