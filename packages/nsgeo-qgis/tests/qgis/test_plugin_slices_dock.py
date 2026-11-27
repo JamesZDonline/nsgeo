@@ -3266,7 +3266,7 @@ def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
     dock, _ = docked
     _minimum_curvature(dock, 500.0)
     engine = dock.engine
-    gate, finished_late = threading.Event(), threading.Event()
+    gate, started, finished_late = threading.Event(), threading.Event(), threading.Event()
     held: dict[str, bytes] = {}
     real = engine.pending_solve
 
@@ -3276,6 +3276,7 @@ def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
             run = job.run
 
             def run_late(should_stop):
+                started.set()
                 gate.wait(10)
                 run(lambda: False)  # deaf to the cancel
                 finished_late.set()
@@ -3287,7 +3288,10 @@ def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
     dock.slice_slider.setValue(20)
     a_values, a_coverage = engine.slice_at(dock.current_window())
     held["a"] = solve_key(a_values)
-    _pump_until(lambda: dock.refiner.busy)  # A rested and its solve began
+    # A rested and the worker is inside its solve. Not `refiner.busy`: that
+    # is set as the list is queued, and a worker slow to pick it up would see
+    # the move to B's cancel first and skip A's job, which never then runs.
+    _pump_until(started.is_set)
     drawn: list[np.ndarray] = []
     dock.slice_changed.connect(lambda: drawn.append(dock.current_values()))
     dock.slice_slider.setValue(30)
