@@ -159,8 +159,7 @@ def section_columns(
     local = np.column_stack(
         [np.interp(distance, along, path[:, 0]), np.interp(distance, along, path[:, 1])]
     )
-    x_hat, y_hat = frame.axes()
-    world = np.asarray(frame.origin, dtype=float) + local[:, :1] * x_hat + local[:, 1:] * y_hat
+    world = frame.to_world(local)
     taps = bilinear_taps(frame, world)
     return SectionColumns(distance, local, world, taps.nearest.astype(np.intp), taps)
 

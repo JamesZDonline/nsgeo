@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from nsgeo.geometry.affine import local_axes, local_to_world, world_to_local
+
 if TYPE_CHECKING:
     from nsgeo.geometry.grid import Grid
     from nsgeo.velocity import VelocityModel
@@ -54,19 +56,15 @@ class CubeFrame:
 
     def axes(self) -> tuple[np.ndarray, np.ndarray]:
         """Unit vectors of frame-local +X and +Y in world coordinates."""
-        a = math.radians(self.azimuth)
-        y_hat = np.array([math.sin(a), math.cos(a)])
-        x_hat = np.array([math.cos(a), -math.sin(a)])
-        return x_hat, y_hat
+        return local_axes(self.azimuth)
 
     def to_local(self, world: np.ndarray) -> np.ndarray:
         """(n, 2) world coordinates -> (n, 2) frame-local metres."""
-        world = np.asarray(world, dtype=float)
-        if world.ndim != 2 or world.shape[1] != 2:
-            raise ValueError(f"expected (n, 2) world coordinates, got {world.shape}")
-        x_hat, y_hat = self.axes()
-        rel = world - np.asarray(self.origin, dtype=float)
-        return np.column_stack([rel @ x_hat, rel @ y_hat])
+        return world_to_local(self.origin, self.azimuth, world)
+
+    def to_world(self, local: np.ndarray) -> np.ndarray:
+        """(n, 2) frame-local metres -> (n, 2) world coordinates (`to_local`'s inverse)."""
+        return local_to_world(self.origin, self.azimuth, local)
 
     def cell_index(self, world: np.ndarray) -> np.ndarray:
         """(n, 2) world coordinates -> (n,) flat cell ids; -1 when outside.

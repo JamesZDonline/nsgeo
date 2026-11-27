@@ -43,6 +43,18 @@ def test_to_local_inverts_the_rotation():
     assert local[0, 1] == pytest.approx(5.0)
 
 
+def test_to_world_is_to_local_inverted_and_the_grids_own():
+    grid = Grid("G", (500000.0, 4000000.0), 30.0, 20.0, 5.0, "EPSG:32633", 0.5)
+    f = CubeFrame.for_grid(grid, 0.2)
+    local = np.array([[0.0, 0.0], [2.0, 5.0], [-1.5, 19.25]])
+    world = f.to_world(local)
+    np.testing.assert_array_equal(world, grid.to_world(local))
+    np.testing.assert_allclose(f.to_local(world), local, atol=1e-9)
+    np.testing.assert_array_equal(f.to_local(world), grid.to_local(world))
+    with pytest.raises(ValueError):
+        f.to_world(np.zeros(2))
+
+
 def test_for_grid_covers_the_whole_grid():
     g = Grid(
         id="A",

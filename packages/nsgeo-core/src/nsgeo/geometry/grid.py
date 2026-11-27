@@ -7,11 +7,11 @@ lets one grid hold cross-hatched lines running in both directions.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
 
+from nsgeo.geometry.affine import local_axes, local_to_world, world_to_local
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_source import VelocitySource
 
@@ -34,24 +34,12 @@ class Grid:
         azimuth is degrees clockwise from CRS north to grid-local +Y, so
         +Y = (sin a, cos a) and +X is that turned 90 degrees clockwise.
         """
-        a = math.radians(self.azimuth)
-        y_hat = np.array([math.sin(a), math.cos(a)])
-        x_hat = np.array([math.cos(a), -math.sin(a)])
-        return x_hat, y_hat
+        return local_axes(self.azimuth)
 
     def to_world(self, local: np.ndarray) -> np.ndarray:
         """Convert (n, 2) grid-local metres to (n, 2) world coordinates."""
-        local = np.asarray(local, dtype=float)
-        if local.ndim != 2 or local.shape[1] != 2:
-            raise ValueError(f"expected (n, 2) local coordinates, got {local.shape}")
-        x_hat, y_hat = self.axes()
-        return np.asarray(self.origin, dtype=float) + local[:, :1] * x_hat + local[:, 1:] * y_hat
+        return local_to_world(self.origin, self.azimuth, local)
 
     def to_local(self, world: np.ndarray) -> np.ndarray:
         """Convert (n, 2) world coordinates to (n, 2) grid-local metres (`to_world`'s inverse)."""
-        world = np.asarray(world, dtype=float)
-        if world.ndim != 2 or world.shape[1] != 2:
-            raise ValueError(f"expected (n, 2) world coordinates, got {world.shape}")
-        x_hat, y_hat = self.axes()
-        rel = world - np.asarray(self.origin, dtype=float)
-        return np.column_stack([rel @ x_hat, rel @ y_hat])
+        return world_to_local(self.origin, self.azimuth, world)
