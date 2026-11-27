@@ -26,7 +26,7 @@ _INLINE_LINK = re.compile(r"\]\(\s*(?:<([^>\n]*)>|([^)\s]+))" + _TITLE + r"\s*\)
 _REFERENCE_LINK = re.compile(r"^\s*\[[^\]]+\]:\s*(?:<([^>\n]*)>|(\S+))", re.MULTILINE)
 _IMG_TAG = re.compile(r"""<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 _ABSOLUTE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")  # https:, mailto:, ...
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _FENCE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -117,8 +117,9 @@ def test_release_notes_exist_for_the_metadata_version_and_link_the_guide():
     notes = _notes().read_text(encoding="utf-8")
     assert "experimental" in notes.lower()
     # The guide as it was at this release's tag, not as it is on main.
-    guide = f"/blob/v{_metadata()['version']}/docs/guide/getting-started.md"
-    assert any(t.endswith(guide) for t in _link_targets(notes)), guide
+    g = _metadata()
+    guide = f"{g['repository']}/blob/v{g['version']}/docs/guide/getting-started.md"
+    assert guide in [t.partition("#")[0] for t in _link_targets(notes)], guide
 
 
 def test_release_notes_use_only_absolute_links():

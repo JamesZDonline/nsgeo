@@ -118,8 +118,8 @@ def test_a_link_into_a_missing_folder_is_skipped_with_a_warning(tmp_path):
     mounts = [out[i + 1] for i, arg in enumerate(out) if arg == "-v"]
     assert not any("unplugged" in m for m in mounts), mounts
     assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:ro" in mounts
-    assert "survey" in result.stderr and "one.DZT" in result.stderr
-    assert not (tmp_path / "unplugged").exists()
+    warned = [line.split(": ")[1] for line in result.stderr.splitlines() if "skipping" in line]
+    assert sorted(warned) == sorted(f"skipping {local / name}" for name in ("survey", "one.DZT"))
 
 
 def test_virtualenvs_are_left_out_of_the_copy_at_any_depth(tmp_path):

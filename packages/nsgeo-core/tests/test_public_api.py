@@ -64,6 +64,7 @@ def readme_sections(text: str) -> dict[str, str]:
             m = re.fullmatch(r"### `nsgeo\.(\w+)`\s*", line)
             current = m.group(1) if m else None
             if current is not None:
+                assert current not in sections, f"two sections for nsgeo.{current}"
                 sections[current] = ""
         elif current is not None:
             sections[current] += line + "\n"
