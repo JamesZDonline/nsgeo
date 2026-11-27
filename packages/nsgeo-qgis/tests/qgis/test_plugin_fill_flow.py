@@ -535,6 +535,28 @@ def test_a_z_edit_mid_stretch_never_lands_a_stale_stretch(quick, monkeypatch):
     assert dock.display_limit() == pytest.approx(fresh)
 
 
+def test_this_grid_keeps_a_current_stretch_when_only_its_fill_is_missing(quick, monkeypatch):
+    """#236: This grid's `_fill_jobs`, like the site's, leaves the stretch job
+    out when the stretch held is for this very key: a final one would be
+    measured again (and, for minimum curvature, replaced by a provisional one)."""
+    dock, _ = quick
+    dock.display_limit()
+    _wait_idle(dock)
+    window, finish = dock.current_window(), dock.slice_finish()
+    key = dock._stretch_key(window, finish)
+    held = dock._grid_refine.held_stretch(key)
+    assert held is not None
+    jobs: list[int] = []
+    real = dock.engine.stretch_job
+    monkeypatch.setattr(dock.engine, "stretch_job", lambda *a, **k: jobs.append(1) or real(*a, **k))
+    dock.engine._drop_fill()  # the fill is missing, the stretch's key is unchanged
+    dock.refresh_slice()
+    _wait_idle(dock)
+    assert dock.engine.fill_held(dock.engine.slice_at(window)[1], finish)
+    assert jobs == [], "a current stretch was measured again"
+    assert dock._grid_refine.held_stretch(key) == held
+
+
 def test_a_scope_switch_applies_a_pending_change_before_it_stops_the_work(slow):
     dock, _ = slow
     dock.cell_spin.setValue(SLOW_CELL)  # pending in the debounce

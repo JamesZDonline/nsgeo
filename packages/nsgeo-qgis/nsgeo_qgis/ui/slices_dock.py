@@ -3157,12 +3157,16 @@ class SlicesDock(QgsDockWidget):
     ) -> list[Any]:
         """The fill for these cells, then the shared stretch measured over it
         when a shared stretch applies (#193). The fill job first: making it drops
-        the held fill, and the stretch job reads the fill job's result."""
+        the held fill, and the stretch job reads the fill job's result. The
+        stretch job is left out when the one held is for this very key, as the
+        site's is (#236: a final one would be replaced by a provisional one)."""
         fill = self.engine.fill_job(coverage, finish)
         # The first north-up plan for this frame is built on the worker too (#193).
         fill.warm_north_up = True
         jobs: list[Any] = [fill]
-        if self._shared_stretch_wanted():
+        held = self._grid_refine.stretch
+        current = held is not None and held[0] == self._stretch_key(window, finish)
+        if self._shared_stretch_wanted() and not current:
             jobs.append(
                 self.engine.stretch_job(window.n_levels, self._stretch_clip(), finish, fill=fill)
             )
