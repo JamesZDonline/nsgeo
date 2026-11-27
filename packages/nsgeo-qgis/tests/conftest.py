@@ -1,10 +1,11 @@
 """Shared setup for the plugin tests.
 
-Puts the plugin package, the core's test helpers, and this directory's
-`plugin_testing` module on sys.path, plus `scripts/` for the dev-tool tests.
-Importing `nsgeo_qgis` runs its path shim, which puts the core *source* on
-sys.path too, so these tests work in `.venv-qgis` (no nsgeo
-installed) as well as in `.venv` (nsgeo editable).
+Puts on sys.path the plugin package, the core's test helpers and this
+directory's `plugin_testing` module, ahead of everything else, and appends
+`scripts/` for the dev-tool tests, behind the standard library so that a
+script cannot shadow a stdlib module. Importing `nsgeo_qgis` runs its path
+shim, which puts the core *source* on sys.path too, so these tests work in
+`.venv-qgis` (no nsgeo installed) as well as in `.venv` (nsgeo editable).
 """
 
 from __future__ import annotations
@@ -15,9 +16,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLUGIN_DIR = HERE.parent  # packages/nsgeo-qgis
 CORE_DIR = PLUGIN_DIR.parent / "nsgeo-core"  # for `from tests.synthetic import write_dzt`
-for p in (HERE, PLUGIN_DIR, CORE_DIR, PLUGIN_DIR / "scripts"):
+for p in (HERE, PLUGIN_DIR, CORE_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
+if str(PLUGIN_DIR / "scripts") not in sys.path:
+    sys.path.append(str(PLUGIN_DIR / "scripts"))
 
 import nsgeo_qgis  # noqa: E402,F401  (runs the core path shim)
 from temp_dirs import _drop_temp_folders_after_a_passing_run  # noqa: E402,F401
