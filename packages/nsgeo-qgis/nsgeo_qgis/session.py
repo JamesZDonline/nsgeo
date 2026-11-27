@@ -332,6 +332,14 @@ class SiteSession(QObject):
         *now*. That is the whole reason the package cannot simply be
         renamed: the journals do not follow it, and everything committed
         since the last checkpoint lives in them.
+
+        The check for any code that copies, moves, renames, backs up or
+        syncs the package as a file (#23): call this first and refuse, or
+        move every journal with it. `_resolve_package` is the one such
+        place today. Table operations inside the database
+        (`SiteLayers._rebuild_picks`' renames and drops) are not file
+        operations and need no check: SQLite replays a hot journal on
+        open, as it does for every read.
         """
         found = []
         for suffix in _SQLITE_JOURNALS:

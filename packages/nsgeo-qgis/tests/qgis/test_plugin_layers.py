@@ -405,6 +405,109 @@ def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
     layers2.detach()
 
 
+# --- #37: `renameVectorTable` rewrites `layer_styles.f_table_name`, so the
+# rename of `picks` out to the backup took its style row with it; the backup
+# was then dropped (leaving that row behind, orphaned) and `_style_picks`
+# painted nsgeo's style over the new table -- a style the user saved
+# themselves was gone after any CRS-driven rebuild. ---
+
+
+def _save_default_style(layer, colour, description="the user's own style"):
+    custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+    custom.setColor(QColor(colour))
+    layer.setRenderer(QgsSingleSymbolRenderer(custom))
+    save_v2 = getattr(layer, "saveStyleToDatabaseV2", None)  # see _style_picks
+    if save_v2 is not None:
+        _, err = save_v2("default", description, True, "")
+    else:
+        err = layer.saveStyleToDatabase("default", description, True, "")
+    assert not err
+
+
+def _style_rows(package):
+    con = sqlite3.connect(package)
+    try:
+        return sorted(row[0] for row in con.execute("SELECT f_table_name FROM layer_styles"))
+    finally:
+        con.close()
+
+
+def _package_sql(package, sql):
+    conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(str(package), {})
+    conn.executeSql(sql)
+
+
+def test_a_crs_rebuild_keeps_the_users_own_saved_picks_style(populated):
+    session, layers, _ = populated
+    _save_default_style(layers.layers["picks"], "#00ff00")
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"  # the rebuild really ran
+    assert layers.layers["picks"].renderer().symbol().color().name() == "#00ff00"
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.renderer().symbol().color().name() == "#00ff00"
+
+
+def test_a_crs_rebuild_leaves_no_style_row_behind_for_the_dropped_backup(populated):
+    session, layers, _ = populated
+    assert _style_rows(session.gpkg_path) == ["picks"]  # the premise
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    session.replace_grid(GRID)  # and back: two rebuilds, so a leak would accumulate
+
+    assert _style_rows(session.gpkg_path) == ["picks"]
+
+
+def test_an_orphan_style_row_from_an_earlier_rebuild_is_not_carried_onto_picks(populated):
+    # Packages rebuilt before this fix already hold an orphan row under the
+    # backup's name. It must be cleared, not moved onto `picks` beside the
+    # user's own style as a second default.
+    session, layers, _ = populated
+    path = str(session.gpkg_path)
+    _save_default_style(layers.layers["picks"], "#ff0000", "an earlier rebuild's style")
+    conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+    layers._drop_loaded_layer("picks")
+    conn.renameVectorTable("", "picks", _PICKS_BACKUP)
+    conn.dropVectorTable("", _PICKS_BACKUP)
+    assert _style_rows(path) == [_PICKS_BACKUP]  # the orphan, as #37 measured it
+    layers.ensure_tables()  # a fresh, unstyled-by-the-user picks table
+    _save_default_style(layers.layers["picks"], "#00ff00")
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"
+    assert _style_rows(path) == ["picks"]
+    fresh = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+    assert fresh.renderer().symbol().color().name() == "#00ff00"
+
+
+def test_a_rebuild_of_picks_with_no_saved_style_gets_the_pick_colour(populated):
+    # The fallback: nothing to carry over, so nsgeo's style, as before.
+    session, layers, _ = populated
+    _package_sql(session.gpkg_path, "DELETE FROM layer_styles")
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.crs().authid() == "EPSG:4326"
+    assert fresh.renderer().symbol().color().name() == PICK_COLOUR.name()
+
+
+def test_a_rebuild_of_picks_in_a_package_with_no_style_table_gets_the_pick_colour(populated):
+    # A package that never had a style saved (pre-M8) has no `layer_styles`
+    # table at all; looking for a style to carry must not fail the rebuild.
+    session, layers, _ = populated
+    _package_sql(session.gpkg_path, "DROP TABLE layer_styles")
+    _package_sql(session.gpkg_path, "DELETE FROM gpkg_contents WHERE table_name = 'layer_styles'")
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.crs().authid() == "EPSG:4326"
+    assert fresh.renderer().symbol().color().name() == PICK_COLOUR.name()
+
+
 _MOVED_GRID = Grid("A", (501.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
 
@@ -1449,6 +1552,82 @@ def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, mon
     assert layers.layers == {}  # still torn down; the site is closing regardless
 
 
+# --- #22: `_rebuild_picks` (a grid's CRS change, "Edit grid...") dropped the
+# loaded `picks` layer the way detach() used to, before I6: rows were read
+# off disk, so a pick still in the layer's edit buffer was never migrated,
+# and the layer holding it was then removed with no prompt and no log line.
+# The reviewer's reproduction: `picks on disk: ['committed pick']`. ---
+
+
+def test_a_crs_rebuild_carries_buffered_pick_edits_into_the_new_table(populated):
+    session, layers, project = populated
+    committed = QgsFeature(layers.layers["picks"].fields())
+    committed.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    committed["line_key"] = "raw/FILE__001.DZT"
+    committed["note"] = "committed pick"
+    assert layers.layers["picks"].dataProvider().addFeatures([committed])[0]
+    _buffer_a_pick(layers, note="buffered pick")
+
+    seen: list[tuple[str, int]] = []
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
+    try:
+        session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    finally:
+        disconnect()
+
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.crs().authid() == "EPSG:4326"  # the rebuild really ran
+    assert sorted(f["note"] for f in on_disk.getFeatures()) == ["buffered pick", "committed pick"]
+    # Said, not silent -- and nothing at Critical: the commit must not set
+    # off `_on_picks_committed`'s follow_lines against a layer still in the
+    # old CRS mid-rebuild, which reports a CRS mismatch at Critical.
+    assert any("picks" in msg and "rebuild" in msg for msg, _ in seen), seen
+    critical = int(Qgis.MessageLevel.Critical)
+    assert not [msg for msg, level in seen if level == critical]
+
+
+def test_a_rebuild_whose_buffered_edits_cannot_be_saved_leaves_picks_alone(populated, monkeypatch):
+    # A rebuild, unlike a site close, can be refused: the edits stay in the
+    # buffer and `picks` stays in its old CRS until the next refresh retries,
+    # rather than the rebuild going ahead without them.
+    session, layers, project = populated
+    picks = _buffer_a_pick(layers, note="cannot be saved yet")
+    monkeypatch.setattr(QgsVectorLayer, "commitChanges", lambda self, *a, **kw: False)
+
+    seen: list[tuple[str, int]] = []
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
+    try:
+        session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    finally:
+        disconnect()
+    monkeypatch.undo()
+
+    assert layers.layers["picks"] is picks  # not dropped
+    assert picks.isModified()
+    assert [f["note"] for f in picks.getFeatures()] == ["cannot be saved yet"]
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.crs().authid() == "EPSG:32616"  # not rebuilt
+    critical = int(Qgis.MessageLevel.Critical)
+    assert any("picks" in msg and level == critical for msg, level in seen), seen
+
+
+def test_dropping_a_layer_with_buffered_edits_says_so_at_critical(populated):
+    # The backstop under every caller: whatever reaches `_drop_loaded_layer`
+    # with edits still buffered, the loss is reported rather than silent.
+    session, layers, project = populated
+    _buffer_a_pick(layers)
+
+    seen: list[tuple[str, int]] = []
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
+    try:
+        layers._drop_loaded_layer("picks")
+    finally:
+        disconnect()
+
+    critical = int(Qgis.MessageLevel.Critical)
+    assert any("picks" in msg and "1" in msg and level == critical for msg, level in seen), seen
+
+
 # --- M8 acceptance walkthrough, Finding A: the author's own words --
 # "if I selected a point and deleted it and hit save, the pick stayed
 # visible in the profile until I made another pick in the profile, at
@@ -1751,6 +1930,34 @@ def _wal_only_rows(package):
         # A clean close checkpoints and removes the sidecars, which is
         # precisely the recovery the refusal below tells the user to do.
         con.close()
+
+
+def test_a_picks_rebuild_over_a_hot_journal_keeps_it_and_the_package_where_they_are(
+    populated, tmp_path
+):
+    """#23: the hazard is a *file*-level rename or move, which SQLite's
+    sidecars do not follow. `_rebuild_picks` renames and drops *tables*,
+    inside the database, so a hot journal is replayed by SQLite as on any
+    open and the package file itself never moves. Pinned, not reproduced:
+    there is no live loss here, and this keeps it that way."""
+    session, layers, project = populated
+    layers.write_pick(_a_pick(note="committed before the crash"))
+    session.save()
+    package = session.gpkg_path
+    session.close_site()
+    _leave_a_hot_wal(package)
+    session.open_site(tmp_path / SURVEY_FILE)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    assert session.gpkg_path == package
+    assert sorted(p.name for p in tmp_path.glob("*.gpkg")) == [package.name]
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"  # the rebuild really ran
+    assert [f["note"] for f in layers.layers["picks"].getFeatures()] == [
+        "committed before the crash"
+    ]
+    layers.detach()
+    assert _wal_only_rows(package) == ["the last hour of picks"]
 
 
 def test_a_legacy_package_with_a_hot_journal_is_used_where_it_is_and_adopted_later(
