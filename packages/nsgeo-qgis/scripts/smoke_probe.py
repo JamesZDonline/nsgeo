@@ -1,7 +1,8 @@
 """Smoke probe: run inside a real QGIS through ``qgis --code``.
 
 Checks that the installed nsgeo_qgis zip loads from its own bundled core and
-that QGIS's own installer accepts its metadata. Writes a JSON object of named
+that QGIS's own installer accepts its metadata, then that unloading it takes
+its docks and toolbar away. Writes a JSON object of named
 checks to $NSGEO_SMOKE_OUT and exits 0 only when every check is true.
 """
 
@@ -44,7 +45,7 @@ def _run():
 
         out["plugin_file"] = nsgeo_qgis.__file__
         out["core_file"] = nsgeo.__file__
-        out["plugin_from_profile"] = _under(nsgeo_qgis.__file__, profile)
+        out["plugin_from_profile"] = _under(nsgeo_qgis.__file__, plugin_dir)
         out["core_from_vendor"] = _under(nsgeo.__file__, os.path.join(plugin_dir, "_vendor"))
         out["build_label"] = nsgeo_qgis.build_label()
         out["stamped"] = out["build_label"].startswith("build ")
@@ -55,10 +56,33 @@ def _run():
         out["toolbar"] = any(
             t.objectName() == "nsgeoToolBar" for t in window.findChildren(QToolBar)
         )
-        out["unloads"] = unloadPlugin("nsgeo_qgis") is True
+        out["unload_returns"] = unloadPlugin("nsgeo_qgis") is True
     except Exception:
         out["error"] = traceback.format_exc()
+        _finish(out)
+        return
+    # The docks are deleteLater()'d: look again once the event loop has run.
+    QTimer.singleShot(500, lambda: _after_unload(out))
 
+
+def _after_unload(out):
+    try:
+        from qgis.PyQt.QtWidgets import QDockWidget, QToolBar
+        from qgis.utils import iface
+
+        window = iface.mainWindow()
+        titles = {d.windowTitle() for d in window.findChildren(QDockWidget)}
+        out["docks_left"] = sorted(t for t in DOCKS if t in titles)
+        toolbar_left = any(t.objectName() == "nsgeoToolBar" for t in window.findChildren(QToolBar))
+        out["unloads"] = (
+            out.get("unload_returns") is True and not out["docks_left"] and not toolbar_left
+        )
+    except Exception:
+        out["error"] = traceback.format_exc()
+    _finish(out)
+
+
+def _finish(out):
     checks = (
         "installer_accepts",
         "loads",

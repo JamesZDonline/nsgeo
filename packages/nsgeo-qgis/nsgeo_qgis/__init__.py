@@ -41,14 +41,19 @@ def plugin_version() -> str:
 
 
 def build_label(core_path: Path = CORE_PATH) -> str:
-    """Which build this is: the release zip's commit, or a dev checkout."""
+    """Which build this is: the release zip's commit, or a dev checkout.
+
+    A zip built with uncommitted changes records ``commit=<sha>+dirty``; the
+    label keeps that mark.
+    """
     version_file = core_path / "VERSION"
     if not version_file.is_file():
         return "development checkout"
     for line in version_file.read_text(encoding="utf-8").splitlines():
         key, _, value = line.partition("=")
         if key == "commit":
-            return f"build {value[:12]}"
+            sha, plus, mark = value.partition("+")
+            return f"build {sha[:12]}{plus}{mark}"
     return "development checkout"
 
 

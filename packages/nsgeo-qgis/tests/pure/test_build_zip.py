@@ -171,6 +171,9 @@ def test_plugin_and_core_versions_must_agree_for_a_tag(repo):
 @needs_git
 def test_two_builds_of_one_commit_are_identical(repo, tmp_path):
     a = build_zip.build_zip(repo, tmp_path / "a").read_bytes()
+    # The working-tree mode never reaches the zip. fileMode off keeps git from
+    # calling the chmod a change, which would (rightly) mark the build +dirty.
+    git(repo, "config", "core.fileMode", "false")
     (repo / QGIS_PKG / "__init__.py").chmod(0o755)
     b = build_zip.build_zip(repo, tmp_path / "b", allow_dirty=True).read_bytes()
     assert a == b
@@ -204,7 +207,91 @@ def test_the_real_zip_loads_its_bundled_core_from_an_awkward_path(real_repo, tmp
         check=True,
     ).stdout.splitlines()
     assert (dest / "nsgeo_qgis" / "_vendor").resolve() in Path(out[0]).resolve().parents
-    assert out[1].startswith("build ") and len(out[1]) == len("build ") + 12
+    # A local run builds with --allow-dirty, so an edited checkout adds "+dirty".
+    assert re.fullmatch(r"build [0-9a-f]{12}(\+dirty)?", out[1])
+
+
+@needs_git
+@pytest.mark.parametrize("licence", ["packages/nsgeo-qgis/LICENSE", "packages/nsgeo-core/LICENSE"])
+def test_a_missing_licence_stops_the_build(repo, tmp_path, licence):
+    git(repo, "rm", "-q", licence)
+    commit_all(repo, "no licence")
+    with pytest.raises(build_zip.BuildError, match=licence):
+        build_zip.build_zip(repo, tmp_path / "o")
+
+
+@needs_git
+def test_a_dirty_build_is_marked_dirty(repo, tmp_path):
+    (repo / QGIS_PKG / "__init__.py").write_text("# edited\n")
+    z = zipfile.ZipFile(build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True))
+    head = git(repo, "rev-parse", "HEAD")
+    assert z.read("nsgeo_qgis/_vendor/VERSION").decode() == f"core=0.1.0\ncommit={head}+dirty\n"
+
+
+@needs_git
+def test_allow_dirty_on_a_clean_tree_is_not_marked(repo, tmp_path):
+    z = zipfile.ZipFile(build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True))
+    assert "+dirty" not in z.read("nsgeo_qgis/_vendor/VERSION").decode()
+
+
+@needs_git
+def test_a_tag_build_refuses_allow_dirty(repo, tmp_path):
+    with pytest.raises(build_zip.BuildError, match="--allow-dirty"):
+        build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True, tag="v0.1.0")
+    assert build_zip.main(["--out", str(tmp_path / "o"), "--allow-dirty", "--tag", "v0.1.0"]) == 1
+
+
+@needs_git
+def test_a_deleted_tracked_file_is_a_clean_error(repo, tmp_path):
+    (repo / "packages/nsgeo-qgis/LICENSE").unlink()
+    with pytest.raises(build_zip.BuildError, match="packages/nsgeo-qgis/LICENSE"):
+        build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True)
+
+
+@needs_git
+@pytest.mark.parametrize(
+    "text", [None, "", "version=0.1.0\n", "[general]\nname=x\n", "[general\nversion=0.1.0\n"]
+)
+def test_a_missing_or_malformed_metadata_is_a_clean_error(repo, tmp_path, text):
+    meta = repo / QGIS_PKG / "metadata.txt"
+    if text is None:
+        meta.unlink()
+    else:
+        meta.write_text(text)
+    with pytest.raises(build_zip.BuildError, match="metadata.txt"):
+        build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True)
+
+
+@needs_git
+@pytest.mark.parametrize("rel", [f"{QGIS_PKG}/help/metadata.txt", f"{CORE_PKG}/old_metadata.txt"])
+def test_the_zip_must_hold_exactly_one_metadata_txt(repo, tmp_path, rel):
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x\n")
+    commit_all(repo)
+    with pytest.raises(build_zip.BuildError, match="metadata.txt"):
+        build_zip.build_zip(repo, tmp_path / "o")
+
+
+@needs_git
+def test_a_licence_lookalike_is_outside_the_allowlist(repo, tmp_path):
+    (repo / QGIS_PKG / "LICENSE.png").write_bytes(b"x")
+    commit_all(repo)
+    with pytest.raises(build_zip.BuildError, match="nsgeo_qgis/LICENSE.png"):
+        build_zip.build_zip(repo, tmp_path / "o")
+
+
+@needs_git
+@pytest.mark.parametrize(
+    "rel", [f"{QGIS_PKG}/_vendor/VERSION", f"{QGIS_PKG}/_vendor/nsgeo/__init__.py"]
+)
+def test_two_entries_with_one_name_are_refused(repo, tmp_path, rel):
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x\n")
+    commit_all(repo)
+    with pytest.raises(build_zip.BuildError, match=rel.replace(QGIS_PKG, "nsgeo_qgis")):
+        build_zip.build_zip(repo, tmp_path / "o")
 
 
 def test_versions_agree_across_metadata_core_and_pyproject():
