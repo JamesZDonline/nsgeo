@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import QApplication
 from test_plugin_slices_dock import PRESET, _ready
 from test_plugin_velocity_box import (  # noqa: F401 -- plugin is the shared fixture
     LEFT,
+    N_TRACES,
     _box_around,
     _pos,
     _px,
@@ -100,8 +101,12 @@ def test_ctrl_click_on_a_cut_places_nothing_and_says_why(plugin, monkeypatch):  
     s.presets_changed.emit()
     _ready(plugin.slices_dock)
     cut = s.add_cut("A", [(0.5, 2.0), (4.5, 2.0)])
+    line = v.transform
     s.open_line(cut)
-    assert spin_until(lambda: v.transform is not None, 20_000), "the cut never drew"
+    # The cut's own section, not the line still drawn from before.
+    drew = spin_until(lambda: v.transform is not None and v.transform is not line, 20_000)
+    assert drew, "the cut never drew"
+    assert v.transform.n_traces != N_TRACES
     assert not plugin.act_velocity.isEnabled()
     said: list = []
     monkeypatch.setattr(plugin, "message", lambda text, level=None, **kw: said.append(text))

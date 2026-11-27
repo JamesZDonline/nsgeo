@@ -223,11 +223,11 @@ def test_too_few_surviving_edges_gives_the_cleaning_message_not_the_fits(monkeyp
 
 def test_one_to_three_strong_edges_give_the_cleaning_message_not_the_fits():
     # A box only as wide as the flat top of a hyperbola whose legs fade at
-    # once leaves three strong edges. Counted only after the first fit, as
-    # once, they reached fit_hyperbola, whose own refusal ("Searching for the
-    # apex ... Click another point.") came back instead.
+    # once leaves three strong edges. When edges were counted only after the
+    # first fit, these three reached fit_hyperbola, and its own refusal
+    # ("Searching for the apex ... Click another point.") came back instead.
     data, t, x = _scene([Planted(100, 15.0, 0.07, fade_from_trace=0)])
-    with pytest.raises(ValueError, match=TOO_FEW):
+    with pytest.raises(ValueError, match=TOO_FEW.replace(r"\d+", "3")):
         trace_hyperbola(data, t, x, TraceBox(96, 104, 10.0, 30.0))
 
 

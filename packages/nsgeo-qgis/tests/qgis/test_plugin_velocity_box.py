@@ -327,7 +327,7 @@ def test_turning_velocity_off_clears_the_box_note(plugin):
     for on in (False, True):
         plugin.act_velocity.setChecked(on)
         plugin.act_velocity.triggered.emit(on)
-    assert NO_HYPERBOLA not in dock.velocity_note.text()
+        assert NO_HYPERBOLA not in dock.velocity_note.text()
 
 
 def test_a_saved_traced_fit_refits_to_the_velocity_shown(plugin):
