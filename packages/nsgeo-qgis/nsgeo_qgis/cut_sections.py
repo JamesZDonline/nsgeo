@@ -386,6 +386,10 @@ class CutSections(QObject):
         engine = source.engine
         if not engine.has_cube:
             if not build_cube:
+                # Only the cut on screen needs telling when a cube is held, so a hover over
+                # many cuts leaves one entry, not one per cut ever previewed (#171 §5).
+                for other in [k for k, why in self._waiting.items() if why == "cube"]:
+                    del self._waiting[other]
                 self._waiting[key] = "cube"
                 return NO_CUBE_TEXT.format(name=cut.name, grid=cut.grid_id)
             if self._too_big(source):

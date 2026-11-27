@@ -329,6 +329,21 @@ def test_a_preview_waiting_for_a_cube_is_announced_when_one_is_held(shown):
     assert changed.calls == [(key,)]
 
 
+def test_only_the_last_preview_waits_for_a_cube(shown):
+    """A hover over many cuts leaves one waiting entry, not one per cut ever previewed;
+    the one previewed last is still announced when a cube is held (#171 §5)."""
+    dock, session, sections = shown
+    keys = [session.add_cut("A", [(1.0, 1.0 + i * 0.5), (5.0, 1.0 + i * 0.5)]) for i in range(4)]
+    dock.engine.drop_cube()
+    for key in keys:
+        assert sections.section(key, build_cube=False).startswith("Select ")
+    assert sections._waiting == {keys[-1]: "cube"}
+    changed = Spy(sections.section_changed)
+    dock.engine.cube()
+    dock.refresh_slice()
+    assert changed.calls == [(keys[-1],)]
+
+
 def test_a_rebuilt_cube_redraws_the_cut_though_nothing_else_moved(shown):
     dock, session, sections = shown
     key = session.add_cut("A", H)
