@@ -70,6 +70,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -596,7 +597,9 @@ class CutSections(QObject):
         if entry is None or entry.section.values is not section.values:
             return section.provenance_json
         z = section.z
-        level = min(max(round((time_ns - z.t0_ns) / z.dz_ns), 0), z.nz - 1)
+        # The row the profile draws under the click: row k spans t0 + k*dz to
+        # t0 + (k + 1)*dz, so floor, as `ViewTransform.sample_index_at` does.
+        level = min(max(math.floor((time_ns - z.t0_ns) / z.dz_ns), 0), z.nz - 1)
         if level not in entry.levels:
             return section.provenance_json
         return _solved_provenance(section.provenance_json)
@@ -882,22 +885,35 @@ class CutSections(QObject):
             standing_in=standing_in,
             solved=(0, nz) if standing_in else (nz, nz),
             source=source,
-            provenance_json=self._provenance_json(cut, source, cube.provenance, cube, method),
+            provenance_json=self._provenance_json(
+                cut, source, cube.provenance, cube, method, self._velocity(cut.grid_id)
+            ),
         )
 
     @staticmethod
     def _provenance_json(
-        cut: Cut, source: CutSource, cube_provenance: Any, cube: Any, method: str
+        cut: Cut,
+        source: CutSource,
+        cube_provenance: Any,
+        cube: Any,
+        method: str,
+        velocity: dict[str, Any] | None,
     ) -> str:
-        """What a reader needs to trust the section (cut spec call 2)."""
+        """What a reader needs to trust the section (cut spec call 2).
+
+        The velocity is the grid's as it is now, the one `shown` records, never a
+        cube's frozen copy: a cube built just before a velocity edit is dropped
+        has the same values and an older label (#171 §1)."""
         settings = source.settings
+        cube_doc = cube_provenance.to_dict()
+        cube_doc["velocity"] = velocity
         doc: dict[str, Any] = {
             "kind": "cut",
             "cut_id": cut.id,
             "cut_name": cut.name,
             "grid_id": cut.grid_id,
             "scope": SCOPE_LABELS[source.scope],
-            "cube": cube_provenance.to_dict(),
+            "cube": cube_doc,
             # The clock every time on this cut is on (cut spec call 18): a pick
             # made on another clock is left out of the profile, not converted.
             "time_base": time_base_of(cube_provenance.steps),

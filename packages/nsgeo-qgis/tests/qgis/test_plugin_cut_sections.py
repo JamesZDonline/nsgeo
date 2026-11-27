@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from nsgeo.slices import finish_section, section_columns
 from nsgeo.slices.resample import sample
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import cut_sections as cut_sections_module
 from nsgeo_qgis import stretch_jobs as stretch_jobs_module
 from nsgeo_qgis.cut_sections import (
@@ -365,6 +366,27 @@ def test_a_source_that_cannot_be_read_is_logged_critical(shown, message_log, mon
     monkeypatch.setattr(dock, "scope", lambda: (_ for _ in ()).throw(ValueError("boom")))
     assert sections.source_for("A") is None
     assert any("boom" in m for m in message_log)
+
+
+def test_a_section_records_the_grids_velocity_now_not_the_cubes_copy(shown):
+    """A cube built before a velocity edit carries the old velocity until it is dropped;
+    the section's rows are the same either way, and its label is the grid's as it is now,
+    the one a later relabel compares against (#171 §1)."""
+    dock, session, sections = shown
+    dock.engine.cube()  # built, with the velocity as it stands
+    site = session.site
+    index = [g.id for g in site.grids].index("A")
+    # The edit lands in the site without the signal, as when the cut is built in the gap
+    # between the edit and the engine's own drop.
+    site.grids[index] = dataclasses.replace(
+        site.grids[index], velocity=VelocityModel.constant(0.09)
+    )
+    assert dock.engine.cube().provenance.velocity != VelocityModel.constant(0.09).to_dict()
+    key = session.add_cut("A", H)
+    got = sections.section(key, build_cube=True)
+    assert isinstance(got, CutSection)
+    doc = json.loads(got.provenance_json)
+    assert doc["cube"]["velocity"] == VelocityModel.constant(0.09).to_dict()
 
 
 def test_the_exact_texts():

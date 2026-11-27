@@ -353,6 +353,9 @@ class MapLink(QObject):
 
         Kept until the section changes (`section_changed`) or the canvas or the
         layers do (`_invalidate`), so a refresh does not ask `section()` again.
+        Columns depend only on the cut and the frame, and `CutSections` announces
+        every change to either (`_on_inputs_changed`); a cut whose section is
+        dropped without that signal would keep its band here (#171 §5).
         """
         if self._sections is None:
             return None

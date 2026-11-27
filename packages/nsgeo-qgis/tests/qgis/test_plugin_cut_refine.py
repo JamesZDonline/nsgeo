@@ -249,6 +249,33 @@ def test_a_pick_mid_solve_records_what_its_own_depth_shows(site, ran):  # noqa: 
     assert on_owed["standing_in_for"] == "min_curvature"
 
 
+def test_a_mid_solve_pick_takes_the_row_the_profile_draws_under_the_click(site, ran):  # noqa: F811
+    """Row k spans t0 + k*dz to t0 + (k + 1)*dz on the profile (`sample_index_at` floors),
+    so a click in its lower half is still row k, at either edge of the solved band."""
+    plugin = site
+    ran.pause = 0.05
+    _to_min_curvature(plugin.slices_dock)
+    key = plugin.session.add_cut("A", H)
+    plugin.session.open_line(key)
+    sections = plugin.cut_sections
+    assert spin_until(lambda: len(sections._cache[key].levels) >= 3)
+    ran.gate = threading.Event()  # the band stays where it is while the picks are made
+    entry = sections._cache[key]
+    z = entry.section.z
+    levels = entry.levels
+    edge_solved = max(levels)  # solved, the row below it not yet
+    edge_owed = min(levels) - 1  # not solved, the row below it solved
+    assert edge_solved + 1 not in levels and edge_owed not in levels and edge_owed >= 0
+    plugin._on_pick_requested(key, 5, z.t0_ns + (edge_solved + 0.6) * z.dz_ns)
+    plugin._on_pick_requested(key, 5, z.t0_ns + (edge_owed + 0.6) * z.dz_ns)
+    on_solved, on_owed = (
+        json.loads(row["stack_json"])
+        for row in list(plugin.layers.layers["picks"].getFeatures())[-2:]
+    )
+    assert on_solved["finish"]["method"] == "min_curvature"
+    assert on_owed["finish"]["method"] == "kriging"
+
+
 def test_the_slices_own_refine_lands_while_a_cut_is_solving(working):
     pd, dock, session, sections, key, ran = working
     ran.pause = 0.05
