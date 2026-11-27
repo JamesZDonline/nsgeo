@@ -1477,7 +1477,7 @@ class NsgeoPlugin:
 
         The cube id is `<grid_id>__<name>`, `name` being the stem of the
         file numpy ACTUALLY wrote (Important 1, same fix round) --
-        `Path(npz_path).stem`, not `Path(path).stem`. `store.npz_path`'s
+        `written.stem`, not `Path(path).stem`. `store.npz_path`'s
         own docstring names exactly this hazard: a user-typed name with a
         dot that is not an extension (a version tag, e.g. "cube.v1")
         keeps that dot in the file numpy writes ("cube.v1.npz") but the
@@ -1511,7 +1511,7 @@ class NsgeoPlugin:
                 return
             root = self.session.root
             line_key(Path(path), root)  # raises ProjectError early; see the docstring above
-            npz_path = save_cube_npz(engine, Path(path))
+            written = save_cube_npz(engine, Path(path))
             # Task 7: `dock.view_settings()`, not a second, independent
             # construction of the same six values -- the dock is the one
             # place they are actually held, and it is also `restore_cube`'s
@@ -1522,11 +1522,11 @@ class NsgeoPlugin:
                 engine.frame,
                 engine.z,
                 dock.view_settings(),
-                npz_path,
+                written,
                 line_keys=engine.provenance().line_keys,
                 time_base=time_base_of(engine.provenance().steps),
             )
-            cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
+            cube_id = f"{engine.choice.grid_id}__{written.stem}"
             self.session.record_cube(cube_id, record)
             # Task 7: the new record is a candidate `cube_combo` selection
             # the instant it exists, and `refresh_cube_combo` is the same
