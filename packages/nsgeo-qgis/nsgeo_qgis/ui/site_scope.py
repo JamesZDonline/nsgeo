@@ -51,7 +51,6 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_engine import PendingSolve
 from nsgeo_qgis.slices_plan import (
-    FILL_CANCELLED_NOTE,
     NO_TRANSFORM,
     TIME_BASE_MIXED,
     Resolution,
@@ -1376,9 +1375,17 @@ class SiteScope:
 
     def on_fill_cancelled(self) -> None:
         """Cancel was pressed while the site's fills were worked out
-        (`FillPicture`)."""
+        (`FillPicture`). The picture's own grids may all hold their fills, the
+        cancelled one being for a grid outside it that the shared stretch
+        reads (`display_limit`): then the note says the picture stays (#236)."""
         if self.showing:
-            self.dock.fill_picture.cancelled(SITE_OWNER)
+            at = self.drawn_at
+            held = (
+                self.slice is not None
+                and at is not None
+                and self.engine.weights_cached(self.dock.site_finish.value(), at=at)
+            )
+            self.dock.fill_picture.cancelled(SITE_OWNER, picture_held=held)
 
     def fill_record(self) -> dict[str, Any]:
         return dict(self.session.site_resolution()) if self.session.is_open else {}
@@ -1395,8 +1402,9 @@ class SiteScope:
         exports at full detail, so it says nothing about the export."""
         engine = self.engine
         entries: list[Entry] = []
-        if self.dock.fill_picture.noted:
-            entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
+        note = self.dock.fill_picture.note
+        if note is not None:
+            entries.append(Entry(NOTE, note))
         if self.drawn:
             if engine.preview_note:
                 entries.append(Entry(NOTE, engine.preview_note))

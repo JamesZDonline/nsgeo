@@ -23,6 +23,7 @@ from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 from nsgeo_qgis.slices_plan import (
     FILL_BUDGET_S,
+    FILL_CANCELLED_KEPT_NOTE,
     FILL_CANCELLED_NOTE,
     FILL_WORKING_GRIDS_INDICATOR,
     FILL_WORKING_INDICATOR,
@@ -1458,6 +1459,40 @@ def test_a_grid_above_the_shown_depth_gets_its_fill_and_the_stretch_follows(
             manual=scope.gains(),
         )
         assert dock.display_limit() == pytest.approx(expected)
+    finally:
+        _close(plugin, answer_modal)
+
+
+def test_cancelling_a_fill_the_stretch_asked_for_keeps_the_picture_and_says_so(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    """#236: with the picture on the map at these very settings, `display_limit`
+    asks for the fill of a grid above the shown depth (the shared stretch reads
+    it). Cancelling that fill latches, so it is not asked for again at once, but
+    the note said "The picture was not drawn" beside a picture that was."""
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        site, flow = dock.site_engine, dock.fill_flow
+        _, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        dock.stretch_combo.setCurrentIndex(1)  # "this slice": only the shown grids fill
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, 0.25)
+        assert spin_until(lambda: _picture_cell(dock) == 0.25, 60_000)
+        _wait_idle(dock)
+        assert not site.engine_for("C").weights_cached(dock.site_finish.value())
+        slow_jobs(monkeypatch, site.engine_for("C"), ("fill_job",), pause=1.0)
+        dock.stretch_combo.setCurrentIndex(0)  # shared: the stretch needs C's fill
+        dock.display_limit()
+        assert flow.working, "display_limit never asked for C's fill"
+        picture = dock.current_site_slice()
+        flow.cancel()
+        assert flow.latched
+        assert dock.current_site_slice() is picture
+        assert FILL_CANCELLED_NOTE not in _notes(dock), "the note says no picture was drawn"
+        assert FILL_CANCELLED_KEPT_NOTE in _notes(dock)
     finally:
         _close(plugin, answer_modal)
 

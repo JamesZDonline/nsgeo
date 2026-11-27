@@ -18,7 +18,7 @@ import dataclasses
 from collections.abc import Callable, Hashable
 from typing import Any
 
-from nsgeo_qgis.slices_plan import SliceFinish
+from nsgeo_qgis.slices_plan import FILL_CANCELLED_KEPT_NOTE, FILL_CANCELLED_NOTE, SliceFinish
 from nsgeo_qgis.ui.fill_flow import FillFlow
 
 #: The remembered-resolution fields a fill is made for.
@@ -55,7 +55,8 @@ class FillPicture:
         #: `(owner, drawn fill settings, which of them the record held)`.
         self._picture: tuple[Hashable, dict[str, float | str], frozenset[str]] | None = None
         self._owner: Hashable | None = None
-        self._noted = False
+        #: The Warnings note the latch carries, or None.
+        self._note: str | None = None
 
     # ---- the picture ------------------------------------------------------
     def record(self, owner: Hashable, cell: float, finish: SliceFinish) -> None:
@@ -71,7 +72,12 @@ class FillPicture:
     @property
     def noted(self) -> bool:
         """Whether the Warnings note is to be shown."""
-        return self._noted
+        return self._note is not None
+
+    @property
+    def note(self) -> str | None:
+        """The Warnings note to show, or None."""
+        return self._note
 
     def check_owner(self, owner: Hashable) -> None:
         """A latch made for another owner (grid) is dropped."""
@@ -82,27 +88,29 @@ class FillPicture:
         """A fill setting changed, or the survey or scope did: draw again."""
         self._flow.unlatch()
         self._owner = None
-        if self._noted:
-            self._noted = False
+        if self._note is not None:
+            self._note = None
             self._changed()
 
     # ---- cancel ------------------------------------------------------------
-    def cancelled(self, owner: Hashable) -> None:
+    def cancelled(self, owner: Hashable, *, picture_held: bool = False) -> None:
         """Cancel was pressed while a fill was worked out. With a picture drawn
         at other fill settings, those go back (record, widgets, applied: which
         can show the working line again if the picture's own fill was slow).
         Otherwise there is nothing to go back to: the settings stay, the note
-        is shown, and the flow latches."""
+        is shown, and the flow latches. `picture_held`: the picture on the map
+        is at these very settings and still holds its own fills, so the
+        cancelled fill was for something it lacks (a grid outside it, which
+        the shared stretch reads): the note says the picture stays (#236),
+        not that none was drawn."""
         cell, finish = self._read_widgets()
         picture = self._picture
-        if (
-            picture is not None
-            and picture[0] == owner
-            and picture[1] != fill_settings(cell, finish)
-        ):
+        drawn = picture is not None and picture[0] == owner
+        if drawn and picture is not None and picture[1] != fill_settings(cell, finish):
             self._take_back(picture)
             return
-        self._noted = True
+        kept = drawn and picture_held
+        self._note = FILL_CANCELLED_KEPT_NOTE if kept else FILL_CANCELLED_NOTE
         self._owner = owner
         self._flow.latch()
         self._changed()

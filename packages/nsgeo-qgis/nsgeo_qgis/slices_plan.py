@@ -113,6 +113,13 @@ FILL_CANCELLED_NOTE = (
     "The picture was not drawn: its fill was cancelled. "
     "Change the cell or the interpolation to draw it."
 )
+#: The note when the cancelled fill was not the picture's own: the picture on
+#: the map is at these very settings, and the fill was for what it lacks (the
+#: shared stretch's, or a grid's), #236.
+FILL_CANCELLED_KEPT_NOTE = (
+    "A fill was cancelled, so the picture stays as it is, without what that fill "
+    "was for. Change the cell or the interpolation to work it out."
+)
 
 #: The method a slow minimum-curvature slice is previewed with (plan call 5),
 #: at the same max distance, search radius and smoothing, so its blanks are

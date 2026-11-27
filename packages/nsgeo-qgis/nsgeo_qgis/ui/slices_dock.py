@@ -84,7 +84,6 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_CELL_M,
     DEFAULT_TRANSFORM,
     FILL_CANCEL_LINK,
-    FILL_CANCELLED_NOTE,
     FILL_THREAD_NAME_PREFIX,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
@@ -3786,8 +3785,9 @@ class SlicesDock(QgsDockWidget):
             else:
                 entries = [Entry(REFUSAL, self._grid_refusal)] if self._grid_refusal else []
                 entries += [Entry(NOTE, note) for note in self._grid_notes]
-                if self.fill_picture.noted:
-                    entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
+                note = self.fill_picture.note
+                if note is not None:
+                    entries.append(Entry(NOTE, note))
             self.warnings_panel.set_entries(entries)
         except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
             _log(f"could not show the warnings: {exc}")
