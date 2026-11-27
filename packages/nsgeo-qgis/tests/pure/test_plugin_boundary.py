@@ -1,8 +1,16 @@
-"""The plugin must contain no signal processing and no direct PyQt imports.
+"""The plugin imports no Qt binding directly, and only the core's named API.
 
 Direct `PyQt5`/`PyQt6` imports break on the other Qt major version; the
-`qgis.PyQt` shim works on both. Importing processing internals would let
-maths creep into widgets, which is the boundary the whole design rests on.
+`qgis.PyQt` shim works on both. matplotlib and scipy are not in the QGIS
+images the plugin runs in.
+
+The core's named API is what its public modules list in `__all__` (see
+`packages/nsgeo-core/README.md`). Reaching past it, into a submodule or a
+name it does not list, ties the plugin to the core's internals, which may
+change without notice. Signal processing stays in the core: for example
+`nsgeo.processing` lists `nyquist_mhz`, the Nyquist frequency of a sample
+interval, so that the add-step dialog's "this file's Nyquist" figure and
+Bandpass's own guard use one formula instead of two that can drift apart.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from pathlib import Path
 
 import nsgeo
 import nsgeo_qgis
+from tests.public_modules import public_modules
 
 SRC = Path(nsgeo_qgis.__file__).parent
 
@@ -42,41 +51,15 @@ def test_no_direct_qt_or_forbidden_imports() -> None:
     assert not offenders, "forbidden imports:\n" + "\n".join(offenders)
 
 
-def _declared_all(path: Path) -> set[str] | None:
-    """The names in a module's top-level `__all__` list, or None if it has none."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
-            and isinstance(node.value, (ast.List, ast.Tuple))
-        ):
-            return {
-                e.value
-                for e in node.value.elts
-                if isinstance(e, ast.Constant) and isinstance(e.value, str)
-            }
-    return None
-
-
 def _public_api() -> dict[str, set[str]]:
     """`"nsgeo.<x>"` -> its `__all__`, for each public module, plus `"nsgeo"`.
 
-    A public module is one level below `nsgeo` (`x/__init__.py` or `x.py`)
-    and declares `__all__`. Read from the source, so the allowlist cannot
-    drift from the core's own declaration.
+    Discovered from the source by the same helper the core's own API test
+    uses, so the allowlist cannot drift from the core's declaration.
     """
-    root = Path(nsgeo.__file__).parent
     public: dict[str, set[str]] = {"nsgeo": {"__version__"}}
-    for child in sorted(root.iterdir()):
-        if child.name.startswith("_"):
-            continue
-        source = child / "__init__.py" if child.is_dir() else child
-        if source.suffix != ".py" or not source.is_file():
-            continue
-        names = _declared_all(source)
-        if names is not None:
-            public[f"nsgeo.{child.stem}"] = names
+    for name, names in public_modules(Path(nsgeo.__file__).parent).items():
+        public[f"nsgeo.{name}"] = names
     return public
 
 
@@ -88,6 +71,15 @@ def _core_import_offenders(path: Path, public: dict[str, set[str]]) -> list[tupl
     """
     offenders: list[tuple[int, str]] = []
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # Every name the top-level package is bound to: `import nsgeo` (or
+    # `import nsgeo.x`) binds `nsgeo`, `import nsgeo as n` binds `n`.
+    aliases = {"nsgeo"} | {
+        a.asname or a.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name == "nsgeo"
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             if node.module.split(".")[0] != "nsgeo":
@@ -105,10 +97,10 @@ def _core_import_offenders(path: Path, public: dict[str, set[str]]) -> list[tupl
         elif (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
-            and node.value.id == "nsgeo"
+            and node.value.id in aliases
             and node.attr not in public["nsgeo"]
         ):
-            offenders.append((node.lineno, f"nsgeo.{node.attr}"))
+            offenders.append((node.lineno, f"{node.value.id}.{node.attr}"))
     return offenders
 
 
@@ -131,11 +123,17 @@ def test_the_checker_flags_each_kind_of_offence(tmp_path: Path) -> None:
         "x = nsgeo.slices\n"
         "ok = nsgeo.__version__\n"
         "from nsgeo.geometry import Grid\n"
-        "from nsgeo_qgis.layers import Whatever\n",
+        "from nsgeo_qgis.layers import Whatever\n"
+        "import nsgeo as n\n"
+        "y = n.slices.store\n"
+        "fine = n.__version__\n",
         encoding="utf-8",
     )
-    found = _core_import_offenders(scratch, _public_api())
-    assert sorted(line for line, _ in found) == [1, 2, 3, 5]
+    # A fixed allowlist, not the core's real `__all__` lists: this tests the
+    # checker alone, so a change to the core cannot make it pass or fail.
+    public = {"nsgeo": {"__version__"}, "nsgeo.geometry": {"Grid"}, "nsgeo.processing": {"Step"}}
+    found = _core_import_offenders(scratch, public)
+    assert sorted(line for line, _ in found) == [1, 2, 3, 5, 10]
 
 
 def test_package_init_imports_no_qgis_at_module_level() -> None:

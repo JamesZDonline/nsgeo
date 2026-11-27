@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import ast
 import importlib
+import re
 from pathlib import Path
 
 import nsgeo
 import pytest
 
-CORE = Path(nsgeo.__file__).parents[2]
+from tests.public_modules import public_modules
+
+# From this file, not `nsgeo.__file__`, so the README is found whether the
+# core is installed editable, installed normally, or put on sys.path.
+README = Path(__file__).resolve().parents[1] / "README.md"
 EXPECTED_PUBLIC = {
     "destagger",
     "io",
@@ -27,30 +31,9 @@ EXPECTED_PUBLIC = {
 }
 
 
-def _declares_all(path: Path) -> bool:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    return any(
-        isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
-        for node in tree.body
-    )
-
-
-def public_modules() -> set[str]:
-    """Names one level below `nsgeo` (`x/__init__.py` or `x.py`) that declare `__all__`."""
-    root = Path(nsgeo.__file__).parent
-    found = set()
-    for child in root.iterdir():
-        if child.name.startswith("_"):
-            continue
-        source = child / "__init__.py" if child.is_dir() else child
-        if source.suffix == ".py" and source.is_file() and _declares_all(source):
-            found.add(child.stem)
-    return found
-
-
 def test_the_public_modules_are_exactly_the_named_ones() -> None:
-    assert public_modules() == EXPECTED_PUBLIC
+    # The same discovery the plugin's import-boundary test uses.
+    assert set(public_modules(Path(nsgeo.__file__).parent)) == EXPECTED_PUBLIC
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_PUBLIC))
@@ -70,12 +53,36 @@ def test_register_is_not_public() -> None:
     assert "register" not in processing.__all__
 
 
-def test_the_readme_names_every_public_name() -> None:
-    text = (CORE / "README.md").read_text(encoding="utf-8")
+def readme_sections(text: str) -> dict[str, str]:
+    """Module name -> the README text under its `nsgeo.<name>` heading (level
+    3), up to the next heading of level 3 or above."""
+    sections: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        heading = re.match(r"#{1,3} ", line)
+        if heading:
+            m = re.fullmatch(r"### `nsgeo\.(\w+)`\s*", line)
+            current = m.group(1) if m else None
+            if current is not None:
+                assert current not in sections, f"two sections for nsgeo.{current}"
+                sections[current] = ""
+        elif current is not None:
+            sections[current] += line + "\n"
+    return sections
+
+
+def test_readme_sections_stop_at_the_next_heading() -> None:
+    text = "### `nsgeo.a`\n`x`\n#### detail\n`y`\n### `nsgeo.b`\n`z`\n## Other\n`w`\n"
+    assert readme_sections(text) == {"a": "`x`\n#### detail\n`y`\n", "b": "`z`\n"}
+
+
+def test_the_readme_names_every_public_name_in_its_own_module_table() -> None:
+    sections = readme_sections(README.read_text(encoding="utf-8"))
+    assert set(sections) == EXPECTED_PUBLIC
     missing = [
         f"{m}.{n}"
         for m in sorted(EXPECTED_PUBLIC)
         for n in importlib.import_module(f"nsgeo.{m}").__all__
-        if f"`{n}`" not in text
+        if f"`{n}`" not in sections[m]
     ]
     assert not missing, missing

@@ -854,7 +854,7 @@ def cube_record(
     frame: CubeFrame,
     z: ZAxis,
     view: ViewSettings,
-    npz_path: Path,
+    written: Path,
     *,
     line_keys: Sequence[str],
     time_base: str,
@@ -913,7 +913,7 @@ def cube_record(
         # which clock `z` is on: "time_zero" (each line reads 0 at its first break) or "radar"
         "time_base": time_base,
         "z": {"t0_ns": z.t0_ns, "t1_ns": t1_ns, "dz_ns": z.dz_ns},
-        "array": line_key(npz_path, root),
+        "array": line_key(written, root),
         # --- how it was BEING READ: changes nothing in the array ---
         "view": view.to_dict(),
     }

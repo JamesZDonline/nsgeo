@@ -120,11 +120,11 @@ def test_save_cube_with_dotted_names_produces_distinct_records(plugin, tmp_path,
     coordinator's own table. `Path("cube.v1").stem` is "cube" (pathlib
     treats ".v1" as the extension), so deriving the id from the RAW
     dialog string collided both saves onto "A__cube"; deriving it from
-    `Path(npz_path).stem` (the file `npz_path` actually wrote,
+    `written.stem` (the file `save_cube_npz` actually wrote,
     "cube.v1.npz") keeps them apart. A first version of this test typed
     the ".npz" suffix explicitly and passed against the pre-fix code too
     -- it never exercised the collision at all, since `path` and
-    `npz_path` were then identical regardless of which one plugin.py
+    `written` were then identical regardless of which one plugin.py
     read the stem from."""
     plugin, s = plugin
     _prepare(plugin)
