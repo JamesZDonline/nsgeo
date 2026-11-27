@@ -349,6 +349,17 @@ def clear_north_up_plans() -> None:
         _plans.clear()
 
 
+def snap_eps(coords: Iterable[float], pixel: float) -> float:
+    """Scale-aware snapping tolerance, in pixels, for a coordinate ratio.
+
+    `64 * eps * max(1, |coord|) / pixel`: the margin `cell_index` uses, in
+    pixels. A fixed epsilon on the ratio is too small at UTM magnitudes (see
+    `frame_lattice`). `frame_lattice` and `SiteLattice.covering` share it.
+    """
+    magnitude = max(1.0, *(abs(c) for c in coords))
+    return 64.0 * float(np.finfo(float).eps) * magnitude / pixel
+
+
 def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
     """The north-up lattice over `frame`'s own extent, at any `pixel`.
 
@@ -380,8 +391,8 @@ def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
     # 3.73e-9 above the true integer at cell=0.1 and cell=0.05), so the
     # bound is scaled by the same `64 * eps * max(1, |coord|)` margin
     # `cell_index` uses, converted from metres to pixels by dividing by
-    # the pixel pitch.
-    eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / pixel
+    # the pixel pitch (`snap_eps`).
+    eps = snap_eps((xmin, ymin, xmax, ymax), pixel)
     return SiteLattice(
         x0=xmin,
         y1=ymax,
