@@ -238,17 +238,24 @@ class StretchJob:
         self._seams = tuple(seams)
         self.limit: float | None = None
         self.final = False
+        #: Set once `run` has let go of what it captured: a second run has
+        #: nothing to measure, so it measures nothing (never the empty site's
+        #: limit, which would read as final).
+        self._released = False
         #: Written by the worker, read by the GUI thread: a float store.
         self.fraction = 0.0
 
     def run(self, should_stop: Callable[[], bool]) -> None:
         """Worker thread. Raises `SolveStopped` when stopped. Whatever happens,
         everything captured is released at the end: `land` needs only `limit`
-        and `final`."""
+        and `final`, so a job run again measures nothing."""
         self.limit, self.final, self.fraction = None, False, 0.0
+        if self._released:
+            return
         try:
             self._measure(should_stop)
         finally:
+            self._released = True
             self._grids = {}
             self._steps = []
             self._seams = ()

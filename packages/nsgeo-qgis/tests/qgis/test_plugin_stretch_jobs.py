@@ -319,3 +319,19 @@ def test_a_stopped_stretch_job_lets_go_too(sourced):  # noqa: F811
     with pytest.raises(SolveStopped):
         job.run(lambda: True)
     assert job._grids == {}
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["finished", "stopped"])
+def test_a_released_stretch_job_run_again_measures_nothing(sourced, stopped):  # noqa: F811
+    """#236: `run` lets go of what it captured, so a second run had no windows
+    and reported the empty site's limit as final. It measures nothing instead."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    job = engine.stretch_job(THICKNESS, PercentileClip(), SliceFinish(method="idw"))
+    if stopped:
+        with pytest.raises(SolveStopped):
+            job.run(lambda: True)
+    else:
+        job.run(lambda: False)
+    job.run(lambda: False)
+    assert (job.limit, job.final) == (None, False)
