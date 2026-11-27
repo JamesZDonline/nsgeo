@@ -487,9 +487,9 @@ def edge_match_solve(
     geometric mean. A group with no known level is not anchored: it keeps
     its minimum-norm solution, so a lone grid with level None is at 1 until
     the last step. That step, a final shift making the geometric mean of all
-    gains 1, moves every grid alike, that one included: it stays at 1 only
-    when the other gains' geometric mean is already 1, not, for one, when a
-    grid with level None shares a group with known levels (#75).
+    gains 1, moves every grid alike, so such a grid generally ends away from
+    1: when a grid with level None shares a group with known levels, that
+    group's anchor shift no longer cancels out across the site (#75).
     """
     ids = sorted(levels)
     ln_level = {g: math.log(level) for g in ids if (level := levels[g])}
