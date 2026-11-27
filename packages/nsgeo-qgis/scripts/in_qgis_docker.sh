@@ -6,11 +6,14 @@
 #   packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:4.2 \
 #       python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
 #
-# The worktree is mounted read-only at /src and copied to /work (minus the
-# virtualenvs), so nothing the tests write reaches the checkout. Directories
-# that the real-data symlinks under packages/nsgeo-core/tests/data/local point
-# into, at any depth, are mounted read-only at the same absolute path, so the
-# links resolve.
+# The worktree is mounted read-only at /src and copied to /work, minus every
+# .venv and .venv-qgis at any depth (a main checkout's .worktrees/* hold their
+# own), so nothing the tests write reaches the checkout. Directories that the
+# real-data symlinks under packages/nsgeo-core/tests/data/local point into, at
+# any depth, are mounted read-only at the same absolute path, so the links
+# resolve. A link whose target is not there (a drive not plugged in) is skipped
+# with a warning: mounting a missing folder would make Docker create it on the
+# host, owned by root.
 # Exits with CMD's status.
 set -euo pipefail
 
@@ -29,6 +32,10 @@ seen=()
 # inside folders reached through a link (find -L walks through them).
 while IFS= read -r -d '' link; do
     [ -L "$link" ] || continue
+    if [ ! -e "$link" ]; then
+        echo "$0: skipping $link: $(readlink "$link") is not there" >&2
+        continue
+    fi
     target=$(readlink -f "$link")
     dir=$(dirname "$target")
     case " ${seen[*]:-} " in *" $dir "*) continue ;; esac
@@ -45,11 +52,7 @@ exec docker run --rm \
     "$image" bash -c '
         set -euo pipefail
         mkdir /work
-        shopt -s dotglob
-        for entry in /src/*; do
-            case "${entry##*/}" in .venv | .venv-qgis) continue ;; esac
-            cp -a "$entry" /work/
-        done
+        tar -C /src --exclude=.venv --exclude=.venv-qgis -cf - . | tar -C /work -xf -
         cd /work
         python3 -m pip install -q --break-system-packages --root-user-action=ignore pytest
         exec "$@"
