@@ -73,7 +73,9 @@ def _after_unload(out):
         window = iface.mainWindow()
         titles = {d.windowTitle() for d in window.findChildren(QDockWidget)}
         out["docks_left"] = sorted(t for t in DOCKS if t in titles)
-        toolbar_left = any(t.objectName() == "nsgeoToolBar" for t in window.findChildren(QToolBar))
+        out["toolbar_left"] = toolbar_left = any(
+            t.objectName() == "nsgeoToolBar" for t in window.findChildren(QToolBar)
+        )
         out["unloads"] = (
             out.get("unload_returns") is True and not out["docks_left"] and not toolbar_left
         )

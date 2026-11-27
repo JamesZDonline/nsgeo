@@ -60,14 +60,16 @@ def read_versions(repo: Path) -> tuple[str, str]:
     try:
         if not cfg.read(repo / metadata, encoding="utf-8"):
             raise BuildError(f"{metadata} is missing")
-        plugin = cfg["general"]["version"]
-    except configparser.Error as exc:
+        plugin = cfg["general"]["version"].strip()
+    except (configparser.Error, UnicodeDecodeError) as exc:
         raise BuildError(f"{metadata} is malformed: {exc}") from exc
     except KeyError as exc:
         raise BuildError(f"{metadata} has no version= under [general]") from exc
+    if not plugin:
+        raise BuildError(f"{metadata} has an empty version= under [general]")
     try:
         tree = ast.parse((repo / CORE_SRC / "__init__.py").read_text(encoding="utf-8"))
-    except (OSError, SyntaxError) as exc:
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
         raise BuildError(f"cannot read {CORE_SRC}/__init__.py: {exc}") from exc
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(

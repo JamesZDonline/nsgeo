@@ -70,7 +70,7 @@ def test_smoke_install_kills_a_qgis_that_ignores_sigterm():
 def test_smoke_install_gives_qt_a_utf8_locale_and_a_runtime_dir():
     text = SMOKE_INSTALL.read_text(encoding="utf-8")
     assert re.search(r"^export LANG=C\.UTF-8$", text, re.M)
-    assert re.search(r"^export XDG_RUNTIME_DIR=", text, re.M)
+    assert re.search(r"^\s*export XDG_RUNTIME_DIR=", text, re.M)
 
 
 # The first major of each action that runs on Node 24 rather than Node 20.

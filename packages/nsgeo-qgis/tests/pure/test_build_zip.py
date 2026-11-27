@@ -235,10 +235,11 @@ def test_allow_dirty_on_a_clean_tree_is_not_marked(repo, tmp_path):
 
 
 @needs_git
-def test_a_tag_build_refuses_allow_dirty(repo, tmp_path):
+def test_a_tag_build_refuses_allow_dirty(repo, tmp_path, capsys):
     with pytest.raises(build_zip.BuildError, match="--allow-dirty"):
         build_zip.build_zip(repo, tmp_path / "o", allow_dirty=True, tag="v0.1.0")
     assert build_zip.main(["--out", str(tmp_path / "o"), "--allow-dirty", "--tag", "v0.1.0"]) == 1
+    assert "must be clean" in capsys.readouterr().err
 
 
 @needs_git
@@ -250,12 +251,23 @@ def test_a_deleted_tracked_file_is_a_clean_error(repo, tmp_path):
 
 @needs_git
 @pytest.mark.parametrize(
-    "text", [None, "", "version=0.1.0\n", "[general]\nname=x\n", "[general\nversion=0.1.0\n"]
+    "text",
+    [
+        None,
+        "",
+        "version=0.1.0\n",
+        "[general]\nname=x\n",
+        "[general\nversion=0.1.0\n",
+        "[general]\nversion=\n",
+        b"[general]\nname=\xff\nversion=0.1.0\n",
+    ],
 )
 def test_a_missing_or_malformed_metadata_is_a_clean_error(repo, tmp_path, text):
     meta = repo / QGIS_PKG / "metadata.txt"
     if text is None:
         meta.unlink()
+    elif isinstance(text, bytes):
+        meta.write_bytes(text)
     else:
         meta.write_text(text)
     with pytest.raises(build_zip.BuildError, match="metadata.txt"):
@@ -282,15 +294,26 @@ def test_a_licence_lookalike_is_outside_the_allowlist(repo, tmp_path):
 
 
 @needs_git
-@pytest.mark.parametrize(
-    "rel", [f"{QGIS_PKG}/_vendor/VERSION", f"{QGIS_PKG}/_vendor/nsgeo/__init__.py"]
-)
-def test_two_entries_with_one_name_are_refused(repo, tmp_path, rel):
-    p = repo / rel
-    p.parent.mkdir(parents=True, exist_ok=True)
+def test_two_entries_with_one_name_are_refused(repo, tmp_path):
+    p = repo / QGIS_PKG / "_vendor/nsgeo/__init__.py"
+    p.parent.mkdir(parents=True)
     p.write_text("x\n")
     commit_all(repo)
-    with pytest.raises(build_zip.BuildError, match=rel.replace(QGIS_PKG, "nsgeo_qgis")):
+    with pytest.raises(
+        build_zip.BuildError,
+        match="more than one zip entry named: nsgeo_qgis/_vendor/nsgeo/__init__.py",
+    ):
+        build_zip.build_zip(repo, tmp_path / "o")
+
+
+@needs_git
+def test_a_tracked_version_file_is_outside_the_allowlist(repo, tmp_path):
+    # _vendor/VERSION is written by the build, never taken from the tree.
+    p = repo / QGIS_PKG / "_vendor/VERSION"
+    p.parent.mkdir(parents=True)
+    p.write_text("x\n")
+    commit_all(repo)
+    with pytest.raises(build_zip.BuildError, match="allowlist: nsgeo_qgis/_vendor/VERSION"):
         build_zip.build_zip(repo, tmp_path / "o")
 
 

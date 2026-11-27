@@ -30,9 +30,11 @@ python3 -m zipfile -e "$zip" "$plugins"
 unset QT_QPA_PLATFORM
 # The container sets neither: Qt warns about the C locale and the unset runtime dir.
 export LANG=C.UTF-8
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 0700 "$XDG_RUNTIME_DIR"
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 0700 "$XDG_RUNTIME_DIR"
+fi
 export NSGEO_SMOKE_OUT=/tmp/nsgeo-smoke.json
 rm -f "$NSGEO_SMOKE_OUT"
 
