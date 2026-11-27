@@ -108,6 +108,14 @@ def crs_transform(
     return transform
 
 
+def _clamped_span(start: int, end: int, n: int) -> tuple[int, int] | None:
+    """(lo, hi), inclusive, of a selection from `start` to `end` in either order,
+    clamped to `n` items; None when nothing of it is inside."""
+    lo = max(0, min(start, end))
+    hi = min(n - 1, max(start, end))
+    return None if lo > hi else (lo, hi)
+
+
 class MapLink(QObject):
     #: The line keys the `lines` layer's selection became, for any change the
     #: user made (QGIS's Select tool), of any size (#57). Not emitted for one
@@ -158,7 +166,7 @@ class MapLink(QObject):
         # as "no column" until the next invalidation, not once per mouse move.
         self._no_transform: set[tuple[str, bool]] = set()
         # A section's columns in canvas CRS, built once per section object.
-        self._columns_canvas: dict[str, tuple[Any, list[QgsPointXY]]] = {}
+        self._columns_canvas: dict[str, list[QgsPointXY]] = {}
         self._cut_mode = False
         self._sections: CutSections | None = None
         # Depth counter: >0 while `select_lines` changes the layer's selection.
@@ -341,20 +349,24 @@ class MapLink(QObject):
         return self._sections.column_at(key, distance)
 
     def _cut_columns(self, key: str) -> list[QgsPointXY] | None:
-        """The columns of the cut's section as canvas points, or None without a section."""
+        """The columns of the cut's section as canvas points, or None without a section.
+
+        Kept until the section changes (`section_changed`) or the canvas or the
+        layers do (`_invalidate`), so a refresh does not ask `section()` again.
+        """
         if self._sections is None:
             return None
+        cached = self._columns_canvas.get(key)
+        if cached is not None:
+            return cached
         section = self._sections.section(key, build_cube=False)
         if isinstance(section, str):
             return None
-        cached = self._columns_canvas.get(key)
-        if cached is not None and cached[0] is section:
-            return cached[1]
         try:
             columns = self._section_canvas_points(section)
         except _NoTransform:
             return None
-        self._columns_canvas[key] = (section, columns)
+        self._columns_canvas[key] = columns
         return columns
 
     def _section_canvas_points(self, section: CutSection) -> list[QgsPointXY]:
@@ -609,16 +621,16 @@ class MapLink(QObject):
     def _hit_test_cuts(self, point: QgsPointXY) -> tuple[str, int] | None:
         """The (cut_key, column) under `point` in cut mode; the column is -1 with no source."""
         tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
-        limit = tolerance * tolerance
         best: tuple[float, str, QgsPointXY] | None = None
         for key, geom in self._cut_geometries().items():
             if geom.isEmpty():
                 continue
-            sq_dist, nearest, _next, _side = geom.closestSegmentWithContext(point)
-            if sq_dist < 0 or sq_dist > limit:
+            near = self._nearest_on_cut(geom, point, tolerance)
+            if near is None:
                 continue
+            sq_dist = near.sqrDist(point)
             if best is None or sq_dist < best[0]:
-                best = (sq_dist, key, QgsPointXY(nearest))
+                best = (sq_dist, key, near)
         if best is None:
             return None
         column = self._cut_column(best[1], best[2])
@@ -962,32 +974,22 @@ class MapLink(QObject):
         assert self._band is not None
         if is_cut_key(key):
             columns = self._cut_columns(key) if start >= 0 and end >= 0 else None
-            if columns is None:
+            span = None if columns is None else _clamped_span(start, end, len(columns))
+            if columns is None or span is None or span[0] == span[1]:
+                # Nothing to draw; one column is a point, and a band needs a segment.
                 self._band.reset(QgsWkbTypes.LineGeometry)
                 return
-            lo = max(0, min(start, end))
-            hi = min(len(columns) - 1, max(start, end))
-            if lo > hi:
-                self._band.reset(QgsWkbTypes.LineGeometry)
-                return
-            picked = columns[lo : hi + 1]
-            if len(picked) < 2:
-                # One column is a point, and a band needs a segment.
-                self._band.reset(QgsWkbTypes.LineGeometry)
-                return
+            picked = columns[span[0] : span[1] + 1]
             self._band.setToGeometry(QgsGeometry.fromPolylineXY(picked), None)
             return
         geom = self._geometries().get(key)
-        if geom is None or start < 0 or end < 0:
+        span = None
+        if geom is not None and start >= 0 and end >= 0:
+            span = _clamped_span(start, end, self._n_vertices(geom))
+        if geom is None or span is None:
             self._band.reset(QgsWkbTypes.LineGeometry)
             return
-        n = self._n_vertices(geom)
-        lo = max(0, min(start, end))
-        hi = min(n - 1, max(start, end))
-        if lo > hi:
-            self._band.reset(QgsWkbTypes.LineGeometry)
-            return
-        points = [QgsPointXY(geom.vertexAt(i)) for i in range(lo, hi + 1)]
+        points = [QgsPointXY(geom.vertexAt(i)) for i in range(span[0], span[1] + 1)]
         # layer=None: the cache is already in canvas CRS, so asking for a
         # transform here would apply one twice.
         self._band.setToGeometry(QgsGeometry.fromPolylineXY(points), None)

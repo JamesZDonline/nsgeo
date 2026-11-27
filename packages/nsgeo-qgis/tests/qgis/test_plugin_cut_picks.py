@@ -305,6 +305,22 @@ def test_the_profile_overlays_cut_picks_at_their_columns(opened):
     ]
 
 
+def test_the_profile_places_every_cut_pick_from_one_source_lookup(opened, monkeypatch):
+    """Placing the picks resolves the cut's source once, not once per pick (#171 §5)."""
+    plugin, key = opened
+    for column in (5, 12, 30):
+        _pick_at(plugin, key, column)
+    sections = plugin.cut_sections
+    lookups = []
+    real = sections.source_for
+    monkeypatch.setattr(sections, "source_for", lambda g: lookups.append(g) or real(g))
+    points, other = plugin.profile_dock._cut_pick_points(key)
+    assert other == 0
+    distances = [row["distance_m"] for row in _rows(plugin)]
+    assert sorted(points) == sorted((sections.column_at(key, d), T) for d in distances)
+    assert len(lookups) == 1 + len(distances)  # the one placement, then column_at above
+
+
 def test_a_preview_cannot_take_a_pick(opened):
     plugin, key = opened
     session = plugin.session

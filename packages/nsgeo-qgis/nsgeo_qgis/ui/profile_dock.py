@@ -1277,7 +1277,7 @@ class ProfileDock(QgsDockWidget):
         if sections is None or shown is None:
             return [], 0
         base = time_base_of_provenance(shown.provenance_json)
-        points: list[tuple[int, float]] = []
+        placed: list[tuple[float, float]] = []
         other = 0
         for pick in self.session.picks_for(key):
             if pick.distance_m is None:
@@ -1285,10 +1285,12 @@ class ProfileDock(QgsDockWidget):
             if time_base_of_provenance(pick.stack_json) != base:
                 other += 1
                 continue
-            column = sections.column_at(key, pick.distance_m)
-            if column is not None:
-                points.append((column, pick.time_ns))
-        return points, other
+            placed.append((pick.distance_m, pick.time_ns))
+        # One source lookup for every pick (#171 §5).
+        columns = sections.columns_at(key, [d for d, _ in placed]) if placed else []
+        if columns is None:
+            return [], other
+        return [(column, t) for column, (_, t) in zip(columns, placed)], other
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:

@@ -70,7 +70,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -603,6 +603,11 @@ class CutSections(QObject):
         Columns are fixed by the cut and the cell, so this needs no section
         and no cube; None when the cut has no source.
         """
+        columns = self.columns_at(key, [distance_m])
+        return None if columns is None else columns[0]
+
+    def columns_at(self, key: str, distances_m: Sequence[float]) -> list[int] | None:
+        """`column_at` for each of `distances_m`, resolving the source once."""
         cut = self._cut(key)
         if cut is None:
             return None
@@ -612,7 +617,7 @@ class CutSections(QObject):
         frame = source.engine.frame
         assert frame is not None  # source_for checked
         along = column_distances(cut.length_m, frame.cell / 2.0)
-        return int(np.argmin(np.abs(along - distance_m)))
+        return [int(np.argmin(np.abs(along - d))) for d in distances_m]
 
     def _cut(self, key: str) -> Cut | None:
         """The cut, or None when it is gone or the site is closed."""

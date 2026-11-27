@@ -256,6 +256,29 @@ def test_the_marker_and_band_follow_a_selection_on_a_cut(cutlink):
     assert c.link._marker.center().distance(QgsPointXY(*section.columns.world[12])) < 1e-6
 
 
+def test_the_band_reads_its_columns_once_per_section(cutlink, monkeypatch):
+    """The canvas columns are kept until the section changes, so a refresh does not ask
+    `section()` again (#171 §5)."""
+    c = cutlink
+    c.session.open_line(c.key)
+    section = c.sections.section(c.key, build_cube=True)
+    asked = []
+    real = c.sections.section
+    monkeypatch.setattr(
+        c.sections, "section", lambda key, **kw: asked.append(key) or real(key, **kw)
+    )
+    c.session.set_selection(c.key, 5, 12)
+    c.session.set_selection(c.key, 4, 12)
+    c.session.set_selection(c.key, 3, 12)
+    assert asked == [c.key]
+    assert c.link._band.numberOfVertices() == 10
+    first = c.link._band.getPoint(0, 0)
+    assert QgsPointXY(first).distance(QgsPointXY(*section.columns.world[3])) < 1e-6
+    c.sections.section_changed.emit(c.key)  # a new section: its columns are read again
+    c.session.set_selection(c.key, 2, 12)
+    assert asked.count(c.key) >= 2
+
+
 def test_a_cut_with_no_section_shows_no_cursor_but_still_previews(cutlink):
     c = cutlink
     c.link.set_cut_mode(True)
