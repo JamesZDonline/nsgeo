@@ -9,7 +9,8 @@
 # The worktree is mounted read-only at /src and copied to /work (minus the
 # virtualenvs), so nothing the tests write reaches the checkout. Directories
 # that the real-data symlinks under packages/nsgeo-core/tests/data/local point
-# into are mounted read-only at the same absolute path, so the links resolve.
+# into, at any depth, are mounted read-only at the same absolute path, so the
+# links resolve.
 # Exits with CMD's status.
 set -euo pipefail
 
@@ -24,14 +25,16 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 mounts=(-v "$root:/src:ro")
 seen=()
-for link in "$root"/packages/nsgeo-core/tests/data/local/*; do
+# Every link at any depth, including links inside a real survey folder and
+# inside folders reached through a link (find -L walks through them).
+while IFS= read -r -d '' link; do
     [ -L "$link" ] || continue
     target=$(readlink -f "$link")
     dir=$(dirname "$target")
     case " ${seen[*]:-} " in *" $dir "*) continue ;; esac
     seen+=("$dir")
     mounts+=(-v "$dir:$dir:ro")
-done
+done < <(find -L "$root/packages/nsgeo-core/tests/data/local" -mindepth 1 -print0)
 
 exec docker run --rm \
     -e QT_QPA_PLATFORM=offscreen \
