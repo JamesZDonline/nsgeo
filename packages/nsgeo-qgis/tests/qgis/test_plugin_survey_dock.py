@@ -463,7 +463,7 @@ def _dismissed_by(buttons, dismiss):
     box.show()
     QApplication.processEvents()
     dismiss(box)
-    QTest.qWait(300)  # Esc animates a click on the escape button first
+    QTest.qWait(300)  # margin: on macOS Esc animates the escape button's click
     still_showing = box.isVisible()
     answer = box.standardButton(box.clickedButton()) if box.clickedButton() else None
     box.done(0)
@@ -498,6 +498,7 @@ def test_only_the_unload_prompt_cannot_be_dismissed(fake_iface, tmp_path, answer
     plugin.new_site()
     plugin.open_site()
     plugin.unload()
+    assert len(calls) == 3  # New, Open, unload: each asked exactly once
     new_buttons, open_buttons, unload_buttons = (args[3] for args, _ in calls)
 
     assert _dismissed_by(unload_buttons, dismiss) == (True, None)

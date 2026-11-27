@@ -492,7 +492,9 @@ class SiteSession(QObject):
             # Emitted BEFORE the site goes (#12): no line is current or
             # previewed any more, but the site is still open, so a slot that
             # reads the session here sees a coherent one. site_closed below
-            # is the signal that says the site itself is gone.
+            # is the signal that says the site itself is gone. A slot must
+            # not open or preview a line here: the site is about to go and
+            # nothing below resets those fields a second time.
             self.line_opened.emit("")
         self._site = None
         self._json_path = None

@@ -993,8 +993,9 @@ class NsgeoPlugin:
         # still in flight (#19): it is the loader's last strong reference,
         # so its `_pending` keep-alive lasts only until the cyclic collector
         # frees loader and task together, and the load then never reports.
-        # That is harmless: the only session it could write to is dropped
-        # on the next line. loader.py's module docstring has the argument.
+        # That is harmless: the only session it could write to is one the
+        # plugin stops holding on the next line, so nothing reads it any
+        # more. loader.py's module docstring has the argument.
         self.loader = None
         self.session = None
 
