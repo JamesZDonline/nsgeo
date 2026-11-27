@@ -21,7 +21,9 @@ def cut_key(cut_id: str) -> str:
 
 
 def is_cut_key(key: str) -> bool:
-    return key.startswith(CUT_KEY_PREFIX)
+    """Whether `key` names a cut. A line key is a DZT path, so one that happens to
+    start "cut:" (a file named `cut:x.DZT`) still ends in `.dzt` and is a line."""
+    return key.startswith(CUT_KEY_PREFIX) and not key.lower().endswith(".dzt")
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,10 @@ class Cut:
         for vertex in self.vertices:
             if len(vertex) != 2 or not all(math.isfinite(c) for c in vertex):
                 raise ValueError(f"cut vertices must be finite (x, y) pairs, got {vertex!r}")
+        if self.length_m == 0.0:
+            # Only a hand-edited file can hold one; it would load, then fail in
+            # `section_columns` the first time the cut is shown.
+            raise ValueError(f"a cut cannot have zero length, got {self.vertices!r}")
 
     @classmethod
     def new(cls, grid_id: str, vertices: Sequence[tuple[float, float]], name: str) -> Cut:
@@ -59,14 +65,14 @@ class Cut:
     def key(self) -> str:
         return cut_key(self.id)
 
-    def _segments(self) -> list[tuple[float, float, float]]:
+    def _segments(self) -> list[tuple[float, float, int]]:
         """(start distance, length, index of the segment's first vertex)."""
         out = []
         run = 0.0
         for i in range(len(self.vertices) - 1):
             (x0, y0), (x1, y1) = self.vertices[i], self.vertices[i + 1]
             length = math.hypot(x1 - x0, y1 - y0)
-            out.append((run, length, float(i)))
+            out.append((run, length, i))
             run += length
         return out
 
@@ -77,10 +83,11 @@ class Cut:
     def point_at(self, distance_m: float) -> tuple[float, float]:
         """The point `distance_m` along the path, clamped to its ends."""
         segments = self._segments()
-        d = min(max(distance_m, 0.0), self.length_m)
+        start, length, _ = segments[-1]
+        d = min(max(distance_m, 0.0), start + length)
         for start, length, first in segments:
             if d <= start + length or first == len(segments) - 1:
-                (x0, y0), (x1, y1) = self.vertices[int(first)], self.vertices[int(first) + 1]
+                (x0, y0), (x1, y1) = self.vertices[first], self.vertices[first + 1]
                 t = 0.0 if length == 0.0 else min(max((d - start) / length, 0.0), 1.0)
                 return (x0 + t * (x1 - x0), y0 + t * (y1 - y0))
         raise AssertionError("unreachable: a cut has at least one segment")
@@ -90,7 +97,7 @@ class Cut:
         px, py = local
         best = (math.inf, 0.0)
         for start, length, first in self._segments():
-            (x0, y0), (x1, y1) = self.vertices[int(first)], self.vertices[int(first) + 1]
+            (x0, y0), (x1, y1) = self.vertices[first], self.vertices[first + 1]
             dx, dy = x1 - x0, y1 - y0
             t = 0.0 if length == 0.0 else ((px - x0) * dx + (py - y0) * dy) / (length * length)
             t = min(max(t, 0.0), 1.0)

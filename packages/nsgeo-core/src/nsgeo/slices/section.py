@@ -94,6 +94,8 @@ SECTION_PIECE_M: float = 4.0  # the most of a cut one crop covers
 # spacings. Past it a section solves the whole frame (`uses_crops`, I1 of M15's final review).
 CROP_MAX_DISTANCE_SPACINGS: float = 0.5
 _STEP_SLACK = 1e-9  # relative: a step of exactly half a cell is allowed
+#: In steps: a length that is a whole number of steps but for rounding grows no sliver column.
+COLUMN_COUNT_SLACK: float = 1e-9
 
 
 @dataclass(frozen=True, eq=False)
@@ -118,12 +120,14 @@ def column_distances(length_m: float, step_m: float) -> np.ndarray:
     a last column exactly at `length_m`. Defined once, so whoever places a
     column by distance (the plugin's cursor) agrees with `section_columns`.
 
-    The tolerance keeps a length that is a whole number of steps from growing
-    a sliver column from rounding (30.000000000000004 steps).
+    The tolerance (`COLUMN_COUNT_SLACK`) keeps a length that is a whole number
+    of steps from growing a sliver column from rounding (30.000000000000004
+    steps). A path shorter than the tolerance still gets its first and last
+    column, so there are always at least two.
     """
     if not (length_m > 0.0 and step_m > 0.0):
         raise ValueError(f"length and step must be positive, got {length_m} and {step_m}")
-    count = int(math.ceil(length_m / step_m - 1e-9))
+    count = max(int(math.ceil(length_m / step_m - COLUMN_COUNT_SLACK)), 1)
     distance = np.minimum(np.arange(count + 1, dtype=float) * step_m, length_m)
     distance[-1] = length_m
     return distance
@@ -324,8 +328,11 @@ def solve_section_level(
     """(n,) float32: one level solved on the crops and read along the columns.
 
     `SolveStopped` propagates when `should_stop` asks. Columns in no crop (outside
-    the frame) are NaN.
+    the frame) are NaN. `crops` and `plans` pair up one to one; a count that
+    differs is refused rather than solving only the shorter.
     """
+    if len(crops) != len(plans):
+        raise ValueError(f"{len(crops)} crops but {len(plans)} plans: each crop needs its plan")
     level = np.asarray(level)
     canvas = np.full(level.shape, np.nan, dtype=np.float32)
     out = np.full(columns.distance_m.size, np.nan, dtype=np.float32)

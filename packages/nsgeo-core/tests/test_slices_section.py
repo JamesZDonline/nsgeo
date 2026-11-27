@@ -24,6 +24,7 @@ from nsgeo.slices import (
     smooth,
 )
 from nsgeo.slices.section import (
+    COLUMN_COUNT_SLACK,
     CROP_MAX_DISTANCE_SPACINGS,
     SECTION_MARGIN_SPACINGS,
     SECTION_PIECE_M,
@@ -392,6 +393,24 @@ def test_column_distances_are_defined_once_for_the_section_and_its_callers():
     np.testing.assert_array_equal(columns.distance_m, column_distances(3.05, 0.1))
     with pytest.raises(ValueError):
         column_distances(0.0, 0.1)
+
+
+def test_a_path_far_shorter_than_a_step_still_has_a_first_and_a_last_column():
+    # The slack would round 1e-11 steps down to none, leaving a single column at the
+    # path's length instead of one at 0 and one at the end.
+    np.testing.assert_array_equal(column_distances(1e-12, 0.1), [0.0, 1e-12])
+    assert COLUMN_COUNT_SLACK == 1e-9
+
+
+def test_a_level_solve_refuses_crops_and_plans_that_do_not_pair_up():
+    frame = axis_frame()
+    columns = section_columns(frame, straight((1.0, 1.0), (4.0, 1.0)))
+    crops = section_crops(columns, frame, 2)
+    assert len(crops) == 1
+    level = np.zeros((frame.ny, frame.nx), dtype=np.float32)
+    settings = FinishSettings("min_curvature", 0.25, 0.25)
+    with pytest.raises(ValueError, match="1 crops but 0 plans"):
+        solve_section_level(level, columns, crops, (), settings, frame.cell)
 
 
 @needs_real_files

@@ -870,6 +870,7 @@ def test_loads_schema_1_to_4_and_refuses_5(tmp_path):
         {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], [1e999, 1]]},
         {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], ["a", 1]]},
         {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[1, 1], [1, 1]]},
         {"id": "c", "name": "n", "grid_id": "A", "vertices": "oops"},
         "not an object",
     ],

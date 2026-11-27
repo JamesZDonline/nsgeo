@@ -41,7 +41,18 @@ def test_keys_are_prefixed_and_never_a_dzt_path():
     assert len(cut.id) == 32
     assert is_cut_key(cut.key)
     assert not is_cut_key("raw/FILE__001.DZT")
+    # A line file whose name starts "cut:" is still a line, not a cut.
+    assert not is_cut_key("cut:x.DZT")
+    assert not is_cut_key("cut:x.dzt")
     assert make().id != cut.id
+
+
+def test_a_cut_with_no_length_is_refused():
+    # Only a hand-edited file can hold one; `Cut.new` already drops the repeated vertex.
+    with pytest.raises(ValueError, match="zero length"):
+        Cut(id="x", name="x", grid_id="A", vertices=((1.0, 1.0), (1.0, 1.0)))
+    with pytest.raises(ValueError, match="zero length"):
+        Cut(id="x", name="x", grid_id="A", vertices=((1.0, 1.0), (1.0, 1.0), (1.0, 1.0)))
 
 
 def test_a_cut_needs_a_name_and_an_id():
