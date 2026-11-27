@@ -1269,17 +1269,23 @@ class SiteEngine(QObject):
     ) -> np.ndarray | None:
         """`grid_id`'s covered cells for its fill: its slice at the shown window
         when it has one, else at the first window the shared stretch measures it
-        in. Within a grid the covered cells are the same in every window (the
-        binner rejects lines that do not span the axis), so any will do; None when
-        no window reaches the grid."""
+        in, else at its own first level. Within a grid the covered cells are the
+        same in every window (the binner rejects lines that do not span the
+        axis), so any will do. None only for a grid with no axis: every grid
+        `weights_cached(finish)` waits for gets its fill (#236: a grid no
+        stretch window reached got none, so the final minimum-curvature
+        stretch was never armed)."""
         binned = sliced[1]
         if grid_id in binned:
             return binned[grid_id][1]
+        engine = self._engines[grid_id]
+        if engine.z is None:
+            return None
         for top, thickness in self._limit_windows_ns(thickness_ns):
             window = self._grid_window(grid_id, top, thickness)
             if window is not None:
-                return self._engines[grid_id].slice_at(window)[1]
-        return None
+                return engine.slice_at(window)[1]
+        return engine.slice_at(SliceWindow(0, 1))[1]
 
     def _fill_targets(
         self,

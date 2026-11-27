@@ -1593,3 +1593,25 @@ def test_a_footprint_for_a_disposed_engine_is_refused(site3, make_site):
     site.dispose()
     assert job.land() is False
     assert job.footprint is None
+
+
+def test_a_grid_no_stretch_window_reaches_still_gets_its_fill(site3_factory, make_site, monkeypatch):
+    """#236: with every grid wanted (a shared stretch), `_coverage_for` gave no
+    cells for a grid none of the stretch's windows reaches, so it got no fill,
+    while `weights_cached(finish)` waits for every grid with an axis: it stayed
+    False, and the minimum-curvature rest never armed the final stretch. A
+    grid's covered cells are the same in every one of its windows, so its own
+    first window gives them."""
+    site3 = site3_factory(samples={"C": 128})  # C ends near 18.84 ns
+    site, _ = prepared(make_site, site3)
+    deep = (40.0, 5.0)
+    # The stretch's windows all lie below C's axis (a grid starting later than
+    # the others, or sampled between the twelve windows, is reached by none).
+    monkeypatch.setattr(site, "_limit_windows_ns", lambda thickness: [(30.0, 5.0), (50.0, 5.0)])
+    sliced = site.sliced(*deep)
+    assert "C" not in sliced[1]
+    assert site.fills_missing(*deep, FINISH, sliced=sliced, every_grid=True) == ["A", "B", "C"]
+    for job in site.fill_jobs(*deep, FINISH, sliced=sliced, every_grid=True):
+        job.run(lambda: False)
+        assert job.land() is True
+    assert site.weights_cached(FINISH), "a grid with an axis was left without its fill"
