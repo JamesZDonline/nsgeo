@@ -523,6 +523,27 @@ def test_cancel_puts_back_only_the_fill_settings(slow):
     _wait_idle(dock)
 
 
+def test_cancel_never_writes_back_a_seeded_cell_after_a_draw_in_the_debounce(slow):
+    """#236: the picture's record of which fill fields the user chose was read
+    at the draw, but its cell came from the frame. A draw inside the cell's
+    120 ms debounce saw the new cell already remembered against the old frame,
+    so Cancel wrote the seeded cell back as if it had been chosen."""
+    dock, session = slow
+    seeded = {k: v for k, v in session.slice_resolution("A").items() if k != "cell"}
+    session.restore_slice_resolution("A", seeded)  # the cell on the map is seeded
+    dock.refresh_slice()
+    _wait_idle(dock)
+    dock.cell_spin.setValue(SLOW_CELL)  # remembered at once, applied after the pause
+    dock.refresh_slice()  # a slider move inside the pause draws the old frame
+    assert dock.current_frame().cell == QUICK_CELL
+    dock.flush_debounce()
+    assert spin_until(lambda: dock.fill_flow.working, 10_000)
+    dock.cancel_link.linkActivated.emit("cancel")
+    assert dock.cell_spin.value() == QUICK_CELL
+    assert "cell" not in session.slice_resolution("A"), "the seeded cell was written back"
+    _wait_idle(dock)
+
+
 def test_a_z_edit_mid_stretch_never_lands_a_stale_stretch(quick, monkeypatch):
     dock, _ = quick
     slow_jobs(monkeypatch, dock.engine, ("stretch_job",), pause=0.6)

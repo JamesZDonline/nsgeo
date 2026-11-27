@@ -60,9 +60,26 @@ class FillPicture:
 
     # ---- the picture ------------------------------------------------------
     def record(self, owner: Hashable, cell: float, finish: SliceFinish) -> None:
-        """An array was drawn at `cell` with `finish` (a preview counts)."""
-        held = frozenset(k for k in FILL_FIELDS if k in self._read_record())
-        self._picture = (owner, fill_settings(cell, finish), held)
+        """An array was drawn at `cell` with `finish` (a preview counts).
+
+        Which fill fields the user chose is read from the record now, except
+        for a field the record holds at another value than the one drawn: that
+        is an edit not applied yet (the cell's debounce: the cell drawn is the
+        frame's), so the picture keeps what it knew when it was drawn at that
+        value (#236: Cancel wrote a seeded cell back as if chosen)."""
+        record = self._read_record()
+        drawn = fill_settings(cell, finish)
+        previous = (
+            self._picture if self._picture is not None and self._picture[0] == owner else None
+        )
+
+        def chosen(field: str) -> bool:
+            pending = field in record and record[field] != drawn[field]
+            if pending and previous is not None and previous[1][field] == drawn[field]:
+                return field in previous[2]
+            return field in record
+
+        self._picture = (owner, drawn, frozenset(k for k in FILL_FIELDS if chosen(k)))
 
     def forget(self) -> None:
         """Nothing is drawn now."""
