@@ -84,7 +84,6 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_CELL_M,
     DEFAULT_TRANSFORM,
     FILL_CANCEL_LINK,
-    FILL_CANCELLED_NOTE,
     FILL_THREAD_NAME_PREFIX,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
@@ -3054,7 +3053,6 @@ class SlicesDock(QgsDockWidget):
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
-            self.status_label.setText(self._grid_status_text())
             self.show_refine()
             # Recorded only once the draw succeeded, and by a coverage draw
             # too (#72): `rebuild_source` redraws when the finish in metres
@@ -3063,6 +3061,9 @@ class SlicesDock(QgsDockWidget):
             # coverage redraws through its own toggle, at the finish then.
             self._drawn_finish = drawn
             self.slice_changed.emit()
+            # After the map has drawn: its layer builds the frame's north-up
+            # plan, which the line counts (#236: set before, it lagged a draw).
+            self.status_label.setText(self._grid_status_text())
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
             # Fix round 1, M4: state reset here too, not just reported --
@@ -3157,12 +3158,16 @@ class SlicesDock(QgsDockWidget):
     ) -> list[Any]:
         """The fill for these cells, then the shared stretch measured over it
         when a shared stretch applies (#193). The fill job first: making it drops
-        the held fill, and the stretch job reads the fill job's result."""
+        the held fill, and the stretch job reads the fill job's result. The
+        stretch job is left out when the one held is for this very key, as the
+        site's is (#236: a final one would be replaced by a provisional one)."""
         fill = self.engine.fill_job(coverage, finish)
         # The first north-up plan for this frame is built on the worker too (#193).
         fill.warm_north_up = True
         jobs: list[Any] = [fill]
-        if self._shared_stretch_wanted():
+        held = self._grid_refine.stretch
+        current = held is not None and held[0] == self._stretch_key(window, finish)
+        if self._shared_stretch_wanted() and not current:
             jobs.append(
                 self.engine.stretch_job(window.n_levels, self._stretch_clip(), finish, fill=fill)
             )
@@ -3419,6 +3424,19 @@ class SlicesDock(QgsDockWidget):
 
     def _on_fill_error(self, what: str, message: str) -> None:
         try:
+            if what == "footprints":
+                # Only the site gathers footprints, for a new lattice: the
+                # picture on the map is the old lattice's, so the failure is
+                # shown as a failed draw is (#236).
+                text = f"could not place the grids on the map: {message}"
+                if self._scope == "site":
+                    self._site.show_failure(text)
+                    return
+                # Defensive: a scope switch stops the flow, so This grid
+                # never sees a footprint's failure.
+                self.show_refine()
+                self.error.emit(text)
+                return
             self.show_refine()
             self.error.emit(f"could not work out the {what}: {message}")
         except Exception:  # noqa: BLE001 -- from the worker's poll timer
@@ -3769,8 +3787,9 @@ class SlicesDock(QgsDockWidget):
             else:
                 entries = [Entry(REFUSAL, self._grid_refusal)] if self._grid_refusal else []
                 entries += [Entry(NOTE, note) for note in self._grid_notes]
-                if self.fill_picture.noted:
-                    entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
+                note = self.fill_picture.note
+                if note is not None:
+                    entries.append(Entry(NOTE, note))
             self.warnings_panel.set_entries(entries)
         except Exception as exc:  # noqa: BLE001 -- reached from slots and ticks
             _log(f"could not show the warnings: {exc}")

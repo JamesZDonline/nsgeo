@@ -105,10 +105,20 @@ FILL_THREAD_NAME_PREFIX = "nsgeo-fill"
 FILL_WORKING_INDICATOR = "Working out the fill at {cell:g} m: {percent}%"
 FILL_WORKING_GRIDS_INDICATOR = "Working out the fill at {cell:g} m: grid {n} of {total}"
 STRETCH_WORKING_INDICATOR = "Working out the colour stretch…"
+#: The working line while only the site's footprints are gathered (a coverage
+#: draw at a new cell: no fill is worked out), #236.
+FOOTPRINT_WORKING_INDICATOR = "Placing the grids on the map at {cell:g} m: grid {n} of {total}"
 FILL_CANCEL_LINK = "Cancel"
 FILL_CANCELLED_NOTE = (
     "The picture was not drawn: its fill was cancelled. "
     "Change the cell or the interpolation to draw it."
+)
+#: The note when the cancelled fill was not the picture's own: the picture on
+#: the map is at these very settings, and the fill was for what it lacks (the
+#: shared stretch's, or a grid's), #236.
+FILL_CANCELLED_KEPT_NOTE = (
+    "A fill was cancelled, so the picture stays as it is, without what that fill "
+    "was for. Change the cell or the interpolation to work it out."
 )
 
 #: The method a slow minimum-curvature slice is previewed with (plan call 5),

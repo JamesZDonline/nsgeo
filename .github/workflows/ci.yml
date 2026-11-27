@@ -87,7 +87,8 @@ jobs:
             packages/nsgeo-qgis/nsgeo_qgis/gps_import.py \
             packages/nsgeo-qgis/nsgeo_qgis/surface_plan.py \
             packages/nsgeo-qgis/nsgeo_qgis/scene3d_plan.py \
-            packages/nsgeo-qgis/nsgeo_qgis/site_export.py
+            packages/nsgeo-qgis/nsgeo_qgis/site_export.py \
+            packages/nsgeo-qgis/nsgeo_qgis/ui/site_scope.py
 
   build-zip:
     runs-on: ubuntu-24.04

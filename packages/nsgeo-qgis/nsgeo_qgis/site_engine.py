@@ -252,6 +252,9 @@ class SiteEngine(QObject):
         #: `set_source` or `grids_changed`: what the caches derive from.
         self._seen: dict[str, tuple[tuple[Any, ...], float]] = {}
         self._redraw_ms: float | None = None
+        #: `(id, ms)` of the last `sliced()` taken: a tick that hands it to
+        #: `slice_at` counts its slicing in the redraw time (#236).
+        self._slicing_ms: tuple[int, float] | None = None
         # One timer, restarted, rather than a `QTimer.singleShot` per busy
         # check: every callback ends by asking for the next dispatch, and
         # separate single shots would pile up while a peer prepares.
@@ -1156,7 +1159,13 @@ class SiteEngine(QObject):
         if method == "edge" and not coverage:
             self._site_seams()
         previewed: dict[str, PreviewedGrid] = {}
-        started = time.perf_counter()
+        # A tick that sliced first (`sliced()`, for `fills_missing`) counts that
+        # slicing as part of its redraw, as one that slices here does.
+        timed, self._slicing_ms = self._slicing_ms, None
+        before = (
+            timed[1] if sliced is not None and timed is not None and timed[0] == id(sliced) else 0.0
+        )
+        started = time.perf_counter() - before / 1000.0
         sliced = sliced if sliced is not None else self._sliced(top_ns, thickness_ns)
         # A coverage tick finishes nothing, so it hashes nothing either.
         live = preview and not coverage
@@ -1260,26 +1269,35 @@ class SiteEngine(QObject):
     def sliced(self, top_ns: float, thickness_ns: float) -> _Sliced:
         """Each ready grid's window at this site time and each present grid's
         binned slice: what a tick draws from, taken once and passed to
-        `fills_missing`, `fill_jobs` and `slice_at`."""
+        `fills_missing`, `fill_jobs` and `slice_at` (whose redraw time counts it)."""
         self._require_lattice()
-        return self._sliced(top_ns, thickness_ns)
+        started = time.perf_counter()
+        taken = self._sliced(top_ns, thickness_ns)
+        self._slicing_ms = (id(taken), (time.perf_counter() - started) * 1000.0)
+        return taken
 
     def _coverage_for(
         self, grid_id: str, thickness_ns: float, sliced: _Sliced
     ) -> np.ndarray | None:
         """`grid_id`'s covered cells for its fill: its slice at the shown window
         when it has one, else at the first window the shared stretch measures it
-        in. Within a grid the covered cells are the same in every window (the
-        binner rejects lines that do not span the axis), so any will do; None when
-        no window reaches the grid."""
+        in, else at its own first level. Within a grid the covered cells are the
+        same in every window (the binner rejects lines that do not span the
+        axis), so any will do. None only for a grid with no axis: every grid
+        `weights_cached(finish)` waits for gets its fill (#236: a grid no
+        stretch window reached got none, so the final minimum-curvature
+        stretch was never armed)."""
         binned = sliced[1]
         if grid_id in binned:
             return binned[grid_id][1]
+        engine = self._engines[grid_id]
+        if engine.z is None:
+            return None
         for top, thickness in self._limit_windows_ns(thickness_ns):
             window = self._grid_window(grid_id, top, thickness)
             if window is not None:
-                return self._engines[grid_id].slice_at(window)[1]
-        return None
+                return engine.slice_at(window)[1]
+        return engine.slice_at(SliceWindow(0, 1))[1]
 
     def _fill_targets(
         self,
@@ -1587,6 +1605,7 @@ class SiteEngine(QObject):
         self._drop_caches()
         self._seen = {}
         self._redraw_ms = None
+        self._slicing_ms = None
         if had_anything:
             self._notify_changed()
 

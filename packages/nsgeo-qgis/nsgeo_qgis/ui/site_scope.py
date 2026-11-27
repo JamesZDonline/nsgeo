@@ -51,7 +51,6 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_engine import PendingSolve
 from nsgeo_qgis.slices_plan import (
-    FILL_CANCELLED_NOTE,
     NO_TRANSFORM,
     TIME_BASE_MIXED,
     Resolution,
@@ -884,9 +883,10 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- reached from task callbacks
             _log(f"could not update the site list: {exc}")
 
-    def _on_included_changed(self, grid_ids: object) -> None:
+    def _on_included_changed(self, grid_ids: Iterable[str]) -> None:
+        # `SiteSourcePanel.included_changed` is `pyqtSignal(object)`: the ids, a tuple.
         try:
-            included = tuple(grid_ids)  # type: ignore[call-overload]
+            included = tuple(grid_ids)
             if included == self.included():
                 return
             self.session.set_site_view(grids=included)
@@ -1217,21 +1217,27 @@ class SiteScope:
             dock.show_refine()
             dock.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slots and timers
-            # No preview stands, so no refine is owed (plan call 5).
-            self.refine.stop()
-            self.dock.fill_flow.stop()
-            self._clear_shown()
-            dock.status_label.setText(self.engine.status_text())
-            dock.show_refine()
-            self.slice = None
-            self.window = None
-            self.drawn_at = None
-            dock.readout.setText(f"error: {exc}")
-            dock.site_depths_label.setText("")
-            dock.legend_label.setText("")
-            dock.slice_changed.emit()
-            dock.window_cleared.emit()
-            dock.error.emit(str(exc))
+            self.show_failure(str(exc))
+
+    def show_failure(self, text: str) -> None:
+        """The tick failed (or the footprints it waited for did, #236): nothing
+        on the map, the error on the readout and in the message bar."""
+        dock = self.dock
+        # No preview stands, so no refine is owed (plan call 5).
+        self.refine.stop()
+        dock.fill_flow.stop()
+        self._clear_shown()
+        dock.status_label.setText(self.engine.status_text())
+        dock.show_refine()
+        self.slice = None
+        self.window = None
+        self.drawn_at = None
+        dock.readout.setText(f"error: {text}")
+        dock.site_depths_label.setText("")
+        dock.legend_label.setText("")
+        dock.slice_changed.emit()
+        dock.window_cleared.emit()
+        dock.error.emit(text)
 
     # ---- #193: the fills and the stretch, worked out in the background --------
     def _fills_ready(
@@ -1370,9 +1376,26 @@ class SiteScope:
 
     def on_fill_cancelled(self) -> None:
         """Cancel was pressed while the site's fills were worked out
-        (`FillPicture`)."""
+        (`FillPicture`). The picture's own grids may all hold their fills, the
+        cancelled one being for a grid outside it that the shared stretch
+        reads (`display_limit`): then the note says the picture stays (#236)."""
         if self.showing:
-            self.dock.fill_picture.cancelled(SITE_OWNER)
+            at = self.drawn_at
+            held = (
+                self.slice is not None
+                and at is not None
+                and at == self._slider_at()  # not a fill for a new depth
+                and self.engine.weights_cached(self.dock.site_finish.value(), at=at)
+            )
+            self.dock.fill_picture.cancelled(SITE_OWNER, picture_held=held)
+
+    def _slider_at(self) -> tuple[float, float] | None:
+        """`(top_ns, thickness_ns)` the panel asks for now, as a tick takes it."""
+        z = self.engine.site_z
+        if z is None:
+            return None
+        thickness, _ = levels(z, self.dock.thickness_spin.value(), self.dock.step_spin.value())
+        return z.t0_ns + self.dock.slice_slider.value() * z.dz_ns, thickness * z.dz_ns
 
     def fill_record(self) -> dict[str, Any]:
         return dict(self.session.site_resolution()) if self.session.is_open else {}
@@ -1389,8 +1412,9 @@ class SiteScope:
         exports at full detail, so it says nothing about the export."""
         engine = self.engine
         entries: list[Entry] = []
-        if self.dock.fill_picture.noted:
-            entries.append(Entry(NOTE, FILL_CANCELLED_NOTE))
+        note = self.dock.fill_picture.note
+        if note is not None:
+            entries.append(Entry(NOTE, note))
         if self.drawn:
             if engine.preview_note:
                 entries.append(Entry(NOTE, engine.preview_note))

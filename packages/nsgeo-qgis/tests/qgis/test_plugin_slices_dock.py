@@ -5867,3 +5867,17 @@ def test_the_ramp_button_is_live_when_the_symbology_button_is(docked):
     dock.coverage_check.setChecked(False)
     dock.colours_combo.setCurrentIndex(0)
     assert not dock.ramp_button.isEnabled()
+
+
+def test_the_dock_has_everything_site_scope_reads_from_it(docked):
+    """#236: `SiteScope` is typed against `SlicesDockView` (checked by CI's
+    mypy), and the dock it is handed must have every member that Protocol names."""
+    from nsgeo_qgis.ui.site_scope import SlicesDockView
+
+    dock, _ = docked
+    names = set(SlicesDockView.__annotations__) | {
+        name for name in vars(SlicesDockView) if not name.startswith("_")
+    }
+    assert len(names) > 40
+    missing = sorted(name for name in names if not hasattr(dock, name))
+    assert missing == [], f"SlicesDock lacks {missing}"

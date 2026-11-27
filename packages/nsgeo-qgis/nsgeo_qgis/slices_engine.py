@@ -1871,8 +1871,21 @@ class SliceEngine(QObject):
             held = (weights[1], weights[2])
             solved = dict(self._solved)
         return GridStretch(
-            self.window_source(), settings, frame.cell, fill_job=fill, held=held, solved=solved
+            self.window_source(),
+            settings,
+            frame.cell,
+            fill_job=fill,
+            held=held,
+            solved=solved,
+            touch=self.touch_solved if solved else None,
         )
+
+    def touch_solved(self, keys: Sequence[bytes]) -> None:
+        """Mark `keys` recently used, in order, where still cached: a stretch
+        job read them from its copy (#236), as `stretch_limit` reads its own."""
+        for key in keys:
+            if key in self._solved:
+                self._solved.move_to_end(key)
 
     def stretch_job(
         self,

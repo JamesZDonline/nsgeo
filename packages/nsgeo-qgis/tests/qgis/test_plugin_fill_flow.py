@@ -20,12 +20,14 @@ import time
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
-from nsgeo_qgis.fill_jobs import FillJob
+from nsgeo_qgis.fill_jobs import FillJob, FootprintJob
 from nsgeo_qgis.slices_plan import (
     FILL_BUDGET_S,
+    FILL_CANCELLED_KEPT_NOTE,
     FILL_CANCELLED_NOTE,
     FILL_WORKING_GRIDS_INDICATOR,
     FILL_WORKING_INDICATOR,
+    FOOTPRINT_WORKING_INDICATOR,
     STRETCH_WORKING_INDICATOR,
     Resolution,
     SliceFinish,
@@ -521,6 +523,27 @@ def test_cancel_puts_back_only_the_fill_settings(slow):
     _wait_idle(dock)
 
 
+def test_cancel_never_writes_back_a_seeded_cell_after_a_draw_in_the_debounce(slow):
+    """#236: the picture's record of which fill fields the user chose was read
+    at the draw, but its cell came from the frame. A draw inside the cell's
+    120 ms debounce saw the new cell already remembered against the old frame,
+    so Cancel wrote the seeded cell back as if it had been chosen."""
+    dock, session = slow
+    seeded = {k: v for k, v in session.slice_resolution("A").items() if k != "cell"}
+    session.restore_slice_resolution("A", seeded)  # the cell on the map is seeded
+    dock.refresh_slice()
+    _wait_idle(dock)
+    dock.cell_spin.setValue(SLOW_CELL)  # remembered at once, applied after the pause
+    dock.refresh_slice()  # a slider move inside the pause draws the old frame
+    assert dock.current_frame().cell == QUICK_CELL
+    dock.flush_debounce()
+    assert spin_until(lambda: dock.fill_flow.working, 10_000)
+    dock.cancel_link.linkActivated.emit("cancel")
+    assert dock.cell_spin.value() == QUICK_CELL
+    assert "cell" not in session.slice_resolution("A"), "the seeded cell was written back"
+    _wait_idle(dock)
+
+
 def test_a_z_edit_mid_stretch_never_lands_a_stale_stretch(quick, monkeypatch):
     dock, _ = quick
     slow_jobs(monkeypatch, dock.engine, ("stretch_job",), pause=0.6)
@@ -533,6 +556,52 @@ def test_a_z_edit_mid_stretch_never_lands_a_stale_stretch(quick, monkeypatch):
     clip = UnipolarClip() if dock.engine.output_unipolar else PercentileClip()
     fresh, _ = dock.engine.stretch_limit(window.n_levels, clip, finish)
     assert dock.display_limit() == pytest.approx(fresh)
+
+
+def test_this_grid_keeps_a_current_stretch_when_only_its_fill_is_missing(quick, monkeypatch):
+    """#236: This grid's `_fill_jobs`, like the site's, leaves the stretch job
+    out when the stretch held is for this very key: a final one would be
+    measured again (and, for minimum curvature, replaced by a provisional one)."""
+    dock, _ = quick
+    dock.display_limit()
+    _wait_idle(dock)
+    window, finish = dock.current_window(), dock.slice_finish()
+    key = dock._stretch_key(window, finish)
+    held = dock._grid_refine.held_stretch(key)
+    assert held is not None
+    jobs: list[int] = []
+    real = dock.engine.stretch_job
+    monkeypatch.setattr(dock.engine, "stretch_job", lambda *a, **k: jobs.append(1) or real(*a, **k))
+    dock.engine._drop_fill()  # the fill is missing, the stretch's key is unchanged
+    dock.refresh_slice()
+    _wait_idle(dock)
+    assert dock.engine.fill_held(dock.engine.slice_at(window)[1], finish)
+    assert jobs == [], "a current stretch was measured again"
+    assert dock._grid_refine.held_stretch(key) == held
+
+
+def test_this_grids_status_line_counts_what_the_draw_built(quick, monkeypatch):
+    """#236: the status line was set before `slice_changed`, whose listener
+    (the map layer's `to_north_up`) builds the frame's north-up plan, so the
+    memory it named lagged one draw. Stand-in: a listener that makes the plans
+    hold a gigabyte."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = quick
+    held = [0]
+    monkeypatch.setattr(slices_engine, "north_up_plans_nbytes", lambda: held[0])
+
+    def build_plan() -> None:
+        held[0] = 10**9
+
+    dock.slice_changed.connect(build_plan)
+    try:
+        dock.refresh_slice()
+        _wait_idle(dock)
+        assert "1.0 GB" in dock._grid_status_text()
+        assert dock.status_label.text() == dock._grid_status_text(), "the line lags the draw"
+    finally:
+        dock.slice_changed.disconnect(build_plan)
 
 
 def test_a_scope_switch_applies_a_pending_change_before_it_stops_the_work(slow):
@@ -628,18 +697,39 @@ class FakeFill(FillJob):
         return not self.refuse
 
 
+class FakeFootprint(FootprintJob):
+    """A footprint job that only sleeps, or fails with `error`."""
+
+    def __init__(self, pause: float = 0.0, *, error: Exception | None = None) -> None:
+        self.pause = pause
+        self.error = error
+        self.fraction = 0.0
+        self.footprint = None
+
+    def run(self, should_stop) -> None:
+        time.sleep(self.pause)
+        if self.error is not None:
+            raise self.error
+        self.fraction = 1.0
+
+    def land(self) -> bool:
+        return True
+
+
 class FakeStretch(StretchJob):
     def __init__(self, limit: float | None, final: bool = True, pause: float = 0.0) -> None:
         self.limit = limit
         self.final = final
         self.pause = pause
         self.fraction = 0.0
+        self.lands = 0
 
     def run(self, should_stop) -> None:
         time.sleep(self.pause)
         self.fraction = 1.0
 
     def land(self) -> bool:
+        self.lands += 1
         return True
 
 
@@ -715,6 +805,19 @@ def test_a_stretch_with_no_limit_is_dropped(flow_probe):
     assert not [entry for entry in log if isinstance(entry, tuple) and entry[0] == "stretch"]
 
 
+def test_a_measured_stretch_is_landed_before_it_is_handed_on(flow_probe):
+    """#236: the stretch job's `land` runs on the GUI thread (it refreshes the
+    solves it read in their engines); a stale one, which measured nothing, is not."""
+    flow, _, log = flow_probe
+    measured, stale = FakeStretch(1.0), FakeStretch(None)
+    flow.request_stretch("s", measured)
+    assert spin_until(lambda: ("stretch", "s", 1.0, True) in log, 10_000)
+    assert measured.lands == 1
+    flow.request_stretch("t", stale)
+    assert spin_until(lambda: not flow.stretching, 10_000)
+    assert stale.lands == 0
+
+
 def test_a_stretch_request_waits_for_the_fills_and_for_its_own_key(flow_probe):
     flow, _, log = flow_probe
     flow.request("k", [FakeFill(0.4)], stretch_key="s")
@@ -756,6 +859,25 @@ def test_progress_reads_the_running_job_or_the_grids_landed(flow_probe):
     )
     assert spin_until(lambda: not flow.working, 10_000)
     assert flow.progress_text(0.05, grids=False) == ""
+
+
+def test_footprints_alone_are_worded_as_placing_the_grids(flow_probe):
+    """#236: a coverage draw's footprint request read "Working out the fill"."""
+    flow, _, _ = flow_probe
+    flow.request("k", [FakeFootprint(0.6), FakeFootprint(0.0)], stretch_key="s")
+    assert flow.progress_text(0.05, grids=True) == FOOTPRINT_WORKING_INDICATOR.format(
+        cell=0.05, n=1, total=2
+    )
+    assert spin_until(lambda: not flow.working, 10_000)
+
+
+def test_a_failed_footprint_is_named_as_the_footprints(flow_probe):
+    """#236: a failed footprint gather was reported as a failed fill."""
+    flow, _, log = flow_probe
+    failing = FakeFootprint(error=ValueError("no transform"))
+    assert flow.request("k", [FakeFill(), failing], stretch_key="s") is False
+    assert spin_until(lambda: not flow.working, 10_000)
+    assert ("error", "footprints", "ValueError: no transform") in log
 
 
 def test_stop_never_touches_the_latch(flow_probe):
@@ -1362,6 +1484,69 @@ def test_a_grid_above_the_shown_depth_gets_its_fill_and_the_stretch_follows(
         _close(plugin, answer_modal)
 
 
+def test_cancelling_a_fill_the_stretch_asked_for_keeps_the_picture_and_says_so(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    """#236: with the picture on the map at these very settings, `display_limit`
+    asks for the fill of a grid above the shown depth (the shared stretch reads
+    it). Cancelling that fill latches, so it is not asked for again at once, but
+    the note said "The picture was not drawn" beside a picture that was."""
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        site, flow = dock.site_engine, dock.fill_flow
+        _, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        dock.stretch_combo.setCurrentIndex(1)  # "this slice": only the shown grids fill
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, 0.25)
+        assert spin_until(lambda: _picture_cell(dock) == 0.25, 60_000)
+        _wait_idle(dock)
+        assert not site.engine_for("C").weights_cached(dock.site_finish.value())
+        slow_jobs(monkeypatch, site.engine_for("C"), ("fill_job",), pause=1.0)
+        dock.stretch_combo.setCurrentIndex(0)  # shared: the stretch needs C's fill
+        dock.display_limit()
+        assert flow.working, "display_limit never asked for C's fill"
+        picture = dock.current_site_slice()
+        flow.cancel()
+        assert flow.latched
+        assert dock.current_site_slice() is picture
+        assert FILL_CANCELLED_NOTE not in _notes(dock), "the note says no picture was drawn"
+        assert FILL_CANCELLED_KEPT_NOTE in _notes(dock)
+    finally:
+        _close(plugin, answer_modal)
+
+
+def test_cancelling_a_fill_for_a_new_depth_says_no_picture_was_drawn(
+    fake_iface, site3_factory, answer_modal, monkeypatch
+):
+    """The note that the picture stays is only for a fill the picture on the map
+    does not need: a slider move into a grid's range asks for that grid's fill
+    to draw the new depth, which a Cancel leaves undrawn."""
+    plugin = _open_short_c(fake_iface, site3_factory, answer_modal)
+    try:
+        dock = whole_site(plugin)
+        site, flow = dock.site_engine, dock.fill_flow
+        inside, outside = _slider_with_and_without_c(dock)
+        dock.slice_slider.setValue(outside)
+        dock.stretch_combo.setCurrentIndex(1)  # "this slice": only the shown grids fill
+        spin_until(lambda: False, 100)
+        _wait_idle(dock)
+        _site_cell(dock, 0.25)
+        assert spin_until(lambda: _picture_cell(dock) == 0.25, 60_000)
+        _wait_idle(dock)
+        slow_jobs(monkeypatch, site.engine_for("C"), ("fill_job",), pause=1.0)
+        dock.slice_slider.setValue(inside)
+        assert spin_until(lambda: flow.working, 10_000), "the new depth never asked for C's fill"
+        flow.cancel()
+        assert flow.latched
+        assert FILL_CANCELLED_KEPT_NOTE not in _notes(dock)
+        assert FILL_CANCELLED_NOTE in _notes(dock)
+    finally:
+        _close(plugin, answer_modal)
+
+
 def test_the_rest_builds_nothing_on_the_gui_thread_for_a_grid_above_the_depth(
     fake_iface, site3_factory, answer_modal, monkeypatch
 ):
@@ -1540,6 +1725,32 @@ def test_a_footprint_for_a_stale_lattice_never_lands(site_quick, monkeypatch):
     assert _applied_cell(dock) == 0.25
     site = dock.site_engine
     assert set(site._gathers) == set(site.ready_grids)
+
+
+def test_a_failed_footprint_shows_the_error_and_no_stale_picture(site_quick, monkeypatch):
+    """#236: a footprint that failed on the worker read "could not work out the
+    fill", kept the picture of the old lattice and set no error readout. It is
+    shown as a failed draw is: the error on the readout, nothing on the map."""
+    from nsgeo_qgis import site_geometry
+
+    _, dock = site_quick
+    real = site_geometry.gather_footprint
+
+    def failing(*args, **kwargs):
+        if threading.current_thread() is not threading.main_thread():
+            raise ValueError("no transform")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site_geometry, "gather_footprint", failing)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    _site_cell(dock, 0.15)
+    assert spin_until(lambda: bool(errors), 60_000), "the failure was never reported"
+    _wait_idle(dock)
+    assert errors == ["could not place the grids on the map: ValueError: no transform"]
+    assert dock.readout.text() == f"error: {errors[0]}"
+    assert dock.current_site_slice() is None, "the old lattice's picture stayed"
+    assert not dock.cancel_link.isVisibleTo(dock)
 
 
 def test_this_grids_first_north_up_plan_is_built_on_the_worker(
