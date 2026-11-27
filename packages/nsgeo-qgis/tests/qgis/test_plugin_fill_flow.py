@@ -557,6 +557,30 @@ def test_this_grid_keeps_a_current_stretch_when_only_its_fill_is_missing(quick, 
     assert dock._grid_refine.held_stretch(key) == held
 
 
+def test_this_grids_status_line_counts_what_the_draw_built(quick, monkeypatch):
+    """#236: the status line was set before `slice_changed`, whose listener
+    (the map layer's `to_north_up`) builds the frame's north-up plan, so the
+    memory it named lagged one draw. Stand-in: a listener that makes the plans
+    hold a gigabyte."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = quick
+    held = [0]
+    monkeypatch.setattr(slices_engine, "north_up_plans_nbytes", lambda: held[0])
+
+    def build_plan() -> None:
+        held[0] = 10**9
+
+    dock.slice_changed.connect(build_plan)
+    try:
+        dock.refresh_slice()
+        _wait_idle(dock)
+        assert "1.0 GB" in dock._grid_status_text()
+        assert dock.status_label.text() == dock._grid_status_text(), "the line lags the draw"
+    finally:
+        dock.slice_changed.disconnect(build_plan)
+
+
 def test_a_scope_switch_applies_a_pending_change_before_it_stops_the_work(slow):
     dock, _ = slow
     dock.cell_spin.setValue(SLOW_CELL)  # pending in the debounce

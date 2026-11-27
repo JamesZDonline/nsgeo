@@ -3054,7 +3054,6 @@ class SlicesDock(QgsDockWidget):
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
-            self.status_label.setText(self._grid_status_text())
             self.show_refine()
             # Recorded only once the draw succeeded, and by a coverage draw
             # too (#72): `rebuild_source` redraws when the finish in metres
@@ -3063,6 +3062,9 @@ class SlicesDock(QgsDockWidget):
             # coverage redraws through its own toggle, at the finish then.
             self._drawn_finish = drawn
             self.slice_changed.emit()
+            # After the map has drawn: its layer builds the frame's north-up
+            # plan, which the line counts (#236: set before, it lagged a draw).
+            self.status_label.setText(self._grid_status_text())
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
             # Fix round 1, M4: state reset here too, not just reported --
